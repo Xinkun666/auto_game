@@ -1,0 +1,21 @@
+# PyTorch CPU 环境
+--find-links https://download.pytorch.org/whl/cpu
+torch
+torchvision
+
+# 图像与界面
+numpy>=1.26.0
+opencv-python
+Pillow
+PyQt6
+
+# 模型推理与识别
+scikit-learn
+ultralytics
+
+# 拉流相关
+grpcio
+protobuf
+
+# OpenHarmony 测试框架入口里还引用了 xdevice / devicetest / hypium，
+# 这类通常由对应测试环境提供，不作为本工程的通用 pip 依赖写入这里。

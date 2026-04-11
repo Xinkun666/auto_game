@@ -1,0 +1,147 @@
+import time
+from dataclasses import dataclass
+from typing import Dict, Optional, Set
+
+
+PHASE_RUNNING = "跑图"
+PHASE_DRIVING = "开车"
+
+
+@dataclass
+class PhaseState:
+    name: str
+    duration: float
+    elapsed: float = 0.0
+    completed: bool = False
+
+
+class PhaseTimeManager:
+    def __init__(self, durations_in_minutes: Dict[str, float], stage_phase_map: Dict[str, str]):
+        self.phase_states = {
+            phase_name: PhaseState(name=phase_name, duration=float(duration) * 60.0)
+            for phase_name, duration in durations_in_minutes.items()
+        }
+        self.stage_phase_map = dict(stage_phase_map)
+
+        self.last_stage: Optional[str] = None
+        self.active_phase: Optional[str] = None
+        self.active_since: Optional[float] = None
+
+        self.round_index = 0
+        self.landed = False
+        self.start_game_time: Optional[float] = None
+        self.sp_recording = False
+        self.sp_saved = False
+
+    def _phase_for_stage(self, stage_name: Optional[str]) -> Optional[str]:
+        return self.stage_phase_map.get(stage_name)
+
+    def _effective_elapsed(self, phase_name: str, now: Optional[float] = None) -> float:
+        state = self.phase_states[phase_name]
+        elapsed = state.elapsed
+        if self.active_phase == phase_name and self.active_since is not None and not state.completed:
+            now = time.time() if now is None else now
+            elapsed += max(0.0, now - self.active_since)
+        return elapsed
+
+    def _sync_completed_flag(self, phase_name: str, now: Optional[float] = None) -> bool:
+        state = self.phase_states[phase_name]
+        if state.completed:
+            return False
+        if self._effective_elapsed(phase_name, now=now) >= state.duration:
+            state.completed = True
+            state.elapsed = state.duration
+            return True
+        return False
+
+    def _pause_active_phase(self, now: Optional[float] = None) -> Set[str]:
+        events: Set[str] = set()
+        if self.active_phase is None or self.active_since is None:
+            return events
+
+        now = time.time() if now is None else now
+        state = self.phase_states[self.active_phase]
+        if not state.completed:
+            state.elapsed = min(state.duration, state.elapsed + max(0.0, now - self.active_since))
+            if state.elapsed >= state.duration:
+                state.completed = True
+                events.add(f"completed_{self.active_phase}")
+
+        self.active_phase = None
+        self.active_since = None
+        return events
+
+    def sync_stage(self, stage_name: Optional[str]) -> Set[str]:
+        now = time.time()
+        events: Set[str] = set()
+
+        if stage_name == self.last_stage:
+            return events
+
+        previous_stage = self.last_stage
+        events |= self._pause_active_phase(now=now)
+        self.last_stage = stage_name
+
+        if previous_stage == "跳伞阶段" and stage_name == "跑图阶段":
+            self.landed = True
+            self.start_game_time = now
+            events.add("landed")
+
+        new_phase = self._phase_for_stage(stage_name)
+        if new_phase and not self.phase_states[new_phase].completed:
+            self.active_phase = new_phase
+            self.active_since = now
+            events.add(f"enter_{new_phase}")
+
+        return events
+
+    def refresh(self) -> Set[str]:
+        now = time.time()
+        events: Set[str] = set()
+        if self.active_phase is None:
+            return events
+
+        if self._sync_completed_flag(self.active_phase, now=now):
+            events.add(f"completed_{self.active_phase}")
+        return events
+
+    def start_new_round(self):
+        self.round_index += 1
+        self.landed = False
+        self.start_game_time = None
+        print(f"[Timer] 开始第 {self.round_index} 局")
+
+    def get_remaining(self, phase_name: str) -> float:
+        state = self.phase_states[phase_name]
+        return max(0.0, state.duration - self._effective_elapsed(phase_name))
+
+    def is_completed(self, phase_name: str) -> bool:
+        self._sync_completed_flag(phase_name)
+        return self.phase_states[phase_name].completed
+
+    def all_done(self) -> bool:
+        return self.is_completed(PHASE_RUNNING) and self.is_completed(PHASE_DRIVING)
+
+    def need_drive(self) -> bool:
+        return not self.is_completed(PHASE_DRIVING)
+
+    def should_start_sp(self) -> bool:
+        return self.landed and not self.sp_recording and not self.sp_saved
+
+    def get_match_elapsed(self) -> float:
+        if self.start_game_time is None:
+            return 0.0
+        return max(0.0, time.time() - self.start_game_time)
+
+    def mark_sp_started(self):
+        self.sp_recording = True
+        print("[Timer] sp 记录已开始")
+
+    def mark_sp_stopped(self):
+        if self.sp_recording:
+            print("[Timer] sp 记录已停止")
+        self.sp_recording = False
+
+    def mark_sp_saved(self):
+        self.sp_saved = True
+        print("[Timer] sp 数据已保存")

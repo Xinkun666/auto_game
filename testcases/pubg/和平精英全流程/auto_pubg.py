@@ -1,0 +1,148 @@
+# !/usr/bin/env python
+# -*- coding: utf-8 -*-
+# Copyright (c) Huawei Technologies Co., Ltd. 2023. All rights reserved.
+import os
+
+project_case = 'Auto_PUBG_ALL'  # 这是你在标注工具导出的自动化资源目录名
+target_case = "auto_pubg"  # 这是你编写的自动化用例脚本名
+
+os.environ["TARGET_PROJECT_CASE"] = project_case
+os.environ["TARGET_GAME_CASE"] = target_case
+
+import sys
+from devicetest.core.test_case import TestCase
+from hypium import *
+import time
+from devicetest.core.test_case import TestCase
+from hypium import *
+from hypium import UiDriver
+from hypium.action.os_hypium.device_logger import DeviceLogger
+from aw.autogame.tools.GameAutomator import GameAutomator
+from aw.autogame.tools.Utils import *
+
+class auto_pubg(TestCase):
+    def __init__(self, controllers):
+        self.TAG = self.__class__.__name__
+        TestCase.__init__(self, self.TAG, controllers)
+
+        self.tests = [
+            "test_step"
+        ]
+        self.driver = UiDriver(self.device1)
+        self.automator = None
+        self.task_name = os.environ.get("TARGET_GAME_CASE")
+        self.device_logger = DeviceLogger(self.driver)
+        self.log_path = f'aw/autogame/temp/logs/{self.task_name}.txt'
+        self.frame_path = f"aw/autogame/temp/logs/process_save_frames"
+        self.game_display_name = '和平精英'
+
+    def setup(self):
+        self.log.info("预置条件：设置常亮")
+        self.driver.hdc("shell power-shell timeout -o 86400000")
+        self.driver.Screen.set_brightness(brightness=130)
+
+    def start_perf_tool(self):
+        """封装性能工具启动逻辑"""
+        print(f"正在启动性能工具并选择应用: {self.game_display_name}")
+        self.driver.start_app("com.huawei.hmsapp.hismartperf")
+
+        steps = [
+            ((0.27, 0.55), 2, "点击性能功耗测试"),
+            ((0.48, 0.20), 2, "点击选择一个应用"),
+        ]
+        for pos, delay, msg in steps:
+            print(msg)
+            self.driver.touch(pos)
+            time.sleep(delay)
+
+        self.driver.find_component(BY.type("TextInput")).inputText(self.game_display_name)
+        time.sleep(1)
+
+        print("启动游戏并开始测试")
+        self.driver.touch((0.27, 0.17))  # 点击搜索出的游戏
+        time.sleep(10)
+        self.driver.touch((0.49, 0.94))  # 点击开始测试
+        time.sleep(1)
+
+    def start_yuanshen(self):
+        print('和平精英-启动!!!')
+        # self.driver.start_app('com.tencent.tmgp.pubgmhd.hw')
+
+        if os.path.exists(self.log_path):
+            os.remove(self.log_path)
+            print(f"检测到旧日志，已成功删除: {self.log_path}")
+        if os.path.exists(f'aw/autogame/temp/results/{self.task_name}/time.txt'):
+            os.remove(f'aw/autogame/temp/results/{self.task_name}/time.txt')
+            print(f'检测到旧的时间日志，已成功删除: {self.log_path}')
+
+        print('开始抓取日志!')
+        self.device_logger.start_log(self.log_path)
+        # time.sleep(30)
+
+    def _wait_for_game_rotation(self, timeout=20, stable_rounds=3, interval=1.0):
+        """
+        等待从 sp 竖屏切到游戏横屏后，再初始化自动化。
+        横屏一般是 90/270；为了避免正在切换中，要求连续多次读到相同横屏值。
+        """
+        print("等待游戏横屏旋转稳定...")
+        deadline = time.time() + timeout
+        last_rotation = None
+        stable_count = 0
+
+        while time.time() < deadline:
+            rotation = normalize_rotation(get_display_rotation())
+            print(f"[Rotation] 当前旋转角: {rotation}")
+
+            if rotation in (90, 270):
+                if rotation == last_rotation:
+                    stable_count += 1
+                else:
+                    stable_count = 1
+                    last_rotation = rotation
+
+                if stable_count >= stable_rounds:
+                    print(f"[Rotation] 横屏已稳定: {rotation}")
+                    return rotation
+            else:
+                last_rotation = rotation
+                stable_count = 0
+
+            time.sleep(interval)
+
+        final_rotation = normalize_rotation(get_display_rotation())
+        print(f"[Rotation] 等待超时，继续执行，当前旋转角: {final_rotation}")
+        return final_rotation
+
+    def _ensure_automator(self):
+        if self.automator is not None:
+            return
+
+        self._wait_for_game_rotation()
+        self.automator = GameAutomator(driver=self.driver, logger=self.log)
+
+    def test_step(self):
+        # 1. 启动并开始游戏
+        # self.start_yuanshen()
+        self.start_perf_tool()
+        self._ensure_automator()
+
+        # 2. 运行自动化逻辑（现在执行完会返回了）
+        print('开始游戏自动化!')
+        self.automator.start()
+
+        print('自动化结束，结束抓取日志!')
+        self.device_logger.stop_log()
+        print(f'日志文件保存在: {self.log_path}')
+
+        if os.path.exists(f'aw/autogame/temp/results/{self.task_name}/time.txt'):
+            result_path = f'aw/autogame/temp/results/{self.task_name}/results.txt'
+            if os.path.exists(result_path):
+                os.remove(result_path)
+                print(f'检测到旧的结果日志，已成功删除: {result_path}')
+            analyze_txt(self.log_path, self.frame_path, time_txt_path=f'aw/autogame/temp/results/{self.task_name}/time.txt', result_path=result_path)
+            print(f'分析完成, 结果保存在 aw/autogame/temp/results/{self.task_name}/results.txt 中')
+
+        if self.automator is not None:
+            self.automator.cleanup(('com.tencent.tmgp.pubgmhd.hw', 'com.huawei.hmsapp.hismartperf'))
+
+

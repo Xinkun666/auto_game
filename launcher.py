@@ -2,9 +2,11 @@ import argparse
 import ast
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import time
 import traceback
 from pathlib import Path
 from typing import Dict, Optional
@@ -36,6 +38,7 @@ TESTCASES_DIR = ROOT_DIR / "testcases"
 CUSTOMS_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_examples"
 CUSTOMS_GAME_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_game_examples"
 PREVIEW_DIR = ROOT_DIR / "aw" / "autogame" / "temp" / "logs" / "process_temp_logs"
+PACKAGE_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+){2,}")
 
 
 def parse_case_vars(py_file: Path) -> Dict[str, str]:
@@ -63,6 +66,25 @@ def parse_case_vars(py_file: Path) -> Dict[str, str]:
             result[target_name] = value_node.value
 
     return result
+
+
+def extract_package_names(py_file: Path) -> list[str]:
+    if not py_file.exists():
+        return []
+
+    try:
+        source = py_file.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(py_file))
+    except Exception:
+        return []
+
+    packages = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            value = node.value.strip()
+            if PACKAGE_NAME_RE.fullmatch(value):
+                packages.add(value)
+    return sorted(packages)
 
 
 def discover_project_cases() -> list[str]:
@@ -150,6 +172,16 @@ def set_hiz_mode(active: bool):
     else:
         run_hdc_shell("echo 0 > /sys/class/hw_power/charger/charge_data/enable_hiz")
         run_hdc_shell("echo startsink > /sys/class/hw_power/charger/charge_data/plugusb")
+
+
+def force_stop_apps(apps: list[str]) -> list[str]:
+    stopped = []
+    for app in apps:
+        if not app:
+            continue
+        run_hdc_shell(f"aa force-stop {app}")
+        stopped.append(app)
+    return stopped
 
 
 class LauncherWindow(QWidget):
@@ -553,6 +585,15 @@ class LauncherWindow(QWidget):
             testcase_label = self.selected_testcase_file.relative_to(ROOT_DIR).with_suffix("").as_posix()
             mode = "testcase"
 
+        cleanup_apps = set()
+        if self.selected_testcase_file is not None:
+            cleanup_apps.update(extract_package_names(self.selected_testcase_file))
+
+        target_logic_file = (
+            CUSTOMS_GAME_EXAMPLES_DIR / project_case / f"{target_case}.py"
+        )
+        cleanup_apps.update(extract_package_names(target_logic_file))
+
         return {
             "mode": mode,
             "project_case": project_case,
@@ -562,6 +603,7 @@ class LauncherWindow(QWidget):
             "safe_temp": float(self.safe_temp_spin.value()),
             "safe_battery": int(self.safe_battery_spin.value()),
             "safe_minutes": float(self.safe_time_spin.value()),
+            "cleanup_apps": sorted(cleanup_apps),
         }
 
     def _format_runtime_text(
@@ -592,7 +634,7 @@ class LauncherWindow(QWidget):
         self._append_output(
             f"[Launcher] 批量运行开始，mode={plan['mode']}, runs={plan['run_count']}, "
             f"safe_temp={plan['safe_temp']}°C, safe_battery={plan['safe_battery']}%, "
-            f"safe_time={plan['safe_minutes']}分钟\n"
+            f"safe_time={plan['safe_minutes']}分钟, cleanup_apps={plan['cleanup_apps']}\n"
         )
         self._check_and_start_if_safe()
 
@@ -609,6 +651,21 @@ class LauncherWindow(QWidget):
         self.run_timeout_timer.stop()
         self._set_status(message)
         self._set_runtime(message)
+
+    def _cleanup_apps_between_runs(self, reason: str):
+        if self.current_plan is None:
+            return
+
+        apps = list(self.current_plan.get("cleanup_apps", []))
+        if not apps:
+            self._append_output(f"[Launcher] {reason}：未识别到需要强杀的应用，跳过设备清理。\n")
+            return
+
+        self._append_output(f"[Launcher] {reason}：开始强制停止残留应用 {apps}\n")
+        stopped = force_stop_apps(apps)
+        if stopped:
+            time.sleep(1.0)
+            self._append_output(f"[Launcher] 已执行 force-stop: {stopped}\n")
 
     def _check_and_start_if_safe(self):
         if not self.batch_active or self.current_plan is None:
@@ -659,6 +716,7 @@ class LauncherWindow(QWidget):
             return
 
         self.safety_timer.stop()
+        self._cleanup_apps_between_runs("启动前清理")
         self._launch_iteration(run_no, temperature, battery)
 
     def _launch_iteration(self, run_no: int, temperature: float, battery: int):
@@ -763,9 +821,11 @@ class LauncherWindow(QWidget):
             return
 
         if self.stop_requested:
+            self._cleanup_apps_between_runs("停止后清理")
             self._finish_batch("任务已停止。")
             return
 
+        self._cleanup_apps_between_runs("轮次结束清理")
         self.current_run_index += 1
         if self.current_run_timed_out:
             self._append_output("[Launcher] 本次用例因超过安全时间被停止，计入已执行次数。\n")
@@ -791,6 +851,7 @@ class LauncherWindow(QWidget):
 
         if self.process is None:
             self._append_output("\n[Launcher] 已取消后续运行。\n")
+            self._cleanup_apps_between_runs("手动停止清理")
             self._finish_batch("任务已停止。")
             return
 

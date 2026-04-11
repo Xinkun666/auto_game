@@ -29,7 +29,7 @@ class DriveContext:
 
 
 class DrivingManager:
-    TARGET_FIRST_DIR = 120
+    TARGET_FIRST_DIR = 115
 
     ALIGN_THRESHOLD = 8
     WAYPOINT_TOLERANCE = 5.0
@@ -346,7 +346,7 @@ class DrivingManager:
             return
 
         turn_dir, _, diff = calculate_move_count(direction, self.TARGET_FIRST_DIR)
-        if turn_dir is not None and diff > 5:
+        if turn_dir is not None and diff > 0:
             action = "forward_turn_left" if turn_dir == "left" else "forward_turn_right"
             self._execute_maneuver(w, action, duration=400, brake_with_steer=True)
             self._tap_single_control(w, "brake", wait=500, dura=1, x_bias=1)
@@ -703,13 +703,11 @@ class DrivingManager:
         self._record_motion_action(action)
 
     def _needs_pre_brake(self, action: str, speed: Optional[int]) -> bool:
-        if speed not in (2, 3):
+        if speed != 3:
             return False
         if self.current_stage == self.STAGE_EXIT_GARAGE:
             return True
         if action == "straight":
-            return False
-        if speed == 2 and not self._should_trigger_auto_brake():
             return False
         return True
 

@@ -44,6 +44,15 @@ class RunningManager:
     CAR_FACE_DIRECTION = 265
     PRECISE_FACE_DIRECTIONS = [265, 270, 275, 280, 285, 290]
     CIRCLE_REPLAN_THRESHOLD = 10
+    PRECISE_FORWARD_BIAS_Y = -220
+    PRECISE_FORWARD_DURA = 550
+    PRECISE_FORWARD_WAIT = 1800
+    PRECISE_LATERAL_STEP_BIAS = 150
+    PRECISE_LATERAL_STEP_DURA = 220
+    PRECISE_LATERAL_STEP_WAIT = 700
+    PRECISE_RESET_CENTER_BIAS = -300
+    PRECISE_RESET_CENTER_DURA = 260
+    PRECISE_RESET_CENTER_WAIT = 700
 
     def __init__(self, map_tool: Optional[MapNavigator] = None):
         self.map_tool = map_tool or MapNavigator()
@@ -459,23 +468,65 @@ class RunningManager:
             self.CAR_ENTRY_POINT,
             dist_to_entry,
         )
-        w.tap_single("摇杆", y_bias=-200, dura=400, wait=2500)
+        w.tap_single(
+            "摇杆",
+            y_bias=self.PRECISE_FORWARD_BIAS_Y,
+            dura=self.PRECISE_FORWARD_DURA,
+            wait=self.PRECISE_FORWARD_WAIT,
+        )
         w.refresh_frame()
 
         if self._click_drive_if_present(w):
             return
 
-        print("[Running] 正前未出现驾驶按钮，向右试探")
-        w.tap_single("摇杆", x_bias=200, dura=300, wait=1000)
-        w.refresh_frame()
-        if self._click_drive_if_present(w):
-            return
+        for step in range(2):
+            print(f"[Running] 正前未出现驾驶按钮，向右第 {step + 1}/2 次小幅试探")
+            self._log_running_state(
+                "正前未出现驾驶按钮",
+                location,
+                direction,
+                f"向右小幅试探 {step + 1}/2",
+                self.CAR_ENTRY_POINT,
+                dist_to_entry,
+            )
+            w.tap_single(
+                "摇杆",
+                x_bias=self.PRECISE_LATERAL_STEP_BIAS,
+                dura=self.PRECISE_LATERAL_STEP_DURA,
+                wait=self.PRECISE_LATERAL_STEP_WAIT,
+            )
+            w.refresh_frame()
+            if self._click_drive_if_present(w):
+                return
 
-        print("[Running] 右侧没有驾驶按钮，向左试探")
-        w.tap_single("摇杆", x_bias=-400, dura=300, wait=1000)
+        print("[Running] 右侧两次试探均未出现驾驶按钮，先大幅回到中心")
+        w.tap_single(
+            "摇杆",
+            x_bias=self.PRECISE_RESET_CENTER_BIAS,
+            dura=self.PRECISE_RESET_CENTER_DURA,
+            wait=self.PRECISE_RESET_CENTER_WAIT,
+        )
         w.refresh_frame()
-        if self._click_drive_if_present(w):
-            return
+
+        for step in range(2):
+            print(f"[Running] 开始向左第 {step + 1}/2 次小幅试探")
+            self._log_running_state(
+                "右侧试探失败后改向左试探",
+                location,
+                direction,
+                f"向左小幅试探 {step + 1}/2",
+                self.CAR_ENTRY_POINT,
+                dist_to_entry,
+            )
+            w.tap_single(
+                "摇杆",
+                x_bias=-self.PRECISE_LATERAL_STEP_BIAS,
+                dura=self.PRECISE_LATERAL_STEP_DURA,
+                wait=self.PRECISE_LATERAL_STEP_WAIT,
+            )
+            w.refresh_frame()
+            if self._click_drive_if_present(w):
+                return
 
         self._handle_precise_attempt_failure(w)
 

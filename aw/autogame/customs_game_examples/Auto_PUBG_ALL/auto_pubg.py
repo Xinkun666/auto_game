@@ -127,6 +127,11 @@ def on_stage(w: "FrameWorker"):
             w.refresh_frame()
             return
         
+        if w.get_info("提示"):
+            w.click("取消")
+            w.refresh_frame()
+            return
+        
         if w.get_info('对局结束'):
             w.click('确定')
             w.refresh_frame()
@@ -144,11 +149,6 @@ def on_stage(w: "FrameWorker"):
 
         if w.get_info("回归"):
             w.click(w.get_info("回归"))
-            w.refresh_frame()
-            return
-
-        if w.get_info("提示"):
-            w.click("取消")
             w.refresh_frame()
             return
 

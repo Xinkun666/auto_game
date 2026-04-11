@@ -449,8 +449,12 @@ def visualizer_process(queue, visual=True):
 
             # 2. 可视化检测框
             detection_keys = set()
+            sorted_info_items = []
+            if isinstance(info, dict):
+                sorted_info_items = sorted(info.items(), key=lambda item: str(item[0]).lower())
+
             if visual and isinstance(info, dict):
-                for k, v in info.items():
+                for k, v in sorted_info_items:
                     if is_detection_list(v):
                         detection_keys.add(k)
                         frame_rotated = draw_detection_list(frame_rotated, v, get_scaled_size, font_info)
@@ -463,7 +467,7 @@ def visualizer_process(queue, visual=True):
                 y_offset += line_height
 
             if isinstance(info, dict):
-                for k, v in info.items():
+                for k, v in sorted_info_items:
                     val_str = str(v)
                     if len(val_str) > 50: val_str = val_str[:50] + "..."
                     safe_info[k] = val_str

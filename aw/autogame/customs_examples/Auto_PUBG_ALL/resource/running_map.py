@@ -27,32 +27,48 @@ class RunningManager:
     - w.refresh_frame()
     """
 
+    # 短时卡死判定窗口：连续多少帧位置不变算“卡住”
     STUCK_HISTORY_LEN = 10
+    # 长时困死判定窗口：连续多少帧都在局部小范围打转算“困死”
     TRAPPED_HISTORY_LEN = 50
+    # 到路径点多近时认为“已经到达”
     WAYPOINT_TOLERANCE = 2.0
+    # 单帧位置跳变超过这个距离时，认为定位异常，需要重规划
     LOCATION_JUMP_THRESHOLD = 25.0
+    # 位置跳变后，多久内不重复触发重规划
     LOCATION_JUMP_REPLAN_COOLDOWN = 1.5
 
+    # 不同时期的进圈目标距离，单位是地图坐标距离
     STAGE1_DIS = 600
     STAGE2_DIS = 400
     STAGE3_DIS = 220
+    # 上面三段进圈距离各自对应的时间分界点，单位秒
     STAGE1_TIME = 11 * 60
     STAGE2_TIME = 16 * 60
 
+    # R 城寻车的大致目标点
     R_CITY = (1136, 783)
+    # 车库附近的精确上车点
     CAR_ENTRY_POINT = (1131, 763)
+    # 历史保留字段，表示默认入库朝向
     CAR_FACE_DIRECTION = 265
+    # 入库失败后依次尝试的朝向序列
     PRECISE_FACE_DIRECTIONS = [265, 270, 275, 280, 285, 290]
+    # 进圈角度变化超过这个阈值时，重新规划跑图路径
     CIRCLE_REPLAN_THRESHOLD = 10
+    # 精调上车时，先向前顶车的摇杆偏移/持续时间/等待时间
     PRECISE_FORWARD_BIAS_Y = -220
     PRECISE_FORWARD_DURA = 550
     PRECISE_FORWARD_WAIT = 2500
+    # 精调上车时，向右或向左单次小幅试探的摇杆参数
     PRECISE_LATERAL_STEP_BIAS = 150
     PRECISE_LATERAL_STEP_DURA = 220
     PRECISE_LATERAL_STEP_WAIT = 700
+    # 右探后回到中间位置的大幅回位参数
     PRECISE_RESET_CENTER_BIAS = -300
     PRECISE_RESET_CENTER_DURA = 260
     PRECISE_RESET_CENTER_WAIT = 700
+    # 落水后，上浮和向前划水脱离水面的操作参数
     WATER_FLOAT_DURA = 2000
     WATER_FORWARD_BIAS_Y = -280
     WATER_FORWARD_DURA = 900

@@ -29,44 +29,64 @@ class DriveContext:
 
 
 class DrivingManager:
+    # 首次出库必须对齐到的固定角度
     TARGET_FIRST_DIR = 115
 
+    # 车辆方向与目标方向的允许误差；小于该值时直接视为已对齐
     ALIGN_THRESHOLD = 8
+    # 到路径点多近时认为已经到达该路径点
     WAYPOINT_TOLERANCE = 5.0
 
+    # 连续多少次“低速且位置几乎不变”才判定为撞障/低速卡死
     STUCK_REPEAT_LIMIT = 2
+    # 两次位置变化小于该距离时，视为基本没动
     STUCK_LOCATION_EPS = 0.2
+    # 低速卡死检测的速度范围下限/上限
     BLOCKED_SPEED_MIN = 1
     BLOCKED_SPEED_MAX = 9
+    # 车辆刚起步后的保护时间，避免刚起步时误判成卡死
     BLOCKED_STARTUP_GRACE = 1.6
 
+    # 困死判定窗口：连续多少帧都在局部很小范围打转才算真正困死
     TRAPPED_HISTORY_LEN = 80
+    # 困死判定时，轨迹围绕中心点打转的半径范围
     TRAPPED_RADIUS_MIN = 1.0
     TRAPPED_RADIUS_MAX = 2.0
+    # 已经进入不可通行区域后，连续脱困失败多少次就直接结束当前局
     FORBIDDEN_ESCAPE_FAIL_LIMIT = 8
+    # 前方黑区检测距离：基础值，以及速度 2/3 时更远的提前量
     FORBIDDEN_BASE_CHECK_DISTANCE = 10
     FORBIDDEN_SPEED2_CHECK_DISTANCE = 14
     FORBIDDEN_SPEED3_CHECK_DISTANCE = 20
+    # 高速接近黑区时，额外预刹车的持续时间
     FORBIDDEN_HIGH_SPEED_BRAKE_WAIT = 1400
 
+    # 速度 2 时自动刹车的冷却时间，避免频繁点刹
     BRAKE_COOLDOWN_SPEED2 = 2.0
 
+    # 驾驶结束时，停车和下车前的操作时长
     TIME_BRAKE = 3000
     TIME_OFF_CAR = 500
 
+    # 不同时期的进圈目标距离，单位是地图坐标距离
     STAGE1_DIS = 600
     STAGE2_DIS = 400
     STAGE3_DIS = 220
+    # 上面三段进圈距离各自对应的时间分界点，单位秒
     STAGE1_TIME = 11 * 60
     STAGE2_TIME = 16 * 60
 
+    # 默认整段开车阶段的最大时长，单位秒
     DEFAULT_MAX_DRIVING_TIME = 10 * 60
+    # 车前方障碍物识别使用的画面 ROI 区域
     DRIVE_VIEW_RECT = (0.2797, 0.2826, 0.7203, 0.6175)
 
+    # 内部阶段名称：首次出库 / 正常巡航 / 驾驶结束
     STAGE_EXIT_GARAGE = "出库阶段"
     STAGE_CRUISE = "巡航阶段"
     STAGE_FINISH = "驾驶结束阶段"
 
+    # 开车阶段按钮名称兼容表，用于适配不同标注名称
     CONTROL_ALIASES = {
         "up": ("油门", "前进", "up"),
         "down": ("倒车", "后退", "down"),

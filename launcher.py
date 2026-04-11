@@ -39,6 +39,7 @@ CUSTOMS_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_examples"
 CUSTOMS_GAME_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_game_examples"
 PREVIEW_DIR = ROOT_DIR / "aw" / "autogame" / "temp" / "logs" / "process_temp_logs"
 PACKAGE_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+){2,}")
+DEFAULT_LOGIN_SHELL = os.environ.get("SHELL") or "/bin/zsh"
 
 
 def parse_case_vars(py_file: Path) -> Dict[str, str]:
@@ -128,18 +129,29 @@ def run_direct_entry(project_case: str, target_case: str):
 
 
 def run_hdc_shell(command: str) -> Optional[str]:
+    shell_path = DEFAULT_LOGIN_SHELL if os.path.exists(DEFAULT_LOGIN_SHELL) else "/bin/zsh"
+    wrapped_cmd = f'hdc shell "{command}"'
     try:
         result = subprocess.run(
-            f'hdc shell "{command}"',
-            shell=True,
+            [shell_path, "-lc", wrapped_cmd],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
+            timeout=20,
         )
+    except subprocess.TimeoutExpired:
+        print(f"[Launcher] hdc shell 执行超时: {wrapped_cmd}")
+        return None
     except subprocess.CalledProcessError as exc:
-        print(f"[Launcher] hdc shell 执行失败: {command}\n{exc.stderr}")
+        stderr = (exc.stderr or "").strip()
+        stdout = (exc.stdout or "").strip()
+        print(
+            f"[Launcher] hdc shell 执行失败: {wrapped_cmd}\n"
+            f"stdout: {stdout}\n"
+            f"stderr: {stderr}"
+        )
         return None
     return result.stdout.strip()
 
@@ -344,6 +356,7 @@ class LauncherWindow(QWidget):
         self.output_edit.moveCursor(QTextCursor.MoveOperation.End)
         self.output_edit.insertPlainText(text)
         self.output_edit.moveCursor(QTextCursor.MoveOperation.End)
+        QApplication.processEvents()
 
     def _set_status(self, text: str):
         self.status_label.setText(text)
@@ -666,6 +679,8 @@ class LauncherWindow(QWidget):
         if stopped:
             time.sleep(1.0)
             self._append_output(f"[Launcher] 已执行 force-stop: {stopped}\n")
+        else:
+            self._append_output("[Launcher] 未成功执行 force-stop，请检查 hdc 环境或设备连接状态。\n")
 
     def _check_and_start_if_safe(self):
         if not self.batch_active or self.current_plan is None:

@@ -53,6 +53,10 @@ class RunningManager:
     PRECISE_RESET_CENTER_BIAS = -300
     PRECISE_RESET_CENTER_DURA = 260
     PRECISE_RESET_CENTER_WAIT = 700
+    WATER_FLOAT_DURA = 1000
+    WATER_FORWARD_BIAS_Y = -280
+    WATER_FORWARD_DURA = 900
+    WATER_FORWARD_WAIT = 1200
 
     def __init__(self, map_tool: Optional[MapNavigator] = None):
         self.map_tool = map_tool or MapNavigator()
@@ -120,6 +124,10 @@ class RunningManager:
         if self._is_dead(w):
             print("[Running] 检测到死亡!")
             self._handle_death(w)
+            return
+
+        if self._is_in_water(w):
+            self._handle_water_escape(w, location, direction)
             return
 
         if self._is_in_vehicle(w):
@@ -259,6 +267,9 @@ class RunningManager:
         )
         return on_foot_ui_missing and vehicle_ui_visible
 
+    def _is_in_water(self, w: "FrameWorker") -> bool:
+        return bool(w.get_info("上浮"))
+
     def _is_dead(self, w: "FrameWorker") -> bool:
         return bool(w.get_info("变身")) or bool(w.get_info("红色血条"))
 
@@ -361,6 +372,71 @@ class RunningManager:
             if not merged or merged[-1] != point:
                 merged.append(point)
         return merged
+
+    def _handle_water_escape(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+    ):
+        self.stop_auto_forward(w)
+        target = self._get_running_target(location)
+        self._log_running_state("检测到落水", location, direction, "执行上浮脱困", target)
+
+        print("[Running] 检测到上浮图标，先长按上浮 1s")
+        w.click_down("上浮", dura=self.WATER_FLOAT_DURA)
+        time.sleep(0.3)
+        w.refresh_frame()
+
+        updated_location = self._get_location(w) or location
+        updated_direction = self._get_scalar(w.get_info("direction"))
+
+        if target is not None and updated_direction is not None:
+            aligned = self._align_to_point(w, updated_location, updated_direction, target, threshold=5)
+            if not aligned:
+                return
+
+        print("[Running] 开始用摇杆向前划水脱离水面")
+        w.tap_single(
+            "摇杆",
+            y_bias=self.WATER_FORWARD_BIAS_Y,
+            dura=self.WATER_FORWARD_DURA,
+            wait=self.WATER_FORWARD_WAIT,
+        )
+        w.refresh_frame()
+
+        if not self._is_in_water(w) or w.get_info("左拳头") or w.get_info("子弹"):
+            print("[Running] 上浮图标已消失，已脱离水面，恢复正常跑图")
+            new_location = self._get_location(w) or updated_location
+            new_direction = self._get_scalar(w.get_info("direction"))
+            self._log_running_state("已脱离水面", new_location, new_direction, "恢复正常跑图", target)
+            return
+
+        print("[Running] 仍在水中，下一帧继续执行脱水流程")
+
+    def _get_running_target(self, location: Tuple[int, int]) -> Optional[Tuple[int, int]]:
+        if self.road_list:
+            return self.road_list[0]
+
+        if not self.loading_road:
+            self._load_path(location)
+            if self.road_list:
+                return self.road_list[0]
+
+        if self.finding_car:
+            return self.R_CITY
+
+        if self.stable_circle_angle is not None:
+            elapsed = self.get_elapsed_time()
+            if elapsed <= self.STAGE1_TIME:
+                target_dist = self.STAGE1_DIS
+            elif elapsed <= self.STAGE2_TIME:
+                target_dist = self.STAGE2_DIS
+            else:
+                target_dist = self.STAGE3_DIS
+            return self.map_tool.get_target_point(location, self.stable_circle_angle, target_dist)
+
+        return None
 
     def _perform_unstuck_action(self, w: "FrameWorker", current_loc: Tuple[int, int]):
         self.stop_auto_forward(w)

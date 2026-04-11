@@ -252,7 +252,12 @@ class RunningManager:
                 self.loading_road = False
 
     def _is_in_vehicle(self, w: "FrameWorker") -> bool:
-        return not w.get_info("左拳头") and not w.get_info("子弹")
+        on_foot_ui_missing = not w.get_info("左拳头") and not w.get_info("子弹")
+        vehicle_ui_visible = any(
+            w.get_info(name)
+            for name in ("自动前进", "急刹", "加速")
+        )
+        return on_foot_ui_missing and vehicle_ui_visible
 
     def _is_dead(self, w: "FrameWorker") -> bool:
         return bool(w.get_info("变身")) or bool(w.get_info("红色血条"))

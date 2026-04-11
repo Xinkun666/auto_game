@@ -37,16 +37,10 @@ class DrivingManager:
     # 到路径点多近时认为已经到达该路径点
     WAYPOINT_TOLERANCE = 5.0
 
-    # 连续多少次“低速且位置几乎不变”才判定为撞障/低速卡死
-    STUCK_REPEAT_LIMIT = 2
+    # 连续多少帧位置几乎不变时，判定车辆被卡住
+    STUCK_REPEAT_LIMIT = 7
     # 两次位置变化小于该距离时，视为基本没动
     STUCK_LOCATION_EPS = 0.2
-    # 低速卡死检测的速度范围下限/上限
-    BLOCKED_SPEED_MIN = 1
-    BLOCKED_SPEED_MAX = 9
-    # 车辆刚起步后的保护时间，避免刚起步时误判成卡死
-    BLOCKED_STARTUP_GRACE = 1.6
-
     # 困死判定窗口：连续多少帧都在局部很小范围打转才算真正困死
     TRAPPED_HISTORY_LEN = 80
     # 困死判定时，轨迹围绕中心点打转的半径范围
@@ -237,7 +231,7 @@ class DrivingManager:
             return
 
         if self._check_motion_block(context):
-            print("[Driving] 检测到前后移动低速不动，执行快速脱困")
+            print("[Driving] 检测到连续7帧位置不变，执行倒车避障")
             self._handle_motion_block(w, context)
             self._finalize_frame(w)
             return
@@ -529,57 +523,31 @@ class DrivingManager:
     def _check_motion_block(self, context: DriveContext) -> bool:
         if self.current_stage in (self.STAGE_EXIT_GARAGE, self.STAGE_FINISH):
             self.last_motion_location = context.location
-            self.blocked_motion_count = 0
-            return False
-
-        if self.last_motion_mode not in ("forward", "backward"):
-            self.last_motion_location = context.location
-            self.blocked_motion_count = 0
-            return False
-
-        if context.speed is None or not (self.BLOCKED_SPEED_MIN <= context.speed <= self.BLOCKED_SPEED_MAX):
-            self.last_motion_location = context.location
-            self.blocked_motion_count = 0
-            return False
-
-        if time.time() - self.last_motion_started_at < self.BLOCKED_STARTUP_GRACE:
-            self.last_motion_location = context.location
-            self.blocked_motion_count = 0
+            self.blocked_motion_count = 1
             return False
 
         if self.last_motion_location is None:
             self.last_motion_location = context.location
-            self.blocked_motion_count = 0
+            self.blocked_motion_count = 1
             return False
 
         if get_distance(context.location, self.last_motion_location) <= self.STUCK_LOCATION_EPS:
             self.blocked_motion_count += 1
         else:
-            self.blocked_motion_count = 0
+            self.blocked_motion_count = 1
 
         self.last_motion_location = context.location
-        if self.blocked_motion_count < self.STUCK_REPEAT_LIMIT:
-            return False
-
-        if self.last_motion_mode == "forward" and not self._has_front_obstacle(context):
-            print("[Driving] 前进低速不动但前方无障碍，忽略本次后退规避")
-            self.blocked_motion_count = 0
-            return False
-
-        return True
+        return self.blocked_motion_count >= self.STUCK_REPEAT_LIMIT
 
     def _handle_motion_block(self, w: "FrameWorker", context: DriveContext):
         steer = self.last_motion_steer or self._decision_to_steer(context.decision) or "right"
-        if self.last_motion_mode == "forward":
-            action = f"backward_turn_{steer}"
-        else:
-            action = f"forward_turn_{steer}"
+        action = f"backward_turn_{steer}"
 
         print(
-            f"[Driving] 快速脱困: mode={self.last_motion_mode}, "
+            f"[Driving] 快速脱困: stuck_frames={self.blocked_motion_count}, "
             f"steer={steer}, action={action}"
         )
-        self._log_drive_state("低速卡死/撞住障碍物", context, f"{action}(1000ms)", self.stable_circle_angle)
+        self._log_drive_state("车辆连续多帧位置不变", context, f"{action}(1000ms)", self.stable_circle_angle)
         self.blocked_motion_count = 0
         self._execute_maneuver(w, action, speed=context.speed, duration=1000, brake_with_steer=True)
 

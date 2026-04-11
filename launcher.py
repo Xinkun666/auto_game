@@ -1,13 +1,15 @@
 import argparse
 import ast
+import json
 import os
+import shutil
 import sys
 import traceback
 from pathlib import Path
 from typing import Dict, Optional
 
-from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt
-from PyQt6.QtGui import QTextCursor
+from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt, QTimer
+from PyQt6.QtGui import QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -30,6 +32,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 TESTCASES_DIR = ROOT_DIR / "testcases"
 CUSTOMS_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_examples"
 CUSTOMS_GAME_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_game_examples"
+PREVIEW_DIR = ROOT_DIR / "aw" / "autogame" / "temp" / "logs" / "process_temp_logs"
 
 
 def parse_case_vars(py_file: Path) -> Dict[str, str]:
@@ -105,9 +108,13 @@ class LauncherWindow(QWidget):
         self.process: Optional[QProcess] = None
         self.selected_testcase_file: Optional[Path] = None
         self._updating_targets = False
+        self.latest_preview_file: Optional[Path] = None
+        self.latest_preview_pixmap: Optional[QPixmap] = None
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setInterval(150)
 
         self.setWindowTitle("Auto Game 启动器")
-        self.resize(980, 760)
+        self.resize(1260, 860)
 
         self.mode_testcase = QRadioButton("通过 testcases 用例启动")
         self.mode_direct = QRadioButton("直接指定 project_case / target_case")
@@ -135,6 +142,15 @@ class LauncherWindow(QWidget):
         self.output_edit = QPlainTextEdit()
         self.output_edit.setReadOnly(True)
         self.output_edit.setPlaceholderText("运行输出会显示在这里...")
+
+        self.preview_image_label = QLabel("启动后将在这里实时显示可视化帧")
+        self.preview_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_image_label.setMinimumSize(640, 360)
+        self.preview_image_label.setStyleSheet("border: 1px solid #666; background: #111; color: #ddd;")
+
+        self.preview_info_edit = QPlainTextEdit()
+        self.preview_info_edit.setReadOnly(True)
+        self.preview_info_edit.setPlaceholderText("当前帧识别信息会显示在这里...")
 
         self._build_ui()
         self._bind_signals()
@@ -171,10 +187,20 @@ class LauncherWindow(QWidget):
         action_layout.addStretch(1)
         main_layout.addLayout(action_layout)
 
+        content_layout = QHBoxLayout()
+
+        preview_group = QGroupBox("实时可视化")
+        preview_layout = QVBoxLayout(preview_group)
+        preview_layout.addWidget(self.preview_image_label, 3)
+        preview_layout.addWidget(self.preview_info_edit, 2)
+        content_layout.addWidget(preview_group, 3)
+
         log_group = QGroupBox("运行输出")
         log_layout = QVBoxLayout(log_group)
         log_layout.addWidget(self.output_edit)
-        main_layout.addWidget(log_group, 1)
+        content_layout.addWidget(log_group, 2)
+
+        main_layout.addLayout(content_layout, 1)
 
     def _bind_signals(self):
         self.mode_testcase.toggled.connect(self._sync_mode_ui)
@@ -184,6 +210,7 @@ class LauncherWindow(QWidget):
         self.project_combo.currentTextChanged.connect(self._on_project_changed)
         self.start_button.clicked.connect(self._start_run)
         self.stop_button.clicked.connect(self._stop_run)
+        self.preview_timer.timeout.connect(self._poll_preview_frame)
 
     def _append_output(self, text: str):
         if not text:
@@ -194,6 +221,10 @@ class LauncherWindow(QWidget):
 
     def _set_status(self, text: str):
         self.status_label.setText(text)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh_preview_pixmap()
 
     def _sync_mode_ui(self):
         testcase_mode = self.mode_testcase.isChecked()
@@ -312,7 +343,74 @@ class LauncherWindow(QWidget):
         env = QProcessEnvironment.systemEnvironment()
         env.insert("TARGET_PROJECT_CASE", project_case)
         env.insert("TARGET_GAME_CASE", target_case)
+        env.insert("AUTOGAME_VIS_MODE", "launcher")
         return env
+
+    def _clear_preview_files(self):
+        self.latest_preview_file = None
+        self.latest_preview_pixmap = None
+        self.preview_image_label.setText("启动后将在这里实时显示可视化帧")
+        self.preview_image_label.setPixmap(QPixmap())
+        self.preview_info_edit.clear()
+
+        PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+        for path in PREVIEW_DIR.iterdir():
+            if path.is_file():
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            elif path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+
+    def _refresh_preview_pixmap(self):
+        if self.latest_preview_pixmap is None:
+            return
+        scaled = self.latest_preview_pixmap.scaled(
+            self.preview_image_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.preview_image_label.setPixmap(scaled)
+
+    def _poll_preview_frame(self):
+        if not PREVIEW_DIR.exists():
+            return
+
+        latest_image = None
+        latest_mtime = -1.0
+        for path in PREVIEW_DIR.glob("frame_*.jpg"):
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if mtime > latest_mtime:
+                latest_mtime = mtime
+                latest_image = path
+
+        if latest_image is None or latest_image == self.latest_preview_file:
+            return
+
+        json_path = latest_image.with_suffix(".json")
+        if not json_path.exists():
+            return
+
+        pixmap = QPixmap(str(latest_image))
+        if pixmap.isNull():
+            return
+
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {"error": "json 读取失败"}
+
+        self.latest_preview_file = latest_image
+        self.latest_preview_pixmap = pixmap
+        self.preview_image_label.setText("")
+        self._refresh_preview_pixmap()
+        self.preview_info_edit.setPlainText(
+            json.dumps(payload, ensure_ascii=False, indent=2)
+        )
 
     def _validate_selection(self) -> Optional[tuple[str, str]]:
         project_case = self.project_combo.currentText().strip()
@@ -339,6 +437,7 @@ class LauncherWindow(QWidget):
 
         project_case, target_case = config
         self.output_edit.clear()
+        self._clear_preview_files()
 
         self.process = QProcess(self)
         self.process.setProgram(sys.executable)
@@ -378,6 +477,7 @@ class LauncherWindow(QWidget):
 
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
+        self.preview_timer.start()
 
     def _read_process_output(self):
         if self.process is None:
@@ -390,6 +490,8 @@ class LauncherWindow(QWidget):
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self._set_status(f"任务已结束，退出码：{exit_code}")
+        self.preview_timer.stop()
+        self._poll_preview_frame()
         if self.process is not None:
             self.process.deleteLater()
             self.process = None
@@ -398,6 +500,7 @@ class LauncherWindow(QWidget):
         if self.process is None:
             return
         self._append_output("\n[Launcher] 正在停止子进程...\n")
+        self.preview_timer.stop()
         self.process.kill()
 
 

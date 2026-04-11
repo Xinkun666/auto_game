@@ -370,7 +370,9 @@ def visualizer_process(queue, visual=True):
     """
     独立进程：处理图像旋转、JSON保存及目标检测框可视化
     """
-    print(f"[Visualizer] 显示进程已启动, 可视化状态: {visual}")
+    vis_mode = os.environ.get("AUTOGAME_VIS_MODE", "window").strip().lower()
+    show_window = visual and vis_mode != "launcher"
+    print(f"[Visualizer] 显示进程已启动, 可视化状态: {visual}, mode: {vis_mode}")
     window_name = "Frame Monitor"
     log_dir = "aw/autogame/temp/logs/process_temp_logs"
     if not os.path.exists(log_dir):
@@ -468,13 +470,15 @@ def visualizer_process(queue, visual=True):
 
             if isinstance(info, dict):
                 for k, v in sorted_info_items:
-                    val_str = str(v)
-                    if len(val_str) > 50: val_str = val_str[:50] + "..."
-                    safe_info[k] = val_str
+                    raw_str = str(v)
+                    safe_info[k] = raw_str
 
                     if visual:
                         if k in detection_keys:
                             continue
+                        val_str = raw_str
+                        if len(val_str) > 50:
+                            val_str = val_str[:50] + "..."
                         info_line = f"{k}: {val_str}"
                         frame_rotated = draw_chinese_text(
                             frame_rotated, info_line, (int(10 / scale), y_offset),
@@ -491,17 +495,19 @@ def visualizer_process(queue, visual=True):
                 json.dump({"index": index, "stage": stage, "info": safe_info}, f, ensure_ascii=False, indent=4)
 
             # 5. 缩放显示 (此时文字会因为前面的反向补偿，在显示窗口中看起来大小适中)
-            frame_display = cv2.resize(frame_rotated, (target_width, target_height))
-            cv2.imshow(window_name, frame_display)
+            if show_window:
+                frame_display = cv2.resize(frame_rotated, (target_width, target_height))
+                cv2.imshow(window_name, frame_display)
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
 
         except Exception as e:
             print(f"\n[Visualizer Error] {e}")
             break
 
-    cv2.destroyAllWindows()
+    if show_window:
+        cv2.destroyAllWindows()
 
 def get_screen_mode(config_path="aw/autogame/config/config.json"):
     """

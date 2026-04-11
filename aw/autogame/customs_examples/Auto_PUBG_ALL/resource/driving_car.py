@@ -38,11 +38,16 @@ class DrivingManager:
     STUCK_LOCATION_EPS = 0.2
     BLOCKED_SPEED_MIN = 1
     BLOCKED_SPEED_MAX = 9
+    BLOCKED_STARTUP_GRACE = 1.6
 
     TRAPPED_HISTORY_LEN = 80
     TRAPPED_RADIUS_MIN = 1.0
     TRAPPED_RADIUS_MAX = 2.0
     FORBIDDEN_ESCAPE_FAIL_LIMIT = 8
+    FORBIDDEN_BASE_CHECK_DISTANCE = 10
+    FORBIDDEN_SPEED2_CHECK_DISTANCE = 14
+    FORBIDDEN_SPEED3_CHECK_DISTANCE = 20
+    FORBIDDEN_HIGH_SPEED_BRAKE_WAIT = 1400
 
     BRAKE_COOLDOWN_SPEED2 = 2.0
 
@@ -104,6 +109,7 @@ class DrivingManager:
         self.last_motion_mode: Optional[str] = None
         self.last_motion_steer: Optional[str] = None
         self.last_motion_location: Optional[Tuple[int, int]] = None
+        self.last_motion_started_at = 0.0
         self.blocked_motion_count = 0
         self.last_auto_brake_time = 0.0
 
@@ -153,6 +159,7 @@ class DrivingManager:
         self.last_motion_mode = None
         self.last_motion_steer = None
         self.last_motion_location = None
+        self.last_motion_started_at = 0.0
         self.blocked_motion_count = 0
         self.last_auto_brake_time = 0.0
 
@@ -385,7 +392,7 @@ class DrivingManager:
         return True
 
     def _handle_forbidden_ahead(self, w: "FrameWorker", context: DriveContext) -> bool:
-        if self.map_tool.check_safety_ahead(context.location, context.direction) != "Pause":
+        if not self._has_forbidden_ahead(context):
             return False
 
         sector = self.map_tool.get_avoidance_action(context.location, context.direction)
@@ -401,18 +408,27 @@ class DrivingManager:
         if action is None:
             return False
 
+        duration = action[1]
+        if context.speed is not None and context.speed >= 3:
+            print("[Driving] 高速接近不可通行区域，先执行预刹车")
+            self._tap_single_control(w, "brake", wait=self.FORBIDDEN_HIGH_SPEED_BRAKE_WAIT)
+            if action[0].startswith("forward_turn_"):
+                duration += 250
+            elif action[0].startswith("backward_turn_"):
+                duration += 400
+
         print(f"[Driving] 前方不可通行，地图规避 sector={sector}, action={action}")
         self._log_drive_state(
             "前方有不可通行区域",
             context,
-            f"{action[0]}({action[1]}ms)",
+            f"{action[0]}({duration}ms)",
             self.stable_circle_angle,
         )
         self._execute_maneuver(
             w,
             action=action[0],
             speed=context.speed,
-            duration=action[1],
+            duration=duration,
             brake_with_steer=True,
         )
         return True
@@ -506,6 +522,11 @@ class DrivingManager:
             self.blocked_motion_count = 0
             return False
 
+        if time.time() - self.last_motion_started_at < self.BLOCKED_STARTUP_GRACE:
+            self.last_motion_location = context.location
+            self.blocked_motion_count = 0
+            return False
+
         if self.last_motion_location is None:
             self.last_motion_location = context.location
             self.blocked_motion_count = 0
@@ -555,7 +576,27 @@ class DrivingManager:
             return True
         if context.decision != "straight":
             return True
-        return self.map_tool.check_safety_ahead(context.location, context.direction) == "Pause"
+        return self._has_forbidden_ahead(context)
+
+    def _get_forbidden_check_distance(self, speed: Optional[int]) -> int:
+        if speed is None:
+            return self.FORBIDDEN_BASE_CHECK_DISTANCE
+        if speed >= 3:
+            return self.FORBIDDEN_SPEED3_CHECK_DISTANCE
+        if speed == 2:
+            return self.FORBIDDEN_SPEED2_CHECK_DISTANCE
+        return self.FORBIDDEN_BASE_CHECK_DISTANCE
+
+    def _has_forbidden_ahead(self, context: DriveContext) -> bool:
+        check_distance = self._get_forbidden_check_distance(context.speed)
+        return (
+            self.map_tool.check_safety_ahead(
+                context.location,
+                context.direction,
+                distance=check_distance,
+            )
+            == "Pause"
+        )
 
     def _update_trapped_state(self, location: Tuple[int, int]):
         self.history_locations.append(location)
@@ -692,6 +733,7 @@ class DrivingManager:
     def _record_motion_action(self, action: str):
         self.last_motion_mode = None
         self.last_motion_steer = None
+        self.last_motion_started_at = time.time()
 
         if action in ("straight", "forward", "forward_turn_left", "forward_turn_right"):
             self.last_motion_mode = "forward"

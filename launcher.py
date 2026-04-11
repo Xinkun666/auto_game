@@ -3,6 +3,7 @@ import ast
 import json
 import os
 import shutil
+import subprocess
 import sys
 import traceback
 from pathlib import Path
@@ -13,6 +14,7 @@ from PyQt6.QtGui import QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -23,6 +25,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QPlainTextEdit,
     QRadioButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -102,6 +105,53 @@ def run_direct_entry(project_case: str, target_case: str):
     automator.start()
 
 
+def run_hdc_shell(command: str) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            f'hdc shell "{command}"',
+            shell=True,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+    except subprocess.CalledProcessError as exc:
+        print(f"[Launcher] hdc shell 执行失败: {command}\n{exc.stderr}")
+        return None
+    return result.stdout.strip()
+
+
+def get_battery_temperature_c() -> Optional[float]:
+    raw = run_hdc_shell("cat /sys/class/power_supply/Battery/temp")
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value / 10.0 if value > 100 else value
+
+
+def get_battery_capacity() -> Optional[int]:
+    raw = run_hdc_shell("cat /sys/class/power_supply/Battery/capacity")
+    if not raw:
+        return None
+    try:
+        return int(float(raw))
+    except ValueError:
+        return None
+
+
+def set_hiz_mode(active: bool):
+    if active:
+        run_hdc_shell("echo 1 > /sys/class/hw_power/charger/charge_data/enable_hiz")
+        run_hdc_shell("echo stopsink > /sys/class/hw_power/charger/charge_data/plugusb")
+    else:
+        run_hdc_shell("echo 0 > /sys/class/hw_power/charger/charge_data/enable_hiz")
+        run_hdc_shell("echo startsink > /sys/class/hw_power/charger/charge_data/plugusb")
+
+
 class LauncherWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -112,6 +162,17 @@ class LauncherWindow(QWidget):
         self.latest_preview_pixmap: Optional[QPixmap] = None
         self.preview_timer = QTimer(self)
         self.preview_timer.setInterval(150)
+        self.safety_timer = QTimer(self)
+        self.safety_timer.setInterval(5000)
+        self.run_timeout_timer = QTimer(self)
+        self.run_timeout_timer.setSingleShot(True)
+
+        self.batch_active = False
+        self.stop_requested = False
+        self.current_run_index = 0
+        self.total_runs = 1
+        self.current_plan: Optional[dict] = None
+        self.current_run_timed_out = False
 
         self.setWindowTitle("Auto Game 启动器")
         self.resize(1260, 860)
@@ -134,6 +195,32 @@ class LauncherWindow(QWidget):
         self.status_label = QLabel("请选择启动方式，并选择 testcases 用例或直接指定配置。")
         self.status_label.setWordWrap(True)
         self.status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.runtime_label = QLabel("运行信息：未开始")
+        self.runtime_label.setWordWrap(True)
+        self.runtime_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        self.run_count_spin = QSpinBox()
+        self.run_count_spin.setRange(1, 9999)
+        self.run_count_spin.setValue(1)
+
+        self.safe_temp_spin = QDoubleSpinBox()
+        self.safe_temp_spin.setRange(0.0, 100.0)
+        self.safe_temp_spin.setDecimals(1)
+        self.safe_temp_spin.setSingleStep(0.5)
+        self.safe_temp_spin.setValue(40.0)
+        self.safe_temp_spin.setSuffix(" °C")
+
+        self.safe_battery_spin = QSpinBox()
+        self.safe_battery_spin.setRange(0, 100)
+        self.safe_battery_spin.setValue(25)
+        self.safe_battery_spin.setSuffix(" %")
+
+        self.safe_time_spin = QDoubleSpinBox()
+        self.safe_time_spin.setRange(0.0, 10000.0)
+        self.safe_time_spin.setDecimals(1)
+        self.safe_time_spin.setSingleStep(1.0)
+        self.safe_time_spin.setValue(0.0)
+        self.safe_time_spin.setSuffix(" 分钟")
 
         self.start_button = QPushButton("启动")
         self.stop_button = QPushButton("停止")
@@ -177,7 +264,12 @@ class LauncherWindow(QWidget):
         config_layout = QFormLayout(config_group)
         config_layout.addRow("project_case", self.project_combo)
         config_layout.addRow("target_case", self.target_combo)
+        config_layout.addRow("运行次数", self.run_count_spin)
+        config_layout.addRow("安全温度", self.safe_temp_spin)
+        config_layout.addRow("安全电量", self.safe_battery_spin)
+        config_layout.addRow("安全时间", self.safe_time_spin)
         config_layout.addRow("解析结果", self.status_label)
+        config_layout.addRow("运行信息", self.runtime_label)
         config_layout.addRow("", self.refresh_button)
         main_layout.addWidget(config_group)
 
@@ -211,6 +303,8 @@ class LauncherWindow(QWidget):
         self.start_button.clicked.connect(self._start_run)
         self.stop_button.clicked.connect(self._stop_run)
         self.preview_timer.timeout.connect(self._poll_preview_frame)
+        self.safety_timer.timeout.connect(self._check_and_start_if_safe)
+        self.run_timeout_timer.timeout.connect(self._handle_run_timeout)
 
     def _append_output(self, text: str):
         if not text:
@@ -221,6 +315,9 @@ class LauncherWindow(QWidget):
 
     def _set_status(self, text: str):
         self.status_label.setText(text)
+
+    def _set_runtime(self, text: str):
+        self.runtime_label.setText(text)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -346,6 +443,20 @@ class LauncherWindow(QWidget):
         env.insert("AUTOGAME_VIS_MODE", "launcher")
         return env
 
+    def _set_inputs_enabled(self, enabled: bool):
+        self.mode_testcase.setEnabled(enabled)
+        self.mode_direct.setEnabled(enabled)
+        self.testcase_path_edit.setEnabled(enabled and self.mode_testcase.isChecked())
+        self.browse_button.setEnabled(enabled and self.mode_testcase.isChecked())
+        self.clear_button.setEnabled(enabled and self.mode_testcase.isChecked())
+        self.refresh_button.setEnabled(enabled)
+        self.project_combo.setEnabled(enabled)
+        self.target_combo.setEnabled(enabled)
+        self.run_count_spin.setEnabled(enabled)
+        self.safe_temp_spin.setEnabled(enabled)
+        self.safe_battery_spin.setEnabled(enabled)
+        self.safe_time_spin.setEnabled(enabled)
+
     def _clear_preview_files(self):
         self.latest_preview_file = None
         self.latest_preview_pixmap = None
@@ -426,18 +537,139 @@ class LauncherWindow(QWidget):
 
         return project_case, target_case
 
-    def _start_run(self):
-        if self.process is not None:
-            QMessageBox.information(self, "运行中", "当前已有任务在运行，请先停止。")
-            return
-
+    def _collect_plan(self) -> Optional[dict]:
         config = self._validate_selection()
         if config is None:
-            return
+            return None
 
         project_case, target_case = config
+        testcase_label = None
+        mode = "direct"
+
+        if self.mode_testcase.isChecked():
+            if self.selected_testcase_file is None:
+                QMessageBox.warning(self, "缺少用例", "testcases 模式下请先选择一个用例文件。")
+                return None
+            testcase_label = self.selected_testcase_file.relative_to(ROOT_DIR).with_suffix("").as_posix()
+            mode = "testcase"
+
+        return {
+            "mode": mode,
+            "project_case": project_case,
+            "target_case": target_case,
+            "testcase_label": testcase_label,
+            "run_count": int(self.run_count_spin.value()),
+            "safe_temp": float(self.safe_temp_spin.value()),
+            "safe_battery": int(self.safe_battery_spin.value()),
+            "safe_minutes": float(self.safe_time_spin.value()),
+        }
+
+    def _format_runtime_text(
+        self,
+        run_index: int,
+        total_runs: int,
+        temperature: Optional[float],
+        battery: Optional[int],
+        extra: str,
+    ) -> str:
+        temp_text = "未知" if temperature is None else f"{temperature:.1f}°C"
+        battery_text = "未知" if battery is None else f"{battery}%"
+        return f"运行信息：第 {run_index}/{total_runs} 次，温度 {temp_text}，电量 {battery_text}。{extra}"
+
+    def _begin_batch(self, plan: dict):
+        self.current_plan = plan
+        self.batch_active = True
+        self.stop_requested = False
+        self.current_run_index = 0
+        self.current_run_timed_out = False
         self.output_edit.clear()
         self._clear_preview_files()
+        self.start_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self._set_inputs_enabled(False)
+        self._set_status("已开始批量执行，准备进行安全检查。")
+        self._set_runtime(f"运行信息：共 {plan['run_count']} 次，等待第 1 次启动。")
+        self._append_output(
+            f"[Launcher] 批量运行开始，mode={plan['mode']}, runs={plan['run_count']}, "
+            f"safe_temp={plan['safe_temp']}°C, safe_battery={plan['safe_battery']}%, "
+            f"safe_time={plan['safe_minutes']}分钟\n"
+        )
+        self._check_and_start_if_safe()
+
+    def _finish_batch(self, message: str):
+        self.batch_active = False
+        self.stop_requested = False
+        self.current_plan = None
+        self.current_run_timed_out = False
+        self.start_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self._set_inputs_enabled(True)
+        self.preview_timer.stop()
+        self.safety_timer.stop()
+        self.run_timeout_timer.stop()
+        self._set_status(message)
+        self._set_runtime(message)
+
+    def _check_and_start_if_safe(self):
+        if not self.batch_active or self.current_plan is None:
+            return
+        if self.process is not None:
+            return
+        if self.stop_requested:
+            self._finish_batch("任务已停止。")
+            return
+        if self.current_run_index >= self.current_plan["run_count"]:
+            self._finish_batch("所有运行次数已完成。")
+            return
+
+        run_no = self.current_run_index + 1
+        temperature = get_battery_temperature_c()
+        battery = get_battery_capacity()
+
+        if battery is None or temperature is None:
+            self._set_status("无法读取手机温度或电量，稍后重试。")
+            self._set_runtime(
+                self._format_runtime_text(run_no, self.current_plan["run_count"], temperature, battery, "等待重试。")
+            )
+            if not self.safety_timer.isActive():
+                self.safety_timer.start()
+            return
+
+        if battery < self.current_plan["safe_battery"]:
+            set_hiz_mode(False)
+            self._set_status(
+                f"当前电量 {battery}% 低于安全电量 {self.current_plan['safe_battery']}%，已开启充电并关闭 HIZ，等待后再运行。"
+            )
+            self._set_runtime(
+                self._format_runtime_text(run_no, self.current_plan["run_count"], temperature, battery, "电量不足，等待充电。")
+            )
+            if not self.safety_timer.isActive():
+                self.safety_timer.start()
+            return
+
+        if temperature > self.current_plan["safe_temp"]:
+            self._set_status(
+                f"当前温度 {temperature:.1f}°C 高于安全温度 {self.current_plan['safe_temp']:.1f}°C，等待降温后再运行。"
+            )
+            self._set_runtime(
+                self._format_runtime_text(run_no, self.current_plan["run_count"], temperature, battery, "温度过高，等待降温。")
+            )
+            if not self.safety_timer.isActive():
+                self.safety_timer.start()
+            return
+
+        self.safety_timer.stop()
+        self._launch_iteration(run_no, temperature, battery)
+
+    def _launch_iteration(self, run_no: int, temperature: float, battery: int):
+        if self.current_plan is None:
+            return
+
+        self.current_run_timed_out = False
+        self._clear_preview_files()
+
+        project_case = self.current_plan["project_case"]
+        target_case = self.current_plan["target_case"]
 
         self.process = QProcess(self)
         self.process.setProgram(sys.executable)
@@ -447,24 +679,32 @@ class LauncherWindow(QWidget):
         self.process.readyReadStandardOutput.connect(self._read_process_output)
         self.process.finished.connect(self._on_process_finished)
 
-        if self.mode_testcase.isChecked():
-            if self.selected_testcase_file is None:
-                QMessageBox.warning(self, "缺少用例", "testcases 模式下请先选择一个用例文件。")
-                self.process.deleteLater()
-                self.process = None
-                return
-
-            testcase_label = self.selected_testcase_file.relative_to(ROOT_DIR).with_suffix("").as_posix()
+        if self.current_plan["mode"] == "testcase":
+            testcase_label = self.current_plan["testcase_label"]
             args = [str(ROOT_DIR / "launcher.py"), "--run-testcase", testcase_label]
             self._set_status(
-                f"正在通过 testcases 启动：{testcase_label}，"
-                f"project_case={project_case}，target_case={target_case}"
+                f"第 {run_no}/{self.current_plan['run_count']} 次启动：{testcase_label}"
             )
+            self._append_output(f"\n[Launcher] 第 {run_no}/{self.current_plan['run_count']} 次：通过 testcase 启动 {testcase_label}\n")
         else:
             args = [str(ROOT_DIR / "launcher.py"), "--run-direct", project_case, target_case]
             self._set_status(
-                f"正在直接启动自动化：project_case={project_case}，target_case={target_case}"
+                f"第 {run_no}/{self.current_plan['run_count']} 次启动：project_case={project_case}, target_case={target_case}"
             )
+            self._append_output(
+                f"\n[Launcher] 第 {run_no}/{self.current_plan['run_count']} 次：直接启动 "
+                f"project_case={project_case}, target_case={target_case}\n"
+            )
+
+        self._set_runtime(
+            self._format_runtime_text(
+                run_no,
+                self.current_plan["run_count"],
+                temperature,
+                battery,
+                "安全检查通过，正在启动。",
+            )
+        )
 
         self.process.setArguments(args)
         self.process.start()
@@ -473,11 +713,35 @@ class LauncherWindow(QWidget):
             QMessageBox.critical(self, "启动失败", "子进程启动失败，请检查 Python 环境。")
             self.process.deleteLater()
             self.process = None
+            self._finish_batch("启动失败，批量任务已终止。")
             return
 
-        self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
         self.preview_timer.start()
+        safe_minutes = self.current_plan["safe_minutes"]
+        if safe_minutes > 0:
+            self.run_timeout_timer.start(int(safe_minutes * 60 * 1000))
+
+    def _handle_run_timeout(self):
+        if self.process is None or self.current_plan is None:
+            return
+        self.current_run_timed_out = True
+        self._append_output(
+            f"\n[Launcher] 第 {self.current_run_index + 1}/{self.current_plan['run_count']} 次运行已超过 "
+            f"{self.current_plan['safe_minutes']} 分钟，正在停止本次用例。\n"
+        )
+        self._set_status("当前用例超过安全时间，正在停止本次运行。")
+        self.process.kill()
+
+    def _start_run(self):
+        if self.batch_active or self.process is not None:
+            QMessageBox.information(self, "运行中", "当前已有任务在运行，请先停止。")
+            return
+
+        plan = self._collect_plan()
+        if plan is None:
+            return
+
+        self._begin_batch(plan)
 
     def _read_process_output(self):
         if self.process is None:
@@ -486,20 +750,51 @@ class LauncherWindow(QWidget):
         self._append_output(text)
 
     def _on_process_finished(self, exit_code: int, _exit_status):
+        self.run_timeout_timer.stop()
         self._append_output(f"\n[Launcher] 进程结束，exit_code={exit_code}\n")
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
-        self._set_status(f"任务已结束，退出码：{exit_code}")
-        self.preview_timer.stop()
         self._poll_preview_frame()
+        self.preview_timer.stop()
         if self.process is not None:
             self.process.deleteLater()
             self.process = None
 
-    def _stop_run(self):
-        if self.process is None:
+        if not self.batch_active or self.current_plan is None:
+            self._finish_batch(f"任务已结束，退出码：{exit_code}")
             return
-        self._append_output("\n[Launcher] 正在停止子进程...\n")
+
+        if self.stop_requested:
+            self._finish_batch("任务已停止。")
+            return
+
+        self.current_run_index += 1
+        if self.current_run_timed_out:
+            self._append_output("[Launcher] 本次用例因超过安全时间被停止，计入已执行次数。\n")
+
+        if self.current_run_index >= self.current_plan["run_count"]:
+            self._finish_batch("所有运行次数已完成。")
+            return
+
+        next_run = self.current_run_index + 1
+        self._set_status(f"第 {self.current_run_index}/{self.current_plan['run_count']} 次已结束，检查第 {next_run} 次启动条件。")
+        self._set_runtime(f"运行信息：已完成 {self.current_run_index}/{self.current_plan['run_count']} 次，准备下一次安全检查。")
+        self._check_and_start_if_safe()
+        if self.batch_active and self.process is None and not self.safety_timer.isActive():
+            self.safety_timer.start()
+
+    def _stop_run(self):
+        if not self.batch_active and self.process is None:
+            return
+
+        self.stop_requested = True
+        self.safety_timer.stop()
+        self.run_timeout_timer.stop()
+
+        if self.process is None:
+            self._append_output("\n[Launcher] 已取消后续运行。\n")
+            self._finish_batch("任务已停止。")
+            return
+
+        self._append_output("\n[Launcher] 正在停止当前子进程，并取消后续运行...\n")
         self.preview_timer.stop()
         self.process.kill()
 

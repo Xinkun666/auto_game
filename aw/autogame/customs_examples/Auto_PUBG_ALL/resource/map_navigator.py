@@ -33,6 +33,11 @@ class MapNavigator:
         # 2. 检查颜色 (注意：opencv中 img[y, x])
         return self.binary_map[int(y), int(x)] == 255
 
+    def is_walkable(self, pos):
+        if pos is None or len(pos) < 2:
+            return False
+        return self._is_walkable(int(pos[0]), int(pos[1]))
+
     def check_safety_ahead(self, current_pos, angle, distance=10, step_size=1.0):
         """
         功能1（优化版）：射线检测。
@@ -295,6 +300,9 @@ class MapNavigator:
                         queue.append((nx, ny))
 
         return None  # 如果在范围内没找到安全点
+
+    def get_nearest_safe_point(self, start_pos, max_search_dist=100):
+        return self._find_nearest_safe_point(start_pos, max_search_dist=max_search_dist)
 
     def get_random_visible_points(self, current_pos, num_points=10, min_dist=30, max_dist=100):
         """

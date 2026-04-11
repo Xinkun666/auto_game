@@ -73,6 +73,15 @@ class RunningManager:
     WATER_FORWARD_BIAS_Y = -280
     WATER_FORWARD_DURA = 900
     WATER_FORWARD_WAIT = 3000
+    # 刚下车后，忽略附近车辆交互的保护时间，避免立刻又上车
+    VEHICLE_EXIT_PROTECTION = 5.0
+    # 下车后若仍贴着车，先短暂移动离开载具
+    VEHICLE_EXIT_ESCAPE_DURA = 350
+    VEHICLE_EXIT_ESCAPE_WAIT = 500
+    # 人物落在不可通行区域时，先脱离黑区再规划
+    FORBIDDEN_ESCAPE_SEARCH_DIST = 120
+    FORBIDDEN_ESCAPE_FORWARD_DURA = 700
+    FORBIDDEN_ESCAPE_FORWARD_WAIT = 900
 
     def __init__(self, map_tool: Optional[MapNavigator] = None):
         self.map_tool = map_tool or MapNavigator()
@@ -97,6 +106,7 @@ class RunningManager:
         self.precise_face_attempt_index = 0
         self.last_valid_location: Optional[Tuple[int, int]] = None
         self.last_jump_replan_time: float = 0.0
+        self.ignore_vehicle_until: float = 0.0
 
     def reset(self, finding_car: bool = True):
         self.road_list = []
@@ -116,6 +126,7 @@ class RunningManager:
         self.precise_face_attempt_index = 0
         self.last_valid_location = None
         self.last_jump_replan_time = 0.0
+        self.ignore_vehicle_until = 0.0
         print("[Running] 状态已重置!")
 
     def set_game_time(self, game_time: Optional[float] = None):
@@ -144,6 +155,12 @@ class RunningManager:
 
         if self._is_in_water(w):
             self._handle_water_escape(w, location, direction)
+            return
+
+        if self._handle_recent_vehicle_exit(w, location, direction):
+            return
+
+        if self._handle_forbidden_escape(w, location, direction):
             return
 
         if self._is_in_vehicle(w):
@@ -293,6 +310,97 @@ class RunningManager:
         self.stop_auto_forward(w)
         self.reset()
         w.change_stage("结束阶段")
+
+    def notify_vehicle_exit(self, cooldown: float = VEHICLE_EXIT_PROTECTION):
+        self.finding_car = False
+        self.loading_road = False
+        self.precise_entering_car = False
+        self.precise_last_distance = None
+        self.precise_idle_rounds = 0
+        self.road_list = []
+        self.locations = []
+        self.history_locations = []
+        self.stuck = False
+        self.trapped = False
+        self.ignore_vehicle_until = time.time() + cooldown
+        print(f"[Running] 收到下车通知，载具交互保护期 {cooldown:.1f}s")
+
+    def _handle_recent_vehicle_exit(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+    ) -> bool:
+        if time.time() >= self.ignore_vehicle_until:
+            return False
+
+        drive_btn = w.get_info("驾驶")
+        still_vehicle_ui = self._is_in_vehicle(w)
+        remaining = max(0.0, self.ignore_vehicle_until - time.time())
+
+        if not drive_btn and not still_vehicle_ui:
+            return False
+
+        print(f"[Running] 刚下车，忽略载具交互 remaining={remaining:.2f}s")
+        self._log_running_state("下车保护期", location, direction, "忽略上车/驾驶并先离开载具")
+        self.stop_auto_forward(w)
+        self.loading_road = False
+        self.road_list = []
+        w.tap_single(
+            "摇杆",
+            y_bias=-260,
+            dura=self.VEHICLE_EXIT_ESCAPE_DURA,
+            wait=self.VEHICLE_EXIT_ESCAPE_WAIT,
+        )
+        w.refresh_frame()
+        return True
+
+    def _handle_forbidden_escape(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+    ) -> bool:
+        if self.map_tool.is_walkable(location):
+            return False
+
+        safe_point = self.map_tool.get_nearest_safe_point(
+            location,
+            max_search_dist=self.FORBIDDEN_ESCAPE_SEARCH_DIST,
+        )
+        self.stop_auto_forward(w)
+        self.loading_road = False
+        self.road_list = []
+
+        if safe_point is None:
+            print("[Running] 当前位于不可通行区域，暂未找到安全点，先尝试直线脱离")
+            self._log_running_state("人物位于不可通行区域", location, direction, "直线尝试脱离黑区")
+            w.tap_single(
+                "摇杆",
+                y_bias=-300,
+                dura=self.FORBIDDEN_ESCAPE_FORWARD_DURA,
+                wait=self.FORBIDDEN_ESCAPE_FORWARD_WAIT,
+            )
+            w.refresh_frame()
+            return True
+
+        dist = get_distance(location, safe_point)
+        print(f"[Running] 当前位于不可通行区域，先脱离到最近安全点 {safe_point}，距离 {dist:.2f}")
+        self._log_running_state("人物位于不可通行区域", location, direction, "先脱离黑区再规划路径", safe_point, dist)
+
+        if direction is not None:
+            aligned = self._align_to_point(w, location, direction, safe_point, threshold=5)
+            if not aligned:
+                return True
+
+        w.tap_single(
+            "摇杆",
+            y_bias=-300,
+            dura=self.FORBIDDEN_ESCAPE_FORWARD_DURA,
+            wait=self.FORBIDDEN_ESCAPE_FORWARD_WAIT,
+        )
+        w.refresh_frame()
+        return True
 
     def _check_if_stuck(self, location: Tuple[int, int]):
         self.locations.append(location)

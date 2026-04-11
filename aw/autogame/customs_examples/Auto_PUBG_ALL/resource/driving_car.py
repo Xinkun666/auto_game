@@ -126,6 +126,7 @@ class DrivingManager:
         self.last_motion_started_at = 0.0
         self.blocked_motion_count = 0
         self.last_auto_brake_time = 0.0
+        self.allow_running_fallback = True
 
         self._frame_action_executed = False
 
@@ -176,9 +177,13 @@ class DrivingManager:
         self.last_motion_started_at = 0.0
         self.blocked_motion_count = 0
         self.last_auto_brake_time = 0.0
+        self.allow_running_fallback = True
 
         self._frame_action_executed = False
         print("[Driving] 状态已重置!")
+
+    def set_running_fallback_enabled(self, enabled: bool):
+        self.allow_running_fallback = bool(enabled)
 
     def process(self, w: "FrameWorker"):
         self._begin_frame()
@@ -219,7 +224,10 @@ class DrivingManager:
 
         if self.trapped:
             print("[Driving] 车辆长时间在 1~2 距离范围内打转，判定困死")
-            self._handle_death(w)
+            if self.allow_running_fallback:
+                self._exit_vehicle_to_running(w, "车辆困死，切回跑图阶段")
+            else:
+                self._handle_death(w)
             self._finalize_frame(w)
             return
 
@@ -620,6 +628,14 @@ class DrivingManager:
     def _run_stage_finish(self, w: "FrameWorker"):
         self.current_stage = self.STAGE_FINISH
         self._tap_single_control(w, "brake", wait=self.TIME_BRAKE, dura=100)
+        self._click_control(w, "off_car")
+        self.reset(max_driving_time=self.max_driving_time)
+        w.change_stage("跑图阶段")
+
+    def _exit_vehicle_to_running(self, w: "FrameWorker", reason: str):
+        print(f"[Driving] {reason}")
+        self.current_stage = self.STAGE_FINISH
+        self._tap_single_control(w, "brake", wait=800, dura=80)
         self._click_control(w, "off_car")
         self.reset(max_driving_time=self.max_driving_time)
         w.change_stage("跑图阶段")

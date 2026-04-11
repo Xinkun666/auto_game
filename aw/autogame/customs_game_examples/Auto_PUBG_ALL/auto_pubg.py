@@ -115,8 +115,12 @@ def finalize_after_lobby(w: "FrameWorker"):
 def on_stage(w: "FrameWorker"):
     global start_game, final_shutdown_pending
 
+    previous_stage = phase_timer.last_stage
     stage_events = phase_timer.sync_stage(w.current_stage)
     stage_events |= phase_timer.refresh()
+
+    if previous_stage == "开车阶段" and w.current_stage == "跑图阶段":
+        running_manager.notify_vehicle_exit()
 
     if "landed" in stage_events and not phase_timer.all_done():
         handle_sp_start(w)
@@ -235,6 +239,8 @@ def on_stage(w: "FrameWorker"):
         return
 
     if w.current_stage == "开车阶段":
+        driving_manager.set_running_fallback_enabled(not phase_timer.is_completed(PHASE_RUNNING))
+
         if "enter_开车" in stage_events:
             driving_manager.set_remaining_drive_time(phase_timer.get_remaining(PHASE_DRIVING))
 

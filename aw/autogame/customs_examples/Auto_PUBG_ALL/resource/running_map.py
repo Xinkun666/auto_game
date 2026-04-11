@@ -53,10 +53,10 @@ class RunningManager:
     PRECISE_RESET_CENTER_BIAS = -300
     PRECISE_RESET_CENTER_DURA = 260
     PRECISE_RESET_CENTER_WAIT = 700
-    WATER_FLOAT_DURA = 1000
+    WATER_FLOAT_DURA = 2000
     WATER_FORWARD_BIAS_Y = -280
     WATER_FORWARD_DURA = 900
-    WATER_FORWARD_WAIT = 1200
+    WATER_FORWARD_WAIT = 3000
 
     def __init__(self, map_tool: Optional[MapNavigator] = None):
         self.map_tool = map_tool or MapNavigator()
@@ -384,7 +384,7 @@ class RunningManager:
         self._log_running_state("检测到落水", location, direction, "执行上浮脱困", target)
 
         print("[Running] 检测到上浮图标，先长按上浮 1s")
-        w.click_down("上浮", dura=self.WATER_FLOAT_DURA)
+        w.click_down(w.get_info("上浮"), dura=self.WATER_FLOAT_DURA)
         time.sleep(0.3)
         w.refresh_frame()
 

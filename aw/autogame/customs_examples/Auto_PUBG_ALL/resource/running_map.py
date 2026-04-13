@@ -361,6 +361,10 @@ class RunningManager:
         location: Tuple[int, int],
         direction: Optional[float],
     ) -> bool:
+        if self.finding_car:
+            print("[Running] 当前处于寻车阶段，跳过黑区脱离推理")
+            return False
+
         if self.map_tool.is_walkable(location):
             return False
 

@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QPlainTextEdit,
     QRadioButton,
+    QSplitter,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -351,12 +352,13 @@ class LauncherWindow(QWidget):
 
         self.preview_image_label = QLabel("启动后将在这里实时显示可视化帧")
         self.preview_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_image_label.setMinimumSize(640, 360)
+        self.preview_image_label.setMinimumSize(640, 440)
         self.preview_image_label.setStyleSheet("border: 1px solid #666; background: #111; color: #ddd;")
 
         self.preview_info_edit = QPlainTextEdit()
         self.preview_info_edit.setReadOnly(True)
         self.preview_info_edit.setPlaceholderText("当前帧识别信息会显示在这里...")
+        self.preview_info_edit.setMinimumHeight(90)
 
         self._build_ui()
         self._bind_signals()
@@ -405,20 +407,30 @@ class LauncherWindow(QWidget):
         action_layout.addStretch(1)
         main_layout.addLayout(action_layout)
 
-        content_layout = QHBoxLayout()
+        content_splitter = QSplitter(Qt.Orientation.Horizontal)
+        content_splitter.setChildrenCollapsible(False)
+        content_splitter.setHandleWidth(8)
 
         preview_group = QGroupBox("实时可视化")
         preview_layout = QVBoxLayout(preview_group)
-        preview_layout.addWidget(self.preview_image_label, 3)
-        preview_layout.addWidget(self.preview_info_edit, 2)
-        content_layout.addWidget(preview_group, 3)
+        preview_splitter = QSplitter(Qt.Orientation.Vertical)
+        preview_splitter.setChildrenCollapsible(False)
+        preview_splitter.setHandleWidth(8)
+        preview_splitter.addWidget(self.preview_image_label)
+        preview_splitter.addWidget(self.preview_info_edit)
+        preview_splitter.setStretchFactor(0, 5)
+        preview_splitter.setStretchFactor(1, 1)
+        preview_layout.addWidget(preview_splitter)
 
         log_group = QGroupBox("运行输出")
         log_layout = QVBoxLayout(log_group)
         log_layout.addWidget(self.output_edit)
-        content_layout.addWidget(log_group, 2)
+        content_splitter.addWidget(preview_group)
+        content_splitter.addWidget(log_group)
+        content_splitter.setStretchFactor(0, 3)
+        content_splitter.setStretchFactor(1, 2)
 
-        main_layout.addLayout(content_layout, 1)
+        main_layout.addWidget(content_splitter, 1)
 
     def _bind_signals(self):
         self.mode_testcase.toggled.connect(self._sync_mode_ui)

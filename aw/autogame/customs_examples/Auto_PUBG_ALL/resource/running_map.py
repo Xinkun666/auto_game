@@ -153,6 +153,11 @@ class RunningManager:
             self._handle_death(w)
             return
 
+        if self._has_rank_info(w):
+            print("[Running] 检测到个人排名或队伍排名，进入结束阶段")
+            self._handle_rank_finish(w)
+            return
+
         if self._is_in_water(w):
             self._handle_water_escape(w, location, direction)
             return
@@ -306,8 +311,20 @@ class RunningManager:
     def _is_dead(self, w: "FrameWorker") -> bool:
         return bool(w.get_info("变身")) or bool(w.get_info("红色血条"))
 
+    def _has_rank_info(self, w: "FrameWorker") -> bool:
+        return bool(w.get_info("个人排名")) or bool(w.get_info("队伍排名"))
+
     def _handle_death(self, w: "FrameWorker"):
         self.stop_auto_forward(w)
+        self.reset()
+        w.change_stage("结束阶段")
+
+    def _handle_rank_finish(self, w: "FrameWorker"):
+        self.stop_auto_forward(w)
+        spectate = w.get_info("观战对手")
+        if spectate:
+            w.click(spectate)
+            time.sleep(2)
         self.reset()
         w.change_stage("结束阶段")
 

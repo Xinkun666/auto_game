@@ -194,6 +194,12 @@ class DrivingManager:
             self.driving_start_time = time.time()
             print(f"[Driving] 本次驾驶计时开始：{self.driving_start_time:.3f}")
 
+        if self._has_rank_info(w):
+            print("[Driving] 检测到个人排名或队伍排名，进入结束阶段")
+            self._handle_rank_finish(w)
+            self._finalize_frame(w)
+            return
+
         if self._is_dead(w):
             print("[Driving] 检测到死亡，结束当前局")
             self._handle_death(w)
@@ -726,11 +732,20 @@ class DrivingManager:
         w.change_stage("跑图阶段")
 
     def _handle_death(self, w: "FrameWorker"):
-        spectate = w.get_info("观战")
+        spectate = w.get_info("观战对手") or w.get_info("观战")
         if spectate:
             self._frame_action_executed = True
             w.click(spectate)
-            time.sleep(1)
+            time.sleep(2)
+        self.reset(max_driving_time=self.max_driving_time)
+        w.change_stage("结束阶段")
+
+    def _handle_rank_finish(self, w: "FrameWorker"):
+        spectate = w.get_info("观战对手")
+        if spectate:
+            self._frame_action_executed = True
+            w.click(spectate)
+            time.sleep(2)
         self.reset(max_driving_time=self.max_driving_time)
         w.change_stage("结束阶段")
 
@@ -891,9 +906,10 @@ class DrivingManager:
             return True
         if bool(w.get_info("红色血条")):
             return True
-        if w.get_info("队伍排名"):
-            return True
         return False
+
+    def _has_rank_info(self, w: "FrameWorker") -> bool:
+        return bool(w.get_info("个人排名")) or bool(w.get_info("队伍排名"))
 
     def _analyze_obstacles(self, w: "FrameWorker") -> Dict[str, Any]:
         detections = w.get_info("forward_scene2")

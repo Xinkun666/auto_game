@@ -337,7 +337,10 @@ class LauncherWindow(QWidget):
         self.start_button = QPushButton("启动")
         self.stop_button = QPushButton("停止")
         self.stop_button.setEnabled(False)
-        self.preview_overlay_button = QPushButton("显示阶段标注")
+        self.keep_process_on_manual_stop_button = QPushButton("停止保活")
+        self.keep_process_on_manual_stop_button.setCheckable(True)
+        self.keep_process_on_manual_stop_button.setChecked(False)
+        self.preview_overlay_button = QPushButton("显示标注")
         self.preview_overlay_button.setCheckable(True)
         self.preview_overlay_button.setChecked(False)
 
@@ -396,6 +399,7 @@ class LauncherWindow(QWidget):
         action_layout = QHBoxLayout()
         action_layout.addWidget(self.start_button)
         action_layout.addWidget(self.stop_button)
+        action_layout.addWidget(self.keep_process_on_manual_stop_button)
         action_layout.addWidget(self.preview_overlay_button)
         action_layout.addStretch(1)
         main_layout.addLayout(action_layout)
@@ -423,6 +427,7 @@ class LauncherWindow(QWidget):
         self.project_combo.currentTextChanged.connect(self._on_project_changed)
         self.start_button.clicked.connect(self._start_run)
         self.stop_button.clicked.connect(self._stop_run)
+        self.keep_process_on_manual_stop_button.toggled.connect(self._toggle_keep_process_on_manual_stop)
         self.preview_overlay_button.toggled.connect(self._toggle_preview_overlay)
         self.preview_timer.timeout.connect(self._poll_preview_frame)
         self.safety_timer.timeout.connect(self._check_and_start_if_safe)
@@ -450,9 +455,15 @@ class LauncherWindow(QWidget):
         self.runtime_label.setText(text)
 
     def _toggle_preview_overlay(self, checked: bool):
-        self.preview_overlay_button.setText("隐藏阶段标注" if checked else "显示阶段标注")
+        self.preview_overlay_button.setText("隐藏标注" if checked else "显示标注")
         LOGGER.info("preview overlay toggled: %s", checked)
         self._refresh_preview_pixmap()
+
+    def _toggle_keep_process_on_manual_stop(self, checked: bool):
+        self.keep_process_on_manual_stop_button.setText(
+            "停止保活: 开" if checked else "停止保活"
+        )
+        LOGGER.info("keep process on manual stop toggled: %s", checked)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1196,9 +1207,10 @@ class LauncherWindow(QWidget):
 
     def _stop_run(self):
         LOGGER.info(
-            "stop_button clicked: batch_active=%s process_exists=%s",
+            "stop_button clicked: batch_active=%s process_exists=%s keep_process=%s",
             self.batch_active,
             self.process is not None,
+            self.keep_process_on_manual_stop_button.isChecked(),
         )
         if not self.batch_active and self.process is None:
             return
@@ -1211,6 +1223,14 @@ class LauncherWindow(QWidget):
             self._log_message("\n[Launcher] 已取消后续运行。\n")
             self._cleanup_apps_between_runs("手动停止清理")
             self._finish_batch("任务已停止。")
+            return
+
+        if self.keep_process_on_manual_stop_button.isChecked():
+            self._log_message(
+                "\n[Launcher] 已取消后续运行，当前子进程将继续运行，直至自行结束。\n"
+            )
+            self._set_status("已手动停止后续运行，当前子进程继续运行中。")
+            self._set_runtime("运行信息：后续轮次已取消，等待当前子进程自然结束。")
             return
 
         self._log_message("\n[Launcher] 正在停止当前子进程，并取消后续运行...\n")

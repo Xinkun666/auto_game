@@ -450,9 +450,15 @@ class LauncherWindow(QWidget):
     def _append_output(self, text: str):
         if not text:
             return
+
+        scrollbar = self.output_edit.verticalScrollBar()
+        should_follow = scrollbar.value() >= max(0, scrollbar.maximum() - 4)
+
         self.output_edit.moveCursor(QTextCursor.MoveOperation.End)
         self.output_edit.insertPlainText(text)
-        self.output_edit.moveCursor(QTextCursor.MoveOperation.End)
+        if should_follow:
+            self.output_edit.moveCursor(QTextCursor.MoveOperation.End)
+            scrollbar.setValue(scrollbar.maximum())
         QApplication.processEvents()
 
     def _log_message(self, text: str, level: int = logging.INFO):

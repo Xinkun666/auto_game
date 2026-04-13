@@ -54,9 +54,29 @@ def _copy_process_temp_logs(dst_dir: Path) -> list[str]:
     return copied
 
 
-def _build_archive_dir(run_index: int) -> Path:
+def _sanitize_archive_name_part(value: str) -> str:
+    value = str(value or "").strip()
+    if not value:
+        return "unknown"
+    value = Path(value).stem
+    value = re.sub(r"[\\/:*?\"<>|]+", "_", value)
+    value = re.sub(r"\s+", "_", value)
+    return value or "unknown"
+
+
+def _build_archive_prefix(extra_metadata: Optional[dict]) -> str:
+    extra_metadata = extra_metadata or {}
+    project_case = _sanitize_archive_name_part(extra_metadata.get("project_case", "project"))
+    testcase_label = extra_metadata.get("testcase_label")
+    target_case = extra_metadata.get("target_case")
+    testcase_name = _sanitize_archive_name_part(testcase_label or target_case or "case")
+    return f"{project_case}_{testcase_name}"
+
+
+def _build_archive_dir(run_index: int, extra_metadata: Optional[dict] = None) -> Path:
     timestamp = time.strftime("%Y%m%d%H%M%S")
-    base_dir = TEMP_DIR / f"game_{timestamp}_第{run_index}次用例"
+    archive_prefix = _build_archive_prefix(extra_metadata)
+    base_dir = TEMP_DIR / f"{archive_prefix}_{timestamp}_第{run_index}次用例"
     archive_dir = base_dir
     suffix = 1
     while archive_dir.exists():
@@ -72,7 +92,7 @@ def archive_run_artifacts(
     extra_text_files: Optional[dict[str, str]] = None,
     extra_metadata: Optional[dict] = None,
 ) -> Path:
-    archive_dir = _build_archive_dir(run_index)
+    archive_dir = _build_archive_dir(run_index, extra_metadata=extra_metadata)
     log_archive_dir = archive_dir / "logs"
     process_archive_dir = archive_dir / "process_temp_logs"
 

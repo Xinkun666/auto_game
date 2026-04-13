@@ -42,7 +42,6 @@ PREVIEW_DIR = ROOT_DIR / "aw" / "autogame" / "temp" / "logs" / "process_temp_log
 LOG_DIR = ROOT_DIR / "aw" / "autogame" / "temp" / "logs"
 LAUNCHER_LOG_FILE = LOG_DIR / "launcher_debug.log"
 PACKAGE_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+){2,}")
-DEFAULT_LOGIN_SHELL = os.environ.get("SHELL") or "/bin/zsh"
 LOGGER = logging.getLogger("launcher")
 
 
@@ -182,12 +181,12 @@ def run_direct_entry(project_case: str, target_case: str):
 
 
 def run_hdc_shell(command: str) -> Optional[str]:
-    shell_path = DEFAULT_LOGIN_SHELL if os.path.exists(DEFAULT_LOGIN_SHELL) else "/bin/zsh"
-    wrapped_cmd = f'hdc shell "{command}"'
-    LOGGER.debug("run_hdc_shell: shell=%s command=%s", shell_path, wrapped_cmd)
+    hdc_executable = shutil.which("hdc") or shutil.which("hdc.exe") or "hdc"
+    cmd = [hdc_executable, "shell", command]
+    LOGGER.debug("run_hdc_shell: cmd=%s", cmd)
     try:
         result = subprocess.run(
-            [shell_path, "-lc", wrapped_cmd],
+            cmd,
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -195,21 +194,27 @@ def run_hdc_shell(command: str) -> Optional[str]:
             encoding="utf-8",
             timeout=20,
         )
+    except FileNotFoundError:
+        LOGGER.warning(
+            "hdc executable not found. Please ensure `hdc` is installed and available in PATH. attempted_cmd=%s",
+            cmd,
+        )
+        return None
     except subprocess.TimeoutExpired:
-        LOGGER.warning("hdc shell timeout: %s", wrapped_cmd)
+        LOGGER.warning("hdc shell timeout: %s", cmd)
         return None
     except subprocess.CalledProcessError as exc:
         stderr = (exc.stderr or "").strip()
         stdout = (exc.stdout or "").strip()
         LOGGER.warning(
             "hdc shell failed: %s | stdout=%s | stderr=%s",
-            wrapped_cmd,
+            cmd,
             stdout,
             stderr,
         )
         return None
     output = result.stdout.strip()
-    LOGGER.debug("run_hdc_shell success: command=%s output=%s", wrapped_cmd, output)
+    LOGGER.debug("run_hdc_shell success: command=%s output=%s", cmd, output)
     return output
 
 

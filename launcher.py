@@ -1,5 +1,6 @@
 import argparse
 import ast
+import importlib
 import json
 import logging
 import os
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt, QTimer
-from PyQt6.QtGui import QPixmap, QTextCursor
+from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -268,6 +269,8 @@ class LauncherWindow(QWidget):
         self._updating_targets = False
         self.latest_preview_file: Optional[Path] = None
         self.latest_preview_pixmap: Optional[QPixmap] = None
+        self.latest_preview_payload: Optional[dict] = None
+        self.stage_info_cache: dict[str, dict] = {}
         self.preview_timer = QTimer(self)
         self.preview_timer.setInterval(150)
         self.safety_timer = QTimer(self)
@@ -334,6 +337,9 @@ class LauncherWindow(QWidget):
         self.start_button = QPushButton("启动")
         self.stop_button = QPushButton("停止")
         self.stop_button.setEnabled(False)
+        self.preview_overlay_button = QPushButton("显示阶段标注")
+        self.preview_overlay_button.setCheckable(True)
+        self.preview_overlay_button.setChecked(False)
 
         self.output_edit = QPlainTextEdit()
         self.output_edit.setReadOnly(True)
@@ -390,6 +396,7 @@ class LauncherWindow(QWidget):
         action_layout = QHBoxLayout()
         action_layout.addWidget(self.start_button)
         action_layout.addWidget(self.stop_button)
+        action_layout.addWidget(self.preview_overlay_button)
         action_layout.addStretch(1)
         main_layout.addLayout(action_layout)
 
@@ -416,6 +423,7 @@ class LauncherWindow(QWidget):
         self.project_combo.currentTextChanged.connect(self._on_project_changed)
         self.start_button.clicked.connect(self._start_run)
         self.stop_button.clicked.connect(self._stop_run)
+        self.preview_overlay_button.toggled.connect(self._toggle_preview_overlay)
         self.preview_timer.timeout.connect(self._poll_preview_frame)
         self.safety_timer.timeout.connect(self._check_and_start_if_safe)
         self.run_timeout_timer.timeout.connect(self._handle_run_timeout)
@@ -440,6 +448,11 @@ class LauncherWindow(QWidget):
 
     def _set_runtime(self, text: str):
         self.runtime_label.setText(text)
+
+    def _toggle_preview_overlay(self, checked: bool):
+        self.preview_overlay_button.setText("隐藏阶段标注" if checked else "显示阶段标注")
+        LOGGER.info("preview overlay toggled: %s", checked)
+        self._refresh_preview_pixmap()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -509,6 +522,7 @@ class LauncherWindow(QWidget):
         self._load_target_cases(preferred=None)
         if project_case:
             self._set_status(f"已选择 project_case={project_case}，请确认 target_case。")
+        self._refresh_preview_pixmap()
 
     def _choose_testcase_file(self):
         LOGGER.info("choose_testcase_file dialog open")
@@ -605,6 +619,7 @@ class LauncherWindow(QWidget):
         LOGGER.debug("clear_preview_files: dir=%s", PREVIEW_DIR)
         self.latest_preview_file = None
         self.latest_preview_pixmap = None
+        self.latest_preview_payload = None
         self.preview_image_label.setText("启动后将在这里实时显示可视化帧")
         self.preview_image_label.setPixmap(QPixmap())
         self.preview_info_edit.clear()
@@ -623,12 +638,112 @@ class LauncherWindow(QWidget):
     def _refresh_preview_pixmap(self):
         if self.latest_preview_pixmap is None:
             return
-        scaled = self.latest_preview_pixmap.scaled(
+        display_pixmap = self._build_preview_display_pixmap()
+        scaled = display_pixmap.scaled(
             self.preview_image_label.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
         self.preview_image_label.setPixmap(scaled)
+
+    def _get_preview_project_case(self) -> str:
+        if self.current_plan is not None:
+            return str(self.current_plan.get("project_case") or "").strip()
+        return self.project_combo.currentText().strip()
+
+    def _load_stage_info(self, project_case: str) -> dict:
+        if not project_case:
+            return {}
+        if project_case in self.stage_info_cache:
+            return self.stage_info_cache[project_case]
+
+        try:
+            module = importlib.import_module(
+                f"aw.autogame.customs_examples.{project_case}.info"
+            )
+            stage_info = getattr(module, "STAGE_INFO", {})
+        except Exception:
+            log_exception(f"load stage info failed: project_case={project_case}")
+            stage_info = {}
+
+        if not isinstance(stage_info, dict):
+            stage_info = {}
+        self.stage_info_cache[project_case] = stage_info
+        return stage_info
+
+    def _draw_stage_rect(
+        self,
+        painter: QPainter,
+        rect_data,
+        pixmap_width: int,
+        pixmap_height: int,
+        color: QColor,
+        label: str,
+    ):
+        if not isinstance(rect_data, (list, tuple)) or len(rect_data) != 4:
+            return
+
+        x1 = int(float(rect_data[0]) * pixmap_width)
+        y1 = int(float(rect_data[1]) * pixmap_height)
+        x2 = int(float(rect_data[2]) * pixmap_width)
+        y2 = int(float(rect_data[3]) * pixmap_height)
+        width = max(1, x2 - x1)
+        height = max(1, y2 - y1)
+
+        pen = QPen(color, 2)
+        painter.setPen(pen)
+        painter.drawRect(x1, y1, width, height)
+        painter.fillRect(x1, y1, width, height, QColor(color.red(), color.green(), color.blue(), 35))
+        painter.drawText(x1 + 4, max(14, y1 + 16), label)
+
+    def _build_preview_display_pixmap(self) -> QPixmap:
+        if self.latest_preview_pixmap is None:
+            return QPixmap()
+        if not self.preview_overlay_button.isChecked():
+            return self.latest_preview_pixmap
+
+        payload = self.latest_preview_payload or {}
+        stage = payload.get("stage")
+        project_case = self._get_preview_project_case()
+        stage_info = self._load_stage_info(project_case)
+        stage_entry = stage_info.get(stage, {}) if isinstance(stage_info, dict) else {}
+        scenes = stage_entry.get("scenes", {}) if isinstance(stage_entry, dict) else {}
+        if not scenes:
+            return self.latest_preview_pixmap
+
+        pixmap = self.latest_preview_pixmap.copy()
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        colors = {
+            "areas": QColor(80, 220, 120),
+            "points": QColor(80, 190, 255),
+            "special_areas": QColor(255, 140, 80),
+        }
+
+        for scene_name, scene_data in scenes.items():
+            if not isinstance(scene_data, dict):
+                continue
+            for item_type, color in colors.items():
+                items = scene_data.get(item_type, {})
+                if not isinstance(items, dict):
+                    continue
+                for item_name, item_data in items.items():
+                    if not isinstance(item_data, dict):
+                        continue
+                    rect = item_data.get("rect")
+                    label = f"{scene_name}/{item_name}"
+                    self._draw_stage_rect(
+                        painter,
+                        rect,
+                        pixmap.width(),
+                        pixmap.height(),
+                        color,
+                        label,
+                    )
+
+        painter.end()
+        return pixmap
 
     def _poll_preview_frame(self):
         if not PREVIEW_DIR.exists():
@@ -665,6 +780,7 @@ class LauncherWindow(QWidget):
 
         self.latest_preview_file = latest_image
         self.latest_preview_pixmap = pixmap
+        self.latest_preview_payload = payload if isinstance(payload, dict) else {"raw": payload}
         self.preview_image_label.setText("")
         self._refresh_preview_pixmap()
         self.preview_info_edit.setPlainText(

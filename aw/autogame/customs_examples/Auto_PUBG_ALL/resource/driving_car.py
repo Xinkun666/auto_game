@@ -31,7 +31,7 @@ class DriveContext:
 class DrivingManager:
     # 首次出库必须对齐到的固定角度
     TARGET_FIRST_DIR = 115
-    FIRST_ALIGN_TOLERANCE = 4
+    FIRST_ALIGN_TOLERANCE = 1
     ESCAPE_ALIGN_TOLERANCE = 8
 
     # 车辆方向与目标方向的允许误差；小于该值时直接视为已对齐
@@ -377,7 +377,7 @@ class DrivingManager:
 
         turn_dir, _, diff = calculate_move_count(direction, self.TARGET_FIRST_DIR)
         if turn_dir is not None and diff > self.FIRST_ALIGN_TOLERANCE:
-            duration = self._get_turn_duration(diff, fine=True)
+            duration = self._get_exit_alignment_duration(diff)
             if diff <= 12:
                 action = "brake_turn_left" if turn_dir == "left" else "brake_turn_right"
                 print(
@@ -575,6 +575,11 @@ class DrivingManager:
 
         self._log_drive_state("发现进圈角度，进行对齐", context, f"{action}({duration}ms)", target_direction)
         self._execute_maneuver(w, action, speed=context.speed, duration=duration, brake_with_steer=False)
+
+    def _get_exit_alignment_duration(self, diff: float) -> int:
+        if diff <= 0:
+            return 0
+        return max(50, min(600, int(round(diff * 10))))
 
     def _get_turn_duration(
         self,

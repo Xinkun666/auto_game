@@ -29,6 +29,7 @@ def _copy_top_level_log_files(dst_dir: Path) -> list[str]:
     if not LOG_DIR.exists():
         return copied
 
+    dst_dir.mkdir(parents=True, exist_ok=True)
     for path in sorted(LOG_DIR.iterdir()):
         if not path.is_file():
             continue

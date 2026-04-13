@@ -285,6 +285,7 @@ class LauncherWindow(QWidget):
         self.current_plan: Optional[dict] = None
         self.current_run_timed_out = False
         self.current_run_output_start = 0
+        self.preserve_device_apps_on_manual_stop = True
 
         self.setWindowTitle("Auto Game 启动器")
         self.resize(1260, 860)
@@ -898,6 +899,7 @@ class LauncherWindow(QWidget):
         self.current_plan = None
         self.current_run_timed_out = False
         self.current_run_output_start = 0
+        self.preserve_device_apps_on_manual_stop = True
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self._set_inputs_enabled(True)
@@ -1185,7 +1187,10 @@ class LauncherWindow(QWidget):
             return
 
         if self.stop_requested:
-            self._cleanup_apps_between_runs("停止后清理")
+            if self.preserve_device_apps_on_manual_stop:
+                self._log_message("[Launcher] 手动停止后保留设备现场，跳过应用清理。\n")
+            else:
+                self._cleanup_apps_between_runs("停止后清理")
             self._finish_batch("任务已停止。")
             return
 
@@ -1216,12 +1221,13 @@ class LauncherWindow(QWidget):
             return
 
         self.stop_requested = True
+        self.preserve_device_apps_on_manual_stop = True
         self.safety_timer.stop()
         self.run_timeout_timer.stop()
 
         if self.process is None:
             self._log_message("\n[Launcher] 已取消后续运行。\n")
-            self._cleanup_apps_between_runs("手动停止清理")
+            self._log_message("[Launcher] 手动停止后保留设备现场，跳过应用清理。\n")
             self._finish_batch("任务已停止。")
             return
 

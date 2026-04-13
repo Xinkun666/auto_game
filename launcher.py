@@ -1,6 +1,7 @@
 import argparse
 import ast
 import json
+import logging
 import os
 import re
 import shutil
@@ -38,11 +39,54 @@ TESTCASES_DIR = ROOT_DIR / "testcases"
 CUSTOMS_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_examples"
 CUSTOMS_GAME_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_game_examples"
 PREVIEW_DIR = ROOT_DIR / "aw" / "autogame" / "temp" / "logs" / "process_temp_logs"
+LOG_DIR = ROOT_DIR / "aw" / "autogame" / "temp" / "logs"
+LAUNCHER_LOG_FILE = LOG_DIR / "launcher_debug.log"
 PACKAGE_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+){2,}")
 DEFAULT_LOGIN_SHELL = os.environ.get("SHELL") or "/bin/zsh"
+LOGGER = logging.getLogger("launcher")
+
+
+def setup_logging():
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    if LOGGER.handlers:
+        return
+
+    LOGGER.setLevel(logging.DEBUG)
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] [pid=%(process)d] %(message)s"
+    )
+
+    file_handler = logging.FileHandler(LAUNCHER_LOG_FILE, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    LOGGER.addHandler(file_handler)
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(logging.INFO)
+    stream_handler.setFormatter(formatter)
+    LOGGER.addHandler(stream_handler)
+
+    LOGGER.propagate = False
+    LOGGER.info("launcher logging initialized, log_file=%s", LAUNCHER_LOG_FILE)
+
+
+def log_exception(context: str, exc_info=None):
+    LOGGER.exception("%s", context, exc_info=exc_info)
+
+
+def install_global_exception_hooks():
+    def _excepthook(exc_type, exc_value, exc_traceback):
+        log_exception(
+            "uncaught exception",
+            (exc_type, exc_value, exc_traceback),
+        )
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+    sys.excepthook = _excepthook
 
 
 def parse_case_vars(py_file: Path) -> Dict[str, str]:
+    LOGGER.debug("parse_case_vars: file=%s", py_file)
     source = py_file.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(py_file))
     result: Dict[str, str] = {}
@@ -70,6 +114,7 @@ def parse_case_vars(py_file: Path) -> Dict[str, str]:
 
 
 def extract_package_names(py_file: Path) -> list[str]:
+    LOGGER.debug("extract_package_names: file=%s exists=%s", py_file, py_file.exists())
     if not py_file.exists():
         return []
 
@@ -89,6 +134,7 @@ def extract_package_names(py_file: Path) -> list[str]:
 
 
 def discover_project_cases() -> list[str]:
+    LOGGER.debug("discover_project_cases: dir=%s exists=%s", CUSTOMS_EXAMPLES_DIR, CUSTOMS_EXAMPLES_DIR.exists())
     if not CUSTOMS_EXAMPLES_DIR.exists():
         return []
 
@@ -101,6 +147,7 @@ def discover_project_cases() -> list[str]:
 
 def discover_target_cases(project_case: str) -> list[str]:
     project_dir = CUSTOMS_GAME_EXAMPLES_DIR / project_case
+    LOGGER.debug("discover_target_cases: project_case=%s dir=%s exists=%s", project_case, project_dir, project_dir.exists())
     if not project_dir.exists():
         return []
 
@@ -113,12 +160,18 @@ def discover_target_cases(project_case: str) -> list[str]:
 
 
 def run_testcase_entry(testcase_label: str):
+    LOGGER.info("run_testcase_entry: testcase_label=%s", testcase_label)
     from xdevice.__main__ import main_process
 
     main_process(f"run -l {testcase_label}")
 
 
 def run_direct_entry(project_case: str, target_case: str):
+    LOGGER.info(
+        "run_direct_entry: project_case=%s target_case=%s",
+        project_case,
+        target_case,
+    )
     os.environ["TARGET_PROJECT_CASE"] = project_case
     os.environ["TARGET_GAME_CASE"] = target_case
 
@@ -131,6 +184,7 @@ def run_direct_entry(project_case: str, target_case: str):
 def run_hdc_shell(command: str) -> Optional[str]:
     shell_path = DEFAULT_LOGIN_SHELL if os.path.exists(DEFAULT_LOGIN_SHELL) else "/bin/zsh"
     wrapped_cmd = f'hdc shell "{command}"'
+    LOGGER.debug("run_hdc_shell: shell=%s command=%s", shell_path, wrapped_cmd)
     try:
         result = subprocess.run(
             [shell_path, "-lc", wrapped_cmd],
@@ -142,18 +196,21 @@ def run_hdc_shell(command: str) -> Optional[str]:
             timeout=20,
         )
     except subprocess.TimeoutExpired:
-        print(f"[Launcher] hdc shell 执行超时: {wrapped_cmd}")
+        LOGGER.warning("hdc shell timeout: %s", wrapped_cmd)
         return None
     except subprocess.CalledProcessError as exc:
         stderr = (exc.stderr or "").strip()
         stdout = (exc.stdout or "").strip()
-        print(
-            f"[Launcher] hdc shell 执行失败: {wrapped_cmd}\n"
-            f"stdout: {stdout}\n"
-            f"stderr: {stderr}"
+        LOGGER.warning(
+            "hdc shell failed: %s | stdout=%s | stderr=%s",
+            wrapped_cmd,
+            stdout,
+            stderr,
         )
         return None
-    return result.stdout.strip()
+    output = result.stdout.strip()
+    LOGGER.debug("run_hdc_shell success: command=%s output=%s", wrapped_cmd, output)
+    return output
 
 
 def get_battery_temperature_c() -> Optional[float]:
@@ -199,6 +256,7 @@ def force_stop_apps(apps: list[str]) -> list[str]:
 class LauncherWindow(QWidget):
     def __init__(self):
         super().__init__()
+        LOGGER.info("LauncherWindow init start")
         self.process: Optional[QProcess] = None
         self.selected_testcase_file: Optional[Path] = None
         self._updating_targets = False
@@ -287,6 +345,11 @@ class LauncherWindow(QWidget):
         self._bind_signals()
         self._load_project_cases()
         self._sync_mode_ui()
+        self._log_message(
+            f"[Launcher] 启动器已初始化，日志文件：{LAUNCHER_LOG_FILE}\n",
+            level=logging.INFO,
+        )
+        LOGGER.info("LauncherWindow init finished")
 
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
@@ -349,6 +412,7 @@ class LauncherWindow(QWidget):
         self.preview_timer.timeout.connect(self._poll_preview_frame)
         self.safety_timer.timeout.connect(self._check_and_start_if_safe)
         self.run_timeout_timer.timeout.connect(self._handle_run_timeout)
+        LOGGER.debug("signals bound")
 
     def _append_output(self, text: str):
         if not text:
@@ -357,6 +421,12 @@ class LauncherWindow(QWidget):
         self.output_edit.insertPlainText(text)
         self.output_edit.moveCursor(QTextCursor.MoveOperation.End)
         QApplication.processEvents()
+
+    def _log_message(self, text: str, level: int = logging.INFO):
+        self._append_output(text)
+        message = text.rstrip()
+        if message:
+            LOGGER.log(level, message)
 
     def _set_status(self, text: str):
         self.status_label.setText(text)
@@ -370,6 +440,7 @@ class LauncherWindow(QWidget):
 
     def _sync_mode_ui(self):
         testcase_mode = self.mode_testcase.isChecked()
+        LOGGER.debug("sync_mode_ui: testcase_mode=%s", testcase_mode)
         self.testcase_path_edit.setEnabled(testcase_mode)
         self.browse_button.setEnabled(testcase_mode)
         self.clear_button.setEnabled(testcase_mode)
@@ -385,6 +456,7 @@ class LauncherWindow(QWidget):
 
     def _load_project_cases(self, preferred: Optional[str] = None):
         current = preferred or self.project_combo.currentText()
+        LOGGER.debug("load_project_cases: preferred=%s current=%s", preferred, current)
         self.project_combo.blockSignals(True)
         self.project_combo.clear()
         self.project_combo.addItems(discover_project_cases())
@@ -400,6 +472,12 @@ class LauncherWindow(QWidget):
     def _load_target_cases(self, preferred: Optional[str]):
         project_case = self.project_combo.currentText().strip()
         current = preferred or self.target_combo.currentText()
+        LOGGER.debug(
+            "load_target_cases: project_case=%s preferred=%s current=%s",
+            project_case,
+            preferred,
+            current,
+        )
         self._updating_targets = True
         self.target_combo.clear()
         self.target_combo.addItems(discover_target_cases(project_case))
@@ -412,6 +490,7 @@ class LauncherWindow(QWidget):
     def _refresh_config_choices(self):
         project = self.project_combo.currentText().strip()
         target = self.target_combo.currentText().strip()
+        LOGGER.info("refresh_config_choices: project=%s target=%s", project, target)
         self._load_project_cases(preferred=project)
         self._load_target_cases(preferred=target)
         self._set_status("已刷新 project_case 和 target_case 列表。")
@@ -419,11 +498,13 @@ class LauncherWindow(QWidget):
     def _on_project_changed(self, project_case: str):
         if self._updating_targets:
             return
+        LOGGER.info("project changed: %s", project_case)
         self._load_target_cases(preferred=None)
         if project_case:
             self._set_status(f"已选择 project_case={project_case}，请确认 target_case。")
 
     def _choose_testcase_file(self):
+        LOGGER.info("choose_testcase_file dialog open")
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "选择 testcases 用例",
@@ -431,6 +512,7 @@ class LauncherWindow(QWidget):
             "Python Files (*.py)",
         )
         if not file_path:
+            LOGGER.info("choose_testcase_file canceled")
             return
 
         py_file = Path(file_path).resolve()
@@ -438,23 +520,28 @@ class LauncherWindow(QWidget):
             py_file.relative_to(TESTCASES_DIR)
             rel_path = py_file.relative_to(ROOT_DIR)
         except ValueError:
+            LOGGER.warning("choose_testcase_file invalid path: %s", py_file)
             QMessageBox.warning(self, "路径错误", "请选择当前项目 testcases 目录下的用例文件。")
             return
 
         self.selected_testcase_file = py_file
+        LOGGER.info("choose_testcase_file selected: %s", py_file)
         self.testcase_path_edit.setText(rel_path.as_posix())
         self.mode_testcase.setChecked(True)
         self._apply_parsed_testcase(py_file)
 
     def _clear_testcase_file(self):
+        LOGGER.info("clear_testcase_file")
         self.selected_testcase_file = None
         self.testcase_path_edit.clear()
         self._set_status("已清空 testcases 选择。可以直接指定 project_case / target_case 启动。")
 
     def _apply_parsed_testcase(self, py_file: Path):
+        LOGGER.info("apply_parsed_testcase: %s", py_file)
         try:
             parsed = parse_case_vars(py_file)
         except Exception as exc:
+            log_exception(f"apply_parsed_testcase failed: file={py_file}")
             self._set_status(f"解析失败：{exc}")
             return
 
@@ -486,6 +573,11 @@ class LauncherWindow(QWidget):
         env.insert("TARGET_PROJECT_CASE", project_case)
         env.insert("TARGET_GAME_CASE", target_case)
         env.insert("AUTOGAME_VIS_MODE", "launcher")
+        LOGGER.debug(
+            "build_process_environment: project_case=%s target_case=%s",
+            project_case,
+            target_case,
+        )
         return env
 
     def _set_inputs_enabled(self, enabled: bool):
@@ -503,6 +595,7 @@ class LauncherWindow(QWidget):
         self.safe_time_spin.setEnabled(enabled)
 
     def _clear_preview_files(self):
+        LOGGER.debug("clear_preview_files: dir=%s", PREVIEW_DIR)
         self.latest_preview_file = None
         self.latest_preview_pixmap = None
         self.preview_image_label.setText("启动后将在这里实时显示可视化帧")
@@ -515,6 +608,7 @@ class LauncherWindow(QWidget):
                 try:
                     path.unlink()
                 except OSError:
+                    LOGGER.warning("failed to unlink preview file: %s", path, exc_info=True)
                     pass
             elif path.is_dir():
                 shutil.rmtree(path, ignore_errors=True)
@@ -553,11 +647,13 @@ class LauncherWindow(QWidget):
 
         pixmap = QPixmap(str(latest_image))
         if pixmap.isNull():
+            LOGGER.warning("preview pixmap is null: %s", latest_image)
             return
 
         try:
             payload = json.loads(json_path.read_text(encoding="utf-8"))
         except Exception:
+            log_exception(f"preview json load failed: {json_path}")
             payload = {"error": "json 读取失败"}
 
         self.latest_preview_file = latest_image
@@ -571,6 +667,13 @@ class LauncherWindow(QWidget):
     def _validate_selection(self) -> Optional[tuple[str, str]]:
         project_case = self.project_combo.currentText().strip()
         target_case = self.target_combo.currentText().strip()
+        LOGGER.info(
+            "validate_selection: mode=%s project_case=%s target_case=%s testcase=%s",
+            "testcase" if self.mode_testcase.isChecked() else "direct",
+            project_case,
+            target_case,
+            self.selected_testcase_file,
+        )
 
         if not project_case:
             QMessageBox.warning(self, "缺少配置", "请选择 project_case。")
@@ -607,7 +710,7 @@ class LauncherWindow(QWidget):
         )
         cleanup_apps.update(extract_package_names(target_logic_file))
 
-        return {
+        plan = {
             "mode": mode,
             "project_case": project_case,
             "target_case": target_case,
@@ -618,6 +721,8 @@ class LauncherWindow(QWidget):
             "safe_minutes": float(self.safe_time_spin.value()),
             "cleanup_apps": sorted(cleanup_apps),
         }
+        LOGGER.info("collect_plan result: %s", plan)
+        return plan
 
     def _format_runtime_text(
         self,
@@ -632,6 +737,7 @@ class LauncherWindow(QWidget):
         return f"运行信息：第 {run_index}/{total_runs} 次，温度 {temp_text}，电量 {battery_text}。{extra}"
 
     def _begin_batch(self, plan: dict):
+        LOGGER.info("begin_batch: %s", plan)
         self.current_plan = plan
         self.batch_active = True
         self.stop_requested = False
@@ -644,7 +750,7 @@ class LauncherWindow(QWidget):
         self._set_inputs_enabled(False)
         self._set_status("已开始批量执行，准备进行安全检查。")
         self._set_runtime(f"运行信息：共 {plan['run_count']} 次，等待第 1 次启动。")
-        self._append_output(
+        self._log_message(
             f"[Launcher] 批量运行开始，mode={plan['mode']}, runs={plan['run_count']}, "
             f"safe_temp={plan['safe_temp']}°C, safe_battery={plan['safe_battery']}%, "
             f"safe_time={plan['safe_minutes']}分钟, cleanup_apps={plan['cleanup_apps']}\n"
@@ -652,6 +758,7 @@ class LauncherWindow(QWidget):
         self._check_and_start_if_safe()
 
     def _finish_batch(self, message: str):
+        LOGGER.info("finish_batch: %s", message)
         self.batch_active = False
         self.stop_requested = False
         self.current_plan = None
@@ -671,18 +778,26 @@ class LauncherWindow(QWidget):
 
         apps = list(self.current_plan.get("cleanup_apps", []))
         if not apps:
-            self._append_output(f"[Launcher] {reason}：未识别到需要强杀的应用，跳过设备清理。\n")
+            self._log_message(f"[Launcher] {reason}：未识别到需要强杀的应用，跳过设备清理。\n")
             return
 
-        self._append_output(f"[Launcher] {reason}：开始强制停止残留应用 {apps}\n")
+        self._log_message(f"[Launcher] {reason}：开始强制停止残留应用 {apps}\n")
         stopped = force_stop_apps(apps)
         if stopped:
             time.sleep(1.0)
-            self._append_output(f"[Launcher] 已执行 force-stop: {stopped}\n")
+            self._log_message(f"[Launcher] 已执行 force-stop: {stopped}\n")
         else:
-            self._append_output("[Launcher] 未成功执行 force-stop，请检查 hdc 环境或设备连接状态。\n")
+            self._log_message("[Launcher] 未成功执行 force-stop，请检查 hdc 环境或设备连接状态。\n", level=logging.WARNING)
 
     def _check_and_start_if_safe(self):
+        LOGGER.info(
+            "check_and_start_if_safe: batch_active=%s process_exists=%s stop_requested=%s current_run_index=%s current_plan=%s",
+            self.batch_active,
+            self.process is not None,
+            self.stop_requested,
+            self.current_run_index,
+            self.current_plan,
+        )
         if not self.batch_active or self.current_plan is None:
             return
         if self.process is not None:
@@ -697,6 +812,14 @@ class LauncherWindow(QWidget):
         run_no = self.current_run_index + 1
         temperature = get_battery_temperature_c()
         battery = get_battery_capacity()
+        LOGGER.info(
+            "safety_check_result: run_no=%s temperature=%s battery=%s thresholds=(temp=%s,battery=%s)",
+            run_no,
+            temperature,
+            battery,
+            self.current_plan["safe_temp"],
+            self.current_plan["safe_battery"],
+        )
 
         if battery is None or temperature is None:
             self._set_status("无法读取手机温度或电量，稍后重试。")
@@ -738,6 +861,13 @@ class LauncherWindow(QWidget):
         if self.current_plan is None:
             return
 
+        LOGGER.info(
+            "launch_iteration start: run_no=%s temperature=%s battery=%s plan=%s",
+            run_no,
+            temperature,
+            battery,
+            self.current_plan,
+        )
         self.current_run_timed_out = False
         self._clear_preview_files()
 
@@ -751,6 +881,7 @@ class LauncherWindow(QWidget):
         self.process.setProcessEnvironment(self._build_process_environment(project_case, target_case))
         self.process.readyReadStandardOutput.connect(self._read_process_output)
         self.process.finished.connect(self._on_process_finished)
+        self.process.errorOccurred.connect(self._on_process_error)
 
         if self.current_plan["mode"] == "testcase":
             testcase_label = self.current_plan["testcase_label"]
@@ -758,13 +889,13 @@ class LauncherWindow(QWidget):
             self._set_status(
                 f"第 {run_no}/{self.current_plan['run_count']} 次启动：{testcase_label}"
             )
-            self._append_output(f"\n[Launcher] 第 {run_no}/{self.current_plan['run_count']} 次：通过 testcase 启动 {testcase_label}\n")
+            self._log_message(f"\n[Launcher] 第 {run_no}/{self.current_plan['run_count']} 次：通过 testcase 启动 {testcase_label}\n")
         else:
             args = [str(ROOT_DIR / "launcher.py"), "--run-direct", project_case, target_case]
             self._set_status(
                 f"第 {run_no}/{self.current_plan['run_count']} 次启动：project_case={project_case}, target_case={target_case}"
             )
-            self._append_output(
+            self._log_message(
                 f"\n[Launcher] 第 {run_no}/{self.current_plan['run_count']} 次：直接启动 "
                 f"project_case={project_case}, target_case={target_case}\n"
             )
@@ -780,9 +911,27 @@ class LauncherWindow(QWidget):
         )
 
         self.process.setArguments(args)
+        LOGGER.info(
+            "starting child process: program=%s args=%s workdir=%s",
+            sys.executable,
+            args,
+            ROOT_DIR,
+        )
         self.process.start()
         started = self.process.waitForStarted(3000)
+        LOGGER.info(
+            "child process start result: started=%s state=%s pid=%s error=%s error_string=%s",
+            started,
+            self.process.state() if self.process is not None else None,
+            int(self.process.processId()) if self.process is not None else None,
+            self.process.error() if self.process is not None else None,
+            self.process.errorString() if self.process is not None else None,
+        )
         if not started:
+            self._log_message(
+                "[Launcher] 子进程启动失败，请检查日志中的 program/args/error 信息。\n",
+                level=logging.ERROR,
+            )
             QMessageBox.critical(self, "启动失败", "子进程启动失败，请检查 Python 环境。")
             self.process.deleteLater()
             self.process = None
@@ -798,7 +947,13 @@ class LauncherWindow(QWidget):
         if self.process is None or self.current_plan is None:
             return
         self.current_run_timed_out = True
-        self._append_output(
+        LOGGER.warning(
+            "run timeout: run_index=%s safe_minutes=%s pid=%s",
+            self.current_run_index + 1,
+            self.current_plan["safe_minutes"],
+            int(self.process.processId()),
+        )
+        self._log_message(
             f"\n[Launcher] 第 {self.current_run_index + 1}/{self.current_plan['run_count']} 次运行已超过 "
             f"{self.current_plan['safe_minutes']} 分钟，正在停止本次用例。\n"
         )
@@ -806,12 +961,18 @@ class LauncherWindow(QWidget):
         self.process.kill()
 
     def _start_run(self):
+        LOGGER.info(
+            "start_button clicked: batch_active=%s process_exists=%s",
+            self.batch_active,
+            self.process is not None,
+        )
         if self.batch_active or self.process is not None:
             QMessageBox.information(self, "运行中", "当前已有任务在运行，请先停止。")
             return
 
         plan = self._collect_plan()
         if plan is None:
+            LOGGER.info("start_run aborted because plan is None")
             return
 
         self._begin_batch(plan)
@@ -821,10 +982,36 @@ class LauncherWindow(QWidget):
             return
         text = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
         self._append_output(text)
+        stripped = text.strip()
+        if stripped:
+            LOGGER.info("child_output: %s", stripped)
+
+    def _on_process_error(self, error):
+        if self.process is None:
+            LOGGER.error("process error signaled after process cleanup: error=%s", error)
+            return
+        LOGGER.error(
+            "process error: error=%s error_string=%s state=%s pid=%s",
+            error,
+            self.process.errorString(),
+            self.process.state(),
+            int(self.process.processId()),
+        )
+        self._log_message(
+            f"[Launcher] 子进程错误：error={error}, detail={self.process.errorString()}\n",
+            level=logging.ERROR,
+        )
 
     def _on_process_finished(self, exit_code: int, _exit_status):
+        LOGGER.info(
+            "process finished: exit_code=%s exit_status=%s current_run_index=%s timed_out=%s",
+            exit_code,
+            _exit_status,
+            self.current_run_index,
+            self.current_run_timed_out,
+        )
         self.run_timeout_timer.stop()
-        self._append_output(f"\n[Launcher] 进程结束，exit_code={exit_code}\n")
+        self._log_message(f"\n[Launcher] 进程结束，exit_code={exit_code}\n")
         self._poll_preview_frame()
         self.preview_timer.stop()
         if self.process is not None:
@@ -843,7 +1030,7 @@ class LauncherWindow(QWidget):
         self._cleanup_apps_between_runs("轮次结束清理")
         self.current_run_index += 1
         if self.current_run_timed_out:
-            self._append_output("[Launcher] 本次用例因超过安全时间被停止，计入已执行次数。\n")
+            self._log_message("[Launcher] 本次用例因超过安全时间被停止，计入已执行次数。\n")
 
         if self.current_run_index >= self.current_plan["run_count"]:
             self._finish_batch("所有运行次数已完成。")
@@ -857,6 +1044,11 @@ class LauncherWindow(QWidget):
             self.safety_timer.start()
 
     def _stop_run(self):
+        LOGGER.info(
+            "stop_button clicked: batch_active=%s process_exists=%s",
+            self.batch_active,
+            self.process is not None,
+        )
         if not self.batch_active and self.process is None:
             return
 
@@ -865,17 +1057,18 @@ class LauncherWindow(QWidget):
         self.run_timeout_timer.stop()
 
         if self.process is None:
-            self._append_output("\n[Launcher] 已取消后续运行。\n")
+            self._log_message("\n[Launcher] 已取消后续运行。\n")
             self._cleanup_apps_between_runs("手动停止清理")
             self._finish_batch("任务已停止。")
             return
 
-        self._append_output("\n[Launcher] 正在停止当前子进程，并取消后续运行...\n")
+        self._log_message("\n[Launcher] 正在停止当前子进程，并取消后续运行...\n")
         self.preview_timer.stop()
         self.process.kill()
 
 
 def _run_helper_command(args: argparse.Namespace) -> int:
+    LOGGER.info("run_helper_command: args=%s", args)
     try:
         if args.run_testcase:
             run_testcase_entry(args.run_testcase)
@@ -888,22 +1081,29 @@ def _run_helper_command(args: argparse.Namespace) -> int:
 
         return 0
     except Exception:
+        log_exception("helper command failed")
         traceback.print_exc()
         return 1
 
 
 def main():
+    setup_logging()
+    install_global_exception_hooks()
+    LOGGER.info("main start: argv=%s cwd=%s", sys.argv, os.getcwd())
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--run-testcase")
     parser.add_argument("--run-direct", nargs=2, metavar=("PROJECT_CASE", "TARGET_CASE"))
     args, _ = parser.parse_known_args()
+    LOGGER.info("parsed args: %s", args)
 
     if args.run_testcase or args.run_direct:
+        LOGGER.info("enter helper mode")
         raise SystemExit(_run_helper_command(args))
 
     app = QApplication(sys.argv)
     window = LauncherWindow()
     window.show()
+    LOGGER.info("launcher window shown")
     raise SystemExit(app.exec())
 
 

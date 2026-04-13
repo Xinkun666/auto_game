@@ -31,6 +31,8 @@ class DriveContext:
 class DrivingManager:
     # 首次出库必须对齐到的固定角度
     TARGET_FIRST_DIR = 115
+    FIRST_ALIGN_TOLERANCE = 4
+    ESCAPE_ALIGN_TOLERANCE = 8
 
     # 车辆方向与目标方向的允许误差；小于该值时直接视为已对齐
     ALIGN_THRESHOLD = 8
@@ -368,10 +370,22 @@ class DrivingManager:
             return
 
         turn_dir, _, diff = calculate_move_count(direction, self.TARGET_FIRST_DIR)
-        if turn_dir is not None and diff > 0:
-            action = "forward_turn_left" if turn_dir == "left" else "forward_turn_right"
-            self._execute_maneuver(w, action, duration=400, brake_with_steer=True)
-            self._tap_single_control(w, "brake", wait=500, dura=1, x_bias=1)
+        if turn_dir is not None and diff > self.FIRST_ALIGN_TOLERANCE:
+            duration = self._get_turn_duration(diff, fine=True)
+            if diff <= 12:
+                action = "brake_turn_left" if turn_dir == "left" else "brake_turn_right"
+                print(
+                    f"[Driving] 出库精调角度: current={direction:.1f}, "
+                    f"target={self.TARGET_FIRST_DIR}, diff={diff:.2f}, action={action}, duration={duration}"
+                )
+                self._execute_maneuver(w, action, duration=duration, brake_with_steer=False)
+            else:
+                action = "forward_turn_left" if turn_dir == "left" else "forward_turn_right"
+                print(
+                    f"[Driving] 出库转向修正: current={direction:.1f}, "
+                    f"target={self.TARGET_FIRST_DIR}, diff={diff:.2f}, action={action}, duration={duration}"
+                )
+                self._execute_maneuver(w, action, duration=duration, brake_with_steer=True)
             return
 
         self._tap_single_control(w, "up", wait=5000, dura=100)
@@ -383,32 +397,65 @@ class DrivingManager:
         print("[Driving] 出库完成，进入巡航阶段")
 
     def _handle_forbidden_escape(self, w: "FrameWorker", context: DriveContext) -> bool:
-        sector = self.map_tool.get_avoidance_action(context.location, context.direction)
-        if sector not in (7, 8):
+        if self.map_tool.is_walkable(context.location):
             self.forbidden_escape_failures = 0
             return False
 
+        safe_point = self.map_tool.get_nearest_safe_point(context.location, max_search_dist=120)
         self.forbidden_escape_failures += 1
-        print(
-            f"[Driving] 已进入不可通行区域，执行脱离动作 sector={sector}, "
-            f"attempt={self.forbidden_escape_failures}"
-        )
+        print(f"[Driving] 已进入不可通行区域，执行角度脱离 attempt={self.forbidden_escape_failures}")
 
         if self.forbidden_escape_failures >= self.FORBIDDEN_ESCAPE_FAIL_LIMIT:
             print("[Driving] 不可通行区域脱困多次失败，结束当前局")
             self._handle_death(w)
             return True
 
-        action_map = {
-            7: ("forward", 1000),
-            8: ("backward", 1200),
-        }
-        action, duration = action_map[sector]
+        if safe_point is None:
+            print("[Driving] 黑区内未找到安全点，先执行保守倒车脱离")
+            self._log_drive_state("已进入不可通行区域", context, "backward(900ms)", self.stable_circle_angle)
+            self._tap_single_control(w, "down", wait=900, dura=100)
+            return True
+
+        target_direction = calculate_angle(context.location, safe_point)
+        turn_dir, _, diff = calculate_move_count(context.direction, target_direction)
+        use_backward = diff > 90
+        duration = self._get_turn_duration(diff, fine=False, reverse=use_backward)
+
+        if use_backward:
+            if turn_dir is None or diff <= self.ESCAPE_ALIGN_TOLERANCE:
+                action_text = "backward(900ms)"
+                print(
+                    f"[Driving] 黑区脱离: safe_point={safe_point}, target={target_direction:.1f}, "
+                    f"diff={diff:.2f}, action={action_text}"
+                )
+                self._log_drive_state("已进入不可通行区域", context, action_text, target_direction)
+                self._tap_single_control(w, "down", wait=900, dura=100)
+                return True
+
+            action = f"backward_turn_{turn_dir}"
+        else:
+            if turn_dir is None or diff <= self.ESCAPE_ALIGN_TOLERANCE:
+                action_text = "forward(700ms)"
+                print(
+                    f"[Driving] 黑区脱离: safe_point={safe_point}, target={target_direction:.1f}, "
+                    f"diff={diff:.2f}, action={action_text}"
+                )
+                self._log_drive_state("已进入不可通行区域", context, action_text, target_direction)
+                self._tap_single_control(w, "up", wait=700, dura=100)
+                return True
+
+            action = f"forward_turn_{turn_dir}"
+
+        action_text = f"{action}({duration}ms)"
         self._log_drive_state(
             "已进入不可通行区域",
             context,
-            f"{action}({duration}ms)",
-            self.stable_circle_angle,
+            action_text,
+            target_direction,
+        )
+        print(
+            f"[Driving] 黑区脱离: safe_point={safe_point}, target={target_direction:.1f}, "
+            f"diff={diff:.2f}, action={action}, duration={duration}, mode={'backward' if use_backward else 'forward'}"
         )
         self._execute_maneuver(w, action, speed=context.speed, duration=duration, brake_with_steer=True)
         return True
@@ -518,15 +565,53 @@ class DrivingManager:
             return
 
         action = f"forward_turn_{turn_dir}"
-        if diff <= 20:
-            duration = 250
-        elif diff <= 45:
-            duration = 400
-        else:
-            duration = 650
+        duration = self._get_turn_duration(diff, fine=False)
 
         self._log_drive_state("发现进圈角度，进行对齐", context, f"{action}({duration}ms)", target_direction)
         self._execute_maneuver(w, action, speed=context.speed, duration=duration, brake_with_steer=False)
+
+    def _get_turn_duration(
+        self,
+        diff: float,
+        fine: bool = False,
+        reverse: bool = False,
+    ) -> int:
+        if diff <= 0:
+            return 0
+
+        if fine:
+            if diff <= 6:
+                return 120
+            if diff <= 10:
+                return 180
+            if diff <= 18:
+                return 240
+            if diff <= 28:
+                return 320
+            if diff <= 40:
+                return 420
+            return min(560, int(diff * 10))
+
+        if reverse:
+            if diff <= 15:
+                return 300
+            if diff <= 35:
+                return 500
+            if diff <= 60:
+                return 700
+            if diff <= 90:
+                return 900
+            return min(1200, int(diff * 10))
+
+        if diff <= 12:
+            return 180
+        if diff <= 25:
+            return 280
+        if diff <= 45:
+            return 420
+        if diff <= 70:
+            return 560
+        return min(760, int(diff * 8))
 
     def _check_motion_block(self, context: DriveContext) -> bool:
         if self.current_stage in (self.STAGE_EXIT_GARAGE, self.STAGE_FINISH):

@@ -685,7 +685,7 @@ class RunningManager:
         )
         w.refresh_frame()
 
-        if self._click_drive_if_present(w):
+        if self._attempt_drive_after_move(w, "前推后尝试上车"):
             return
 
         for step in range(2):
@@ -705,7 +705,7 @@ class RunningManager:
                 wait=self.PRECISE_LATERAL_STEP_WAIT,
             )
             w.refresh_frame()
-            if self._click_drive_if_present(w):
+            if self._attempt_drive_after_move(w, f"右移试探后尝试上车 {step + 1}/2"):
                 return
 
         print("[Running] 右侧两次试探均未出现驾驶按钮，先大幅回到中心")
@@ -716,6 +716,8 @@ class RunningManager:
             wait=self.PRECISE_RESET_CENTER_WAIT,
         )
         w.refresh_frame()
+        if self._attempt_drive_after_move(w, "回正后尝试上车"):
+            return
 
         for step in range(2):
             print(f"[Running] 开始向左第 {step + 1}/2 次小幅试探")
@@ -734,7 +736,7 @@ class RunningManager:
                 wait=self.PRECISE_LATERAL_STEP_WAIT,
             )
             w.refresh_frame()
-            if self._click_drive_if_present(w):
+            if self._attempt_drive_after_move(w, f"左移试探后尝试上车 {step + 1}/2"):
                 return
 
         self._handle_precise_attempt_failure(w)
@@ -756,15 +758,20 @@ class RunningManager:
             self.precise_idle_rounds = 0
             print(f"[Running] 精调阶段长时间无进展，累计失败 {self.correct_position_times}")
 
-    def _click_drive_if_present(self, w: "FrameWorker") -> bool:
+    def _attempt_drive_after_move(self, w: "FrameWorker", reason: str) -> bool:
+        print(f"[Running] {reason}，尝试点击驾驶按钮")
+        location = self._get_location(w)
+        direction = self._get_scalar(w.get_info("direction"))
+        if location is not None:
+            self._log_running_state("执行上车尝试", location, direction, reason)
+
         drive_btn = w.get_info("驾驶")
         if not drive_btn:
             return False
 
         print("[Running] 检测到驾驶按钮，执行上车")
-        location = self._get_location(w)
         if location is not None:
-            self._log_running_state("检测到驾驶按钮", location, self._get_scalar(w.get_info("direction")), "点击上车")
+            self._log_running_state("检测到驾驶按钮", location, direction, "点击上车")
         w.click(drive_btn)
         time.sleep(1)
         w.refresh_frame()

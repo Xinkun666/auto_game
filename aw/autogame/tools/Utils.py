@@ -4,10 +4,103 @@ import cv2
 import time
 import math
 import json
+import shutil
 import subprocess
 import numpy as np
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional
 from PIL import Image, ImageDraw, ImageFont
+
+
+ROOT_DIR = Path(__file__).resolve().parents[3]
+TEMP_DIR = ROOT_DIR / "aw" / "autogame" / "temp"
+LOG_DIR = TEMP_DIR / "logs"
+PROCESS_TEMP_LOGS_DIR = LOG_DIR / "process_temp_logs"
+
+
+def _safe_write_text(path: Path, content: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _copy_top_level_log_files(dst_dir: Path) -> list[str]:
+    copied = []
+    if not LOG_DIR.exists():
+        return copied
+
+    for path in sorted(LOG_DIR.iterdir()):
+        if not path.is_file():
+            continue
+        shutil.copy2(path, dst_dir / path.name)
+        copied.append(path.name)
+    return copied
+
+
+def _copy_process_temp_logs(dst_dir: Path) -> list[str]:
+    copied = []
+    if not PROCESS_TEMP_LOGS_DIR.exists():
+        return copied
+
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for path in sorted(PROCESS_TEMP_LOGS_DIR.iterdir()):
+        target = dst_dir / path.name
+        if path.is_file():
+            shutil.copy2(path, target)
+            copied.append(path.name)
+        elif path.is_dir():
+            shutil.copytree(path, target, dirs_exist_ok=True)
+            copied.append(path.name + "/")
+    return copied
+
+
+def _build_archive_dir(run_index: int) -> Path:
+    timestamp = time.strftime("%Y%m%d%H%M%S")
+    base_dir = TEMP_DIR / f"game_{timestamp}_第{run_index}次用例"
+    archive_dir = base_dir
+    suffix = 1
+    while archive_dir.exists():
+        archive_dir = TEMP_DIR / f"{base_dir.name}_{suffix}"
+        suffix += 1
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    return archive_dir
+
+
+def archive_run_artifacts(
+    run_index: int,
+    source: str,
+    extra_text_files: Optional[dict[str, str]] = None,
+    extra_metadata: Optional[dict] = None,
+) -> Path:
+    archive_dir = _build_archive_dir(run_index)
+    log_archive_dir = archive_dir / "logs"
+    process_archive_dir = archive_dir / "process_temp_logs"
+
+    copied_log_files = _copy_top_level_log_files(log_archive_dir)
+    copied_process_files = _copy_process_temp_logs(process_archive_dir)
+
+    if extra_text_files:
+        for name, content in extra_text_files.items():
+            if not name:
+                continue
+            _safe_write_text(log_archive_dir / name, content)
+
+    metadata = {
+        "source": source,
+        "run_index": run_index,
+        "archive_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "archive_dir": str(archive_dir),
+        "copied_log_files": copied_log_files,
+        "copied_process_temp_logs": copied_process_files,
+    }
+    if extra_metadata:
+        metadata.update(extra_metadata)
+
+    _safe_write_text(
+        archive_dir / "archive_info.json",
+        json.dumps(metadata, ensure_ascii=False, indent=2),
+    )
+    return archive_dir
 
 def find_template_center_multiscale(target_img, template_input, threshold=0.7, match_mode="gray"):
     def _normalize_match_mode(mode):

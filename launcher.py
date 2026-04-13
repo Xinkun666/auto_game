@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from aw.autogame.tools.Utils import archive_run_artifacts
 
 ROOT_DIR = Path(__file__).resolve().parent
 TESTCASES_DIR = ROOT_DIR / "testcases"
@@ -280,6 +281,7 @@ class LauncherWindow(QWidget):
         self.total_runs = 1
         self.current_plan: Optional[dict] = None
         self.current_run_timed_out = False
+        self.current_run_output_start = 0
 
         self.setWindowTitle("Auto Game 启动器")
         self.resize(1260, 860)
@@ -768,6 +770,7 @@ class LauncherWindow(QWidget):
         self.stop_requested = False
         self.current_plan = None
         self.current_run_timed_out = False
+        self.current_run_output_start = 0
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self._set_inputs_enabled(True)
@@ -875,6 +878,7 @@ class LauncherWindow(QWidget):
         )
         self.current_run_timed_out = False
         self._clear_preview_files()
+        self.current_run_output_start = len(self.output_edit.toPlainText())
 
         project_case = self.current_plan["project_case"]
         target_case = self.current_plan["target_case"]
@@ -948,6 +952,30 @@ class LauncherWindow(QWidget):
         if safe_minutes > 0:
             self.run_timeout_timer.start(int(safe_minutes * 60 * 1000))
 
+    def _archive_run_outputs(self, run_no: int, exit_code: int):
+        if self.current_plan is None:
+            return
+
+        run_output_text = self.output_edit.toPlainText()[self.current_run_output_start:]
+        try:
+            archive_dir = archive_run_artifacts(
+                run_index=run_no,
+                source="launcher",
+                extra_text_files={"launcher_output.txt": run_output_text},
+                extra_metadata={
+                    "mode": self.current_plan["mode"],
+                    "project_case": self.current_plan["project_case"],
+                    "target_case": self.current_plan["target_case"],
+                    "testcase_label": self.current_plan["testcase_label"],
+                    "exit_code": exit_code,
+                    "timed_out": self.current_run_timed_out,
+                },
+            )
+            self._log_message(f"[Launcher] 本次运行产物已归档到：{archive_dir}\n")
+        except Exception:
+            log_exception(f"archive_run_outputs failed: run_no={run_no}")
+            self._log_message("[Launcher] 运行产物归档失败，请查看 launcher_debug.log。\n", level=logging.ERROR)
+
     def _handle_run_timeout(self):
         if self.process is None or self.current_plan is None:
             return
@@ -1018,6 +1046,8 @@ class LauncherWindow(QWidget):
         self.run_timeout_timer.stop()
         self._log_message(f"\n[Launcher] 进程结束，exit_code={exit_code}\n")
         self._poll_preview_frame()
+        run_no = self.current_run_index + 1
+        self._archive_run_outputs(run_no, exit_code)
         self.preview_timer.stop()
         if self.process is not None:
             self.process.deleteLater()

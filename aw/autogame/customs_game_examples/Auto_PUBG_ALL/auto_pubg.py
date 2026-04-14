@@ -225,7 +225,7 @@ def on_stage(w: "FrameWorker"):
         return
 
     if w.current_stage == "搜房阶段":
-        w.change_stage("跑图阶段")
+        pass
         return
 
     if w.current_stage == "跑图阶段":

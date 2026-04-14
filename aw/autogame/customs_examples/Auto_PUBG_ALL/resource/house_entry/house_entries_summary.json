@@ -1,0 +1,515 @@
+{
+    "1": [
+        {
+            "image": "frame_00056.jpg",
+            "direction": 355,
+            "location": [
+                986,
+                711
+            ]
+        },
+        {
+            "image": "frame_00090.jpg",
+            "direction": 275,
+            "location": [
+                991,
+                709
+            ]
+        },
+        {
+            "image": "frame_00120.jpg",
+            "direction": 75,
+            "location": [
+                988,
+                704
+            ]
+        }
+    ],
+    "10": [
+        {
+            "image": "frame_00651.jpg",
+            "direction": 255,
+            "location": [
+                1001,
+                748
+            ]
+        },
+        {
+            "image": "frame_00673.jpg",
+            "direction": 350,
+            "location": [
+                998,
+                751
+            ]
+        }
+    ],
+    "11": [
+        {
+            "image": "frame_00714.jpg",
+            "direction": 85,
+            "location": [
+                1003,
+                750
+            ]
+        }
+    ],
+    "12": [
+        {
+            "image": "frame_00747.jpg",
+            "direction": 355,
+            "location": [
+                1011,
+                753
+            ]
+        },
+        {
+            "image": "frame_00978.jpg",
+            "direction": 270,
+            "location": [
+                1013,
+                751
+            ]
+        }
+    ],
+    "13": [
+        {
+            "image": "frame_00791.jpg",
+            "direction": 350,
+            "location": [
+                1012,
+                745
+            ]
+        },
+        {
+            "image": "frame_00837.jpg",
+            "direction": 1,
+            "location": [
+                1012,
+                738
+            ]
+        }
+    ],
+    "14": [
+        {
+            "image": "frame_00887.jpg",
+            "direction": 80,
+            "location": [
+                1016,
+                747
+            ]
+        },
+        {
+            "image": "frame_00914.jpg",
+            "direction": 350,
+            "location": [
+                1019,
+                750
+            ]
+        }
+    ],
+    "15": [
+        {
+            "image": "frame_01041.jpg",
+            "direction": 85,
+            "location": [
+                1026,
+                742
+            ]
+        },
+        {
+            "image": "frame_01113.jpg",
+            "direction": 355,
+            "location": [
+                1031,
+                744
+            ]
+        }
+    ],
+    "16": [
+        {
+            "image": "frame_01062.jpg",
+            "direction": 90,
+            "location": [
+                1026,
+                747
+            ]
+        },
+        {
+            "image": "frame_01085.jpg",
+            "direction": 355,
+            "location": [
+                1028,
+                750
+            ]
+        }
+    ],
+    "17": [
+        {
+            "image": "frame_01113.jpg",
+            "direction": 355,
+            "location": [
+                1031,
+                744
+            ]
+        }
+    ],
+    "18": [
+        {
+            "image": "frame_01195.jpg",
+            "direction": 115,
+            "location": [
+                1042,
+                743
+            ]
+        }
+    ],
+    "19": [
+        {
+            "image": "frame_01223.jpg",
+            "direction": 55,
+            "location": [
+                1045,
+                743
+            ]
+        },
+        {
+            "image": "frame_01248.jpg",
+            "direction": 300,
+            "location": [
+                1047,
+                740
+            ]
+        }
+    ],
+    "2": [
+        {
+            "image": "frame_00165.jpg",
+            "direction": 85,
+            "location": [
+                995,
+                707
+            ]
+        },
+        {
+            "image": "frame_00254.jpg",
+            "direction": 200,
+            "location": [
+                1006,
+                706
+            ]
+        }
+    ],
+    "20": [
+        {
+            "image": "frame_01281.jpg",
+            "direction": 355,
+            "location": [
+                1042,
+                737
+            ]
+        }
+    ],
+    "21": [
+        {
+            "image": "frame_01309.jpg",
+            "direction": 0,
+            "location": [
+                1038,
+                733
+            ]
+        }
+    ],
+    "22": [
+        {
+            "image": "frame_01340.jpg",
+            "direction": 355,
+            "location": [
+                1033,
+                734
+            ]
+        },
+        {
+            "image": "frame_01360.jpg",
+            "direction": 85,
+            "location": [
+                1030,
+                731
+            ]
+        }
+    ],
+    "23": [
+        {
+            "image": "frame_01395.jpg",
+            "direction": 265,
+            "location": [
+                1035,
+                724
+            ]
+        },
+        {
+            "image": "frame_01427.jpg",
+            "direction": 95,
+            "location": [
+                1030,
+                724
+            ]
+        }
+    ],
+    "24": [
+        {
+            "image": "frame_01464.jpg",
+            "direction": 90,
+            "location": [
+                1035,
+                729
+            ]
+        },
+        {
+            "image": "frame_01551.jpg",
+            "direction": 0,
+            "location": [
+                1038,
+                733
+            ]
+        }
+    ],
+    "25": [
+        {
+            "image": "frame_01695.jpg",
+            "direction": 0,
+            "location": [
+                1039,
+                725
+            ]
+        },
+        {
+            "image": "frame_01718.jpg",
+            "direction": 80,
+            "location": [
+                1037,
+                721
+            ]
+        }
+    ],
+    "26": [
+        {
+            "image": "frame_01779.jpg",
+            "direction": 265,
+            "location": [
+                1035,
+                724
+            ]
+        },
+        {
+            "image": "frame_01809.jpg",
+            "direction": 90,
+            "location": [
+                1030,
+                724
+            ]
+        }
+    ],
+    "27": [
+        {
+            "image": "frame_01851.jpg",
+            "direction": 175,
+            "location": [
+                1021,
+                721
+            ]
+        },
+        {
+            "image": "frame_01876.jpg",
+            "direction": 85,
+            "location": [
+                1017,
+                724
+            ]
+        }
+    ],
+    "28": [
+        {
+            "image": "frame_01924.jpg",
+            "direction": 355,
+            "location": [
+                1015,
+                729
+            ]
+        },
+        {
+            "image": "frame_01974.jpg",
+            "direction": 180,
+            "location": [
+                1014,
+                724
+            ]
+        }
+    ],
+    "29": [
+        {
+            "image": "frame_01991.jpg",
+            "direction": 95,
+            "location": [
+                1017,
+                724
+            ]
+        }
+    ],
+    "3": [
+        {
+            "image": "frame_00196.jpg",
+            "direction": 265,
+            "location": [
+                998,
+                714
+            ]
+        }
+    ],
+    "30": [
+        {
+            "image": "frame_02161.jpg",
+            "direction": 140,
+            "location": [
+                1052,
+                740
+            ]
+        },
+        {
+            "image": "frame_02184.jpg",
+            "direction": 40,
+            "location": [
+                1051,
+                745
+            ]
+        }
+    ],
+    "31": [
+        {
+            "image": "frame_02240.jpg",
+            "direction": 105,
+            "location": [
+                1053,
+                752
+            ]
+        }
+    ],
+    "32": [
+        {
+            "image": "frame_02306.jpg",
+            "direction": 100,
+            "location": [
+                1071,
+                756
+            ]
+        },
+        {
+            "image": "frame_02330.jpg",
+            "direction": 10,
+            "location": [
+                1074,
+                759
+            ]
+        }
+    ],
+    "33": [
+        {
+            "image": "frame_02392.jpg",
+            "direction": 180,
+            "location": [
+                1080,
+                750
+            ]
+        },
+        {
+            "image": "frame_02411.jpg",
+            "direction": 95,
+            "location": [
+                1076,
+                751
+            ]
+        }
+    ],
+    "4": [
+        {
+            "image": "frame_00273.jpg",
+            "direction": 170,
+            "location": [
+                1010,
+                705
+            ]
+        }
+    ],
+    "5": [
+        {
+            "image": "frame_00352.jpg",
+            "direction": 175,
+            "location": [
+                1001,
+                726
+            ]
+        },
+        {
+            "image": "frame_00388.jpg",
+            "direction": 345,
+            "location": [
+                1001,
+                732
+            ]
+        }
+    ],
+    "6": [],
+    "7": [
+        {
+            "image": "frame_00411.jpg",
+            "direction": 350,
+            "location": [
+                996,
+                733
+            ]
+        },
+        {
+            "image": "frame_00518.jpg",
+            "direction": 165,
+            "location": [
+                995,
+                726
+            ]
+        }
+    ],
+    "8": [
+        {
+            "image": "frame_00445.jpg",
+            "direction": 350,
+            "location": [
+                989,
+                734
+            ]
+        },
+        {
+            "image": "frame_00471.jpg",
+            "direction": 70,
+            "location": [
+                986,
+                730
+            ]
+        }
+    ],
+    "9": [
+        {
+            "image": "frame_00606.jpg",
+            "direction": 80,
+            "location": [
+                1000,
+                744
+            ]
+        },
+        {
+            "image": "frame_00633.jpg",
+            "direction": 355,
+            "location": [
+                1004,
+                746
+            ]
+        }
+    ]
+}

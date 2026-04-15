@@ -5,6 +5,18 @@ import json
 import numpy as np
 from sklearn.cluster import DBSCAN
 
+
+def draw_points_with_arrows(
+    road_list,
+    image_path=r"resource\map\hpjy.png",
+    output_path=r"temp\road\route.jpg",
+):
+    from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigator import (
+        draw_points_with_arrows as _draw_points_with_arrows,
+    )
+
+    return _draw_points_with_arrows(road_list, image_path=image_path, output_path=output_path)
+
 def detect_red_text(image_path):
     # 1. 读取图片
     img = cv2.imread(image_path)

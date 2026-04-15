@@ -5,11 +5,14 @@ import json
 import numpy as np
 from sklearn.cluster import DBSCAN
 
+RESOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_ROUTE_IMAGE_PATH = os.path.join(RESOURCE_DIR, "map", "hpjy.png")
+DEFAULT_ROUTE_OUTPUT_PATH = os.path.join("aw", "autogame", "temp", "road", "route.jpg")
 
 def draw_points_with_arrows(
     road_list,
-    image_path=r"resource\map\hpjy.png",
-    output_path=r"temp\road\route.jpg",
+    image_path=DEFAULT_ROUTE_IMAGE_PATH,
+    output_path=DEFAULT_ROUTE_OUTPUT_PATH,
 ):
     from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigator import (
         draw_points_with_arrows as _draw_points_with_arrows,

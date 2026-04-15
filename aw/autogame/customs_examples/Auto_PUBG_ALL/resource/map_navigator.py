@@ -5,6 +5,10 @@ import heapq
 from collections import deque
 import os
 
+RESOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_ROUTE_IMAGE_PATH = os.path.join(RESOURCE_DIR, "map", "hpjy.png")
+DEFAULT_ROUTE_OUTPUT_PATH = os.path.join("aw", "autogame", "temp", "road", "route.jpg")
+
 class MapNavigator:
     def __init__(self, map_mask_path = r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/map/hpjy_mask.tif'):
         """
@@ -479,10 +483,14 @@ class MapNavigator:
                 else:
                     return 4
 
-def draw_points_with_arrows(road_list, image_path = r"resource\map\hpjy.png",output_path = r'temp\road\route.jpg'):
+def draw_points_with_arrows(
+    road_list,
+    image_path=DEFAULT_ROUTE_IMAGE_PATH,
+    output_path=DEFAULT_ROUTE_OUTPUT_PATH,
+):
     image = cv2.imread(image_path)
     if image is None:
-        print(f"错误：无法读取图像 {image_path}")
+        print(f"警告：路线绘图底图不存在，跳过绘图 -> {image_path}")
         return
 
     point_color = (0, 0, 255)  # 红色点 (BGR格式)
@@ -502,8 +510,9 @@ def draw_points_with_arrows(road_list, image_path = r"resource\map\hpjy.png",out
             cv2.arrowedLine(image, (x, y), (next_x, next_y),
                             arrow_color, arrow_thickness,
                             tipLength=0.2)  # 箭头头部长度比例
-    if not os.path.exists(os.path.dirname(output_path)):
-        os.makedirs(os.path.dirname(output_path))
+    output_dir = os.path.dirname(output_path)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir)
     cv2.imwrite(output_path, image)
     print(f"结果已保存到: {output_path}")
 

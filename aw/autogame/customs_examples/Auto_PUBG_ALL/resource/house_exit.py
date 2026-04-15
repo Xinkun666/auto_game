@@ -92,7 +92,8 @@ class HouseExitManager:
             time.sleep(0.8)
             w.refresh_frame()
 
-        self._move_forward(w, dura=500, wait=1100)
+        print("[HouseExit] 小步靠近门口")
+        self._move_forward(w, dura=220, wait=380)
         return self._verify_exit_success(w)
 
     def _exit_via_window(self, w: "FrameWorker", window: Sequence[float]) -> bool:
@@ -107,8 +108,8 @@ class HouseExitManager:
                 self._move_forward(w, dura=650, wait=1200)
                 return self._verify_exit_success(w)
 
-            print("[HouseExit] 继续靠近窗户")
-            self._move_forward(w, dura=320, wait=500)
+            print("[HouseExit] 小步靠近窗户")
+            self._move_forward(w, dura=180, wait=320)
             w.refresh_frame()
 
             window = self._find_largest_target(self._get_forward_scene(w), self.WINDOW_CLASS_IDS)

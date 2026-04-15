@@ -239,7 +239,7 @@ def on_stage(w: "FrameWorker"):
             house_scene = house_scene[0]
 
         if house_exit_manager.process(w):
-            w.change_stage("跑图阶段")
+            w.stop()
         return
 
     if w.current_stage == "跑图阶段":

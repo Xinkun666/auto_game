@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QMenu, QFileDialog, QInputDialog, QLabel, QSplitter,
                              QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
                              QGraphicsRectItem, QGraphicsLineItem, QToolBar, QMessageBox, QFrame,
-                             QPinchGesture)
+                             QPinchGesture, QHeaderView)
 from PyQt6.QtCore import Qt, QRectF, QPointF, QEvent
 from PyQt6.QtGui import QAction, QPixmap, QColor, QPen, QBrush, QImage, QPainter, QGuiApplication, QFontMetricsF
 # ==========================================
@@ -456,7 +456,10 @@ class AutoStudioWindow(QMainWindow):
         # 树控件
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["项目层级", "属性"])
-        self.tree.setColumnWidth(0, 200)
+        self.tree.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.tree.itemClicked.connect(self.on_tree_click)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.open_context_menu)
@@ -507,19 +510,25 @@ class AutoStudioWindow(QMainWindow):
         if not self.project:
             return
         root = QTreeWidgetItem(self.tree)
-        root.setText(0, f"ROOT: {self.project.name}")
+        root_text = f"ROOT: {self.project.name}"
+        root.setText(0, root_text)
+        root.setToolTip(0, root_text)
         root.setData(0, Qt.ItemDataRole.UserRole, self.project)
         root.setExpanded(True)
         stage_items = {}
         scene_items = {}
         for stage in self.project.stages:
             s_node = QTreeWidgetItem(root)
-            s_node.setText(0, f"阶段: {stage.name}")
+            stage_text = f"阶段: {stage.name}"
+            s_node.setText(0, stage_text)
+            s_node.setToolTip(0, stage_text)
             s_node.setData(0, Qt.ItemDataRole.UserRole, stage)
             stage_items[stage.id] = s_node
             for scene in stage.scenes:
                 sc_node = QTreeWidgetItem(s_node)
-                sc_node.setText(0, f"场景: {scene.name}")
+                scene_text = f"场景: {scene.name}"
+                sc_node.setText(0, scene_text)
+                sc_node.setToolTip(0, scene_text)
                 sc_node.setData(0, Qt.ItemDataRole.UserRole, scene)
                 scene_items[scene.id] = sc_node
                 for item in scene.items:
@@ -530,10 +539,15 @@ class AutoStudioWindow(QMainWindow):
                         type_icon = "[特殊区域]"
                     else:
                         type_icon = "[控点]"
-                    i_node.setText(0, f"{type_icon} {item.name}")
+                    item_text = f"{type_icon} {item.name}"
+                    i_node.setText(0, item_text)
+                    i_node.setToolTip(0, item_text)
                     vis_text = "显示" if item.visible else "隐藏"
                     i_node.setText(1, vis_text)
+                    i_node.setToolTip(1, vis_text)
                     i_node.setData(0, Qt.ItemDataRole.UserRole, item)
+        self.tree.resizeColumnToContents(0)
+        self.tree.resizeColumnToContents(1)
         self.restore_expanded_ids(expanded_ids, stage_items, scene_items)
         if self.last_expand_stage_id:
             item = stage_items.get(self.last_expand_stage_id)

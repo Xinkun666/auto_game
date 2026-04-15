@@ -5,6 +5,12 @@ from aw.autogame.tools.Utils import *
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.parachute import ParachuteManager
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.running_map import RunningManager
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.driving_car import DrivingManager
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.searching_house import (
+    Searching_House,
+)
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.house_exit import (
+    HouseExitManager,
+)
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.phase_timer import (
     PHASE_DRIVING,
     PHASE_RUNNING,
@@ -47,6 +53,8 @@ final_shutdown_pending = False
 parachute_manager = ParachuteManager()
 running_manager = RunningManager()
 driving_manager = DrivingManager()
+searching_house_manager = Searching_House()
+house_exit_manager = HouseExitManager()
 phase_timer = PhaseTimeManager(PHASE_DURATIONS, PHASE_STAGE_MAP)
 
 
@@ -62,6 +70,7 @@ def prepare_round():
     running_manager.reset(finding_car=need_drive)
 
     driving_manager.reset()
+    house_exit_manager.reset()
 
     print(
         f"[Round] need_drive={need_drive}, "
@@ -225,7 +234,12 @@ def on_stage(w: "FrameWorker"):
         return
 
     if w.current_stage == "搜房阶段":
-        pass
+        house_scene = w.get_info("house_scene")
+        if isinstance(house_scene, (list, tuple)) and len(house_scene) == 1:
+            house_scene = house_scene[0]
+
+        if house_exit_manager.process(w):
+            w.change_stage("跑图阶段")
         return
 
     if w.current_stage == "跑图阶段":

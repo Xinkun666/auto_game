@@ -1301,14 +1301,23 @@ class AutoStudioWindow(QMainWindow):
         export_dir = QFileDialog.getExistingDirectory(self, "选择导出目录", default_export_dir)
         if not export_dir:
             return
+        original_project_name = self.project.name
         project_name = self.project.name
         project_dir = os.path.join(export_dir, project_name)
         preserved_handler_content = None
         imported_resource_source = self.imported_resource_dir if (
             self.imported_resource_dir and os.path.isdir(self.imported_resource_dir)
         ) else None
-        imported_resource_backup_dir = None
+        export_temp_dir = None
+        staging_project_dir = None
+        restore_root_dir = None
+        restore_project_dir = None
+        renamed_backup_dir = None
+        created_game_case_dir = None
+        game_case_dir_existed = False
+        project_dir_swapped = False
         try:
+            existing_dir_strategy = None
             if os.path.exists(project_dir):
                 msg = QMessageBox(self)
                 msg.setWindowTitle("目录已存在")
@@ -1322,39 +1331,20 @@ class AutoStudioWindow(QMainWindow):
                 if clicked == cancel_btn:
                     return
                 if clicked == replace_btn:
-                    old_resource_path = os.path.join(project_dir, "resource")
-                    if os.path.isdir(old_resource_path):
-                        should_backup_resource = False
-                        if imported_resource_source:
-                            src_abs = os.path.abspath(imported_resource_source)
-                            old_abs = os.path.abspath(old_resource_path)
-                            should_backup_resource = (
-                                src_abs == old_abs or src_abs.startswith(old_abs + os.sep)
-                            )
-                        else:
-                            # 替换前重新检查当前 resource 的真实状态，避免导入时为空、
-                            # 标注期间新增文件后在导出时被误删。
-                            with os.scandir(old_resource_path) as entries:
-                                should_backup_resource = any(entries)
-                        if should_backup_resource:
-                            imported_resource_backup_dir = tempfile.mkdtemp(prefix="imported_resource_")
-                            backup_resource_path = os.path.join(imported_resource_backup_dir, "resource")
-                            shutil.copytree(old_resource_path, backup_resource_path)
-                            imported_resource_source = backup_resource_path
+                    existing_dir_strategy = "replace"
                     if not imported_resource_source:
                         old_handler_path = os.path.join(project_dir, "resource", "SpecialSceneHandler.py")
                         if os.path.exists(old_handler_path):
                             with open(old_handler_path, "r", encoding="utf-8") as f:
                                 preserved_handler_content = f.read()
-                    shutil.rmtree(project_dir)
                 elif clicked == backup_btn:
+                    existing_dir_strategy = "backup"
                     suffix = "_backup"
                     backup_dir = f"{project_dir}{suffix}"
                     idx = 1
                     while os.path.exists(backup_dir):
                         backup_dir = f"{project_dir}{suffix}{idx}"
                         idx += 1
-                    os.rename(project_dir, backup_dir)
                 elif clicked == rename_btn:
                     new_name, ok = QInputDialog.getText(self, "修改工程名", "新工程名:", text=project_name)
                     if not ok or not new_name.strip():
@@ -1365,12 +1355,13 @@ class AutoStudioWindow(QMainWindow):
                     if os.path.exists(project_dir):
                         QMessageBox.critical(self, "导出失败", "修改后的工程名仍然冲突。")
                         return
+            export_temp_dir = tempfile.mkdtemp(prefix="label_export_")
+            staging_project_dir = os.path.join(export_temp_dir, project_name)
             customs_game_examples_dir = os.path.join(project_root_dir, "customs_game_examples")
             os.makedirs(customs_game_examples_dir, exist_ok=True)
-            os.makedirs(os.path.join(customs_game_examples_dir, project_name), exist_ok=True)
-            scenes_dir = os.path.join(project_dir, "scenes")
-            templates_dir = os.path.join(project_dir, "templates")
-            resource_dir = os.path.join(project_dir, "resource")
+            scenes_dir = os.path.join(staging_project_dir, "scenes")
+            templates_dir = os.path.join(staging_project_dir, "templates")
+            resource_dir = os.path.join(staging_project_dir, "resource")
             os.makedirs(scenes_dir, exist_ok=True)
             os.makedirs(templates_dir, exist_ok=True)
             if imported_resource_source:
@@ -1379,7 +1370,7 @@ class AutoStudioWindow(QMainWindow):
                 shutil.copytree(imported_resource_source, resource_dir)
             else:
                 os.makedirs(resource_dir, exist_ok=True)
-            file_path = os.path.join(project_dir, "info.py")
+            file_path = os.path.join(staging_project_dir, "info.py")
             # 生成代码逻辑
             stage_dict = {}
             stage_info = {}
@@ -1493,13 +1484,43 @@ class AutoStudioWindow(QMainWindow):
             with open(file_path, "w", encoding='utf-8') as f:
                 f.write("\n".join(code_lines))
             if imported_resource_source:
-                self.ensure_special_scene_handler(project_dir, special_area_names)
+                self.ensure_special_scene_handler(staging_project_dir, special_area_names)
             else:
-                self.ensure_special_scene_handler(project_dir, special_area_names, preserved_handler_content)
+                self.ensure_special_scene_handler(staging_project_dir, special_area_names, preserved_handler_content)
+            if existing_dir_strategy == "replace" and os.path.exists(project_dir):
+                restore_root_dir = tempfile.mkdtemp(prefix="label_export_restore_")
+                restore_project_dir = os.path.join(restore_root_dir, os.path.basename(project_dir))
+                shutil.move(project_dir, restore_project_dir)
+            elif existing_dir_strategy == "backup" and os.path.exists(project_dir):
+                renamed_backup_dir = backup_dir
+                os.rename(project_dir, renamed_backup_dir)
+            shutil.move(staging_project_dir, project_dir)
+            project_dir_swapped = True
+            created_game_case_dir = os.path.join(customs_game_examples_dir, project_name)
+            game_case_dir_existed = os.path.exists(created_game_case_dir)
+            os.makedirs(created_game_case_dir, exist_ok=True)
             QMessageBox.information(self, "成功", f"项目已导出至 {project_dir}")
+        except Exception as exc:
+            if staging_project_dir and os.path.exists(staging_project_dir):
+                shutil.rmtree(staging_project_dir, ignore_errors=True)
+            if project_dir_swapped and os.path.exists(project_dir):
+                shutil.rmtree(project_dir, ignore_errors=True)
+            if restore_project_dir and os.path.exists(restore_project_dir):
+                shutil.move(restore_project_dir, project_dir)
+            elif renamed_backup_dir and os.path.exists(renamed_backup_dir) and not os.path.exists(project_dir):
+                os.rename(renamed_backup_dir, project_dir)
+            if created_game_case_dir and not game_case_dir_existed and os.path.isdir(created_game_case_dir):
+                try:
+                    os.rmdir(created_game_case_dir)
+                except OSError:
+                    pass
+            self.project.name = original_project_name
+            QMessageBox.critical(self, "导出失败", f"导出失败，已恢复导出前状态。\n\n{exc}")
         finally:
-            if imported_resource_backup_dir and os.path.isdir(imported_resource_backup_dir):
-                shutil.rmtree(imported_resource_backup_dir, ignore_errors=True)
+            if export_temp_dir and os.path.isdir(export_temp_dir):
+                shutil.rmtree(export_temp_dir, ignore_errors=True)
+            if restore_root_dir and os.path.isdir(restore_root_dir):
+                shutil.rmtree(restore_root_dir, ignore_errors=True)
     def import_project(self):
         import_dir = QFileDialog.getExistingDirectory(self, "选择导入目录")
         if not import_dir:

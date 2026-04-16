@@ -1,5 +1,5 @@
 import time
-from typing import List, Optional, Tuple, TYPE_CHECKING
+from typing import Callable, List, Optional, Tuple, TYPE_CHECKING
 
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigator import MapNavigator
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.toolkit import (
@@ -107,6 +107,7 @@ class RunningManager:
         self.last_valid_location: Optional[Tuple[int, int]] = None
         self.last_jump_replan_time: float = 0.0
         self.ignore_vehicle_until: float = 0.0
+        self.pause_sp_callback: Optional[Callable] = None
 
     def reset(self, finding_car: bool = True):
         self.road_list = []
@@ -320,11 +321,13 @@ class RunningManager:
         w.change_stage("结束阶段")
 
     def _handle_rank_finish(self, w: "FrameWorker"):
-        self.stop_auto_forward(w)
-        spectate = w.get_info("观战对手")
-        if spectate:
-            w.click(spectate)
-            time.sleep(2)
+        if callable(self.pause_sp_callback):
+            self.pause_sp_callback(w)
+        else:
+            w.click("sp")
+            time.sleep(0.5)
+        time.sleep(1)
+        w.click("观战对手")
         self.reset()
         w.change_stage("结束阶段")
 

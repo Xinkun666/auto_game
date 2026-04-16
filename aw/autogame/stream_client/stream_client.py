@@ -111,6 +111,8 @@ class StreamClient:
         self.stub_ = None
         self.channel = None
         self.host = '127.0.0.1:12345'
+        self.reconnect_base_delay = 1.0
+        self.reconnect_max_delay = 5.0
 
         # ---------- 图像参数 ----------
         self.width = 720
@@ -180,18 +182,7 @@ class StreamClient:
         print("[Stream] Stopping client...")
 
         # 1. 通知服务端结束流
-        try:
-            if self.stub_ is not None and faststream_pb2 is not None:
-                self.stub_.EndStream(faststream_pb2.Empty(), timeout=1)
-        except Exception as e:
-            print("[Stream] EndStream warning: %s" % e)
-
-        # 2. 关闭 channel
-        try:
-            if self.channel is not None:
-                self.channel.close()
-        except Exception as e:
-            print("[Stream] Channel close warning: %s" % e)
+        self._close_transport(send_end_stream=True)
 
         # 3. 结束保存线程
         try:
@@ -271,59 +262,95 @@ class StreamClient:
         expected_size = self.width * self.height * 4  # RGBX
 
         try:
-            self.channel = grpc.insecure_channel(self.host, options=options)
-            grpc.channel_ready_future(self.channel).result(timeout=5)
-            self.stub_ = faststream_pb2_grpc.StreamServiceStub(self.channel)
+            reconnect_attempt = 0
+            while self.running and not self._stop_event.is_set():
+                try:
+                    self.channel = grpc.insecure_channel(self.host, options=options)
+                    grpc.channel_ready_future(self.channel).result(timeout=5)
+                    self.stub_ = faststream_pb2_grpc.StreamServiceStub(self.channel)
 
-            stream_config = faststream_pb2.StreamConfig(
-                lowh=lowh,
-                highh=highh,
-                skip=skip,
-                width=width,
-                height=height,
-                layerid=layerid
-            )
+                    stream_config = faststream_pb2.StreamConfig(
+                        lowh=lowh,
+                        highh=highh,
+                        skip=skip,
+                        width=width,
+                        height=height,
+                        layerid=layerid
+                    )
 
-            print("[Stream] Start receiving...")
-            responses = self.stub_.StartStream(stream_config)
+                    print("[Stream] Start receiving...")
+                    responses = self.stub_.StartStream(stream_config)
+                    reconnect_attempt = 0
 
-            for message in responses:
-                if not self.running or self._stop_event.is_set():
-                    break
+                    for message in responses:
+                        if not self.running or self._stop_event.is_set():
+                            break
 
-                data = message.data
-                if not data:
-                    continue
+                        data = message.data
+                        if not data:
+                            continue
 
-                data = bytes(data)
+                        data = bytes(data)
 
-                # 风险控制 1：长度不符直接丢弃，避免无意义解码异常
-                if len(data) != expected_size:
-                    print("[Stream] Frame size mismatch: got=%d, expected=%d" % (len(data), expected_size))
-                    continue
+                        # 风险控制 1：长度不符直接丢弃，避免无意义解码异常
+                        if len(data) != expected_size:
+                            print("[Stream] Frame size mismatch: got=%d, expected=%d" % (len(data), expected_size))
+                            continue
 
-                frame = self.decode_frame(data)
-                frame = apply_rotation(frame, self.rotation_mode)
-                if frame is None:
-                    continue
+                        frame = self.decode_frame(data)
+                        frame = apply_rotation(frame, self.rotation_mode)
+                        if frame is None:
+                            continue
 
-                # 统一出口，便于后续扩展
-                self.on_frame(frame)
+                        # 统一出口，便于后续扩展
+                        self.on_frame(frame)
 
-                if self.save_frame:
-                    self._enqueue_save(frame)
+                        if self.save_frame:
+                            self._enqueue_save(frame)
 
-            print("[Stream] Receive loop exited.")
+                    if not self.running or self._stop_event.is_set():
+                        print("[Stream] Receive loop exited.")
+                        break
 
-        except grpc.FutureTimeoutError:
-            if self.running:
-                print("[Stream] Channel ready timeout.")
-        except grpc.RpcError as e:
-            if self.running:
-                print("[Stream] gRPC Error: %s" % e)
-        except Exception as e:
-            if self.running:
-                print("[Stream] Runtime Error: %s" % e)
+                    reconnect_attempt += 1
+                    delay = self._get_reconnect_delay(reconnect_attempt)
+                    print(
+                        "[Stream] Receive loop ended unexpectedly. "
+                        "Reconnect in %.1fs (attempt=%d)." % (delay, reconnect_attempt)
+                    )
+                    if self._stop_event.wait(delay):
+                        break
+
+                except grpc.FutureTimeoutError:
+                    if not self.running or self._stop_event.is_set():
+                        break
+                    reconnect_attempt += 1
+                    delay = self._get_reconnect_delay(reconnect_attempt)
+                    print("[Stream] Channel ready timeout. Reconnect in %.1fs (attempt=%d)." % (delay, reconnect_attempt))
+                    if self._stop_event.wait(delay):
+                        break
+                except grpc.RpcError as e:
+                    if not self.running or self._stop_event.is_set():
+                        break
+                    reconnect_attempt += 1
+                    delay = self._get_reconnect_delay(reconnect_attempt)
+                    status = e.code() if hasattr(e, "code") else "UNKNOWN"
+                    details = e.details() if hasattr(e, "details") else str(e)
+                    print("[Stream] gRPC Error: code=%s details=%s" % (status, details))
+                    print("[Stream] Reconnect in %.1fs (attempt=%d)." % (delay, reconnect_attempt))
+                    if self._stop_event.wait(delay):
+                        break
+                except Exception as e:
+                    if not self.running or self._stop_event.is_set():
+                        break
+                    reconnect_attempt += 1
+                    delay = self._get_reconnect_delay(reconnect_attempt)
+                    print("[Stream] Runtime Error: %s" % e)
+                    print("[Stream] Reconnect in %.1fs (attempt=%d)." % (delay, reconnect_attempt))
+                    if self._stop_event.wait(delay):
+                        break
+                finally:
+                    self._close_transport(send_end_stream=False)
         finally:
             # 注意：这里不直接 self.stop()，避免后台线程中自我 join 风险
             self._cleanup_after_run()
@@ -434,26 +461,37 @@ class StreamClient:
             self._loop_owner = None
             self._stop_event.set()
 
-        try:
-            if self.stub_ is not None and faststream_pb2 is not None:
-                self.stub_.EndStream(faststream_pb2.Empty(), timeout=1)
-        except Exception:
-            pass
-
-        try:
-            if self.channel is not None:
-                self.channel.close()
-        except Exception:
-            pass
-
-        self.stub_ = None
-        self.channel = None
+        self._close_transport(send_end_stream=True)
 
         # 通知保存线程收尾
         try:
             self.save_queue.put_nowait(None)
         except Exception:
             pass
+
+    def _close_transport(self, send_end_stream: bool = False):
+        if send_end_stream:
+            try:
+                if self.stub_ is not None and faststream_pb2 is not None:
+                    self.stub_.EndStream(faststream_pb2.Empty(), timeout=1)
+            except Exception as e:
+                if self.running and not self._stop_event.is_set():
+                    print("[Stream] EndStream warning: %s" % e)
+
+        try:
+            if self.channel is not None:
+                self.channel.close()
+        except Exception as e:
+            if self.running and not self._stop_event.is_set():
+                print("[Stream] Channel close warning: %s" % e)
+
+        self.stub_ = None
+        self.channel = None
+
+    def _get_reconnect_delay(self, attempt: int) -> float:
+        attempt = max(1, int(attempt))
+        delay = self.reconnect_base_delay * (2 ** (attempt - 1))
+        return min(self.reconnect_max_delay, delay)
 
 
 class HDCSnapshotClient:

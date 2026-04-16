@@ -50,6 +50,8 @@ SP_SAVE_LONG_PRESS_MS = 3000
 
 start_game = False
 final_shutdown_pending = False
+next_phase_report_time = 0.0
+all_done_reported = False
 parachute_manager = ParachuteManager()
 running_manager = RunningManager()
 driving_manager = DrivingManager()
@@ -58,8 +60,22 @@ house_exit_manager = HouseExitManager()
 phase_timer = PhaseTimeManager(PHASE_DURATIONS, PHASE_STAGE_MAP)
 
 
+def pause_sp_after_death(w: "FrameWorker"):
+    w.click("sp")
+    time.sleep(0.5)
+    phase_timer.mark_sp_stopped()
+
+
+running_manager.pause_sp_callback = pause_sp_after_death
+driving_manager.pause_sp_callback = pause_sp_after_death
+
+
 def prepare_round():
+    global next_phase_report_time, all_done_reported
+
     phase_timer.start_new_round()
+    next_phase_report_time = 0.0
+    all_done_reported = False
 
     need_drive = phase_timer.need_drive()
     drop_target = DROP_TARGET_GARAGE if need_drive else DROP_TARGET_CENTER
@@ -121,6 +137,43 @@ def finalize_after_lobby(w: "FrameWorker"):
     w.stop()
 
 
+def _format_phase_seconds(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    minutes, sec = divmod(seconds, 60)
+    return f"{minutes:02d}:{sec:02d}"
+
+
+def maybe_report_phase_remaining():
+    global next_phase_report_time, all_done_reported
+
+    if phase_timer.start_game_time is None:
+        return
+
+    now = time.time()
+    if next_phase_report_time <= 0.0:
+        next_phase_report_time = now + 5.0
+
+    if now >= next_phase_report_time:
+        running_remaining = phase_timer.get_remaining(PHASE_RUNNING)
+        driving_remaining = phase_timer.get_remaining(PHASE_DRIVING)
+        print(
+            "[Timer] 阶段剩余时间 | "
+            f"跑图={_format_phase_seconds(running_remaining)} | "
+            f"开车={_format_phase_seconds(driving_remaining)}"
+        )
+        next_phase_report_time = now + 5.0
+
+    if phase_timer.all_done() and not all_done_reported:
+        running_remaining = phase_timer.get_remaining(PHASE_RUNNING)
+        driving_remaining = phase_timer.get_remaining(PHASE_DRIVING)
+        print(
+            "[Timer] 跑图和开车阶段均已圆满结束 | "
+            f"跑图剩余={_format_phase_seconds(running_remaining)} | "
+            f"开车剩余={_format_phase_seconds(driving_remaining)}"
+        )
+        all_done_reported = True
+
+
 def on_stage(w: "FrameWorker"):
     global start_game, final_shutdown_pending
 
@@ -133,6 +186,9 @@ def on_stage(w: "FrameWorker"):
 
     if "landed" in stage_events and not phase_timer.all_done():
         handle_sp_start(w)
+
+    if w.current_stage in {"跑图阶段", "开车阶段"}:
+        maybe_report_phase_remaining()
 
     if w.current_stage == "关闭弹窗阶段":
         if w.get_info("关闭公告"):

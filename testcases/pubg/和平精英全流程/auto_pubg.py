@@ -55,7 +55,13 @@ class auto_pubg(TestCase):
             self.driver.touch(pos)
             time.sleep(delay)
 
-        self.driver.find_component(BY.type("TextInput")).inputText(self.game_display_name)
+        text_input = self._wait_for_component(
+            BY.type("TextInput"),
+            timeout=12,
+            interval=1.0,
+            desc="性能工具应用搜索输入框",
+        )
+        text_input.inputText(self.game_display_name)
         time.sleep(1)
 
         print("启动游戏并开始测试")
@@ -63,6 +69,15 @@ class auto_pubg(TestCase):
         time.sleep(10)
         self.driver.touch((0.49, 0.94))  # 点击开始测试
         time.sleep(1)
+
+    def _wait_for_component(self, selector, timeout=10, interval=1.0, desc="目标控件"):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            component = self.driver.find_component(selector)
+            if component is not None:
+                return component
+            time.sleep(interval)
+        raise RuntimeError(f"未找到{desc}，请检查当前页面是否已正确进入目标界面")
 
     def start_yuanshen(self):
         print('和平精英-启动!!!')

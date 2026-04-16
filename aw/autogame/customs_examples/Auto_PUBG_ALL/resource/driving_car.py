@@ -1,6 +1,6 @@
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigator import MapNavigator
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.obstacle_analyzer import (
@@ -33,6 +33,8 @@ class DrivingManager:
     TARGET_FIRST_DIR = 115
     FIRST_ALIGN_TOLERANCE = 1
     ESCAPE_ALIGN_TOLERANCE = 8
+    EXIT_GARAGE_WARMUP_FORWARD_MS = 700
+    EXIT_GARAGE_BRAKE_MS = 500
 
     # 车辆方向与目标方向的允许误差；小于该值时直接视为已对齐
     ALIGN_THRESHOLD = 8
@@ -129,6 +131,7 @@ class DrivingManager:
         self.blocked_motion_count = 0
         self.last_auto_brake_time = 0.0
         self.allow_running_fallback = True
+        self.pause_sp_callback: Optional[Callable] = None
 
         self._frame_action_executed = False
 
@@ -370,28 +373,26 @@ class DrivingManager:
 
     def _handle_first_car_alignment(self, w: "FrameWorker", direction: float):
         if not self.exit_garage_warmup_done:
-            print("[Driving] 首次出库先前探 700ms")
-            self._tap_single_control(w, "up", wait=700, dura=100)
+            print(
+                f"[Driving] 首次出库先前开 {self.EXIT_GARAGE_WARMUP_FORWARD_MS}ms，"
+                f"随后立即刹停 {self.EXIT_GARAGE_BRAKE_MS}ms"
+            )
+            self._tap_single_control(w, "up", wait=self.EXIT_GARAGE_WARMUP_FORWARD_MS, dura=100)
+            self._tap_single_control(w, "brake", wait=self.EXIT_GARAGE_BRAKE_MS)
             self.exit_garage_warmup_done = True
             return
 
         turn_dir, _, diff = calculate_move_count(direction, self.TARGET_FIRST_DIR)
         if turn_dir is not None and diff > self.FIRST_ALIGN_TOLERANCE:
             duration = self._get_exit_alignment_duration(diff)
-            if diff <= 12:
-                action = "brake_turn_left" if turn_dir == "left" else "brake_turn_right"
-                print(
-                    f"[Driving] 出库精调角度: current={direction:.1f}, "
-                    f"target={self.TARGET_FIRST_DIR}, diff={diff:.2f}, action={action}, duration={duration}"
-                )
-                self._execute_maneuver(w, action, duration=duration, brake_with_steer=False)
-            else:
-                action = "forward_turn_left" if turn_dir == "left" else "forward_turn_right"
-                print(
-                    f"[Driving] 出库转向修正: current={direction:.1f}, "
-                    f"target={self.TARGET_FIRST_DIR}, diff={diff:.2f}, action={action}, duration={duration}"
-                )
-                self._execute_maneuver(w, action, duration=duration, brake_with_steer=True)
+            action = "forward_turn_left" if turn_dir == "left" else "forward_turn_right"
+            print(
+                f"[Driving] 出库角度修正: current={direction:.1f}, "
+                f"target={self.TARGET_FIRST_DIR}, diff={diff:.2f}, "
+                f"action={action}, steer_duration={duration}ms, "
+                f"post_brake={self.EXIT_GARAGE_BRAKE_MS}ms"
+            )
+            self._execute_exit_garage_alignment(w, turn_dir, duration)
             return
 
         self._tap_single_control(w, "up", wait=5000, dura=100)
@@ -581,6 +582,11 @@ class DrivingManager:
             return 0
         return max(50, min(600, int(round(diff * 10))))
 
+    def _execute_exit_garage_alignment(self, w: "FrameWorker", turn_dir: str, duration: int):
+        steer_key = "left" if turn_dir == "left" else "right"
+        self._tap_double_control(w, "up", steer_key, wait=duration)
+        self._tap_single_control(w, "brake", wait=self.EXIT_GARAGE_BRAKE_MS)
+
     def _get_turn_duration(
         self,
         diff: float,
@@ -746,11 +752,15 @@ class DrivingManager:
         w.change_stage("结束阶段")
 
     def _handle_rank_finish(self, w: "FrameWorker"):
-        spectate = w.get_info("观战对手")
-        if spectate:
+        if callable(self.pause_sp_callback):
+            self.pause_sp_callback(w)
+        else:
             self._frame_action_executed = True
-            w.click(spectate)
-            time.sleep(2)
+            w.click("sp")
+            time.sleep(0.5)
+        time.sleep(1)
+        self._frame_action_executed = True
+        w.click("观战对手")
         self.reset(max_driving_time=self.max_driving_time)
         w.change_stage("结束阶段")
 

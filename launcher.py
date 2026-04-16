@@ -290,6 +290,7 @@ class LauncherWindow(QWidget):
         self.current_batch_start_timestamp: Optional[str] = None
         self.current_run_start_timestamp: Optional[str] = None
         self.preview_target_info_height = 220
+        self.preview_target_info_width = 360
         self._adjusting_preview_splitter = False
 
         self.setWindowTitle("Auto Game 启动器")
@@ -364,6 +365,7 @@ class LauncherWindow(QWidget):
         self.preview_info_edit.setReadOnly(True)
         self.preview_info_edit.setPlaceholderText("当前帧识别信息会显示在这里...")
         self.preview_info_edit.setMinimumHeight(150)
+        self.preview_info_edit.setMinimumWidth(280)
 
         self._build_ui()
         self._bind_signals()
@@ -676,42 +678,79 @@ class LauncherWindow(QWidget):
         if self._adjusting_preview_splitter:
             return
 
+        total_width = self.preview_splitter.size().width()
         total_height = self.preview_splitter.size().height()
-        if total_height <= 0:
+        if total_width <= 0 or total_height <= 0:
             return
+
+        desired_orientation = (
+            Qt.Orientation.Horizontal
+            if total_width >= total_height * 1.35
+            else Qt.Orientation.Vertical
+        )
+        if self.preview_splitter.orientation() != desired_orientation:
+            self.preview_splitter.setOrientation(desired_orientation)
+            force = True
 
         handle_height = self.preview_splitter.handleWidth()
-        available_height = max(0, total_height - handle_height)
-        if available_height <= 0:
-            return
-
-        min_info_height = max(self.preview_info_edit.minimumHeight(), 150)
-        preferred_info_height = max(min_info_height, self.preview_target_info_height)
         current_sizes = self.preview_splitter.sizes()
         if len(current_sizes) != 2:
-            current_sizes = [available_height - preferred_info_height, preferred_info_height]
+            current_sizes = [max(0, total_width - self.preview_target_info_width), self.preview_target_info_width]
 
-        current_preview_height = max(0, current_sizes[0])
-        current_info_height = max(0, current_sizes[1])
-
-        max_preview_height = max(0, available_height - preferred_info_height)
-        if force:
-            target_preview_height = max_preview_height
-        else:
-            target_preview_height = current_preview_height
-            if current_info_height < preferred_info_height:
-                target_preview_height = max_preview_height
-            elif current_preview_height > max_preview_height + 40:
-                target_preview_height = max_preview_height
-            else:
+        if desired_orientation == Qt.Orientation.Horizontal:
+            available_width = max(0, total_width - handle_height)
+            if available_width <= 0:
                 return
 
-        target_info_height = max(min_info_height, available_height - target_preview_height)
-        target_preview_height = max(0, available_height - target_info_height)
+            min_info_width = max(self.preview_info_edit.minimumWidth(), 280)
+            preferred_info_width = max(min_info_width, self.preview_target_info_width)
+            current_preview_width = max(0, current_sizes[0])
+            current_info_width = max(0, current_sizes[1])
+            max_preview_width = max(0, available_width - preferred_info_width)
+
+            if force:
+                target_preview_width = max_preview_width
+            else:
+                target_preview_width = current_preview_width
+                if current_info_width < preferred_info_width:
+                    target_preview_width = max_preview_width
+                elif current_preview_width > max_preview_width + 40:
+                    target_preview_width = max_preview_width
+                else:
+                    return
+
+            target_info_width = max(min_info_width, available_width - target_preview_width)
+            target_preview_width = max(0, available_width - target_info_width)
+            target_sizes = [target_preview_width, target_info_width]
+        else:
+            available_height = max(0, total_height - handle_height)
+            if available_height <= 0:
+                return
+
+            min_info_height = max(self.preview_info_edit.minimumHeight(), 150)
+            preferred_info_height = max(min_info_height, self.preview_target_info_height)
+            current_preview_height = max(0, current_sizes[0])
+            current_info_height = max(0, current_sizes[1])
+            max_preview_height = max(0, available_height - preferred_info_height)
+
+            if force:
+                target_preview_height = max_preview_height
+            else:
+                target_preview_height = current_preview_height
+                if current_info_height < preferred_info_height:
+                    target_preview_height = max_preview_height
+                elif current_preview_height > max_preview_height + 40:
+                    target_preview_height = max_preview_height
+                else:
+                    return
+
+            target_info_height = max(min_info_height, available_height - target_preview_height)
+            target_preview_height = max(0, available_height - target_info_height)
+            target_sizes = [target_preview_height, target_info_height]
 
         self._adjusting_preview_splitter = True
         try:
-            self.preview_splitter.setSizes([target_preview_height, target_info_height])
+            self.preview_splitter.setSizes(target_sizes)
         finally:
             self._adjusting_preview_splitter = False
 
@@ -962,6 +1001,7 @@ class LauncherWindow(QWidget):
             f"safe_temp={plan['safe_temp']}°C, safe_battery={plan['safe_battery']}%, "
             f"safe_time={plan['safe_minutes']}分钟, cleanup_apps={plan['cleanup_apps']}\n"
         )
+        self._cleanup_apps_between_runs("批次启动前预清理")
         self._check_and_start_if_safe()
 
     def _finish_batch(self, message: str):

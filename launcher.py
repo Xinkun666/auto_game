@@ -287,6 +287,10 @@ class LauncherWindow(QWidget):
         self.current_run_timed_out = False
         self.current_run_output_start = 0
         self.preserve_device_apps_on_manual_stop = True
+        self.current_batch_start_timestamp: Optional[str] = None
+        self.current_run_start_timestamp: Optional[str] = None
+        self.preview_target_info_height = 220
+        self._adjusting_preview_splitter = False
 
         self.setWindowTitle("Auto Game 启动器")
         self.resize(1260, 860)
@@ -352,7 +356,8 @@ class LauncherWindow(QWidget):
 
         self.preview_image_label = QLabel("启动后将在这里实时显示可视化帧")
         self.preview_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_image_label.setMinimumSize(640, 440)
+        self.preview_image_label.setMinimumWidth(640)
+        self.preview_image_label.setMinimumHeight(320)
         self.preview_image_label.setStyleSheet("border: 1px solid #666; background: #111; color: #ddd;")
 
         self.preview_info_edit = QPlainTextEdit()
@@ -420,7 +425,7 @@ class LauncherWindow(QWidget):
         self.preview_splitter.addWidget(self.preview_info_edit)
         self.preview_splitter.setStretchFactor(0, 4)
         self.preview_splitter.setStretchFactor(1, 1)
-        self.preview_splitter.setSizes([700, 180])
+        self.preview_splitter.setSizes([620, self.preview_target_info_height])
         preview_layout.addWidget(self.preview_splitter)
 
         log_group = QGroupBox("运行输出")
@@ -487,6 +492,7 @@ class LauncherWindow(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._adjust_preview_splitter_sizes()
         self._refresh_preview_pixmap()
 
     def _sync_mode_ui(self):
@@ -666,10 +672,54 @@ class LauncherWindow(QWidget):
             elif path.is_dir():
                 shutil.rmtree(path, ignore_errors=True)
 
+    def _adjust_preview_splitter_sizes(self, force: bool = False):
+        if self._adjusting_preview_splitter:
+            return
+
+        total_height = self.preview_splitter.size().height()
+        if total_height <= 0:
+            return
+
+        handle_height = self.preview_splitter.handleWidth()
+        available_height = max(0, total_height - handle_height)
+        if available_height <= 0:
+            return
+
+        min_info_height = max(self.preview_info_edit.minimumHeight(), 150)
+        preferred_info_height = max(min_info_height, self.preview_target_info_height)
+        current_sizes = self.preview_splitter.sizes()
+        if len(current_sizes) != 2:
+            current_sizes = [available_height - preferred_info_height, preferred_info_height]
+
+        current_preview_height = max(0, current_sizes[0])
+        current_info_height = max(0, current_sizes[1])
+
+        max_preview_height = max(0, available_height - preferred_info_height)
+        if force:
+            target_preview_height = max_preview_height
+        else:
+            target_preview_height = current_preview_height
+            if current_info_height < preferred_info_height:
+                target_preview_height = max_preview_height
+            elif current_preview_height > max_preview_height + 40:
+                target_preview_height = max_preview_height
+            else:
+                return
+
+        target_info_height = max(min_info_height, available_height - target_preview_height)
+        target_preview_height = max(0, available_height - target_info_height)
+
+        self._adjusting_preview_splitter = True
+        try:
+            self.preview_splitter.setSizes([target_preview_height, target_info_height])
+        finally:
+            self._adjusting_preview_splitter = False
+
     def _refresh_preview_pixmap(self):
         if self.latest_preview_pixmap is None:
             return
         display_pixmap = self._build_preview_display_pixmap()
+        self._adjust_preview_splitter_sizes()
         scaled = display_pixmap.scaled(
             self.preview_image_label.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
@@ -813,6 +863,7 @@ class LauncherWindow(QWidget):
         self.latest_preview_pixmap = pixmap
         self.latest_preview_payload = payload if isinstance(payload, dict) else {"raw": payload}
         self.preview_image_label.setText("")
+        self._adjust_preview_splitter_sizes()
         self._refresh_preview_pixmap()
         self.preview_info_edit.setPlainText(
             json.dumps(payload, ensure_ascii=False, indent=2)
@@ -893,6 +944,8 @@ class LauncherWindow(QWidget):
     def _begin_batch(self, plan: dict):
         LOGGER.info("begin_batch: %s", plan)
         self.current_plan = plan
+        self.current_batch_start_timestamp = time.strftime("%Y%m%d%H%M%S")
+        self.current_run_start_timestamp = None
         self.batch_active = True
         self.stop_requested = False
         self.current_run_index = 0
@@ -919,6 +972,8 @@ class LauncherWindow(QWidget):
         self.current_run_timed_out = False
         self.current_run_output_start = 0
         self.preserve_device_apps_on_manual_stop = True
+        self.current_batch_start_timestamp = None
+        self.current_run_start_timestamp = None
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self._set_inputs_enabled(True)
@@ -1025,6 +1080,7 @@ class LauncherWindow(QWidget):
             self.current_plan,
         )
         self.current_run_timed_out = False
+        self.current_run_start_timestamp = time.strftime("%Y%m%d%H%M%S")
         self._clear_preview_files()
         self.current_run_output_start = len(self.output_edit.toPlainText())
 
@@ -1117,6 +1173,8 @@ class LauncherWindow(QWidget):
                     "testcase_label": self.current_plan["testcase_label"],
                     "exit_code": exit_code,
                     "timed_out": self.current_run_timed_out,
+                    "batch_start_timestamp": self.current_batch_start_timestamp,
+                    "run_start_timestamp": self.current_run_start_timestamp,
                 },
             )
             self._log_message(f"[Launcher] 本次运行产物已归档到：{archive_dir}\n")

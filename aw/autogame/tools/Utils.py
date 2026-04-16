@@ -65,26 +65,81 @@ def _sanitize_archive_name_part(value: str) -> str:
     return value or "unknown"
 
 
-def _build_archive_prefix(extra_metadata: Optional[dict]) -> str:
+def _resolve_batch_start_timestamp(extra_metadata: Optional[dict]) -> str:
     extra_metadata = extra_metadata or {}
-    project_case = _sanitize_archive_name_part(extra_metadata.get("project_case", "project"))
-    testcase_label = extra_metadata.get("testcase_label")
-    target_case = extra_metadata.get("target_case")
-    testcase_name = _sanitize_archive_name_part(testcase_label or target_case or "case")
-    return f"{project_case}_{testcase_name}"
+    value = str(extra_metadata.get("batch_start_timestamp") or "").strip()
+    if value:
+        return value
+    return time.strftime("%Y%m%d%H%M%S")
+
+
+def _resolve_run_timestamp(extra_metadata: Optional[dict]) -> str:
+    extra_metadata = extra_metadata or {}
+    value = str(extra_metadata.get("run_start_timestamp") or "").strip()
+    if value:
+        return value
+    return time.strftime("%Y%m%d%H%M%S")
 
 
 def _build_archive_dir(run_index: int, extra_metadata: Optional[dict] = None) -> Path:
-    timestamp = time.strftime("%Y%m%d%H%M%S")
-    archive_prefix = _build_archive_prefix(extra_metadata)
-    base_dir = TEMP_DIR / f"{archive_prefix}_{timestamp}_第{run_index}次用例"
+    batch_timestamp = _resolve_batch_start_timestamp(extra_metadata)
+    run_timestamp = _resolve_run_timestamp(extra_metadata)
+
+    batch_dir = TEMP_DIR / f"game_cases_{batch_timestamp}"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+
+    base_dir = batch_dir / f"第{run_index}次_{run_timestamp}"
     archive_dir = base_dir
     suffix = 1
     while archive_dir.exists():
-        archive_dir = TEMP_DIR / f"{base_dir.name}_{suffix}"
+        archive_dir = batch_dir / f"{base_dir.name}_{suffix}"
         suffix += 1
     archive_dir.mkdir(parents=True, exist_ok=True)
     return archive_dir
+
+
+def _frame_sort_key(path: Path):
+    match = re.search(r"frame_(\d+)", path.stem)
+    if match:
+        return int(match.group(1))
+    return path.name
+
+
+def _create_preview_video(src_dir: Path, output_path: Path, fps: int = 10) -> Optional[str]:
+    frame_paths = sorted(src_dir.glob("frame_*.jpg"), key=_frame_sort_key)
+    if not frame_paths:
+        return None
+
+    first_frame = cv2.imread(str(frame_paths[0]))
+    if first_frame is None:
+        return None
+
+    height, width = first_frame.shape[:2]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(output_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        float(fps),
+        (width, height),
+    )
+
+    if not writer.isOpened():
+        return None
+
+    try:
+        for frame_path in frame_paths:
+            frame = cv2.imread(str(frame_path))
+            if frame is None:
+                continue
+            if frame.shape[1] != width or frame.shape[0] != height:
+                frame = cv2.resize(frame, (width, height))
+            writer.write(frame)
+    finally:
+        writer.release()
+
+    if output_path.exists():
+        return output_path.name
+    return None
 
 
 def archive_run_artifacts(
@@ -99,6 +154,11 @@ def archive_run_artifacts(
 
     copied_log_files = _copy_top_level_log_files(log_archive_dir)
     copied_process_files = _copy_process_temp_logs(process_archive_dir)
+    video_file = _create_preview_video(
+        process_archive_dir,
+        archive_dir / "preview_10fps.mp4",
+        fps=10,
+    )
 
     if extra_text_files:
         for name, content in extra_text_files.items():
@@ -111,8 +171,10 @@ def archive_run_artifacts(
         "run_index": run_index,
         "archive_time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "archive_dir": str(archive_dir),
+        "batch_dir": str(archive_dir.parent),
         "copied_log_files": copied_log_files,
         "copied_process_temp_logs": copied_process_files,
+        "preview_video": video_file,
     }
     if extra_metadata:
         metadata.update(extra_metadata)

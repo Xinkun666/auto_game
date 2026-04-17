@@ -668,6 +668,66 @@ class SendEventController:
         _, trace = self.mt._pixel_to_abs(x0, y0, return_trace=True)
         return trace
 
+    @staticmethod
+    def _to_unsigned32_decimal(value: int) -> int:
+        return int(value) & 0xffffffff
+
+    def _build_immediate_contact_commands(self, input_prefix: str, finger: FingerState, include_vendor_prefix: bool = False):
+        profile = self.mt._get_contact_profile(finger)
+        cmd_list = []
+
+        if include_vendor_prefix:
+            vendor_2a = profile.get("vendor_2a")
+            if vendor_2a is not None and self.mt.frame_seq == 0:
+                cmd_list.append(f"{input_prefix} 3 42 {int(vendor_2a)}")
+
+            vendor_2b = int(profile["vendor_2b"]) + int(self.mt.frame_seq)
+            cmd_list.append(f"{input_prefix} 3 43 {vendor_2b}")
+
+        cmd_list.extend([
+            f"{input_prefix} 3 53 {int(finger.x_abs)}",
+            f"{input_prefix} 3 54 {int(finger.y_abs)}",
+            f"{input_prefix} 3 58 {int(profile['pressure'])}",
+            f"{input_prefix} 3 57 {int(finger.tracking_id)}",
+            f"{input_prefix} 3 48 {int(profile['major'])}",
+            f"{input_prefix} 3 49 {int(profile['minor'])}",
+            f"{input_prefix} 3 52 {self._to_unsigned32_decimal(int(profile['orientation']))}",
+            f"{input_prefix} 3 56 {int(profile['blob'])}",
+            f"{input_prefix} 0 2 0",
+        ])
+        return cmd_list
+
+    def _advance_immediate_frame_state(self):
+        self.mt.frame_seq += 1
+        for finger in self.mt.active_fingers.values():
+            finger.contact_phase += 1
+
+    def _send_immediate_frame(self, include_btn_touch_down: bool = False, include_btn_touch_up: bool = False):
+        self.ensure_screen_mapping()
+        input_prefix = f"sendevent /dev/input/{self.mt.input_device}"
+        cmd_list = []
+
+        report_fingers = self.mt._get_report_fingers()
+        for idx, finger in enumerate(report_fingers):
+            cmd_list.extend(
+                self._build_immediate_contact_commands(
+                    input_prefix,
+                    finger,
+                    include_vendor_prefix=(idx == 0),
+                )
+            )
+
+        if include_btn_touch_down:
+            cmd_list.append(f"{input_prefix} 1 330 1")
+
+        if include_btn_touch_up:
+            cmd_list.append(f"{input_prefix} 0 2 0")
+            cmd_list.append(f"{input_prefix} 1 330 0")
+
+        cmd_list.append(f"{input_prefix} 0 0 0")
+        self.dut_handle.run_cmd_with_ret(gen_cmd_str_by_list(cmd_list))
+        self._advance_immediate_frame_state()
+
     def _build_legacy_single_touch_text(self, x0, y0, duration_ms):
         x_abs, y_abs = self.mt._pixel_to_abs(x0, y0)
         input_device = self.mt.input_device
@@ -861,12 +921,12 @@ class SendEventController:
     def move_press(self, finger_id: int, pos):
         self.ensure_screen_mapping()
         x0, y0 = int(pos[0]), int(pos[1])
+        if not self.mt.active_fingers:
+            self.mt.reset_frames()
         self._ensure_fingers_available([finger_id])
-        self.mt.reset_frames()
         had_active_fingers = bool(self.mt.active_fingers)
         self.mt.finger_down(finger_id, x0, y0)
-        self.mt.commit_frame(include_btn_touch_down=not had_active_fingers, duration_ms=0)
-        self._flush()
+        self._send_immediate_frame(include_btn_touch_down=not had_active_fingers)
 
     def move_to(self, finger_id: int, pos, duration_ms: int = None):
         if finger_id not in self.mt.active_fingers:
@@ -874,13 +934,19 @@ class SendEventController:
 
         self.ensure_screen_mapping()
         x0, y0 = int(pos[0]), int(pos[1])
-        self.mt.reset_frames()
         self.mt.finger_move(finger_id, x0, y0)
-        self.mt.commit_frame(duration_ms=self._normalize_duration(duration_ms))
-        self._flush()
+        self._send_immediate_frame()
 
     def move_up(self, finger_id: int, duration_ms: int = 0):
-        self.click_up(finger_id=finger_id, duration_ms=duration_ms)
+        if finger_id not in self.mt.active_fingers:
+            return
+
+        self.ensure_screen_mapping()
+        was_last = len(self.mt.active_fingers) == 1
+        self.mt.finger_up(finger_id)
+        self._send_immediate_frame(include_btn_touch_up=was_last)
+        if not self.mt.active_fingers:
+            self.mt.reset_frames()
 
     def click_up(self, finger_id: int = 0, duration_ms: int = 0):
         if finger_id in self._legacy_pressed_fingers:

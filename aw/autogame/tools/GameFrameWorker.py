@@ -271,14 +271,7 @@ def get_panel_abs_xy_check_rotation(dut_handle):
     device_info = dut_handle.run_cmd_with_ret("/data/test/getevent -p")
     abs_w, abs_h, input_device = get_panel_abs_xy(device_info)
     rotation = int(dut_handle.get_screen_rotation())
-
-    if rotation == 0:
-        return 0, 0, abs_w, abs_h, input_device, rotation
-    if rotation == 90:
-        return abs_h, 0, 0, abs_w, input_device, rotation
-    if rotation == 180:
-        return abs_w, abs_h, 0, 0, input_device, rotation
-    return 0, abs_w, abs_h, 0, input_device, rotation
+    return 0, 0, abs_w, abs_h, input_device, rotation
 
 
 def gen_cmd_str_by_list2(cmd_list):
@@ -502,8 +495,6 @@ class MultiTouchController:
         )
 
         x_abs, y_abs = raw_x_abs, raw_y_abs
-        if self.rotation % 180 > 0:
-            x_abs, y_abs = y_abs, x_abs
 
         if return_trace:
             trace = {
@@ -512,6 +503,7 @@ class MultiTouchController:
                 "panel_origin_abs": (int(self.abs_w0), int(self.abs_h0)),
                 "panel_max_abs": (int(self.abs_w), int(self.abs_h)),
                 "panel_rotation": int(self.rotation),
+                "rotation_applied_in_panel_transform": False,
                 "input_device": self.input_device,
                 "raw_panel_abs": (int(raw_x_abs), int(raw_y_abs)),
                 "final_panel_abs": (int(x_abs), int(y_abs)),
@@ -998,10 +990,13 @@ class Controller:
         current_rotation = self._get_cached_rotation()
         trace["display_rotation"] = current_rotation
         trace["screen_size"] = (int(screen_width), int(screen_height))
-        # 当前画面识别点已经处于“显示坐标系”，这里只做显示分辨率映射；
-        # 真正的物理旋转留给 sendevent backend 的 pixel->panel 映射处理。
-        trace["rotation_applied_in_controller"] = False
-        result = (int(round(x + x_bias)), int(round(y + y_bias)))
+        trace["pre_rotation_xy"] = (x + x_bias, y + y_bias)
+        result = convert_display_point_by_rotation(
+            x + x_bias, y + y_bias,
+            int(screen_width), int(screen_height),
+            current_rotation,
+        )
+        trace["rotation_applied_in_controller"] = True
         trace["display_output"] = result
         return (result, trace) if return_trace else result
 
@@ -1124,10 +1119,15 @@ class Controller:
             trace["mapped_from_norm_to_screen"] = None
 
         trace["scaled_xy"] = (scaled_x, scaled_y)
-        # 静态控点在这里仅缩放到当前“显示分辨率”；
-        # 设备旋转由 sendevent backend 在 pixel->panel 阶段统一处理，避免二次旋转。
-        trace["rotation_applied_in_controller"] = False
-        result = (scaled_x + x_bias, scaled_y + y_bias)
+        trace["pre_rotation_xy"] = (scaled_x + x_bias, scaled_y + y_bias)
+        result = convert_display_point_by_rotation(
+            scaled_x + x_bias,
+            scaled_y + y_bias,
+            dst_width,
+            dst_height,
+            current_rotation,
+        )
+        trace["rotation_applied_in_controller"] = True
         trace["display_output"] = result
         return (result, trace) if return_trace else result
 

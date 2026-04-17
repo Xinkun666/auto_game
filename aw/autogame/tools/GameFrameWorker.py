@@ -1318,30 +1318,28 @@ class Controller:
             else:
                 self._run_hdc(f"hdc shell uinput -T -c {x} {y}")
 
-    def move_press(self, finger_id, pos):
+    def move_press(self, finger_id, pos, x_bias=0, y_bias=0):
         self._require_sendevent_backend()
-        if not isinstance(pos, (list, tuple)) or len(pos) != 2:
-            raise ValueError("move_press 的 pos 需要是 (x, y)")
+        target, label = self._get_abs_pos(pos, x_bias=x_bias, y_bias=y_bias)
+        if not target:
+            raise ValueError("move_press 无法解析目标位置，请检查 pos/x_bias/y_bias")
 
-        x, y = self._transform_runtime_point(
-            pos[0],
-            pos[1],
-            normalized=(0 <= pos[0] <= 1.0 and 0 <= pos[1] <= 1.0),
-        )
+        x, y = target
+        desc = label or pos
         print(f"执行 move_press: finger_id={finger_id} @({x},{y})")
+        print(f"move_press 目标: {desc}")
         self.touch_backend.move_press(finger_id, (x, y))
 
-    def move_to(self, finger_id, pos, duration_ms=16):
+    def move_to(self, finger_id, pos, x_bias=0, y_bias=0, duration_ms=16):
         self._require_sendevent_backend()
-        if not isinstance(pos, (list, tuple)) or len(pos) != 2:
-            raise ValueError("move_to 的 pos 需要是 (x, y)")
+        target, label = self._get_abs_pos(pos, x_bias=x_bias, y_bias=y_bias)
+        if not target:
+            raise ValueError("move_to 无法解析目标位置，请检查 pos/x_bias/y_bias")
 
-        x, y = self._transform_runtime_point(
-            pos[0],
-            pos[1],
-            normalized=(0 <= pos[0] <= 1.0 and 0 <= pos[1] <= 1.0),
-        )
+        x, y = target
+        desc = label or pos
         print(f"执行 move_to: finger_id={finger_id} @({x},{y})")
+        print(f"move_to 目标: {desc}")
         self.touch_backend.move_to(finger_id, (x, y), duration_ms=duration_ms)
 
     def move_up(self, finger_id, duration_ms=0):

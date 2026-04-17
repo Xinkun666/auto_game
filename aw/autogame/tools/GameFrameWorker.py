@@ -921,6 +921,10 @@ class SendEventController:
     def move_press(self, finger_id: int, pos):
         self.ensure_screen_mapping()
         x0, y0 = int(pos[0]), int(pos[1])
+        if finger_id in self.mt.active_fingers:
+            self.mt.finger_move(finger_id, x0, y0)
+            self._send_immediate_frame()
+            return
         if not self.mt.active_fingers:
             self.mt.reset_frames()
         self._ensure_fingers_available([finger_id])

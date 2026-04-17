@@ -30,6 +30,12 @@ def run_testcase():
     main_process(f"run -l {DEFAULT_TESTCASE_LABEL}")
 
 
+def should_archive_run_outputs() -> bool:
+    source = os.environ.get("AUTOGAME_RUN_SOURCE", "").strip().lower()
+    vis_mode = os.environ.get("AUTOGAME_VIS_MODE", "").strip().lower()
+    return source == "launcher" or vis_mode == "launcher"
+
+
 if __name__ == '__main__':
     run_mode = os.environ.get("AUTOGAME_MAIN_MODE", "direct").strip().lower()
 
@@ -39,13 +45,14 @@ if __name__ == '__main__':
         else:
             run_direct()
     finally:
-        archive_run_artifacts(
-            run_index=1,
-            source=f"main:{run_mode}",
-            extra_metadata={
-                "run_mode": run_mode,
-                "project_case": os.environ.get("TARGET_PROJECT_CASE", ""),
-                "target_case": os.environ.get("TARGET_GAME_CASE", ""),
-                "testcase_label": DEFAULT_TESTCASE_LABEL if run_mode == "testcase" else None,
-            },
-        )
+        if should_archive_run_outputs():
+            archive_run_artifacts(
+                run_index=1,
+                source=f"main:{run_mode}",
+                extra_metadata={
+                    "run_mode": run_mode,
+                    "project_case": os.environ.get("TARGET_PROJECT_CASE", ""),
+                    "target_case": os.environ.get("TARGET_GAME_CASE", ""),
+                    "testcase_label": DEFAULT_TESTCASE_LABEL if run_mode == "testcase" else None,
+                },
+            )

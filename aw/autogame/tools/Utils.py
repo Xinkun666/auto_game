@@ -435,6 +435,8 @@ def extract_absolute_points(stage_info):
                 key = f"{stage_name}_{point_name}"
                 absolute_points[key] = {
                     "pos": (abs_x, abs_y),
+                    "norm_pos": (float(norm_x), float(norm_y)),
+                    "rect": list(rect),
                     "scene_width": int(img_w),
                     "scene_height": int(img_h),
                 }

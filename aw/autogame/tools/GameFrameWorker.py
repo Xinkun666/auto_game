@@ -988,12 +988,10 @@ class Controller:
         current_rotation = self._get_cached_rotation()
         trace["display_rotation"] = current_rotation
         trace["screen_size"] = (int(screen_width), int(screen_height))
-        trace["pre_rotation_xy"] = (x + x_bias, y + y_bias)
-        result = convert_display_point_by_rotation(
-            x + x_bias, y + y_bias,
-            int(screen_width), int(screen_height),
-            current_rotation,
-        )
+        # 当前画面识别点已经处于“显示坐标系”，这里只做显示分辨率映射；
+        # 真正的物理旋转留给 sendevent backend 的 pixel->panel 映射处理。
+        trace["rotation_applied_in_controller"] = False
+        result = (int(round(x + x_bias)), int(round(y + y_bias)))
         trace["display_output"] = result
         return (result, trace) if return_trace else result
 
@@ -1069,6 +1067,12 @@ class Controller:
 
         x, y = int(pos[0]), int(pos[1])
         trace["input_pos"] = (x, y)
+        norm_pos = button_data.get("norm_pos")
+        if norm_pos and len(norm_pos) == 2:
+            trace["norm_pos"] = (float(norm_pos[0]), float(norm_pos[1]))
+        rect = button_data.get("rect")
+        if rect and len(rect) == 4:
+            trace["rect"] = list(rect)
         if self.backend != "sendevent":
             result = (x + x_bias, y + y_bias)
             trace["display_output"] = result
@@ -1093,20 +1097,27 @@ class Controller:
             trace["display_output"] = result
             return (result, trace) if return_trace else result
 
-        scaled_x, scaled_y = scale_point(
-            x, y,
-            src_width, src_height,
-            dst_width, dst_height,
-        )
+        if norm_pos and len(norm_pos) == 2:
+            mapped_x = float(norm_pos[0]) * float(dst_width)
+            mapped_y = float(norm_pos[1]) * float(dst_height)
+            scaled_x = int(round(mapped_x))
+            scaled_y = int(round(mapped_y))
+            scaled_x = min(max(scaled_x, 0), max(dst_width - 1, 0))
+            scaled_y = min(max(scaled_y, 0), max(dst_height - 1, 0))
+            trace["mapped_from_norm_to_screen"] = (mapped_x, mapped_y)
+        else:
+            scaled_x, scaled_y = scale_point(
+                x, y,
+                src_width, src_height,
+                dst_width, dst_height,
+            )
+            trace["mapped_from_norm_to_screen"] = None
+
         trace["scaled_xy"] = (scaled_x, scaled_y)
-        trace["pre_rotation_xy"] = (scaled_x + x_bias, scaled_y + y_bias)
-        result = convert_display_point_by_rotation(
-            scaled_x + x_bias,
-            scaled_y + y_bias,
-            dst_width,
-            dst_height,
-            current_rotation,
-        )
+        # 静态控点在这里仅缩放到当前“显示分辨率”；
+        # 设备旋转由 sendevent backend 在 pixel->panel 阶段统一处理，避免二次旋转。
+        trace["rotation_applied_in_controller"] = False
+        result = (scaled_x + x_bias, scaled_y + y_bias)
         trace["display_output"] = result
         return (result, trace) if return_trace else result
 

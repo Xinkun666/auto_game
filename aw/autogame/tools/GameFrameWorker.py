@@ -274,6 +274,10 @@ def get_panel_abs_xy_check_rotation(dut_handle):
     return 0, 0, abs_w, abs_h, input_device, rotation
 
 
+def gen_cmd_str_by_list(cmd_list):
+    return " && ".join(cmd_list)
+
+
 def gen_cmd_str_by_list2(cmd_list):
     return "\n".join(cmd_list)
 

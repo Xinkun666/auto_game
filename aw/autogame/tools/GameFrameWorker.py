@@ -936,14 +936,29 @@ class SendEventController:
         self.mt.finger_down(finger_id, x0, y0)
         self._send_immediate_frame(include_btn_touch_down=not had_active_fingers)
 
-    def move_to(self, finger_id: int, pos, duration_ms: int = None):
+    def move_to(self, finger_id: int, pos, duration_ms: int = 160):
         if finger_id not in self.mt.active_fingers:
             raise ValueError(f"finger_id={finger_id} 尚未按下，不能 move_to")
 
         self.ensure_screen_mapping()
         x0, y0 = int(pos[0]), int(pos[1])
-        self.mt.finger_move(finger_id, x0, y0)
-        self._send_immediate_frame()
+        target_x_abs, target_y_abs = self.mt._pixel_to_abs(x0, y0)
+        finger = self.mt.active_fingers[finger_id]
+        start_x_abs, start_y_abs = finger.x_abs, finger.y_abs
+
+        duration_ms = max(self._normalize_duration(duration_ms), self.mt.frame_interval_ms)
+        frame_count = max(3, round(duration_ms / self.mt.frame_interval_ms))
+        path = gen_slider_points_by_bezier(
+            (start_x_abs, start_y_abs),
+            (target_x_abs, target_y_abs),
+            frame_count,
+        )
+
+        for x_abs, y_abs in path[1:]:
+            finger.x_abs = int(x_abs)
+            finger.y_abs = int(y_abs)
+            self.mt.last_changed_finger_id = finger_id
+            self._send_immediate_frame()
 
     def move_up(self, finger_id: int, duration_ms: int = 0):
         if finger_id not in self.mt.active_fingers:
@@ -1404,7 +1419,7 @@ class Controller:
         print(f"move_press 目标: {desc}")
         self.touch_backend.move_press(finger_id, (x, y))
 
-    def move_to(self, finger_id, pos, x_bias=0, y_bias=0, duration_ms=16):
+    def move_to(self, finger_id, pos, x_bias=0, y_bias=0, duration_ms=160):
         self._require_sendevent_backend()
         target, label = self._get_abs_pos(pos, x_bias=x_bias, y_bias=y_bias)
         if not target:

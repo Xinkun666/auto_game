@@ -2,6 +2,7 @@ import os
 import time
 import threading
 import queue
+import atexit
 from datetime import datetime
 import subprocess
 import grpc
@@ -110,6 +111,8 @@ class StreamClient:
         # ---------- gRPC 相关 ----------
         self.stub_ = None
         self.channel = None
+        self._responses = None
+        self._channel_ready = None
         self.host = '127.0.0.1:12345'
         self.reconnect_base_delay = 1.0
         self.reconnect_max_delay = 5.0
@@ -128,9 +131,12 @@ class StreamClient:
         # ---------- 线程/状态保护 ----------
         self._state_lock = threading.Lock()
         self._save_lock = threading.Lock()
+        self._transport_lock = threading.Lock()
 
         if self.save_frame:
             os.makedirs(self.save_dir, exist_ok=True)
+
+        atexit.register(self._atexit_cleanup)
 
     def _ensure_proto_ready(self):
         if faststream_pb2 is None or faststream_pb2_grpc is None:
@@ -173,7 +179,11 @@ class StreamClient:
         """优雅关闭，支持重复调用"""
         loop_owner = None
         with self._state_lock:
-            if not self.running and not self._loop_active:
+            has_transport = any(
+                handle is not None
+                for handle in (self.stub_, self.channel, self._responses, self._channel_ready)
+            )
+            if not self.running and not self._loop_active and not has_transport:
                 return
             self.running = False
             self._stop_event.set()
@@ -213,6 +223,12 @@ class StreamClient:
         self.channel = None
 
         print("[Stream] Client stopped.")
+
+    def _atexit_cleanup(self):
+        try:
+            self.stop()
+        except Exception:
+            pass
 
     # =========================================================
     # 内部主流程
@@ -266,7 +282,8 @@ class StreamClient:
             while self.running and not self._stop_event.is_set():
                 try:
                     self.channel = grpc.insecure_channel(self.host, options=options)
-                    grpc.channel_ready_future(self.channel).result(timeout=5)
+                    self._channel_ready = grpc.channel_ready_future(self.channel)
+                    self._channel_ready.result(timeout=5)
                     self.stub_ = faststream_pb2_grpc.StreamServiceStub(self.channel)
 
                     stream_config = faststream_pb2.StreamConfig(
@@ -280,6 +297,7 @@ class StreamClient:
 
                     print("[Stream] Start receiving...")
                     responses = self.stub_.StartStream(stream_config)
+                    self._responses = responses
                     reconnect_attempt = 0
 
                     for message in responses:
@@ -470,23 +488,50 @@ class StreamClient:
             pass
 
     def _close_transport(self, send_end_stream: bool = False):
+        with self._transport_lock:
+            responses = self._responses
+            channel_ready = self._channel_ready
+            stub = self.stub_
+            channel = self.channel
+
+            self._responses = None
+            self._channel_ready = None
+            self.stub_ = None
+            self.channel = None
+
+        if responses is not None:
+            try:
+                if hasattr(responses, "cancel"):
+                    responses.cancel()
+            except Exception as e:
+                if self.running and not self._stop_event.is_set():
+                    print("[Stream] Response cancel warning: %s" % e)
+            try:
+                if hasattr(responses, "close"):
+                    responses.close()
+            except Exception:
+                pass
+
         if send_end_stream:
             try:
-                if self.stub_ is not None and faststream_pb2 is not None:
-                    self.stub_.EndStream(faststream_pb2.Empty(), timeout=1)
+                if stub is not None and faststream_pb2 is not None:
+                    stub.EndStream(faststream_pb2.Empty(), timeout=1)
             except Exception as e:
                 if self.running and not self._stop_event.is_set():
                     print("[Stream] EndStream warning: %s" % e)
 
-        try:
-            if self.channel is not None:
-                self.channel.close()
-        except Exception as e:
-            if self.running and not self._stop_event.is_set():
-                print("[Stream] Channel close warning: %s" % e)
+        if channel_ready is not None:
+            try:
+                channel_ready.cancel()
+            except Exception:
+                pass
 
-        self.stub_ = None
-        self.channel = None
+        if channel is not None:
+            try:
+                channel.close()
+            except Exception as e:
+                if self.running and not self._stop_event.is_set():
+                    print("[Stream] Channel close warning: %s" % e)
 
     def _get_reconnect_delay(self, attempt: int) -> float:
         attempt = max(1, int(attempt))

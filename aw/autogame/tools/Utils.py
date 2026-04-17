@@ -280,10 +280,14 @@ def run_shell(cmd: str, r = False):
 
 def get_resolution(r = True):
     resolution_mode = run_shell('hdc shell hidumper -s RenderService -a screen', r)
+    if not resolution_mode:
+        print('未能获取分辨率信息!')
+        return None, None
+
     match = re.search(r'activeMode:\s*(\d+)x(\d+)', resolution_mode)
     if match:
-        h, w = int(match.group(1)), int(match.group(2))
-        return w, h
+        width, height = int(match.group(1)), int(match.group(2))
+        return width, height
     else:
         print('未能获取分辨率信息!')
         return None, None

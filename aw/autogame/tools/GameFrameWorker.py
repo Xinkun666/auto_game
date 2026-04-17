@@ -75,11 +75,17 @@ class HdcDut:
                 os.remove(local_path)
 
     def get_resolution(self):
+        rotation = normalize_rotation(self.get_screen_rotation())
+
         try:
             ret = self.run_cmd_with_ret("wm size")
             match = re.search(r"(\d+)\s*x\s*(\d+)", ret)
             if match:
-                return int(match.group(1)), int(match.group(2))
+                return normalize_resolution_by_rotation(
+                    int(match.group(1)),
+                    int(match.group(2)),
+                    rotation,
+                )
         except Exception:
             pass
 
@@ -87,7 +93,11 @@ class HdcDut:
             ret = self.run_cmd_with_ret("hidumper -s RenderService -a screen")
             match = re.search(r"activeMode:\s*(\d+)x(\d+)", ret)
             if match:
-                return int(match.group(1)), int(match.group(2))
+                return normalize_resolution_by_rotation(
+                    int(match.group(1)),
+                    int(match.group(2)),
+                    rotation,
+                )
         except Exception:
             pass
 

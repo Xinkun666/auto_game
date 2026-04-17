@@ -287,7 +287,8 @@ def get_resolution(r = True):
     match = re.search(r'activeMode:\s*(\d+)x(\d+)', resolution_mode)
     if match:
         width, height = int(match.group(1)), int(match.group(2))
-        return width, height
+        rotation = normalize_rotation(get_display_rotation())
+        return normalize_resolution_by_rotation(width, height, rotation)
     else:
         print('未能获取分辨率信息!')
         return None, None
@@ -316,6 +317,20 @@ def normalize_rotation(rotation):
         return value
     mapping = {1: 90, 2: 180, 3: 270}
     return mapping.get(value)
+
+def normalize_resolution_by_rotation(width, height, rotation):
+    if width is None or height is None:
+        return width, height
+
+    width = int(width)
+    height = int(height)
+    rotation = normalize_rotation(rotation)
+
+    if rotation in (90, 270):
+        return (max(width, height), min(width, height))
+    if rotation in (0, 180):
+        return (min(width, height), max(width, height))
+    return width, height
 
 def is_landscape(width, height):
     return width >= height

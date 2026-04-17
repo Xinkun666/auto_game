@@ -478,9 +478,9 @@ class MultiTouchController:
         self.finger_tracking_map[finger_id] = tracking_id
         return tracking_id
 
-    def _pixel_to_abs(self, x0: int, y0: int) -> Tuple[int, int]:
+    def _pixel_to_abs(self, x0: int, y0: int, return_trace: bool = False):
         self.refresh_screen_mapping()
-        x_abs, y_abs = pixel_2_panel_abs_pt(
+        raw_x_abs, raw_y_abs = pixel_2_panel_abs_pt(
             x0,
             y0,
             self.pixel_w,
@@ -491,8 +491,22 @@ class MultiTouchController:
             self.abs_h,
         )
 
+        x_abs, y_abs = raw_x_abs, raw_y_abs
         if self.rotation % 180 > 0:
             x_abs, y_abs = y_abs, x_abs
+
+        if return_trace:
+            trace = {
+                "input_display_xy": (int(x0), int(y0)),
+                "pixel_resolution": (int(self.pixel_w), int(self.pixel_h)),
+                "panel_origin_abs": (int(self.abs_w0), int(self.abs_h0)),
+                "panel_max_abs": (int(self.abs_w), int(self.abs_h)),
+                "panel_rotation": int(self.rotation),
+                "input_device": self.input_device,
+                "raw_panel_abs": (int(raw_x_abs), int(raw_y_abs)),
+                "final_panel_abs": (int(x_abs), int(y_abs)),
+            }
+            return (x_abs, y_abs), trace
 
         return x_abs, y_abs
 
@@ -618,6 +632,11 @@ class SendEventController:
 
     def ensure_screen_mapping(self):
         self.mt.refresh_screen_mapping()
+
+    def get_pixel_to_abs_trace(self, x0: int, y0: int):
+        self.ensure_screen_mapping()
+        _, trace = self.mt._pixel_to_abs(x0, y0, return_trace=True)
+        return trace
 
     def _build_legacy_single_touch_text(self, x0, y0, duration_ms):
         x_abs, y_abs = self.mt._pixel_to_abs(x0, y0)
@@ -927,9 +946,18 @@ class Controller:
             return None
         return int(width), int(height)
 
-    def _transform_runtime_point(self, x, y, normalized=False, x_bias=0, y_bias=0):
+    def _transform_runtime_point(self, x, y, normalized=False, x_bias=0, y_bias=0, return_trace: bool = False):
         current_res = self._get_cached_resolution()
         frame_size = self._get_current_frame_size()
+        trace = {
+            "trace_type": "runtime_point",
+            "input_xy": (x, y),
+            "normalized": bool(normalized),
+            "bias": (x_bias, y_bias),
+            "cached_resolution": current_res,
+            "frame_size": frame_size,
+            "backend": self.backend,
+        }
 
         if current_res is not None and current_res[0] is not None and current_res[1] is not None:
             screen_width, screen_height = int(current_res[0]), int(current_res[1])
@@ -940,93 +968,179 @@ class Controller:
 
         if normalized:
             if screen_width is None or screen_height is None:
-                return int(round(x + x_bias)), int(round(y + y_bias))
+                result = (int(round(x + x_bias)), int(round(y + y_bias)))
+                trace["display_output"] = result
+                return (result, trace) if return_trace else result
             x = float(x) * float(screen_width)
             y = float(y) * float(screen_height)
+            trace["scaled_from_normalized"] = (x, y)
 
         if self.backend != "sendevent":
-            return int(round(x + x_bias)), int(round(y + y_bias))
+            result = (int(round(x + x_bias)), int(round(y + y_bias)))
+            trace["display_output"] = result
+            return (result, trace) if return_trace else result
 
         if screen_width is None or screen_height is None:
-            return int(round(x + x_bias)), int(round(y + y_bias))
+            result = (int(round(x + x_bias)), int(round(y + y_bias)))
+            trace["display_output"] = result
+            return (result, trace) if return_trace else result
 
         current_rotation = self._get_cached_rotation()
-        return convert_display_point_by_rotation(
+        trace["display_rotation"] = current_rotation
+        trace["screen_size"] = (int(screen_width), int(screen_height))
+        trace["pre_rotation_xy"] = (x + x_bias, y + y_bias)
+        result = convert_display_point_by_rotation(
             x + x_bias, y + y_bias,
             int(screen_width), int(screen_height),
             current_rotation,
         )
+        trace["display_output"] = result
+        return (result, trace) if return_trace else result
 
-    def _get_abs_pos(self, btn_input, x_bias=0, y_bias=0):
+    def _get_abs_pos(self, btn_input, x_bias=0, y_bias=0, return_trace: bool = False):
         if isinstance(btn_input, (list, tuple)) and len(btn_input) == 2:
             val_x, val_y = btn_input
 
             if 0 <= val_x <= 1.0 and 0 <= val_y <= 1.0:
-                abs_x, abs_y = self._transform_runtime_point(
-                    val_x, val_y, normalized=True, x_bias=x_bias, y_bias=y_bias
+                result = self._transform_runtime_point(
+                    val_x, val_y, normalized=True, x_bias=x_bias, y_bias=y_bias, return_trace=return_trace
                 )
                 desc = f"Norm({val_x}, {val_y})"
             else:
-                abs_x, abs_y = self._transform_runtime_point(
-                    val_x, val_y, normalized=False, x_bias=x_bias, y_bias=y_bias
+                result = self._transform_runtime_point(
+                    val_x, val_y, normalized=False, x_bias=x_bias, y_bias=y_bias, return_trace=return_trace
                 )
-                desc = f"Abs({abs_x}, {abs_y})"
+                desc = f"Abs({val_x}, {val_y})"
 
+            if return_trace:
+                pos, trace = result
+                desc = f"Norm({val_x}, {val_y})" if 0 <= val_x <= 1.0 and 0 <= val_y <= 1.0 else f"Abs({pos[0]}, {pos[1]})"
+                return pos, desc, trace
+            abs_x, abs_y = result
             return (abs_x, abs_y), desc
 
         if isinstance(btn_input, str):
             stage = self.worker.get_stage()
             if not stage:
+                if return_trace:
+                    return None, None, None
                 return None, None
             full_key = f"{stage}_{btn_input}"
             button_data = self.buttons.get(full_key)
+            if return_trace:
+                pos, trace = self._transform_button_pos(button_data, x_bias=x_bias, y_bias=y_bias, return_trace=True)
+                return pos, full_key, trace
             return self._transform_button_pos(button_data, x_bias=x_bias, y_bias=y_bias), full_key
 
+        if return_trace:
+            return None, None, None
         return None, None
 
-    def _transform_button_pos(self, button_data, x_bias=0, y_bias=0):
+    def _transform_button_pos(self, button_data, x_bias=0, y_bias=0, return_trace: bool = False):
+        trace = {
+            "trace_type": "static_button",
+            "bias": (x_bias, y_bias),
+            "backend": self.backend,
+        }
         if button_data is None:
+            if return_trace:
+                trace["error"] = "button_data is None"
+                return None, trace
             return None
 
         if isinstance(button_data, (list, tuple)) and len(button_data) == 2:
-            return int(button_data[0] + x_bias), int(button_data[1] + y_bias)
+            result = (int(button_data[0] + x_bias), int(button_data[1] + y_bias))
+            trace["input_pos"] = tuple(button_data)
+            trace["display_output"] = result
+            return (result, trace) if return_trace else result
 
         if not isinstance(button_data, dict):
+            if return_trace:
+                trace["error"] = f"unexpected button_data type: {type(button_data).__name__}"
+                return None, trace
             return None
 
         pos = button_data.get("pos")
         if not pos or len(pos) != 2:
+            if return_trace:
+                trace["error"] = "button_data.pos missing"
+                return None, trace
             return None
 
         x, y = int(pos[0]), int(pos[1])
+        trace["input_pos"] = (x, y)
         if self.backend != "sendevent":
-            return x + x_bias, y + y_bias
+            result = (x + x_bias, y + y_bias)
+            trace["display_output"] = result
+            return (result, trace) if return_trace else result
 
         current_res = self._get_cached_resolution()
+        trace["cached_resolution"] = current_res
         if not current_res or current_res[0] is None or current_res[1] is None:
-            return x + x_bias, y + y_bias
+            result = (x + x_bias, y + y_bias)
+            trace["display_output"] = result
+            return (result, trace) if return_trace else result
 
         current_rotation = self._get_cached_rotation()
         src_width = int(button_data.get("scene_width") or 0)
         src_height = int(button_data.get("scene_height") or 0)
         dst_width, dst_height = int(current_res[0]), int(current_res[1])
+        trace["scene_size"] = (src_width, src_height)
+        trace["display_rotation"] = current_rotation
+        trace["screen_size"] = (dst_width, dst_height)
         if src_width <= 0 or src_height <= 0:
-            return x + x_bias, y + y_bias
+            result = (x + x_bias, y + y_bias)
+            trace["display_output"] = result
+            return (result, trace) if return_trace else result
 
         scaled_x, scaled_y = scale_point(
             x, y,
             src_width, src_height,
             dst_width, dst_height,
         )
-        return convert_display_point_by_rotation(
+        trace["scaled_xy"] = (scaled_x, scaled_y)
+        trace["pre_rotation_xy"] = (scaled_x + x_bias, scaled_y + y_bias)
+        result = convert_display_point_by_rotation(
             scaled_x + x_bias,
             scaled_y + y_bias,
             dst_width,
             dst_height,
             current_rotation,
         )
+        trace["display_output"] = result
+        return (result, trace) if return_trace else result
 
-    def _resolve_pos(self, btn_input, x_bias=0, y_bias=0):
+    @staticmethod
+    def _format_trace_value(value):
+        if isinstance(value, float):
+            return f"{value:.3f}"
+        if isinstance(value, tuple):
+            return "(" + ", ".join(Controller._format_trace_value(v) for v in value) + ")"
+        if isinstance(value, list):
+            return "[" + ", ".join(Controller._format_trace_value(v) for v in value) + "]"
+        if isinstance(value, dict):
+            items = [f"{k}={Controller._format_trace_value(v)}" for k, v in value.items()]
+            return "{" + ", ".join(items) + "}"
+        return str(value)
+
+    def _print_sendevent_coordinate_trace(self, action, label, display_trace=None, panel_trace=None, finger_id=0):
+        print(f"[SendeventTrace] action={action}, label={label}, finger_id={finger_id}")
+        if display_trace:
+            print("[SendeventTrace] display_transform:")
+            for key, value in display_trace.items():
+                print(f"  - {key}: {self._format_trace_value(value)}")
+        if panel_trace:
+            print("[SendeventTrace] panel_transform:")
+            for key, value in panel_trace.items():
+                print(f"  - {key}: {self._format_trace_value(value)}")
+
+    def _resolve_pos(self, btn_input, x_bias=0, y_bias=0, return_trace: bool = False):
+        if return_trace:
+            pos, label, trace = self._get_abs_pos(btn_input, x_bias=x_bias, y_bias=y_bias, return_trace=True)
+            if not pos:
+                return None, None, trace
+            return pos, label, trace
+
         pos, label = self._get_abs_pos(btn_input, x_bias=x_bias, y_bias=y_bias)
         if not pos:
             return None, None
@@ -1092,11 +1206,19 @@ class Controller:
                 self._run_hdc(cmd)
 
     def click_down(self, btn, x_bias=0, y_bias=0, dura=0, finger_id=0):
-        pos, label = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias)
+        pos, label, display_trace = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias, return_trace=True)
         if pos:
             x, y = pos
             print(f"执行按下: {label} @({x},{y})")
             if self.backend == "sendevent":
+                panel_trace = self.touch_backend.get_pixel_to_abs_trace(x, y)
+                self._print_sendevent_coordinate_trace(
+                    action="click_down",
+                    label=label,
+                    display_trace=display_trace,
+                    panel_trace=panel_trace,
+                    finger_id=finger_id,
+                )
                 self.touch_backend.click_down(x, y, dura=dura, finger_id=finger_id)
             else:
                 if dura == 0:
@@ -1106,11 +1228,19 @@ class Controller:
                 self._run_hdc(cmd)
 
     def click(self, btn, x_bias=0, y_bias=0, finger_id=0, duration_ms=16):
-        pos, label = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias)
+        pos, label, display_trace = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias, return_trace=True)
         if pos:
             x, y = pos
             print(f"执行点击: {label} @({x},{y})")
             if self.backend == "sendevent":
+                panel_trace = self.touch_backend.get_pixel_to_abs_trace(x, y)
+                self._print_sendevent_coordinate_trace(
+                    action="click",
+                    label=label,
+                    display_trace=display_trace,
+                    panel_trace=panel_trace,
+                    finger_id=finger_id,
+                )
                 self.touch_backend.click(x, y, finger_id=finger_id, duration_ms=duration_ms)
             else:
                 self._run_hdc(f"hdc shell uinput -T -c {x} {y}")

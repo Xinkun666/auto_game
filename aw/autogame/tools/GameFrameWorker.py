@@ -446,6 +446,7 @@ class MultiTouchController:
         self.screen_mapping_ready = False
         self.active_fingers: Dict[int, FingerState] = {}
         self.finger_tracking_map: Dict[int, int] = {}
+        self.last_changed_finger_id = None
         self.frames = []
         self.current_time_ms = 0
         self.frame_interval_ms = frame_interval_ms
@@ -455,6 +456,16 @@ class MultiTouchController:
         self.frames = []
         self.current_time_ms = 0
         self.frame_seq = 0
+
+    def _get_report_fingers(self):
+        if not self.active_fingers:
+            return []
+
+        finger_ids = list(self.active_fingers.keys())
+        if self.last_changed_finger_id in self.active_fingers:
+            finger_ids.remove(self.last_changed_finger_id)
+            finger_ids.insert(0, self.last_changed_finger_id)
+        return [self.active_fingers[finger_id] for finger_id in finger_ids]
 
     def refresh_screen_mapping(self, force: bool = False):
         if self.screen_mapping_ready and not force:
@@ -563,7 +574,7 @@ class MultiTouchController:
         prefix = f"[{int_str}.{frac_str}] /dev/input/{self.input_device}"
 
         cmd_list = []
-        for idx, finger in enumerate(self.active_fingers.values()):
+        for idx, finger in enumerate(self._get_report_fingers()):
             cmd_list.extend(self._build_contact_block(prefix, finger, include_vendor_prefix=(idx == 0)))
 
         if include_btn_touch_down:
@@ -609,6 +620,7 @@ class MultiTouchController:
             x_abs=x_abs,
             y_abs=y_abs,
         )
+        self.last_changed_finger_id = finger_id
 
     def finger_move(self, finger_id: int, x0: int, y0: int):
         if finger_id not in self.active_fingers:
@@ -618,6 +630,7 @@ class MultiTouchController:
         finger = self.active_fingers[finger_id]
         finger.x_abs = x_abs
         finger.y_abs = y_abs
+        self.last_changed_finger_id = finger_id
 
     def finger_up(self, finger_id: int) -> bool:
         if finger_id not in self.active_fingers:
@@ -625,6 +638,11 @@ class MultiTouchController:
 
         self.active_fingers.pop(finger_id)
         self.finger_tracking_map.pop(finger_id, None)
+        if self.active_fingers:
+            remaining_ids = list(self.active_fingers.keys())
+            self.last_changed_finger_id = remaining_ids[0]
+        else:
+            self.last_changed_finger_id = None
         return len(self.active_fingers) == 0
 
 
@@ -839,6 +857,30 @@ class SendEventController:
         self.mt.finger_down(finger_id, target_x, target_y)
         self.mt.commit_frame(include_btn_touch_down=not had_active_fingers, duration_ms=0)
         self._flush()
+
+    def move_press(self, finger_id: int, pos):
+        self.ensure_screen_mapping()
+        x0, y0 = int(pos[0]), int(pos[1])
+        self._ensure_fingers_available([finger_id])
+        self.mt.reset_frames()
+        had_active_fingers = bool(self.mt.active_fingers)
+        self.mt.finger_down(finger_id, x0, y0)
+        self.mt.commit_frame(include_btn_touch_down=not had_active_fingers, duration_ms=0)
+        self._flush()
+
+    def move_to(self, finger_id: int, pos, duration_ms: int = None):
+        if finger_id not in self.mt.active_fingers:
+            raise ValueError(f"finger_id={finger_id} 尚未按下，不能 move_to")
+
+        self.ensure_screen_mapping()
+        x0, y0 = int(pos[0]), int(pos[1])
+        self.mt.reset_frames()
+        self.mt.finger_move(finger_id, x0, y0)
+        self.mt.commit_frame(duration_ms=self._normalize_duration(duration_ms))
+        self._flush()
+
+    def move_up(self, finger_id: int, duration_ms: int = 0):
+        self.click_up(finger_id=finger_id, duration_ms=duration_ms)
 
     def click_up(self, finger_id: int = 0, duration_ms: int = 0):
         if finger_id in self._legacy_pressed_fingers:
@@ -1276,6 +1318,37 @@ class Controller:
             else:
                 self._run_hdc(f"hdc shell uinput -T -c {x} {y}")
 
+    def move_press(self, finger_id, pos):
+        self._require_sendevent_backend()
+        if not isinstance(pos, (list, tuple)) or len(pos) != 2:
+            raise ValueError("move_press 的 pos 需要是 (x, y)")
+
+        x, y = self._transform_runtime_point(
+            pos[0],
+            pos[1],
+            normalized=(0 <= pos[0] <= 1.0 and 0 <= pos[1] <= 1.0),
+        )
+        print(f"执行 move_press: finger_id={finger_id} @({x},{y})")
+        self.touch_backend.move_press(finger_id, (x, y))
+
+    def move_to(self, finger_id, pos, duration_ms=16):
+        self._require_sendevent_backend()
+        if not isinstance(pos, (list, tuple)) or len(pos) != 2:
+            raise ValueError("move_to 的 pos 需要是 (x, y)")
+
+        x, y = self._transform_runtime_point(
+            pos[0],
+            pos[1],
+            normalized=(0 <= pos[0] <= 1.0 and 0 <= pos[1] <= 1.0),
+        )
+        print(f"执行 move_to: finger_id={finger_id} @({x},{y})")
+        self.touch_backend.move_to(finger_id, (x, y), duration_ms=duration_ms)
+
+    def move_up(self, finger_id, duration_ms=0):
+        self._require_sendevent_backend()
+        print(f"执行 move_up: finger_id={finger_id}")
+        self.touch_backend.move_up(finger_id, duration_ms=duration_ms)
+
 class FrameWorker(threading.Thread):
     def __init__(self, buffer, driver=None, logger=None, controller_backend=None, controller_options=None):
         super().__init__()
@@ -1330,6 +1403,9 @@ class FrameWorker(threading.Thread):
         self.click_down = self.controller.click_down
         self.tap_single = self.controller.tap_single
         self.tap_double = self.controller.tap_double
+        self.move_press = self.controller.move_press
+        self.move_to = self.controller.move_to
+        self.move_up = self.controller.move_up
 
     def loop(self):
         print("GameFrameWorker 引擎已启动")

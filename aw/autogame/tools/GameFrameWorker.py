@@ -444,10 +444,12 @@ class MultiTouchController:
         self.frames = []
         self.current_time_ms = 0
         self.frame_interval_ms = frame_interval_ms
+        self.frame_seq = 0
 
     def reset_frames(self):
         self.frames = []
         self.current_time_ms = 0
+        self.frame_seq = 0
 
     def refresh_screen_mapping(self, force: bool = False):
         if self.screen_mapping_ready and not force:
@@ -502,16 +504,20 @@ class MultiTouchController:
         idx = min(max(int(finger.contact_phase), 0), len(self.RECORD_CONTACT_PROFILES) - 1)
         return self.RECORD_CONTACT_PROFILES[idx]
 
-    def _build_contact_block(self, prefix: str, finger: FingerState):
+    def _build_contact_block(self, prefix: str, finger: FingerState, include_vendor_prefix: bool = False):
         profile = self._get_contact_profile(finger)
         block = []
-        vendor_2a = profile.get("vendor_2a")
-        if vendor_2a is not None:
-            block.append(f"{prefix}: 0003 002a {vendor_2a:08x}")
+        if include_vendor_prefix:
+            vendor_2a = profile.get("vendor_2a")
+            if vendor_2a is not None and self.frame_seq == 0:
+                block.append(f"{prefix}: 0003 002a {vendor_2a:08x}")
 
-        vendor_2b = int(profile["vendor_2b"]) + int(finger.finger_id)
+            # 录制样本里 002b 只出现在每帧第一组 contact 前，且会持续变化；
+            # 这里保留 profile 基值并叠加帧序号，避免多指时为每根手指重复塞 vendor 头字段。
+            vendor_2b = int(profile["vendor_2b"]) + int(self.frame_seq)
+            block.append(f"{prefix}: 0003 002b {vendor_2b:08x}")
+
         block.extend([
-            f"{prefix}: 0003 002b {vendor_2b:08x}",
             f"{prefix}: 0003 0035 {finger.x_abs:08x}",
             f"{prefix}: 0003 0036 {finger.y_abs:08x}",
             f"{prefix}: 0003 003a {int(profile['pressure']):08x}",
@@ -531,9 +537,8 @@ class MultiTouchController:
         prefix = f"[{int_str}.{frac_str}] /dev/input/{self.input_device}"
 
         cmd_list = []
-        for finger_id in sorted(self.active_fingers.keys()):
-            finger = self.active_fingers[finger_id]
-            cmd_list.extend(self._build_contact_block(prefix, finger))
+        for idx, finger in enumerate(self.active_fingers.values()):
+            cmd_list.extend(self._build_contact_block(prefix, finger, include_vendor_prefix=(idx == 0)))
 
         if include_btn_touch_down:
             cmd_list.append(f"{prefix}: 0001 014a 00000001")
@@ -556,6 +561,7 @@ class MultiTouchController:
         )
         self.frames.append(frame_text)
         self.current_time_ms += duration_ms
+        self.frame_seq += 1
         for finger in self.active_fingers.values():
             finger.contact_phase += 1
 
@@ -709,15 +715,20 @@ class SendEventController:
         finger_ids = sorted(start_points.keys())
         self._ensure_fingers_available(finger_ids)
         release_map = release_map or {finger_id: True for finger_id in finger_ids}
+        had_active_fingers = bool(self.mt.active_fingers)
 
         self.mt.reset_frames()
-        for finger_id in finger_ids:
+        for idx, finger_id in enumerate(finger_ids):
             x0, y0 = start_points[finger_id]
             self.mt.finger_down(finger_id, x0, y0)
+            self.mt.commit_frame(
+                include_btn_touch_down=(not had_active_fingers and idx == 0),
+                duration_ms=0,
+            )
 
-        # 每次 EventRecord 回放都视为独立批次，首帧显式补一次 BTN_TOUCH=1，
-        # 不依赖前一个回放批次是否在设备侧保留了按下状态。
-        self.mt.commit_frame(include_btn_touch_down=True, duration_ms=self._normalize_duration(wait_ms))
+        normalized_wait_ms = self._normalize_duration(wait_ms)
+        if normalized_wait_ms > 0:
+            self.mt.commit_frame(duration_ms=normalized_wait_ms)
 
         move_time_ms = self._normalize_duration(move_time_ms)
         move_count = max(2, round(max(1, move_time_ms) / self.mt.frame_interval_ms))
@@ -732,7 +743,7 @@ class SendEventController:
         synced_paths = self._sync_paths(path_map)
         per_frame_ms = max(1, round(max(1, move_time_ms) / max(1, move_count - 1)))
 
-        for step_idx in range(max(len(path) for path in synced_paths.values())):
+        for step_idx in range(1, max(len(path) for path in synced_paths.values())):
             for finger_id in finger_ids:
                 x, y = synced_paths[finger_id][step_idx]
                 self.mt.finger_move(finger_id, x, y)
@@ -793,8 +804,9 @@ class SendEventController:
 
         self._ensure_fingers_available([finger_id])
         self.mt.reset_frames()
+        had_active_fingers = bool(self.mt.active_fingers)
         self.mt.finger_down(finger_id, target_x, target_y)
-        self.mt.commit_frame(include_btn_touch_down=True, duration_ms=0)
+        self.mt.commit_frame(include_btn_touch_down=not had_active_fingers, duration_ms=0)
         self._flush()
 
     def click_up(self, finger_id: int = 0, duration_ms: int = 0):

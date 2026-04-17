@@ -332,6 +332,18 @@ def normalize_resolution_by_rotation(width, height, rotation):
         return (min(width, height), max(width, height))
     return width, height
 
+def get_natural_resolution_by_rotation(width, height, rotation):
+    if width is None or height is None:
+        return width, height
+
+    width = int(width)
+    height = int(height)
+    rotation = normalize_rotation(rotation)
+
+    if rotation in (90, 270):
+        return height, width
+    return width, height
+
 def is_landscape(width, height):
     return width >= height
 
@@ -341,6 +353,9 @@ def _clamp_point(x, y, width, height):
     x = min(max(x, 0), max(int(width) - 1, 0))
     y = min(max(y, 0), max(int(height) - 1, 0))
     return x, y
+
+def _round_point(x, y):
+    return int(round(x)), int(round(y))
 
 def scale_point(x, y, src_width, src_height, dst_width, dst_height):
     if src_width <= 0 or src_height <= 0 or dst_width <= 0 or dst_height <= 0:
@@ -362,25 +377,22 @@ def convert_display_point_by_rotation(x, y, screen_width, screen_height, current
         return int(round(x)), int(round(y))
 
     current_rotation = normalize_rotation(current_rotation)
-    nx = float(x) / float(screen_width)
-    ny = float(y) / float(screen_height)
-
     if current_rotation == 90:
-        dst_x = ny * screen_height
-        dst_y = (1.0 - nx) * screen_width
-        return _clamp_point(dst_x, dst_y, screen_width, screen_height)
+        dst_x = y
+        dst_y = screen_width - x
+        return _round_point(dst_x, dst_y)
 
     if current_rotation == 180:
-        dst_x = (1.0 - nx) * screen_width
-        dst_y = (1.0 - ny) * screen_height
-        return _clamp_point(dst_x, dst_y, screen_width, screen_height)
+        dst_x = screen_width - x
+        dst_y = screen_height - y
+        return _round_point(dst_x, dst_y)
 
     if current_rotation == 270:
-        dst_x = (1.0 - ny) * screen_height
-        dst_y = nx * screen_width
-        return _clamp_point(dst_x, dst_y, screen_width, screen_height)
+        dst_x = screen_height - y
+        dst_y = x
+        return _round_point(dst_x, dst_y)
 
-    return _clamp_point(x, y, screen_width, screen_height)
+    return _round_point(x, y)
 
 def convert_scene_point_by_current_rotation(x, y, scene_width, scene_height,
                                             current_width, current_height, current_rotation):

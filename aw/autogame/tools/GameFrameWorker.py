@@ -439,6 +439,8 @@ class MultiTouchController:
         self.abs_h = 0
         self.input_device = None
         self.rotation = 0
+        self.display_pixel_w = 0
+        self.display_pixel_h = 0
         self.pixel_w = 0
         self.pixel_h = 0
         self.screen_mapping_ready = False
@@ -459,7 +461,14 @@ class MultiTouchController:
             return
         self.abs_w0, self.abs_h0, self.abs_w, self.abs_h, self.input_device, self.rotation = \
             get_panel_abs_xy_check_rotation(self.dut_handle)
-        self.pixel_w, self.pixel_h = self.dut_handle.get_resolution()
+        current_pixel_w, current_pixel_h = self.dut_handle.get_resolution()
+        self.display_pixel_w = current_pixel_w
+        self.display_pixel_h = current_pixel_h
+        self.pixel_w, self.pixel_h = get_natural_resolution_by_rotation(
+            current_pixel_w,
+            current_pixel_h,
+            self.rotation,
+        )
         self.screen_mapping_ready = True
 
     def _ensure_tracking_id(self, finger_id: int) -> int:
@@ -499,6 +508,7 @@ class MultiTouchController:
         if return_trace:
             trace = {
                 "input_display_xy": (int(x0), int(y0)),
+                "display_resolution": (int(self.display_pixel_w), int(self.display_pixel_h)),
                 "pixel_resolution": (int(self.pixel_w), int(self.pixel_h)),
                 "panel_origin_abs": (int(self.abs_w0), int(self.abs_h0)),
                 "panel_max_abs": (int(self.abs_w), int(self.abs_h)),

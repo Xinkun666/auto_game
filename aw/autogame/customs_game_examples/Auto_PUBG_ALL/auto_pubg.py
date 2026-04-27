@@ -195,17 +195,17 @@ def on_stage(w: "FrameWorker"):
             w.click(w.get_info("关闭公告"))
             w.refresh_frame()
             return
-        
+
         if w.get_info("提示"):
             w.click("取消")
             w.refresh_frame()
             return
-        
+
         if w.get_info('对局结束'):
             w.click('确定')
             w.refresh_frame()
             return
-        
+
         if w.get_info('关闭预约'):
             w.click(w.get_info('关闭预约'))
             w.refresh_frame()
@@ -290,13 +290,15 @@ def on_stage(w: "FrameWorker"):
         return
 
     if w.current_stage == "搜房阶段":
-        house_scene = w.get_info("house_scene")
-        if isinstance(house_scene, (list, tuple)) and len(house_scene) == 1:
-            house_scene = house_scene[0]
-
-        if house_exit_manager.process(w):
-            w.stop()
-        return
+        time.sleep(1)
+        pass
+        # house_scene = w.get_info("house_scene")
+        # if isinstance(house_scene, (list, tuple)) and len(house_scene) == 1:
+        #     house_scene = house_scene[0]
+        #
+        # if house_exit_manager.process(w):
+        #     w.stop()
+        # return
 
     if w.current_stage == "跑图阶段":
         handle_sp_start(w)

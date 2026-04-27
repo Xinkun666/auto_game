@@ -1,5 +1,6 @@
 import os
 import gc
+import math
 import re
 import time
 import tempfile
@@ -380,12 +381,33 @@ def gen_slider_points_by_bezier(start, end, n):
     return list(zip(x_list, y_list))
 
 
+def gen_slider_points_by_linear(start, end, n):
+    x1, y1 = start
+    x2, y2 = end
+    t_linear = np.linspace(0, 1, n)
+    x_array = x1 + (x2 - x1) * t_linear
+    y_array = y1 + (y2 - y1) * t_linear
+    x_list = [int(round(x)) for x in x_array.tolist()]
+    y_list = [int(round(y)) for y in y_array.tolist()]
+    return list(zip(x_list, y_list))
+
+
+def gen_slider_points(start, end, n, trajectory="linear"):
+    if trajectory == "linear":
+        return gen_slider_points_by_linear(start, end, n)
+    if trajectory == "bezier":
+        return gen_slider_points_by_bezier(start, end, n)
+    raise ValueError(f"不支持的轨迹类型: {trajectory}")
+
+
 @dataclass
 class FingerState:
     finger_id: int
     tracking_id: int
     x_abs: int
     y_abs: int
+    x_px: int
+    y_px: int
     pressure: int = 0x024C
     major: int = 0x00CE
     minor: int = 0x00CE
@@ -623,6 +645,8 @@ class MultiTouchController:
             tracking_id=tracking_id,
             x_abs=x_abs,
             y_abs=y_abs,
+            x_px=int(x0),
+            y_px=int(y0),
         )
         self.last_changed_finger_id = finger_id
 
@@ -634,6 +658,8 @@ class MultiTouchController:
         finger = self.active_fingers[finger_id]
         finger.x_abs = x_abs
         finger.y_abs = y_abs
+        finger.x_px = int(x0)
+        finger.y_px = int(y0)
         self.last_changed_finger_id = finger_id
 
     def finger_up(self, finger_id: int) -> bool:
@@ -653,12 +679,15 @@ class MultiTouchController:
 class SendEventController:
     """参考 GameFrameWorker.Controller 风格封装 sendevent/EventRecord。"""
 
-    def __init__(self, device_id="", dut_handle=None, frame_interval_ms: int = 16, auto_prepare: bool = True):
+    def __init__(self, device_id="", dut_handle=None, frame_interval_ms: int = 16,
+                 auto_prepare: bool = True, max_step_px: int = 100, trajectory: str = "linear"):
         self.dut_handle = dut_handle or get_dut_controller_handle(device_id)
         if auto_prepare:
             check_tool_exist(self.dut_handle)
         self.mt = MultiTouchController(self.dut_handle, frame_interval_ms=frame_interval_ms)
         self._legacy_pressed_fingers = set()
+        self.max_step_px = max(1, int(max_step_px))
+        self.trajectory = trajectory
 
     def _flush(self):
         self.mt.play()
@@ -813,6 +842,30 @@ class SendEventController:
             return self.mt.frame_interval_ms
         return max(0, int(duration_ms))
 
+    def _resolve_trajectory(self, trajectory):
+        return trajectory or self.trajectory
+
+    def _resolve_max_step_px(self, max_step_px):
+        if max_step_px is None:
+            return self.max_step_px
+        return max(1, int(max_step_px))
+
+    def _calc_move_frame_count(self, target_map, max_step_px, duration_ms):
+        max_distance = 0.0
+        for fid, target_pos in target_map.items():
+            finger = self.mt.active_fingers[fid]
+            dx = int(target_pos[0]) - int(finger.x_px)
+            dy = int(target_pos[1]) - int(finger.y_px)
+            max_distance = max(max_distance, math.hypot(dx, dy))
+
+        if max_distance > 0:
+            return max(1, int(math.ceil(max_distance / float(max_step_px))))
+
+        normalized_duration = self._normalize_duration(duration_ms)
+        if normalized_duration <= 0:
+            return 1
+        return max(1, round(normalized_duration / self.mt.frame_interval_ms))
+
     def _sync_paths(self, path_map):
         max_len = max(len(path) for path in path_map.values())
         synced = {}
@@ -878,19 +931,33 @@ class SendEventController:
             self.mt.commit_frame(duration_ms=self.mt.frame_interval_ms)
         self._flush()
 
-    def click(self, x0, y0, x_bias=0, y_bias=0, finger_id: int = 0, duration_ms: int = 16):
+    def click(self, x0, y0, x_bias=0, y_bias=0, finger_id: int = 0, duration_ms: int = 16,
+              trajectory=None, max_step_px=None):
         target_x = x0 + x_bias
         target_y = y0 + y_bias
         self.move_press(finger_id, (target_x, target_y))
-        self.move_to(finger_id, (target_x, target_y), duration_ms=duration_ms)
+        self.move_to(
+            finger_id,
+            (target_x, target_y),
+            duration_ms=duration_ms,
+            trajectory=trajectory,
+            max_step_px=max_step_px,
+        )
         self.move_up(finger_id)
 
-    def click_down(self, x0, y0, x_bias=0, y_bias=0, dura=0, finger_id: int = 0):
+    def click_down(self, x0, y0, x_bias=0, y_bias=0, dura=0, finger_id: int = 0,
+                   trajectory=None, max_step_px=None):
         target_x = x0 + x_bias
         target_y = y0 + y_bias
         self.move_press(finger_id, (target_x, target_y))
         if dura > 0:
-            self.move_to(finger_id, (target_x, target_y), duration_ms=dura)
+            self.move_to(
+                finger_id,
+                (target_x, target_y),
+                duration_ms=dura,
+                trajectory=trajectory,
+                max_step_px=max_step_px,
+            )
             self.move_up(finger_id)
 
     def move_press(self, finger_id: int, pos):
@@ -907,7 +974,8 @@ class SendEventController:
         self.mt.finger_down(finger_id, x0, y0)
         self._send_immediate_frame(include_btn_touch_down=not had_active_fingers)
 
-    def move_to(self, finger_id, pos=None, duration_ms: int = 160):
+    def move_to(self, finger_id, pos=None, duration_ms: int = 160,
+                trajectory=None, max_step_px=None):
         if isinstance(finger_id, dict) and pos is None:
             target_map = finger_id
         else:
@@ -916,30 +984,38 @@ class SendEventController:
         missing_fingers = [fid for fid in target_map if fid not in self.mt.active_fingers]
         if missing_fingers:
             raise ValueError(f"finger_id={missing_fingers} 尚未按下，不能 move_to")
+        missing_targets = [fid for fid, target_pos in target_map.items() if target_pos is None]
+        if missing_targets:
+            raise ValueError(f"finger_id={missing_targets} 缺少 move_to 目标位置")
 
         self.ensure_screen_mapping()
         path_map = {}
-
-        duration_ms = max(self._normalize_duration(duration_ms), self.mt.frame_interval_ms)
-        frame_count = max(3, round(duration_ms / self.mt.frame_interval_ms))
+        move_frame_count = self._calc_move_frame_count(
+            target_map,
+            self._resolve_max_step_px(max_step_px),
+            duration_ms,
+        )
+        point_count = move_frame_count + 1
+        trajectory = self._resolve_trajectory(trajectory)
         for fid, target_pos in target_map.items():
-            if target_pos is None:
-                raise ValueError(f"finger_id={fid} 缺少 move_to 目标位置")
             x0, y0 = int(target_pos[0]), int(target_pos[1])
-            target_x_abs, target_y_abs = self.mt._pixel_to_abs(x0, y0)
             finger = self.mt.active_fingers[fid]
-            path_map[fid] = gen_slider_points_by_bezier(
-                (finger.x_abs, finger.y_abs),
-                (target_x_abs, target_y_abs),
-                frame_count,
+            path_map[fid] = gen_slider_points(
+                (finger.x_px, finger.y_px),
+                (x0, y0),
+                point_count,
+                trajectory=trajectory,
             )
 
-        for step_idx in range(1, frame_count):
+        for step_idx in range(1, point_count):
             for fid, path in path_map.items():
-                x_abs, y_abs = path[step_idx]
+                x_px, y_px = path[step_idx]
+                x_abs, y_abs = self.mt._pixel_to_abs(x_px, y_px)
                 finger = self.mt.active_fingers[fid]
                 finger.x_abs = int(x_abs)
                 finger.y_abs = int(y_abs)
+                finger.x_px = int(x_px)
+                finger.y_px = int(y_px)
                 self.mt.last_changed_finger_id = fid
             self._send_immediate_frame()
 
@@ -957,17 +1033,30 @@ class SendEventController:
     def click_up(self, finger_id: int = 0, duration_ms: int = 0):
         self.move_up(finger_id, duration_ms=duration_ms)
 
-    def tap_single(self, x0, y0, wait=100, dura=500, x_bias=0, y_bias=1, finger_id: int = 0, release: bool = True):
+    def tap_single(self, x0, y0, wait=100, dura=500, x_bias=0, y_bias=1, finger_id: int = 0,
+                   release: bool = True, trajectory=None, max_step_px=None):
         self.move_press(finger_id, (x0, y0))
         if self._normalize_duration(wait) > 0:
-            self.move_to(finger_id, (x0, y0), duration_ms=wait)
-        self.move_to(finger_id, (x0 + x_bias, y0 + y_bias), duration_ms=dura)
+            self.move_to(
+                finger_id,
+                (x0, y0),
+                duration_ms=wait,
+                trajectory=trajectory,
+                max_step_px=max_step_px,
+            )
+        self.move_to(
+            finger_id,
+            (x0 + x_bias, y0 + y_bias),
+            duration_ms=dura,
+            trajectory=trajectory,
+            max_step_px=max_step_px,
+        )
         if release:
             self.move_up(finger_id)
 
     def tap_double(self, x1, y1, x2, y2, wait=100, dura=500,
                    x1_bias=0, y1_bias=1, x2_bias=0, y2_bias=1, finger_id: int = 0,
-                   release1: bool = True, release2: bool = True):
+                   release1: bool = True, release2: bool = True, trajectory=None, max_step_px=None):
         second_finger_id = finger_id + 1
         if second_finger_id > 9:
             raise ValueError("tap_double 的 finger_id 最大只能到 8，否则第二根手指会超出设备支持范围")
@@ -980,6 +1069,8 @@ class SendEventController:
                     second_finger_id: (x2, y2),
                 },
                 duration_ms=wait,
+                trajectory=trajectory,
+                max_step_px=max_step_px,
             )
         self.move_to(
             {
@@ -987,6 +1078,8 @@ class SendEventController:
                 second_finger_id: (x2 + x2_bias, y2 + y2_bias),
             },
             duration_ms=dura,
+            trajectory=trajectory,
+            max_step_px=max_step_px,
         )
         if release1:
             self.move_up(finger_id)
@@ -1246,7 +1339,7 @@ class Controller:
 
     def tap_double(self, btn1, btn2, wait=100, dura=500,
                    x1_bias=0, y1_bias=1, x2_bias=0, y2_bias=1, finger_id=0,
-                   release1=True, release2=True):
+                   release1=True, release2=True, trajectory=None, max_step_px=None):
         pos1, label1 = self._resolve_pos(btn1)
         pos2, label2 = self._resolve_pos(btn2)
         if pos1 and pos2:
@@ -1272,6 +1365,8 @@ class Controller:
                     finger_id=finger_id,
                     release1=release1,
                     release2=release2,
+                    trajectory=trajectory,
+                    max_step_px=max_step_px,
                 )
             else:
                 cmd = (
@@ -1280,7 +1375,8 @@ class Controller:
                 )
                 self._run_hdc(cmd)
 
-    def tap_single(self, btn, wait=100, dura=500, x_bias=0, y_bias=1, finger_id=0, release=True):
+    def tap_single(self, btn, wait=100, dura=500, x_bias=0, y_bias=1, finger_id=0,
+                   release=True, trajectory=None, max_step_px=None):
         pos, label = self._resolve_pos(btn)
         if pos:
             x, y = pos
@@ -1298,18 +1394,28 @@ class Controller:
                     y_bias=end_pos[1] - y,
                     finger_id=finger_id,
                     release=release,
+                    trajectory=trajectory,
+                    max_step_px=max_step_px,
                 )
             else:
                 cmd = f"hdc shell uinput -T -m {x} {y} {x + x_bias} {y + y_bias} -k {wait} {dura}"
                 self._run_hdc(cmd)
 
-    def click_down(self, btn, x_bias=0, y_bias=0, dura=0, finger_id=0):
+    def click_down(self, btn, x_bias=0, y_bias=0, dura=0, finger_id=0,
+                   trajectory=None, max_step_px=None):
         pos, label = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias)
         if pos:
             x, y = pos
             print(f"执行按下: {label} @({x},{y})")
             if self.backend == "sendevent":
-                self.touch_backend.click_down(x, y, dura=dura, finger_id=finger_id)
+                self.touch_backend.click_down(
+                    x,
+                    y,
+                    dura=dura,
+                    finger_id=finger_id,
+                    trajectory=trajectory,
+                    max_step_px=max_step_px,
+                )
             else:
                 if dura == 0:
                     cmd = f"hdc shell uinput -T -d {x} {y}"
@@ -1317,13 +1423,21 @@ class Controller:
                     cmd = f"hdc shell uinput -T -d {x} {y} -i {dura} -u {x} {y}"
                 self._run_hdc(cmd)
 
-    def click(self, btn, x_bias=0, y_bias=0, finger_id=0, duration_ms=16):
+    def click(self, btn, x_bias=0, y_bias=0, finger_id=0, duration_ms=16,
+              trajectory=None, max_step_px=None):
         pos, label = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias)
         if pos:
             x, y = pos
             print(f"执行点击: {label} @({x},{y})")
             if self.backend == "sendevent":
-                self.touch_backend.click(x, y, finger_id=finger_id, duration_ms=duration_ms)
+                self.touch_backend.click(
+                    x,
+                    y,
+                    finger_id=finger_id,
+                    duration_ms=duration_ms,
+                    trajectory=trajectory,
+                    max_step_px=max_step_px,
+                )
             else:
                 self._run_hdc(f"hdc shell uinput -T -c {x} {y}")
 
@@ -1339,7 +1453,8 @@ class Controller:
         print(f"move_press 目标: {desc}")
         self.touch_backend.move_press(finger_id, (x, y))
 
-    def move_to(self, finger_id, pos, x_bias=0, y_bias=0, duration_ms=160):
+    def move_to(self, finger_id, pos, x_bias=0, y_bias=0, duration_ms=160,
+                trajectory=None, max_step_px=None):
         self._require_sendevent_backend()
         target, label = self._get_abs_pos(pos, x_bias=x_bias, y_bias=y_bias)
         if not target:
@@ -1349,7 +1464,13 @@ class Controller:
         desc = label or pos
         print(f"执行 move_to: finger_id={finger_id} @({x},{y})")
         print(f"move_to 目标: {desc}")
-        self.touch_backend.move_to(finger_id, (x, y), duration_ms=duration_ms)
+        self.touch_backend.move_to(
+            finger_id,
+            (x, y),
+            duration_ms=duration_ms,
+            trajectory=trajectory,
+            max_step_px=max_step_px,
+        )
 
     def move_up(self, finger_id, duration_ms=0):
         self._require_sendevent_backend()

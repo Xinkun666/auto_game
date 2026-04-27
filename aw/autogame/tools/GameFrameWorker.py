@@ -1272,30 +1272,6 @@ class Controller:
         trace["display_output"] = result
         return (result, trace) if return_trace else result
 
-    @staticmethod
-    def _format_trace_value(value):
-        if isinstance(value, float):
-            return f"{value:.3f}"
-        if isinstance(value, tuple):
-            return "(" + ", ".join(Controller._format_trace_value(v) for v in value) + ")"
-        if isinstance(value, list):
-            return "[" + ", ".join(Controller._format_trace_value(v) for v in value) + "]"
-        if isinstance(value, dict):
-            items = [f"{k}={Controller._format_trace_value(v)}" for k, v in value.items()]
-            return "{" + ", ".join(items) + "}"
-        return str(value)
-
-    def _print_sendevent_coordinate_trace(self, action, label, display_trace=None, panel_trace=None, finger_id=0):
-        print(f"[SendeventTrace] action={action}, label={label}, finger_id={finger_id}")
-        if display_trace:
-            print("[SendeventTrace] display_transform:")
-            for key, value in display_trace.items():
-                print(f"  - {key}: {self._format_trace_value(value)}")
-        if panel_trace:
-            print("[SendeventTrace] panel_transform:")
-            for key, value in panel_trace.items():
-                print(f"  - {key}: {self._format_trace_value(value)}")
-
     def _resolve_pos(self, btn_input, x_bias=0, y_bias=0, return_trace: bool = False):
         if return_trace:
             pos, label, trace = self._get_abs_pos(btn_input, x_bias=x_bias, y_bias=y_bias, return_trace=True)
@@ -1368,19 +1344,11 @@ class Controller:
                 self._run_hdc(cmd)
 
     def click_down(self, btn, x_bias=0, y_bias=0, dura=0, finger_id=0):
-        pos, label, display_trace = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias, return_trace=True)
+        pos, label = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias)
         if pos:
             x, y = pos
             print(f"执行按下: {label} @({x},{y})")
             if self.backend == "sendevent":
-                panel_trace = self.touch_backend.get_pixel_to_abs_trace(x, y)
-                self._print_sendevent_coordinate_trace(
-                    action="click_down",
-                    label=label,
-                    display_trace=display_trace,
-                    panel_trace=panel_trace,
-                    finger_id=finger_id,
-                )
                 self.touch_backend.click_down(x, y, dura=dura, finger_id=finger_id)
             else:
                 if dura == 0:
@@ -1390,19 +1358,11 @@ class Controller:
                 self._run_hdc(cmd)
 
     def click(self, btn, x_bias=0, y_bias=0, finger_id=0, duration_ms=16):
-        pos, label, display_trace = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias, return_trace=True)
+        pos, label = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias)
         if pos:
             x, y = pos
             print(f"执行点击: {label} @({x},{y})")
             if self.backend == "sendevent":
-                panel_trace = self.touch_backend.get_pixel_to_abs_trace(x, y)
-                self._print_sendevent_coordinate_trace(
-                    action="click",
-                    label=label,
-                    display_trace=display_trace,
-                    panel_trace=panel_trace,
-                    finger_id=finger_id,
-                )
                 self.touch_backend.click(x, y, finger_id=finger_id, duration_ms=duration_ms)
             else:
                 self._run_hdc(f"hdc shell uinput -T -c {x} {y}")

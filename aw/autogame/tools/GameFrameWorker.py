@@ -879,48 +879,19 @@ class SendEventController:
         self._flush()
 
     def click(self, x0, y0, x_bias=0, y_bias=0, finger_id: int = 0, duration_ms: int = 16):
-        self.ensure_screen_mapping()
         target_x = x0 + x_bias
         target_y = y0 + y_bias
-
-        if self.mt.active_fingers:
-            self._run_multi_finger_path(
-                start_points={finger_id: (target_x, target_y)},
-                end_points={finger_id: (target_x, target_y)},
-                wait_ms=self._normalize_duration(duration_ms),
-                move_time_ms=1,
-                release_map={finger_id: True},
-            )
-            return
-
-        cmd_text = self._build_legacy_single_touch_text(
-            target_x,
-            target_y,
-            self._normalize_duration(duration_ms),
-        )
-        self.dut_handle.run_cmd_by_file_with_ret(cmd_text)
+        self.move_press(finger_id, (target_x, target_y))
+        self.move_to(finger_id, (target_x, target_y), duration_ms=duration_ms)
+        self.move_up(finger_id)
 
     def click_down(self, x0, y0, x_bias=0, y_bias=0, dura=0, finger_id: int = 0):
-        self.ensure_screen_mapping()
         target_x = x0 + x_bias
         target_y = y0 + y_bias
-
+        self.move_press(finger_id, (target_x, target_y))
         if dura > 0:
-            self._run_multi_finger_path(
-                start_points={finger_id: (target_x, target_y)},
-                end_points={finger_id: (target_x, target_y)},
-                wait_ms=self._normalize_duration(dura),
-                move_time_ms=1,
-                release_map={finger_id: True},
-            )
-            return
-
-        self._ensure_fingers_available([finger_id])
-        self.mt.reset_frames()
-        had_active_fingers = bool(self.mt.active_fingers)
-        self.mt.finger_down(finger_id, target_x, target_y)
-        self.mt.commit_frame(include_btn_touch_down=not had_active_fingers, duration_ms=0)
-        self._flush()
+            self.move_to(finger_id, (target_x, target_y), duration_ms=dura)
+            self.move_up(finger_id)
 
     def move_press(self, finger_id: int, pos):
         self.ensure_screen_mapping()
@@ -936,28 +907,40 @@ class SendEventController:
         self.mt.finger_down(finger_id, x0, y0)
         self._send_immediate_frame(include_btn_touch_down=not had_active_fingers)
 
-    def move_to(self, finger_id: int, pos, duration_ms: int = 160):
-        if finger_id not in self.mt.active_fingers:
-            raise ValueError(f"finger_id={finger_id} 尚未按下，不能 move_to")
+    def move_to(self, finger_id, pos=None, duration_ms: int = 160):
+        if isinstance(finger_id, dict) and pos is None:
+            target_map = finger_id
+        else:
+            target_map = {finger_id: pos}
+
+        missing_fingers = [fid for fid in target_map if fid not in self.mt.active_fingers]
+        if missing_fingers:
+            raise ValueError(f"finger_id={missing_fingers} 尚未按下，不能 move_to")
 
         self.ensure_screen_mapping()
-        x0, y0 = int(pos[0]), int(pos[1])
-        target_x_abs, target_y_abs = self.mt._pixel_to_abs(x0, y0)
-        finger = self.mt.active_fingers[finger_id]
-        start_x_abs, start_y_abs = finger.x_abs, finger.y_abs
+        path_map = {}
 
         duration_ms = max(self._normalize_duration(duration_ms), self.mt.frame_interval_ms)
         frame_count = max(3, round(duration_ms / self.mt.frame_interval_ms))
-        path = gen_slider_points_by_bezier(
-            (start_x_abs, start_y_abs),
-            (target_x_abs, target_y_abs),
-            frame_count,
-        )
+        for fid, target_pos in target_map.items():
+            if target_pos is None:
+                raise ValueError(f"finger_id={fid} 缺少 move_to 目标位置")
+            x0, y0 = int(target_pos[0]), int(target_pos[1])
+            target_x_abs, target_y_abs = self.mt._pixel_to_abs(x0, y0)
+            finger = self.mt.active_fingers[fid]
+            path_map[fid] = gen_slider_points_by_bezier(
+                (finger.x_abs, finger.y_abs),
+                (target_x_abs, target_y_abs),
+                frame_count,
+            )
 
-        for x_abs, y_abs in path[1:]:
-            finger.x_abs = int(x_abs)
-            finger.y_abs = int(y_abs)
-            self.mt.last_changed_finger_id = finger_id
+        for step_idx in range(1, frame_count):
+            for fid, path in path_map.items():
+                x_abs, y_abs = path[step_idx]
+                finger = self.mt.active_fingers[fid]
+                finger.x_abs = int(x_abs)
+                finger.y_abs = int(y_abs)
+                self.mt.last_changed_finger_id = fid
             self._send_immediate_frame()
 
     def move_up(self, finger_id: int, duration_ms: int = 0):
@@ -972,49 +955,15 @@ class SendEventController:
             self.mt.reset_frames()
 
     def click_up(self, finger_id: int = 0, duration_ms: int = 0):
-        if finger_id in self._legacy_pressed_fingers:
-            self.ensure_screen_mapping()
-            cmd_text = self._build_legacy_up_text()
-            self.dut_handle.run_cmd_by_file_with_ret(cmd_text)
-            self._legacy_pressed_fingers.discard(finger_id)
-            return
-
-        if finger_id not in self.mt.active_fingers:
-            return
-
-        self.ensure_screen_mapping()
-        self.mt.reset_frames()
-        self.mt.finger_up(finger_id)
-        self.mt.commit_frame(
-            include_btn_touch_up=len(self.mt.active_fingers) == 0,
-            duration_ms=self._normalize_duration(duration_ms),
-        )
-        self._flush()
+        self.move_up(finger_id, duration_ms=duration_ms)
 
     def tap_single(self, x0, y0, wait=100, dura=500, x_bias=0, y_bias=1, finger_id: int = 0, release: bool = True):
-        self.ensure_screen_mapping()
-        use_legacy_single = release and not self.mt.active_fingers
-
-        if use_legacy_single:
-            cmd_text = self._build_legacy_tap_single_text(
-                x0,
-                y0,
-                x0 + x_bias,
-                y0 + y_bias,
-                wait,
-                dura,
-                release=True,
-            )
-            self.dut_handle.run_cmd_by_file_with_ret(cmd_text)
-            return
-
-        self._run_multi_finger_path(
-            start_points={finger_id: (x0, y0)},
-            end_points={finger_id: (x0 + x_bias, y0 + y_bias)},
-            wait_ms=wait,
-            move_time_ms=dura,
-            release_map={finger_id: release},
-        )
+        self.move_press(finger_id, (x0, y0))
+        if self._normalize_duration(wait) > 0:
+            self.move_to(finger_id, (x0, y0), duration_ms=wait)
+        self.move_to(finger_id, (x0 + x_bias, y0 + y_bias), duration_ms=dura)
+        if release:
+            self.move_up(finger_id)
 
     def tap_double(self, x1, y1, x2, y2, wait=100, dura=500,
                    x1_bias=0, y1_bias=1, x2_bias=0, y2_bias=1, finger_id: int = 0,
@@ -1022,16 +971,27 @@ class SendEventController:
         second_finger_id = finger_id + 1
         if second_finger_id > 9:
             raise ValueError("tap_double 的 finger_id 最大只能到 8，否则第二根手指会超出设备支持范围")
-        self._run_multi_finger_path(
-            start_points={finger_id: (x1, y1), second_finger_id: (x2, y2)},
-            end_points={
+        self.move_press(finger_id, (x1, y1))
+        self.move_press(second_finger_id, (x2, y2))
+        if self._normalize_duration(wait) > 0:
+            self.move_to(
+                {
+                    finger_id: (x1, y1),
+                    second_finger_id: (x2, y2),
+                },
+                duration_ms=wait,
+            )
+        self.move_to(
+            {
                 finger_id: (x1 + x1_bias, y1 + y1_bias),
                 second_finger_id: (x2 + x2_bias, y2 + y2_bias),
             },
-            wait_ms=wait,
-            move_time_ms=dura,
-            release_map={finger_id: release1, second_finger_id: release2},
+            duration_ms=dura,
         )
+        if release1:
+            self.move_up(finger_id)
+        if release2:
+            self.move_up(second_finger_id)
 
 
 class Controller:

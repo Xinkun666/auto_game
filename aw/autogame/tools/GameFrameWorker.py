@@ -726,6 +726,16 @@ class FingerReleaseScheduler:
         with self._condition:
             return self._versions.get(finger_id) == version
 
+    def get_jobs(self, finger_ids=None):
+        with self._condition:
+            if finger_ids is None:
+                return dict(self._jobs)
+            return {
+                finger_id: self._jobs[finger_id]
+                for finger_id in finger_ids
+                if finger_id in self._jobs
+            }
+
     def close(self):
         with self._condition:
             if self._closed:
@@ -783,8 +793,29 @@ class SendEventController:
         self.mt.reset_frames()
 
     def close(self):
+        wait_deadline = None
+        with self._op_lock:
+            active_finger_ids = list(self.mt.active_fingers.keys())
+            pending_jobs = self._release_scheduler.get_jobs(active_finger_ids)
+            if pending_jobs:
+                latest_release_time = max(deadline for deadline, _ in pending_jobs.values())
+                wait_deadline = latest_release_time + 0.1
+
+        if wait_deadline is not None:
+            while time.monotonic() < wait_deadline:
+                with self._op_lock:
+                    active_finger_ids = list(self.mt.active_fingers.keys())
+                    if not active_finger_ids:
+                        break
+                    if not self._release_scheduler.get_jobs(active_finger_ids):
+                        break
+                time.sleep(0.01)
+
         with self._op_lock:
             self._release_scheduler.cancel_all()
+            active_finger_ids = sorted(self.mt.active_fingers.keys())
+            for finger_id in active_finger_ids:
+                self._move_up_locked(finger_id)
         self._release_scheduler.close()
 
     def _cancel_pending_releases(self, finger_ids):

@@ -806,29 +806,29 @@ class SendEventController:
         cmd_list.append(gen_single_move_cmd_str2(point_idx, input_device, int(x0_abs), int(y0_abs), "down"))
         point_idx += 1
 
-        hold_count = max(0, round(max(0, int(wait_ms)) / 5))
-        for _ in range(hold_count):
-            cmd_list.append(gen_single_move_cmd_str2(point_idx, input_device, int(x0_abs), int(y0_abs), "no"))
-            point_idx += 1
-
         move_time_ms = max(5, int(move_time_ms))
         move_count = max(2, round(move_time_ms / 5))
         point_list = gen_slider_points_by_bezier((x0_abs, y0_abs), (x1_abs, y1_abs), move_count)
 
-        for move_idx, point in enumerate(point_list):
-            button_status = "no"
-            if release and move_idx == len(point_list) - 1:
-                button_status = "up"
+        for point in point_list:
             cmd_list.append(
                 gen_single_move_cmd_str2(
                     point_idx,
                     input_device,
                     int(point[0]),
                     int(point[1]),
-                    button_status,
+                    "no",
                 )
             )
             point_idx += 1
+
+        hold_count = max(0, round(max(0, int(wait_ms)) / 5))
+        for _ in range(hold_count):
+            cmd_list.append(gen_single_move_cmd_str2(point_idx, input_device, int(x1_abs), int(y1_abs), "no"))
+            point_idx += 1
+
+        if release:
+            cmd_list.append(gen_single_move_cmd_str2(point_idx, input_device, int(x1_abs), int(y1_abs), "up"))
 
         return gen_cmd_str_by_list2(cmd_list)
 
@@ -892,10 +892,6 @@ class SendEventController:
                 duration_ms=0,
             )
 
-        normalized_wait_ms = self._normalize_duration(wait_ms)
-        if normalized_wait_ms > 0:
-            self.mt.commit_frame(duration_ms=normalized_wait_ms)
-
         move_time_ms = self._normalize_duration(move_time_ms)
         move_count = max(2, round(max(1, move_time_ms) / self.mt.frame_interval_ms))
         path_map = {}
@@ -914,6 +910,10 @@ class SendEventController:
                 x, y = synced_paths[finger_id][step_idx]
                 self.mt.finger_move(finger_id, x, y)
             self.mt.commit_frame(duration_ms=per_frame_ms)
+
+        normalized_wait_ms = self._normalize_duration(wait_ms)
+        if normalized_wait_ms > 0:
+            self.mt.commit_frame(duration_ms=normalized_wait_ms)
 
         released_finger_ids = []
         for finger_id in finger_ids:
@@ -1035,22 +1035,23 @@ class SendEventController:
 
     def tap_single(self, x0, y0, wait=100, dura=500, x_bias=0, y_bias=1, finger_id: int = 0,
                    release: bool = True, trajectory=None, max_step_px=None):
+        end_pos = (x0 + x_bias, y0 + y_bias)
         self.move_press(finger_id, (x0, y0))
-        if self._normalize_duration(wait) > 0:
-            self.move_to(
-                finger_id,
-                (x0, y0),
-                duration_ms=wait,
-                trajectory=trajectory,
-                max_step_px=max_step_px,
-            )
         self.move_to(
             finger_id,
-            (x0 + x_bias, y0 + y_bias),
+            end_pos,
             duration_ms=dura,
             trajectory=trajectory,
             max_step_px=max_step_px,
         )
+        if self._normalize_duration(wait) > 0:
+            self.move_to(
+                finger_id,
+                end_pos,
+                duration_ms=wait,
+                trajectory=trajectory,
+                max_step_px=max_step_px,
+            )
         if release:
             self.move_up(finger_id)
 
@@ -1060,27 +1061,25 @@ class SendEventController:
         second_finger_id = finger_id + 1
         if second_finger_id > 9:
             raise ValueError("tap_double 的 finger_id 最大只能到 8，否则第二根手指会超出设备支持范围")
+        end_pos_map = {
+            finger_id: (x1 + x1_bias, y1 + y1_bias),
+            second_finger_id: (x2 + x2_bias, y2 + y2_bias),
+        }
         self.move_press(finger_id, (x1, y1))
         self.move_press(second_finger_id, (x2, y2))
-        if self._normalize_duration(wait) > 0:
-            self.move_to(
-                {
-                    finger_id: (x1, y1),
-                    second_finger_id: (x2, y2),
-                },
-                duration_ms=wait,
-                trajectory=trajectory,
-                max_step_px=max_step_px,
-            )
         self.move_to(
-            {
-                finger_id: (x1 + x1_bias, y1 + y1_bias),
-                second_finger_id: (x2 + x2_bias, y2 + y2_bias),
-            },
+            end_pos_map,
             duration_ms=dura,
             trajectory=trajectory,
             max_step_px=max_step_px,
         )
+        if self._normalize_duration(wait) > 0:
+            self.move_to(
+                end_pos_map,
+                duration_ms=wait,
+                trajectory=trajectory,
+                max_step_px=max_step_px,
+            )
         if release1:
             self.move_up(finger_id)
         if release2:

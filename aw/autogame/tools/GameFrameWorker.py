@@ -1015,7 +1015,24 @@ class SendEventController:
             synced[finger_id] = path + [path[-1]] * (max_len - len(path))
         return synced
 
-    def _run_multi_finger_path(self, start_points, end_points, wait_ms, move_time_ms, release_map=None):
+    def _calc_path_frame_count_from_points(self, start_points, end_points, max_step_px, duration_ms):
+        max_distance = 0.0
+        for finger_id, start_pos in start_points.items():
+            end_pos = end_points[finger_id]
+            dx = int(end_pos[0]) - int(start_pos[0])
+            dy = int(end_pos[1]) - int(start_pos[1])
+            max_distance = max(max_distance, math.hypot(dx, dy))
+
+        if max_distance > 0:
+            return max(1, int(math.ceil(max_distance / float(max_step_px))))
+
+        normalized_duration = self._normalize_duration(duration_ms)
+        if normalized_duration <= 0:
+            return 1
+        return max(1, round(normalized_duration / self.mt.frame_interval_ms))
+
+    def _run_multi_finger_path(self, start_points, end_points, wait_ms, move_time_ms, release_map=None,
+                               trajectory=None, max_step_px=None):
         self.ensure_screen_mapping()
         finger_ids = sorted(start_points.keys())
         self._ensure_fingers_available(finger_ids)
@@ -1032,17 +1049,25 @@ class SendEventController:
             )
 
         move_time_ms = self._normalize_duration(move_time_ms)
-        move_count = max(2, round(max(1, move_time_ms) / self.mt.frame_interval_ms))
+        move_frame_count = self._calc_path_frame_count_from_points(
+            start_points,
+            end_points,
+            self._resolve_max_step_px(max_step_px),
+            move_time_ms,
+        )
+        point_count = move_frame_count + 1
+        trajectory = self._resolve_trajectory(trajectory)
         path_map = {}
         for finger_id in finger_ids:
-            path_map[finger_id] = gen_slider_points_by_bezier(
+            path_map[finger_id] = gen_slider_points(
                 start_points[finger_id],
                 end_points[finger_id],
-                move_count,
+                point_count,
+                trajectory=trajectory,
             )
 
         synced_paths = self._sync_paths(path_map)
-        per_frame_ms = max(1, round(max(1, move_time_ms) / max(1, move_count - 1)))
+        per_frame_ms = max(1, round(max(1, move_time_ms) / max(1, point_count - 1)))
 
         for step_idx in range(1, max(len(path) for path in synced_paths.values())):
             for finger_id in finger_ids:
@@ -1180,21 +1205,21 @@ class SendEventController:
     def tap_single(self, x0, y0, wait=100, dura=500, x_bias=0, y_bias=1, finger_id: int = 0,
                    release: bool = True, trajectory=None, max_step_px=None):
         with self._op_lock:
+            normalized_wait = self._normalize_duration(wait)
             end_pos = (x0 + x_bias, y0 + y_bias)
-            self.move_press(finger_id, (x0, y0))
-            self.move_to(
-                finger_id,
-                end_pos,
-                duration_ms=dura,
+            release_map = {finger_id: bool(release and normalized_wait <= 0)}
+            self._cancel_pending_releases([finger_id])
+            self._run_multi_finger_path(
+                {finger_id: (x0, y0)},
+                {finger_id: end_pos},
+                wait_ms=0,
+                move_time_ms=dura,
+                release_map=release_map,
                 trajectory=trajectory,
                 max_step_px=max_step_px,
             )
-            if release:
-                normalized_wait = self._normalize_duration(wait)
-                if normalized_wait > 0:
-                    self._schedule_release(finger_id, normalized_wait)
-                else:
-                    self._move_up_locked(finger_id)
+            if release and normalized_wait > 0:
+                self._schedule_release(finger_id, normalized_wait)
 
     def tap_double(self, x1, y1, x2, y2, wait=100, dura=500,
                    x1_bias=0, y1_bias=1, x2_bias=0, y2_bias=1, finger_id: int = 0,
@@ -1203,29 +1228,29 @@ class SendEventController:
             second_finger_id = finger_id + 1
             if second_finger_id > 9:
                 raise ValueError("tap_double 的 finger_id 最大只能到 8，否则第二根手指会超出设备支持范围")
+            normalized_wait = self._normalize_duration(wait)
             end_pos_map = {
                 finger_id: (x1 + x1_bias, y1 + y1_bias),
                 second_finger_id: (x2 + x2_bias, y2 + y2_bias),
             }
-            self.move_press(finger_id, (x1, y1))
-            self.move_press(second_finger_id, (x2, y2))
-            self.move_to(
+            release_map = {
+                finger_id: bool(release1 and normalized_wait <= 0),
+                second_finger_id: bool(release2 and normalized_wait <= 0),
+            }
+            self._cancel_pending_releases([finger_id, second_finger_id])
+            self._run_multi_finger_path(
+                {finger_id: (x1, y1), second_finger_id: (x2, y2)},
                 end_pos_map,
-                duration_ms=dura,
+                wait_ms=0,
+                move_time_ms=dura,
+                release_map=release_map,
                 trajectory=trajectory,
                 max_step_px=max_step_px,
             )
-            normalized_wait = self._normalize_duration(wait)
-            if release1:
-                if normalized_wait > 0:
-                    self._schedule_release(finger_id, normalized_wait)
-                else:
-                    self._move_up_locked(finger_id)
-            if release2:
-                if normalized_wait > 0:
-                    self._schedule_release(second_finger_id, normalized_wait)
-                else:
-                    self._move_up_locked(second_finger_id)
+            if release1 and normalized_wait > 0:
+                self._schedule_release(finger_id, normalized_wait)
+            if release2 and normalized_wait > 0:
+                self._schedule_release(second_finger_id, normalized_wait)
 
 
 class Controller:

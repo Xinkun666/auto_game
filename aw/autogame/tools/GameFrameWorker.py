@@ -676,6 +676,93 @@ class MultiTouchController:
         return len(self.active_fingers) == 0
 
 
+class FingerReleaseScheduler:
+    """后台调度手指延迟释放，避免在业务线程里阻塞等待。"""
+
+    def __init__(self, release_callback):
+        self.release_callback = release_callback
+        self._condition = threading.Condition()
+        self._jobs = {}
+        self._versions = {}
+        self._closed = False
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name="FingerReleaseScheduler",
+        )
+        self._thread.start()
+
+    def schedule(self, finger_id: int, delay_ms: int) -> int:
+        delay_ms = max(0, int(delay_ms))
+        deadline = time.monotonic() + (delay_ms / 1000.0)
+        with self._condition:
+            version = self._versions.get(finger_id, 0) + 1
+            self._versions[finger_id] = version
+            self._jobs[finger_id] = (deadline, version)
+            self._condition.notify_all()
+            return version
+
+    def cancel(self, finger_id: int):
+        with self._condition:
+            self._versions[finger_id] = self._versions.get(finger_id, 0) + 1
+            self._jobs.pop(finger_id, None)
+            self._condition.notify_all()
+
+    def cancel_many(self, finger_ids):
+        with self._condition:
+            for finger_id in finger_ids:
+                self._versions[finger_id] = self._versions.get(finger_id, 0) + 1
+                self._jobs.pop(finger_id, None)
+            self._condition.notify_all()
+
+    def cancel_all(self):
+        with self._condition:
+            for finger_id in list(self._jobs.keys()):
+                self._versions[finger_id] = self._versions.get(finger_id, 0) + 1
+            self._jobs.clear()
+            self._condition.notify_all()
+
+    def is_current(self, finger_id: int, version: int) -> bool:
+        with self._condition:
+            return self._versions.get(finger_id) == version
+
+    def close(self):
+        with self._condition:
+            if self._closed:
+                return
+            self._closed = True
+            self._jobs.clear()
+            self._condition.notify_all()
+        self._thread.join(timeout=1.0)
+
+    def _run(self):
+        while True:
+            with self._condition:
+                while not self._closed and not self._jobs:
+                    self._condition.wait()
+                if self._closed:
+                    return
+
+                next_deadline = min(deadline for deadline, _ in self._jobs.values())
+                timeout = max(0.0, next_deadline - time.monotonic())
+                if timeout > 0:
+                    self._condition.wait(timeout=timeout)
+                    continue
+
+                now = time.monotonic()
+                due_jobs = []
+                for finger_id, (deadline, version) in list(self._jobs.items()):
+                    if deadline <= now:
+                        due_jobs.append((finger_id, version))
+                        self._jobs.pop(finger_id, None)
+
+            for finger_id, version in due_jobs:
+                try:
+                    self.release_callback(finger_id, version)
+                except Exception as exc:
+                    print(f"[FingerReleaseScheduler] finger_id={finger_id} 自动释放失败: {exc}")
+
+
 class SendEventController:
     """参考 GameFrameWorker.Controller 风格封装 sendevent/EventRecord。"""
 
@@ -688,10 +775,31 @@ class SendEventController:
         self._legacy_pressed_fingers = set()
         self.max_step_px = max(1, int(max_step_px))
         self.trajectory = trajectory
+        self._op_lock = threading.RLock()
+        self._release_scheduler = FingerReleaseScheduler(self._handle_scheduled_release)
 
     def _flush(self):
         self.mt.play()
         self.mt.reset_frames()
+
+    def close(self):
+        with self._op_lock:
+            self._release_scheduler.cancel_all()
+        self._release_scheduler.close()
+
+    def _cancel_pending_releases(self, finger_ids):
+        self._release_scheduler.cancel_many(finger_ids)
+
+    def _schedule_release(self, finger_id: int, delay_ms: int):
+        self._release_scheduler.schedule(finger_id, delay_ms)
+
+    def _handle_scheduled_release(self, finger_id: int, version: int):
+        with self._op_lock:
+            if not self._release_scheduler.is_current(finger_id, version):
+                return
+            if finger_id not in self.mt.active_fingers:
+                return
+            self._move_up_locked(finger_id)
 
     def ensure_screen_mapping(self):
         self.mt.refresh_screen_mapping()
@@ -933,93 +1041,98 @@ class SendEventController:
 
     def click(self, x0, y0, x_bias=0, y_bias=0, finger_id: int = 0, duration_ms: int = 16,
               trajectory=None, max_step_px=None):
-        target_x = x0 + x_bias
-        target_y = y0 + y_bias
-        self.move_press(finger_id, (target_x, target_y))
-        self.move_to(
-            finger_id,
-            (target_x, target_y),
-            duration_ms=duration_ms,
-            trajectory=trajectory,
-            max_step_px=max_step_px,
-        )
-        self.move_up(finger_id)
-
-    def click_down(self, x0, y0, x_bias=0, y_bias=0, dura=0, finger_id: int = 0,
-                   trajectory=None, max_step_px=None):
-        target_x = x0 + x_bias
-        target_y = y0 + y_bias
-        self.move_press(finger_id, (target_x, target_y))
-        if dura > 0:
+        with self._op_lock:
+            target_x = x0 + x_bias
+            target_y = y0 + y_bias
+            self.move_press(finger_id, (target_x, target_y))
             self.move_to(
                 finger_id,
                 (target_x, target_y),
-                duration_ms=dura,
+                duration_ms=duration_ms,
                 trajectory=trajectory,
                 max_step_px=max_step_px,
             )
             self.move_up(finger_id)
 
+    def click_down(self, x0, y0, x_bias=0, y_bias=0, dura=0, finger_id: int = 0,
+                   trajectory=None, max_step_px=None):
+        with self._op_lock:
+            target_x = x0 + x_bias
+            target_y = y0 + y_bias
+            self.move_press(finger_id, (target_x, target_y))
+            if dura > 0:
+                self._schedule_release(finger_id, dura)
+
     def move_press(self, finger_id: int, pos):
-        self.ensure_screen_mapping()
-        x0, y0 = int(pos[0]), int(pos[1])
-        if finger_id in self.mt.active_fingers:
-            self.mt.finger_move(finger_id, x0, y0)
-            self._send_immediate_frame()
-            return
-        if not self.mt.active_fingers:
-            self.mt.reset_frames()
-        self._ensure_fingers_available([finger_id])
-        had_active_fingers = bool(self.mt.active_fingers)
-        self.mt.finger_down(finger_id, x0, y0)
-        self._send_immediate_frame(include_btn_touch_down=not had_active_fingers)
+        with self._op_lock:
+            self._cancel_pending_releases([finger_id])
+            self.ensure_screen_mapping()
+            x0, y0 = int(pos[0]), int(pos[1])
+            if finger_id in self.mt.active_fingers:
+                self.mt.finger_move(finger_id, x0, y0)
+                self._send_immediate_frame()
+                return
+            if not self.mt.active_fingers:
+                self.mt.reset_frames()
+            self._ensure_fingers_available([finger_id])
+            had_active_fingers = bool(self.mt.active_fingers)
+            self.mt.finger_down(finger_id, x0, y0)
+            self._send_immediate_frame(include_btn_touch_down=not had_active_fingers)
 
     def move_to(self, finger_id, pos=None, duration_ms: int = 160,
                 trajectory=None, max_step_px=None):
-        if isinstance(finger_id, dict) and pos is None:
-            target_map = finger_id
-        else:
-            target_map = {finger_id: pos}
+        with self._op_lock:
+            if isinstance(finger_id, dict) and pos is None:
+                target_map = finger_id
+            else:
+                target_map = {finger_id: pos}
 
-        missing_fingers = [fid for fid in target_map if fid not in self.mt.active_fingers]
-        if missing_fingers:
-            raise ValueError(f"finger_id={missing_fingers} 尚未按下，不能 move_to")
-        missing_targets = [fid for fid, target_pos in target_map.items() if target_pos is None]
-        if missing_targets:
-            raise ValueError(f"finger_id={missing_targets} 缺少 move_to 目标位置")
+            self._cancel_pending_releases(target_map.keys())
 
-        self.ensure_screen_mapping()
-        path_map = {}
-        move_frame_count = self._calc_move_frame_count(
-            target_map,
-            self._resolve_max_step_px(max_step_px),
-            duration_ms,
-        )
-        point_count = move_frame_count + 1
-        trajectory = self._resolve_trajectory(trajectory)
-        for fid, target_pos in target_map.items():
-            x0, y0 = int(target_pos[0]), int(target_pos[1])
-            finger = self.mt.active_fingers[fid]
-            path_map[fid] = gen_slider_points(
-                (finger.x_px, finger.y_px),
-                (x0, y0),
-                point_count,
-                trajectory=trajectory,
+            missing_fingers = [fid for fid in target_map if fid not in self.mt.active_fingers]
+            if missing_fingers:
+                raise ValueError(f"finger_id={missing_fingers} 尚未按下，不能 move_to")
+            missing_targets = [fid for fid, target_pos in target_map.items() if target_pos is None]
+            if missing_targets:
+                raise ValueError(f"finger_id={missing_targets} 缺少 move_to 目标位置")
+
+            self.ensure_screen_mapping()
+            path_map = {}
+            move_frame_count = self._calc_move_frame_count(
+                target_map,
+                self._resolve_max_step_px(max_step_px),
+                duration_ms,
             )
-
-        for step_idx in range(1, point_count):
-            for fid, path in path_map.items():
-                x_px, y_px = path[step_idx]
-                x_abs, y_abs = self.mt._pixel_to_abs(x_px, y_px)
+            point_count = move_frame_count + 1
+            trajectory = self._resolve_trajectory(trajectory)
+            for fid, target_pos in target_map.items():
+                x0, y0 = int(target_pos[0]), int(target_pos[1])
                 finger = self.mt.active_fingers[fid]
-                finger.x_abs = int(x_abs)
-                finger.y_abs = int(y_abs)
-                finger.x_px = int(x_px)
-                finger.y_px = int(y_px)
-                self.mt.last_changed_finger_id = fid
-            self._send_immediate_frame()
+                path_map[fid] = gen_slider_points(
+                    (finger.x_px, finger.y_px),
+                    (x0, y0),
+                    point_count,
+                    trajectory=trajectory,
+                )
+
+            for step_idx in range(1, point_count):
+                for fid, path in path_map.items():
+                    x_px, y_px = path[step_idx]
+                    x_abs, y_abs = self.mt._pixel_to_abs(x_px, y_px)
+                    finger = self.mt.active_fingers[fid]
+                    finger.x_abs = int(x_abs)
+                    finger.y_abs = int(y_abs)
+                    finger.x_px = int(x_px)
+                    finger.y_px = int(y_px)
+                    self.mt.last_changed_finger_id = fid
+                self._send_immediate_frame()
 
     def move_up(self, finger_id: int, duration_ms: int = 0):
+        with self._op_lock:
+            self._cancel_pending_releases([finger_id])
+            self._move_up_locked(finger_id)
+
+    def _move_up_locked(self, finger_id: int):
         if finger_id not in self.mt.active_fingers:
             return
 
@@ -1035,55 +1148,53 @@ class SendEventController:
 
     def tap_single(self, x0, y0, wait=100, dura=500, x_bias=0, y_bias=1, finger_id: int = 0,
                    release: bool = True, trajectory=None, max_step_px=None):
-        end_pos = (x0 + x_bias, y0 + y_bias)
-        self.move_press(finger_id, (x0, y0))
-        self.move_to(
-            finger_id,
-            end_pos,
-            duration_ms=dura,
-            trajectory=trajectory,
-            max_step_px=max_step_px,
-        )
-        if self._normalize_duration(wait) > 0:
+        with self._op_lock:
+            end_pos = (x0 + x_bias, y0 + y_bias)
+            self.move_press(finger_id, (x0, y0))
             self.move_to(
                 finger_id,
                 end_pos,
-                duration_ms=wait,
+                duration_ms=dura,
                 trajectory=trajectory,
                 max_step_px=max_step_px,
             )
-        if release:
-            self.move_up(finger_id)
+            if release:
+                normalized_wait = self._normalize_duration(wait)
+                if normalized_wait > 0:
+                    self._schedule_release(finger_id, normalized_wait)
+                else:
+                    self._move_up_locked(finger_id)
 
     def tap_double(self, x1, y1, x2, y2, wait=100, dura=500,
                    x1_bias=0, y1_bias=1, x2_bias=0, y2_bias=1, finger_id: int = 0,
                    release1: bool = True, release2: bool = True, trajectory=None, max_step_px=None):
-        second_finger_id = finger_id + 1
-        if second_finger_id > 9:
-            raise ValueError("tap_double 的 finger_id 最大只能到 8，否则第二根手指会超出设备支持范围")
-        end_pos_map = {
-            finger_id: (x1 + x1_bias, y1 + y1_bias),
-            second_finger_id: (x2 + x2_bias, y2 + y2_bias),
-        }
-        self.move_press(finger_id, (x1, y1))
-        self.move_press(second_finger_id, (x2, y2))
-        self.move_to(
-            end_pos_map,
-            duration_ms=dura,
-            trajectory=trajectory,
-            max_step_px=max_step_px,
-        )
-        if self._normalize_duration(wait) > 0:
+        with self._op_lock:
+            second_finger_id = finger_id + 1
+            if second_finger_id > 9:
+                raise ValueError("tap_double 的 finger_id 最大只能到 8，否则第二根手指会超出设备支持范围")
+            end_pos_map = {
+                finger_id: (x1 + x1_bias, y1 + y1_bias),
+                second_finger_id: (x2 + x2_bias, y2 + y2_bias),
+            }
+            self.move_press(finger_id, (x1, y1))
+            self.move_press(second_finger_id, (x2, y2))
             self.move_to(
                 end_pos_map,
-                duration_ms=wait,
+                duration_ms=dura,
                 trajectory=trajectory,
                 max_step_px=max_step_px,
             )
-        if release1:
-            self.move_up(finger_id)
-        if release2:
-            self.move_up(second_finger_id)
+            normalized_wait = self._normalize_duration(wait)
+            if release1:
+                if normalized_wait > 0:
+                    self._schedule_release(finger_id, normalized_wait)
+                else:
+                    self._move_up_locked(finger_id)
+            if release2:
+                if normalized_wait > 0:
+                    self._schedule_release(second_finger_id, normalized_wait)
+                else:
+                    self._move_up_locked(second_finger_id)
 
 
 class Controller:
@@ -1116,6 +1227,10 @@ class Controller:
     def _require_sendevent_backend(self):
         if self.backend != "sendevent" or self.touch_backend is None:
             raise RuntimeError("当前控制器未启用 sendevent 后端，请使用 controller_backend='sendevent'")
+
+    def close(self):
+        if self.touch_backend and hasattr(self.touch_backend, "close"):
+            self.touch_backend.close()
 
     def _get_cached_resolution(self):
         if self._cached_resolution is None:
@@ -1572,8 +1687,7 @@ class FrameWorker(threading.Thread):
 
     def stop(self):
         print("主动结束游戏自动化中......")
-        if not self.running:
-            return
+        already_stopped = not self.running
 
         self.running = False
         self.finished = True
@@ -1590,6 +1704,15 @@ class FrameWorker(threading.Thread):
                 self.viz_proc.join(timeout=0.5)
 
             self.viz_queue.cancel_join_thread()
+
+        try:
+            self.controller.close()
+        except Exception as exc:
+            print(f"[FrameWorker] 关闭控制器失败: {exc}")
+
+        if already_stopped:
+            print("GameFrameWorker 已停止")
+            return
 
         print("GameFrameWorker 已停止")
 

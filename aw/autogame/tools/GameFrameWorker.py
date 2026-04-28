@@ -872,7 +872,7 @@ class SendEventController:
         for finger in self.mt.active_fingers.values():
             finger.contact_phase += 1
 
-    def _send_immediate_frame(self, include_btn_touch_down: bool = False, include_btn_touch_up: bool = False):
+    def _build_immediate_frame_command(self, include_btn_touch_down: bool = False, include_btn_touch_up: bool = False):
         self.ensure_screen_mapping()
         input_prefix = f"sendevent /dev/input/{self.mt.input_device}"
         cmd_list = []
@@ -889,8 +889,37 @@ class SendEventController:
             cmd_list.append(f"{input_prefix} 1 330 0")
 
         cmd_list.append(f"{input_prefix} 0 0 0")
-        self.dut_handle.run_cmd_with_ret(gen_cmd_str_by_list(cmd_list))
+        return gen_cmd_str_by_list(cmd_list)
+
+    def _send_immediate_frame(self, include_btn_touch_down: bool = False, include_btn_touch_up: bool = False):
+        cmd_text = self._build_immediate_frame_command(
+            include_btn_touch_down=include_btn_touch_down,
+            include_btn_touch_up=include_btn_touch_up,
+        )
+        self.dut_handle.run_cmd_with_ret(cmd_text)
         self._advance_immediate_frame_state()
+
+    def _quick_tap_locked(self, finger_id: int, pos):
+        self._cancel_pending_releases([finger_id])
+        self.ensure_screen_mapping()
+        x0, y0 = int(pos[0]), int(pos[1])
+
+        if not self.mt.active_fingers:
+            self.mt.reset_frames()
+
+        self._ensure_fingers_available([finger_id])
+        had_active_fingers = bool(self.mt.active_fingers)
+
+        self.mt.finger_down(finger_id, x0, y0)
+        down_cmd = self._build_immediate_frame_command(include_btn_touch_down=not had_active_fingers)
+        self._advance_immediate_frame_state()
+
+        was_last = len(self.mt.active_fingers) == 1
+        self.mt.finger_up(finger_id)
+        up_cmd = self._build_immediate_frame_command(include_btn_touch_up=was_last)
+        self._advance_immediate_frame_state()
+
+        self.dut_handle.run_cmd_with_ret(gen_cmd_str_by_list([down_cmd, up_cmd]))
 
     def _build_legacy_single_touch_text(self, x0, y0, duration_ms):
         x_abs, y_abs = self.mt._pixel_to_abs(x0, y0)
@@ -1105,19 +1134,19 @@ class SendEventController:
             self.mt.commit_frame(duration_ms=self.mt.frame_interval_ms)
         self._flush()
 
-    def click(self, x0, y0, x_bias=0, y_bias=0, finger_id: int = 0, duration_ms: int = 16,
+    def click(self, x0, y0, x_bias=0, y_bias=0, finger_id: int = 0, duration_ms: int = 0,
               trajectory=None, max_step_px=None):
         self._wait_for_releasable_fingers([finger_id])
         target_x = x0 + x_bias
         target_y = y0 + y_bias
+        normalized_duration = self._normalize_duration(duration_ms)
+        if normalized_duration <= 0:
+            with self._op_lock:
+                self._quick_tap_locked(finger_id, (target_x, target_y))
+            return
+
         self.move_press(finger_id, (target_x, target_y))
-        self.move_to(
-            finger_id,
-            (target_x, target_y),
-            duration_ms=duration_ms,
-            trajectory=trajectory,
-            max_step_px=max_step_px,
-        )
+        time.sleep(normalized_duration / 1000.0)
         self.move_up(finger_id)
 
     def click_down(self, x0, y0, x_bias=0, y_bias=0, dura=0, finger_id: int = 0,
@@ -1604,7 +1633,7 @@ class Controller:
                     cmd = f"hdc shell uinput -T -d {x} {y} -i {dura} -u {x} {y}"
                 self._run_hdc(cmd)
 
-    def click(self, btn, x_bias=0, y_bias=0, finger_id=0, duration_ms=16,
+    def click(self, btn, x_bias=0, y_bias=0, finger_id=0, duration_ms=0,
               trajectory=None, max_step_px=None):
         pos, label = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias)
         if pos:

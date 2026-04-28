@@ -22,11 +22,14 @@ class ParachuteManager:
     TARGET_POS: Tuple[int, int] = (966, 755)  # 默认目标落点
     TRIGGER_DIST: int = 450  # 触发跳伞的距离阈值
     SAFE_BUFFER: int = 550  # 有效靠近的判定缓冲值
+    OVERSHOOT_INCREASE_FRAMES: int = 5  # 连续多少帧递增才判定为飞过最佳跳伞点
     DIVE_DURATION_MS: int = 47500  # 俯冲/滑行持续时间 (根据地图大小调整)
 
     def __init__(self):
         self.is_active = False  # 是否处于监控跳伞距离的激活状态
         self.prior_dist = 0  # 历史最近距离（用于判断是否飞过了）
+        self.last_dist: Optional[float] = None  # 上一帧距离（用于判断连续递增）
+        self.increase_streak = 0  # 连续递增帧数
         self.target_pos: Tuple[int, int] = self.TARGET_POS
         self.landing_stage: str = "搜房阶段"
 
@@ -34,6 +37,8 @@ class ParachuteManager:
         """重置跳伞管理器的内部状态"""
         self.is_active = False
         self.prior_dist = 0
+        self.last_dist = None
+        self.increase_streak = 0
         print("[Parachute] 状态已重置!")
 
     def configure(
@@ -100,16 +105,38 @@ class ParachuteManager:
         # 初始化最近距离
         if self.prior_dist == 0:
             self.prior_dist = current_dist
+            self.last_dist = current_dist
+            self.increase_streak = 0
             return
         else:
-            print(f'[Parachute] 当前距离跳伞点距离：{current_dist:.2f}, 上一次距离跳伞点距离：{self.prior_dist:.2f}')
+            last_dist_text = f"{self.last_dist:.2f}" if self.last_dist is not None else "None"
+            print(
+                f"[Parachute] 当前距离：{current_dist:.2f}, "
+                f"历史最近距离：{self.prior_dist:.2f}, "
+                f"上一帧距离：{last_dist_text}, "
+                f"连续递增帧数：{self.increase_streak}"
+            )
 
         # 正常情况：距离在变小，更新最近距离
         if current_dist <= self.prior_dist:
             self.prior_dist = current_dist
 
-        if current_dist > self.prior_dist and self.prior_dist > self.TRIGGER_DIST:
-            print(f'[Parachute] 警告：航线偏离。最近距离 {self.prior_dist} > 阈值 {self.TRIGGER_DIST}')
+        if self.last_dist is not None and current_dist > self.last_dist:
+            self.increase_streak += 1
+        else:
+            self.increase_streak = 0
+
+        self.last_dist = current_dist
+
+        if (
+            current_dist > self.TRIGGER_DIST
+            and self.prior_dist > self.TRIGGER_DIST
+            and self.increase_streak >= self.OVERSHOOT_INCREASE_FRAMES
+        ):
+            print(
+                f"[Parachute] 警告：航线偏离。历史最近距离 {self.prior_dist:.2f} > 阈值 {self.TRIGGER_DIST}，"
+                f"且已连续 {self.increase_streak} 帧远离目标，判定飞过最佳跳伞点。"
+            )
             self.reset()
             w.change_stage('结束阶段')
 

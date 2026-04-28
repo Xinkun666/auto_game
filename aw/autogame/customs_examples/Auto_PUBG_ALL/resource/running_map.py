@@ -9,7 +9,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.toolkit import (
     get_distance,
     is_location_stagnant, draw_points_with_arrows,
 )
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.utils import find_path
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.utils import get_resolution
 
 if TYPE_CHECKING:
     from aw.autogame.tools.GameFrameWorker import FrameWorker
@@ -48,8 +48,10 @@ class RunningManager:
 
     # R 城寻车的大致目标点
     R_CITY = (1136, 783)
+    R_CITY_APPROACH_RADIUS = 50.0
     # 车库附近的精确上车点
     CAR_ENTRY_POINT = (1131, 763)
+    CAR_ENTRY_TOLERANCE = 1.0
     # 历史保留字段，表示默认入库朝向
     CAR_FACE_DIRECTION = 265
     # 入库失败后依次尝试的朝向序列
@@ -68,6 +70,15 @@ class RunningManager:
     PRECISE_RESET_CENTER_BIAS = -300
     PRECISE_RESET_CENTER_DURA = 260
     PRECISE_RESET_CENTER_WAIT = 700
+    # 视觉对准车辆时的参数
+    CAR_ALIGN_CENTER_THRESHOLD = 80
+    CAR_ALIGN_STEP_RATIO = 0.33
+    CAR_ALIGN_MAX_BIAS = 400
+    CAR_ALIGN_DURA = 500
+    CAR_ALIGN_WAIT = 500
+    CAR_VISUAL_FORWARD_BIAS_Y = -220
+    CAR_VISUAL_FORWARD_DURA = 320
+    CAR_VISUAL_FORWARD_WAIT = 600
     # 落水后，上浮和向前划水脱离水面的操作参数
     WATER_FLOAT_DURA = 2000
     WATER_FORWARD_BIAS_Y = -280
@@ -190,6 +201,13 @@ class RunningManager:
             return
 
         if self.precise_entering_car:
+            self._process_precise_entry(w, location, direction)
+            return
+
+        if self.finding_car and self._is_near_car_search_zone(location):
+            print("[Running] 已接近 R_CITY，直接进入上车精调阶段")
+            self._log_running_state("已接近 R_CITY", location, direction, "切换到上车精调阶段")
+            self._enter_precise_entry_mode(w)
             self._process_precise_entry(w, location, direction)
             return
 
@@ -481,12 +499,10 @@ class RunningManager:
         if self.finding_car:
             print("[Running] 正在加载寻车路径...")
             self._log_running_state("正在加载寻车路径", location, None, "规划路径")
-            if get_distance(location, self.R_CITY) > 50:
-                approach_path = self.map_tool.plan_path(location, self.R_CITY)
-                garage_path = find_path(self.R_CITY) or []
-                self.road_list = self._merge_paths(approach_path, garage_path)
+            if get_distance(location, self.R_CITY) > self.R_CITY_APPROACH_RADIUS:
+                self.road_list = self.map_tool.plan_path(location, self.R_CITY)
             else:
-                self.road_list = find_path(location) or []
+                self.road_list = []
         else:
             if self.stable_circle_angle is None:
                 print("[Running] 未获取到进圈方向，加载随机巡逻路径")
@@ -520,6 +536,9 @@ class RunningManager:
             if not merged or merged[-1] != point:
                 merged.append(point)
         return merged
+
+    def _is_near_car_search_zone(self, location: Tuple[int, int]) -> bool:
+        return get_distance(location, self.R_CITY) <= self.R_CITY_APPROACH_RADIUS
 
     def _handle_water_escape(
         self,
@@ -646,6 +665,7 @@ class RunningManager:
         self.precise_last_distance = None
         self.precise_idle_rounds = 0
         self.precise_face_attempt_index = 0
+        self.road_list = []
         self.locations = []
         self.history_locations = []
         self.stuck = False
@@ -675,7 +695,7 @@ class RunningManager:
             dist_to_entry,
         )
 
-        if dist_to_entry > 0:
+        if dist_to_entry > self.CAR_ENTRY_TOLERANCE:
             self._update_precise_progress(dist_to_entry)
             self._align_to_point(w, location, direction, self.CAR_ENTRY_POINT, threshold=3)
             w.tap_single("摇杆", y_bias=-120, dura=180, wait=350)
@@ -686,6 +706,12 @@ class RunningManager:
         print(f"[Running] 当前入库尝试 {self.precise_face_attempt_index + 1}/5，目标朝向 {target_face_direction}")
         face_aligned = self._align_to_direction(w, direction, target_face_direction, threshold=3)
         if not face_aligned:
+            return
+
+        if self._attempt_drive_after_move(w, "已到达上车点，先尝试直接上车"):
+            return
+
+        if self._approach_visible_car(w):
             return
 
         print("[Running] 已对准车头，缓慢前进尝试触发驾驶按钮")
@@ -777,6 +803,77 @@ class RunningManager:
             self.correct_position_times += 1
             self.precise_idle_rounds = 0
             print(f"[Running] 精调阶段长时间无进展，累计失败 {self.correct_position_times}")
+
+    def _find_largest_car(self, w: "FrameWorker"):
+        scene = w.get_info("forward_scene")
+        if not scene:
+            return None
+
+        cars = [obj for obj in scene if int(obj[5]) == 7]
+        if not cars:
+            return None
+
+        return max(cars, key=lambda x: (x[2] - x[0]) * (x[3] - x[1]))
+
+    def _get_visual_frame_width(self, w: "FrameWorker") -> Optional[int]:
+        frame = getattr(w, "frame", None)
+        if frame is None:
+            return None
+        try:
+            return int(frame.shape[1])
+        except Exception:
+            return None
+
+    def _align_to_visible_car(self, w: "FrameWorker") -> Optional[bool]:
+        car = self._find_largest_car(w)
+        if not car:
+            return None
+
+        frame_w = self._get_visual_frame_width(w)
+        if not frame_w:
+            return None
+
+        screen_w, _ = get_resolution()
+        if not screen_w:
+            return None
+
+        car_center_x = (float(car[0]) + float(car[2])) / 2.0
+        offset_real = (car_center_x - (frame_w / 2.0)) * (float(screen_w) / float(frame_w))
+        print(f"[Running] 发现车辆，视觉中心偏移 {offset_real:.2f}px")
+
+        if abs(offset_real) <= self.CAR_ALIGN_CENTER_THRESHOLD:
+            return True
+
+        adjust_val = int(offset_real * self.CAR_ALIGN_STEP_RATIO)
+        adjust_val = max(-self.CAR_ALIGN_MAX_BIAS, min(self.CAR_ALIGN_MAX_BIAS, adjust_val))
+        print(f"[Running] 视角对准车辆，x_bias={adjust_val}")
+        w.tap_single("视角", x_bias=adjust_val, dura=self.CAR_ALIGN_DURA, wait=self.CAR_ALIGN_WAIT)
+        w.refresh_frame()
+        return False
+
+    def _approach_visible_car(self, w: "FrameWorker") -> bool:
+        for step in range(4):
+            aligned = self._align_to_visible_car(w)
+            if aligned is None:
+                print("[Running] 当前画面未检测到可用车辆，回退到原有上车试探流程")
+                return False
+
+            if not aligned:
+                continue
+
+            print(f"[Running] 已完成车辆视觉对准，执行前推尝试上车 {step + 1}/4")
+            w.tap_single(
+                "摇杆",
+                y_bias=self.CAR_VISUAL_FORWARD_BIAS_Y,
+                dura=self.CAR_VISUAL_FORWARD_DURA,
+                wait=self.CAR_VISUAL_FORWARD_WAIT,
+            )
+            w.refresh_frame()
+
+            if self._attempt_drive_after_move(w, f"车辆视觉对准后尝试上车 {step + 1}/4"):
+                return True
+
+        return False
 
     def _attempt_drive_after_move(self, w: "FrameWorker", reason: str) -> bool:
         print(f"[Running] {reason}，尝试点击驾驶按钮")

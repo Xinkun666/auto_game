@@ -285,11 +285,12 @@ class DrivingManager:
         )
         speed_text = "None" if context.speed is None else str(context.speed)
         obstacle_count = int(context.obstacle_info.get("obstacles_count", 0) or 0)
+        obstacle_classes = ",".join(context.obstacle_info.get("classes", [])[:4]) or "None"
         print(
             f"[情况:{situation}] "
             f"[状态: speed={speed_text}, loc={context.location}, dir={context.direction:.1f}, "
             f"circle={circle_text}, target={target_text}, obstacle_count={obstacle_count}, "
-            f"vision={context.decision}] "
+            f"vision={context.decision}, classes={obstacle_classes}] "
             f"[决策:{decision}]"
         )
 
@@ -514,15 +515,18 @@ class DrivingManager:
         if decision == "straight":
             return False
 
+        hard_obstacle_count = int(context.obstacle_info.get("hard_obstacles_count", 0) or 0)
+        coverage_ratio = float(context.obstacle_info.get("coverage_ratio", 0.0) or 0.0)
+        severe_block = hard_obstacle_count > 0 or coverage_ratio >= 0.45
         action_map = {
-            "slight_left": ("forward_turn_left", 250),
-            "small_left": ("forward_turn_left", 450),
-            "large_left": ("forward_turn_left", 700),
-            "slight_right": ("forward_turn_right", 250),
-            "small_right": ("forward_turn_right", 450),
-            "large_right": ("forward_turn_right", 700),
-            "reverse_and_left": ("reverse_and_left", 1000),
-            "reverse_and_right": ("reverse_and_right", 1000),
+            "slight_left": ("forward_turn_left", 320 if severe_block else 250),
+            "small_left": ("forward_turn_left", 560 if severe_block else 450),
+            "large_left": ("forward_turn_left", 860 if severe_block else 700),
+            "slight_right": ("forward_turn_right", 320 if severe_block else 250),
+            "small_right": ("forward_turn_right", 560 if severe_block else 450),
+            "large_right": ("forward_turn_right", 860 if severe_block else 700),
+            "reverse_and_left": ("reverse_and_left", 1400 if severe_block else 1000),
+            "reverse_and_right": ("reverse_and_right", 1400 if severe_block else 1000),
         }
         action = action_map.get(decision)
         if action is None:
@@ -927,7 +931,7 @@ class DrivingManager:
         return bool(w.get_info("个人排名")) or bool(w.get_info("队伍排名"))
 
     def _analyze_obstacles(self, w: "FrameWorker") -> Dict[str, Any]:
-        detections = w.get_info("forward_scene2")
+        detections = w.get_info("forward_scene")
         if not detections:
             return {"decision": "straight", "obstacles_count": 0}
 
@@ -950,7 +954,24 @@ class DrivingManager:
             if not isinstance(det, (list, tuple)) or len(det) < 6:
                 continue
             x1, y1, x2, y2, conf, cls_id = det[:6]
-            local_dets.append([x1 - roi_x, y1 - roi_y, x2 - roi_x, y2 - roi_y, conf, cls_id])
+            inter_x1 = max(float(x1), float(roi_x))
+            inter_y1 = max(float(y1), float(roi_y))
+            inter_x2 = min(float(x2), float(roi_x + roi_w))
+            inter_y2 = min(float(y2), float(roi_y + roi_h))
+
+            if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+                continue
+
+            local_dets.append(
+                [
+                    inter_x1 - roi_x,
+                    inter_y1 - roi_y,
+                    inter_x2 - roi_x,
+                    inter_y2 - roi_y,
+                    conf,
+                    cls_id,
+                ]
+            )
 
         if not local_dets:
             return {"decision": "straight", "obstacles_count": 0}

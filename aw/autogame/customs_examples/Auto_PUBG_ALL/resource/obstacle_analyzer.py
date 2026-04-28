@@ -1,26 +1,144 @@
-import numpy as np
-
 class ObstacleAvoidanceAnalyzer:
-    def __init__(self,
-                 width,
-                 height,
-                 w_r=0.15,  # 最小可通行比率 (Gap width / Image width)
-                 conf_thresh=0.25,  # 检测置信度阈值
-                 center_tolerance=0.1,  # 中心死区 (在这个范围内认为是 Straight)
-                 slight_thresh=0.25,  # 轻微转向阈值 (偏离比例)
-                 small_thresh=0.5,  # 小转向阈值
-                 # large_thresh > 0.5    # 大转向
-                 ):
-        """
-        基于1D投影的避障分析器
-        """
-        self.W = width
-        self.H = height
+    # YOLO26 类别定义，用于驱动阶段的类别感知避障
+    CLASS_NAMES = {
+        0: "door",
+        1: "object",
+        2: "window",
+        3: "pick_menu",
+        4: "open_door",
+        5: "stair",
+        6: "down_stair",
+        7: "car",
+        8: "house",
+        9: "stone_wall",
+        10: "stump",
+        11: "rock",
+        12: "grass_tuft",
+        13: "fence",
+        14: "water",
+        15: "ditch",
+        16: "unique_construction",
+        17: "wrecked_car",
+        18: "box",
+        19: "sandband_wall",
+    }
+
+    # 仅将真正会挡住车或会让车陷进去的类别纳入视觉避障
+    CLASS_CONFIG = {
+        7: {
+            "name": "car",
+            "min_area_ratio": 0.003,
+            "min_bottom_ratio": 0.25,
+            "min_width_ratio": 0.04,
+            "x_padding_ratio": 0.06,
+            "priority": "hard",
+        },
+        8: {
+            "name": "house",
+            "min_area_ratio": 0.05,
+            "min_bottom_ratio": 0.55,
+            "min_width_ratio": 0.18,
+            "x_padding_ratio": 0.02,
+            "priority": "hard",
+        },
+        9: {
+            "name": "stone_wall",
+            "min_area_ratio": 0.005,
+            "min_bottom_ratio": 0.35,
+            "min_width_ratio": 0.05,
+            "x_padding_ratio": 0.05,
+            "priority": "hard",
+        },
+        10: {
+            "name": "stump",
+            "min_area_ratio": 0.0015,
+            "min_bottom_ratio": 0.38,
+            "min_width_ratio": 0.02,
+            "x_padding_ratio": 0.03,
+            "priority": "medium",
+        },
+        11: {
+            "name": "rock",
+            "min_area_ratio": 0.002,
+            "min_bottom_ratio": 0.35,
+            "min_width_ratio": 0.03,
+            "x_padding_ratio": 0.04,
+            "priority": "hard",
+        },
+        13: {
+            "name": "fence",
+            "min_area_ratio": 0.004,
+            "min_bottom_ratio": 0.4,
+            "min_width_ratio": 0.06,
+            "x_padding_ratio": 0.05,
+            "priority": "medium",
+        },
+        14: {
+            "name": "water",
+            "min_area_ratio": 0.04,
+            "min_bottom_ratio": 0.58,
+            "min_width_ratio": 0.2,
+            "x_padding_ratio": 0.08,
+            "priority": "hard",
+        },
+        15: {
+            "name": "ditch",
+            "min_area_ratio": 0.01,
+            "min_bottom_ratio": 0.45,
+            "min_width_ratio": 0.08,
+            "x_padding_ratio": 0.06,
+            "priority": "hard",
+        },
+        16: {
+            "name": "unique_construction",
+            "min_area_ratio": 0.012,
+            "min_bottom_ratio": 0.38,
+            "min_width_ratio": 0.08,
+            "x_padding_ratio": 0.05,
+            "priority": "hard",
+        },
+        17: {
+            "name": "wrecked_car",
+            "min_area_ratio": 0.003,
+            "min_bottom_ratio": 0.25,
+            "min_width_ratio": 0.04,
+            "x_padding_ratio": 0.06,
+            "priority": "hard",
+        },
+        18: {
+            "name": "box",
+            "min_area_ratio": 0.0018,
+            "min_bottom_ratio": 0.38,
+            "min_width_ratio": 0.025,
+            "x_padding_ratio": 0.03,
+            "priority": "medium",
+        },
+        19: {
+            "name": "sandband_wall",
+            "min_area_ratio": 0.005,
+            "min_bottom_ratio": 0.35,
+            "min_width_ratio": 0.05,
+            "x_padding_ratio": 0.05,
+            "priority": "hard",
+        },
+    }
+
+    def __init__(
+        self,
+        width,
+        height,
+        w_r=0.15,  # 最小可通行比率 (Gap width / Image width)
+        conf_thresh=0.25,  # 检测置信度阈值
+        center_tolerance=0.1,  # 中心死区 (在这个范围内认为是 Straight)
+        slight_thresh=0.25,  # 轻微转向阈值 (偏离比例)
+        small_thresh=0.5,  # 小转向阈值
+    ):
+        self.W = max(1, int(width))
+        self.H = max(1, int(height))
         self.w_r = w_r
-        self.min_gap_width = width * w_r  # 转换为像素宽度
+        self.min_gap_width = self.W * w_r
         self.conf_thresh = conf_thresh
 
-        # 转向阈值设定
         self.center_tolerance = center_tolerance
         self.slight_thresh = slight_thresh
         self.small_thresh = small_thresh
@@ -30,100 +148,148 @@ class ObstacleAvoidanceAnalyzer:
         Input: results = [[x1, y1, x2, y2, conf, cls], ...]
         Output: {'decision': str, 'debug_info': dict}
         """
-        # 1. 提取所有障碍物的 X 轴投影区间 [x1, x2]
         obstacles = []
-        for det in results:
-            if len(det) < 6: continue
-            x1, y1, x2, y2, conf, cls = det
+        kept_items = []
+        hard_intervals = []
 
-            # 过滤低置信度
-            if conf < self.conf_thresh:
+        for det in results:
+            parsed = self._parse_detection(det)
+            if parsed is None:
                 continue
 
-            # 边界截断，防止超出图像范围
-            x1 = max(0, min(self.W, x1))
-            x2 = max(0, min(self.W, x2))
+            interval, meta = parsed
+            obstacles.append(interval)
+            kept_items.append(meta)
+            if meta["priority"] == "hard":
+                hard_intervals.append(interval)
 
-            # 简单的逻辑：只关心在一定高度以下的障碍物 (可选优化)
-            # 如果物体完全在天空（例如 y2 < H/3），可能不需要投影
-            # 这里严格按照你的要求：全部投影
-            obstacles.append([x1, x2])
-
-        # 2. 合并重叠区间 (核心算法)
-        merged_obstacles = self._merge_intervals(obstacles)
-
-        # 3. 计算可通行间隙 (Gaps)
-        gaps = self._find_gaps(merged_obstacles, self.W)
-
-        # 4. 筛选有效间隙 (宽度 >= w_r * W)
-        valid_gaps = [g for g in gaps if (g[1] - g[0]) >= self.min_gap_width]
-
-        # 5. 决策逻辑
-        cx = self.W / 2.0
-        decision = "straight"  # 默认
-
-        # 情况 A: 没有任何有效间隙 -> 倒车
-        if not valid_gaps:
-            # 寻找所有间隙（包括不够宽的）里最大的那个，决定倒车方向
-            largest_gap = max(gaps, key=lambda x: x[1] - x[0]) if gaps else (0, 0)
-            gap_center = (largest_gap[0] + largest_gap[1]) / 2
-            if gap_center < cx:
-                decision = "reverse_and_left"  # 空间在左边，往左倒/退
-            else:
-                decision = "reverse_and_right"
-
+        if not obstacles:
             return {
-                "decision": decision,
-                "gap_center": gap_center
+                "decision": "straight",
+                "target_x": self.W / 2.0,
+                "obstacles_count": 0,
+                "hard_obstacles_count": 0,
+                "coverage_ratio": 0.0,
+                "classes": [],
+                "center_blocked": False,
             }
 
-        # 情况 B: 分析中心点
-        # 找到包含中心点 cx 的间隙
+        merged_obstacles = self._merge_intervals(obstacles)
+        merged_hard_obstacles = self._merge_intervals(hard_intervals)
+        gaps = self._find_gaps(merged_obstacles, self.W)
+        valid_gaps = [g for g in gaps if (g[1] - g[0]) >= self.min_gap_width]
+
+        cx = self.W / 2.0
+        center_blocked = any(interval[0] <= cx <= interval[1] for interval in merged_hard_obstacles)
+        coverage_ratio = sum((obs[1] - obs[0]) for obs in merged_obstacles) / float(self.W)
+        class_names = sorted({meta["name"] for meta in kept_items})
+
+        if not valid_gaps:
+            largest_gap = max(gaps, key=lambda x: x[1] - x[0]) if gaps else (0, 0)
+            gap_center = (largest_gap[0] + largest_gap[1]) / 2.0
+            decision = "reverse_and_left" if gap_center < cx else "reverse_and_right"
+            return {
+                "decision": decision,
+                "target_x": gap_center,
+                "gap_center": gap_center,
+                "obstacles_count": len(merged_obstacles),
+                "hard_obstacles_count": len(merged_hard_obstacles),
+                "coverage_ratio": coverage_ratio,
+                "classes": class_names,
+                "center_blocked": center_blocked,
+            }
+
         center_gap = None
-        for g in valid_gaps:
-            if g[0] <= cx <= g[1]:
-                center_gap = g
+        for gap in valid_gaps:
+            if gap[0] <= cx <= gap[1]:
+                center_gap = gap
                 break
 
-        target_x = cx  # 默认目标是中心
+        target_x = cx
+        decision = "straight"
 
-        # 逻辑：如果中心点在某个有效间隙内，且不仅包含cx，该间隙本身是有效的
-        # (代码逻辑上 valid_gaps 里的都已经足够宽了)
-        if center_gap:
-            # 中心可通行，直接直行
-            decision = "straight"
-            target_x = cx
-        else:
-            # 情况 C: 中心有障碍物，寻找最近的有效间隙
-            # 计算每个有效间隙中心到图像中心的距离
-            # 策略：选择“距离中心最近”的那个间隙的中心点作为目标
-            best_gap = min(valid_gaps, key=lambda g: abs(((g[0] + g[1]) / 2) - cx))
-
-            # 目标点设为该间隙的中心
+        if center_gap is None:
+            best_gap = min(valid_gaps, key=lambda g: abs(((g[0] + g[1]) / 2.0) - cx))
             target_x = (best_gap[0] + best_gap[1]) / 2.0
-
-            # 计算偏离程度
-            offset = target_x - cx
-            # 归一化偏离值 (-1.0 ~ 1.0), 负左正右
-            ratio = offset / (self.W / 2.0)
-
-            abs_ratio = abs(ratio)
-            direction = "right" if ratio > 0 else "left"
-
-            if abs_ratio < self.center_tolerance:
-                decision = "straight"
-            elif abs_ratio < self.slight_thresh:
-                decision = f"slight_{direction}"
-            elif abs_ratio < self.small_thresh:
-                decision = f"small_{direction}"
-            else:
-                decision = f"large_{direction}"
+            decision = self._decision_from_target(target_x, cx, center_blocked, coverage_ratio)
 
         return {
             "decision": decision,
             "target_x": target_x,
-            "obstacles_count": len(merged_obstacles)
+            "obstacles_count": len(merged_obstacles),
+            "hard_obstacles_count": len(merged_hard_obstacles),
+            "coverage_ratio": coverage_ratio,
+            "classes": class_names,
+            "center_blocked": center_blocked,
         }
+
+    def _parse_detection(self, det):
+        if len(det) < 6:
+            return None
+
+        x1, y1, x2, y2, conf, cls_id = det[:6]
+        if conf < self.conf_thresh:
+            return None
+
+        cls_id = int(cls_id)
+        cfg = self.CLASS_CONFIG.get(cls_id)
+        if cfg is None:
+            return None
+
+        x1 = max(0.0, min(float(self.W), float(x1)))
+        x2 = max(0.0, min(float(self.W), float(x2)))
+        y1 = max(0.0, min(float(self.H), float(y1)))
+        y2 = max(0.0, min(float(self.H), float(y2)))
+        if x2 <= x1 or y2 <= y1:
+            return None
+
+        box_w = x2 - x1
+        box_h = y2 - y1
+        area_ratio = (box_w * box_h) / float(self.W * self.H)
+        bottom_ratio = y2 / float(self.H)
+        width_ratio = box_w / float(self.W)
+
+        if area_ratio < cfg["min_area_ratio"]:
+            return None
+        if bottom_ratio < cfg["min_bottom_ratio"]:
+            return None
+        if width_ratio < cfg["min_width_ratio"]:
+            return None
+
+        pad = float(self.W) * cfg.get("x_padding_ratio", 0.0)
+        interval = [
+            max(0.0, x1 - pad),
+            min(float(self.W), x2 + pad),
+        ]
+        meta = {
+            "name": cfg["name"],
+            "priority": cfg["priority"],
+        }
+        return interval, meta
+
+    def _decision_from_target(self, target_x, cx, center_blocked, coverage_ratio):
+        offset = target_x - cx
+        ratio = offset / (self.W / 2.0)
+        abs_ratio = abs(ratio)
+        direction = "right" if ratio > 0 else "left"
+
+        if abs_ratio < self.center_tolerance:
+            return "straight"
+
+        if abs_ratio < self.slight_thresh:
+            level = "slight"
+        elif abs_ratio < self.small_thresh:
+            level = "small"
+        else:
+            level = "large"
+
+        if center_blocked or coverage_ratio >= 0.45:
+            if level == "slight":
+                level = "small"
+            elif level == "small":
+                level = "large"
+
+        return f"{level}_{direction}"
 
     def _merge_intervals(self, intervals):
         """

@@ -832,6 +832,22 @@ class SendEventController:
                 return
             self._move_up_locked(finger_id)
 
+    def _release_fingers_locked(self, finger_ids):
+        finger_ids = [finger_id for finger_id in finger_ids if finger_id in self.mt.active_fingers]
+        if not finger_ids:
+            return
+
+        self.ensure_screen_mapping()
+        self.mt.reset_frames()
+        for finger_id in finger_ids:
+            was_last = len(self.mt.active_fingers) == 1
+            self.mt.finger_up(finger_id)
+            self.mt.commit_frame(
+                include_btn_touch_up=was_last,
+                duration_ms=self.mt.frame_interval_ms,
+            )
+        self._flush()
+
     def ensure_screen_mapping(self):
         self.mt.refresh_screen_mapping()
 
@@ -1191,13 +1207,7 @@ class SendEventController:
     def _move_up_locked(self, finger_id: int):
         if finger_id not in self.mt.active_fingers:
             return
-
-        self.ensure_screen_mapping()
-        was_last = len(self.mt.active_fingers) == 1
-        self.mt.finger_up(finger_id)
-        self._send_immediate_frame(include_btn_touch_up=was_last)
-        if not self.mt.active_fingers:
-            self.mt.reset_frames()
+        self._release_fingers_locked([finger_id])
 
     def click_up(self, finger_id: int = 0, duration_ms: int = 0):
         self.move_up(finger_id, duration_ms=duration_ms)

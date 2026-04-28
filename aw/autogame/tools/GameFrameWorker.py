@@ -1293,7 +1293,7 @@ class Controller:
 
     def _require_sendevent_backend(self):
         if self.backend != "sendevent" or self.touch_backend is None:
-            raise RuntimeError("当前控制器未启用 sendevent 后端，请使用 controller_backend='sendevent'")
+            raise RuntimeError("当前控制器未启用 sendevent 后端，请在 aw/autogame/config/config.json 中将 touch_backend 设为 'sendevent'")
 
     def close(self):
         if self.touch_backend and hasattr(self.touch_backend, "close"):
@@ -1694,7 +1694,8 @@ class FrameWorker(threading.Thread):
         self.running = False
         self.finished = False
 
-        touch_backend = controller_backend or os.environ.get("TARGET_TOUCH_BACKEND", "sendevent")
+        # 触控后端统一从 config.json 读取，controller_backend 仅保留兼容旧调用签名。
+        touch_backend = get_touch_backend()
         self.controller = Controller(
             driver,
             self,

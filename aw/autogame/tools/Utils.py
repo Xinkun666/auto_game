@@ -718,19 +718,39 @@ def visualizer_process(queue, visual=True):
     if show_window:
         cv2.destroyAllWindows()
 
+def _read_autogame_config(config_path="aw/autogame/config/config.json"):
+    if not os.path.exists(config_path):
+        return {}
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
 def get_screen_mode(config_path="aw/autogame/config/config.json"):
     """
     仅读取并返回 config.json 中的 screen_mode 字段
     """
-    if not os.path.exists(config_path):
-        return "0"  # 默认值
+    config = _read_autogame_config(config_path)
+    return str(config.get("screen_mode", "0"))
 
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-            return config.get("screen_mode", "0")
-    except Exception:
-        return "0"
+
+def get_touch_backend(config_path="aw/autogame/config/config.json"):
+    """
+    读取触控后端配置。
+
+    统一从 config.json 中读取 touch_backend。
+    可选值：sendevent / uinput
+    未配置或配置非法时，默认使用 sendevent。
+    """
+    config = _read_autogame_config(config_path)
+    backend = str(config.get("touch_backend", "")).strip().lower()
+    if backend in {"sendevent", "uinput"}:
+        return backend
+
+    return "sendevent"
 
 def get_display_rotation():
     """

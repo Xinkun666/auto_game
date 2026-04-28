@@ -833,20 +833,12 @@ class SendEventController:
             self._move_up_locked(finger_id)
 
     def _release_fingers_locked(self, finger_ids):
-        finger_ids = [finger_id for finger_id in finger_ids if finger_id in self.mt.active_fingers]
-        if not finger_ids:
-            return
-
-        self.ensure_screen_mapping()
-        self.mt.reset_frames()
         for finger_id in finger_ids:
+            if finger_id not in self.mt.active_fingers:
+                continue
             was_last = len(self.mt.active_fingers) == 1
             self.mt.finger_up(finger_id)
-            self.mt.commit_frame(
-                include_btn_touch_up=was_last,
-                duration_ms=self.mt.frame_interval_ms,
-            )
-        self._flush()
+            self._send_immediate_frame(include_btn_touch_up=was_last)
 
     def ensure_screen_mapping(self):
         self.mt.refresh_screen_mapping()
@@ -860,30 +852,20 @@ class SendEventController:
     def _to_unsigned32_decimal(value: int) -> int:
         return int(value) & 0xffffffff
 
-    def _build_immediate_contact_commands(self, input_prefix: str, finger: FingerState, include_vendor_prefix: bool = False):
-        profile = self.mt._get_contact_profile(finger)
-        cmd_list = []
-
-        if include_vendor_prefix:
-            vendor_2a = profile.get("vendor_2a")
-            if vendor_2a is not None and self.mt.frame_seq == 0:
-                cmd_list.append(f"{input_prefix} 3 42 {int(vendor_2a)}")
-
-            vendor_2b = int(profile["vendor_2b"]) + int(self.mt.frame_seq)
-            cmd_list.append(f"{input_prefix} 3 43 {vendor_2b}")
-
-        cmd_list.extend([
+    def _build_immediate_contact_commands(self, input_prefix: str, finger: FingerState):
+        # 这里刻意对齐 send_tp_data_demo 的即时 sendevent 方案：
+        # 不带 002a/002b vendor 字段，接触参数使用抓包验证过的固定值。
+        return [
             f"{input_prefix} 3 53 {int(finger.x_abs)}",
             f"{input_prefix} 3 54 {int(finger.y_abs)}",
-            f"{input_prefix} 3 58 {int(profile['pressure'])}",
+            f"{input_prefix} 3 58 512",
             f"{input_prefix} 3 57 {int(finger.tracking_id)}",
-            f"{input_prefix} 3 48 {int(profile['major'])}",
-            f"{input_prefix} 3 49 {int(profile['minor'])}",
-            f"{input_prefix} 3 52 {self._to_unsigned32_decimal(int(profile['orientation']))}",
-            f"{input_prefix} 3 56 {int(profile['blob'])}",
+            f"{input_prefix} 3 48 126",
+            f"{input_prefix} 3 49 115",
+            f"{input_prefix} 3 52 4294967283",
+            f"{input_prefix} 3 56 0",
             f"{input_prefix} 0 2 0",
-        ])
-        return cmd_list
+        ]
 
     def _advance_immediate_frame_state(self):
         self.mt.frame_seq += 1
@@ -896,14 +878,8 @@ class SendEventController:
         cmd_list = []
 
         report_fingers = self.mt._get_report_fingers()
-        for idx, finger in enumerate(report_fingers):
-            cmd_list.extend(
-                self._build_immediate_contact_commands(
-                    input_prefix,
-                    finger,
-                    include_vendor_prefix=(idx == 0),
-                )
-            )
+        for finger in report_fingers:
+            cmd_list.extend(self._build_immediate_contact_commands(input_prefix, finger))
 
         if include_btn_touch_down:
             cmd_list.append(f"{input_prefix} 1 330 1")
@@ -1216,20 +1192,24 @@ class SendEventController:
                    release: bool = True, trajectory=None, max_step_px=None):
         with self._op_lock:
             normalized_wait = self._normalize_duration(wait)
-            end_pos = (x0 + x_bias, y0 + y_bias)
-            release_map = {finger_id: bool(release and normalized_wait <= 0)}
             self._cancel_pending_releases([finger_id])
-            self._run_multi_finger_path(
-                {finger_id: (x0, y0)},
-                {finger_id: end_pos},
-                wait_ms=0,
-                move_time_ms=dura,
-                release_map=release_map,
+            self._ensure_fingers_available([finger_id])
+            start_pos = (int(x0), int(y0))
+            end_pos = (int(x0 + x_bias), int(y0 + y_bias))
+            self.move_press(finger_id, start_pos)
+            self.move_to(
+                finger_id,
+                end_pos,
+                duration_ms=dura,
                 trajectory=trajectory,
                 max_step_px=max_step_px,
             )
-            if release and normalized_wait > 0:
+            if not release:
+                return
+            if normalized_wait > 0:
                 self._schedule_release(finger_id, normalized_wait)
+                return
+            self._move_up_locked(finger_id)
 
     def tap_double(self, x1, y1, x2, y2, wait=100, dura=500,
                    x1_bias=0, y1_bias=1, x2_bias=0, y2_bias=1, finger_id: int = 0,
@@ -1239,28 +1219,34 @@ class SendEventController:
             if second_finger_id > 9:
                 raise ValueError("tap_double 的 finger_id 最大只能到 8，否则第二根手指会超出设备支持范围")
             normalized_wait = self._normalize_duration(wait)
-            end_pos_map = {
-                finger_id: (x1 + x1_bias, y1 + y1_bias),
-                second_finger_id: (x2 + x2_bias, y2 + y2_bias),
-            }
-            release_map = {
-                finger_id: bool(release1 and normalized_wait <= 0),
-                second_finger_id: bool(release2 and normalized_wait <= 0),
-            }
             self._cancel_pending_releases([finger_id, second_finger_id])
-            self._run_multi_finger_path(
-                {finger_id: (x1, y1), second_finger_id: (x2, y2)},
+            self._ensure_fingers_available([finger_id, second_finger_id])
+            start_pos_map = {
+                finger_id: (int(x1), int(y1)),
+                second_finger_id: (int(x2), int(y2)),
+            }
+            end_pos_map = {
+                finger_id: (int(x1 + x1_bias), int(y1 + y1_bias)),
+                second_finger_id: (int(x2 + x2_bias), int(y2 + y2_bias)),
+            }
+            self.move_press(finger_id, start_pos_map[finger_id])
+            self.move_press(second_finger_id, start_pos_map[second_finger_id])
+            self.move_to(
                 end_pos_map,
-                wait_ms=0,
-                move_time_ms=dura,
-                release_map=release_map,
+                duration_ms=dura,
                 trajectory=trajectory,
                 max_step_px=max_step_px,
             )
-            if release1 and normalized_wait > 0:
-                self._schedule_release(finger_id, normalized_wait)
-            if release2 and normalized_wait > 0:
-                self._schedule_release(second_finger_id, normalized_wait)
+            if normalized_wait > 0:
+                if release1:
+                    self._schedule_release(finger_id, normalized_wait)
+                if release2:
+                    self._schedule_release(second_finger_id, normalized_wait)
+                return
+            if release1:
+                self._move_up_locked(finger_id)
+            if release2:
+                self._move_up_locked(second_finger_id)
 
 
 class Controller:

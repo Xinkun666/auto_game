@@ -8,6 +8,7 @@ import shutil
 import ast
 import re
 import keyword
+import hashlib
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional, Dict
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
@@ -42,6 +43,8 @@ class SceneData:
     name: str
     image_path: str = ""  # 暂时存储路径，实际可能存Base64或相对路径
     pixmap: Optional[QPixmap] = None  # 仅用于UI显示的内存图片
+    image_width: int = 0
+    image_height: int = 0
     items: List[ItemData] = field(default_factory=list)
 @dataclass
 class StageData:
@@ -856,6 +859,60 @@ class AutoStudioWindow(QMainWindow):
         if rect is None:
             return None
         return RectData(rect.x, rect.y, rect.w, rect.h)
+
+    def _get_scene_image_size(self, scene: SceneData):
+        if not scene:
+            return 0, 0
+        if scene.image_width > 0 and scene.image_height > 0:
+            return scene.image_width, scene.image_height
+        if scene.pixmap and not scene.pixmap.isNull():
+            return scene.pixmap.width(), scene.pixmap.height()
+        if scene.image_path and os.path.exists(scene.image_path):
+            pixmap = QPixmap(scene.image_path)
+            if not pixmap.isNull():
+                return pixmap.width(), pixmap.height()
+        return 0, 0
+
+    def _scale_rect_between_images(self, rect: Optional[RectData], old_w, old_h, new_w, new_h) -> Optional[RectData]:
+        if rect is None:
+            return None
+        if old_w <= 0 or old_h <= 0 or new_w <= 0 or new_h <= 0:
+            return self._clone_rect(rect)
+        x1 = rect.x / old_w
+        y1 = rect.y / old_h
+        x2 = (rect.x + rect.w) / old_w
+        y2 = (rect.y + rect.h) / old_h
+        return RectData(
+            x1 * new_w,
+            y1 * new_h,
+            (x2 - x1) * new_w,
+            (y2 - y1) * new_h,
+        )
+
+    def _rescale_scene_items_for_new_image(self, scene: SceneData, old_size, new_size):
+        old_w, old_h = old_size
+        new_w, new_h = new_size
+        if old_w <= 0 or old_h <= 0 or new_w <= 0 or new_h <= 0:
+            return False
+        if old_w == new_w and old_h == new_h:
+            return False
+        if not scene.items:
+            return False
+        for item in scene.items:
+            item.rect = self._scale_rect_between_images(item.rect, old_w, old_h, new_w, new_h)
+            if item.search_scope:
+                item.search_scope = self._scale_rect_between_images(item.search_scope, old_w, old_h, new_w, new_h)
+        return True
+
+    def _replace_scene_image(self, scene_data: SceneData, image_path: str, pixmap: QPixmap):
+        old_size = self._get_scene_image_size(scene_data)
+        new_size = (pixmap.width(), pixmap.height())
+        resized_items = self._rescale_scene_items_for_new_image(scene_data, old_size, new_size)
+        scene_data.image_path = image_path
+        scene_data.pixmap = pixmap
+        scene_data.image_width, scene_data.image_height = new_size
+        return resized_items
+
     def _clone_item(self, item: ItemData) -> ItemData:
         return ItemData(
             id=str(random.randint(10000, 99999)),
@@ -874,11 +931,14 @@ class AutoStudioWindow(QMainWindow):
             loaded_pixmap = QPixmap(scene.image_path)
             if not loaded_pixmap.isNull():
                 pixmap = loaded_pixmap.copy()
+        image_width, image_height = self._get_scene_image_size(scene)
         return SceneData(
             id=str(random.randint(1000, 9999)),
             name=new_name or scene.name,
             image_path=scene.image_path,
             pixmap=pixmap,
+            image_width=image_width,
+            image_height=image_height,
             items=[self._clone_item(item) for item in scene.items],
         )
     def copy_scene(self, scene_data: SceneData):
@@ -918,9 +978,12 @@ class AutoStudioWindow(QMainWindow):
         if img.isNull():
             QMessageBox.critical(self, "抓图失败", "读取截图文件失败，请检查路径或权限。")
             return
-        scene_data.image_path = local_path
-        scene_data.pixmap = img
+        resized_items = self._replace_scene_image(scene_data, local_path, img)
         self.canvas.set_image(img)
+        self.canvas.redraw_overlays(scene_data)
+        if resized_items:
+            self.status_label.setText("抓图成功，已按新图片尺寸同步缩放已有标注。")
+            return
         self.status_label.setText("抓图成功。请开始添加区域或控点。")
     def import_image(self, scene_data):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -935,13 +998,18 @@ class AutoStudioWindow(QMainWindow):
         if img.isNull():
             QMessageBox.critical(self, "导入失败", "读取图片失败，请检查文件格式或路径。")
             return
-        scene_data.image_path = file_path
-        scene_data.pixmap = img
+        resized_items = self._replace_scene_image(scene_data, file_path, img)
         self.show_scene_image(scene_data)
+        if resized_items:
+            self.status_label.setText("图片已导入，已按新图片尺寸同步缩放已有标注。")
+            return
         self.status_label.setText("图片已导入。请开始添加区域或控点。")
     def show_scene_image(self, scene_data):
         self.canvas.active_scene_data = scene_data
         if scene_data.pixmap:
+            if scene_data.image_width <= 0 or scene_data.image_height <= 0:
+                scene_data.image_width = scene_data.pixmap.width()
+                scene_data.image_height = scene_data.pixmap.height()
             self.canvas.set_image(scene_data.pixmap)
         elif not scene_data.image_path:
             self.clear_scene_display()
@@ -1304,6 +1372,141 @@ class AutoStudioWindow(QMainWindow):
             final_content += "\n"
         with open(handler_path, "w", encoding="utf-8") as f:
             f.write(final_content)
+
+    def _scan_tree(self, root_dir):
+        files = set()
+        dirs = set()
+        if not root_dir or not os.path.isdir(root_dir):
+            return files, dirs
+        for current_dir, dirnames, filenames in os.walk(root_dir):
+            rel_dir = os.path.relpath(current_dir, root_dir)
+            if rel_dir != ".":
+                dirs.add(rel_dir)
+            for dirname in dirnames:
+                rel_path = os.path.normpath(os.path.join(rel_dir, dirname)) if rel_dir != "." else dirname
+                dirs.add(rel_path)
+            for filename in filenames:
+                rel_path = os.path.normpath(os.path.join(rel_dir, filename)) if rel_dir != "." else filename
+                files.add(rel_path)
+        return files, dirs
+
+    def _file_digest(self, path):
+        digest = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _files_equal(self, left_path, right_path):
+        try:
+            if os.path.getsize(left_path) != os.path.getsize(right_path):
+                return False
+            return self._file_digest(left_path) == self._file_digest(right_path)
+        except OSError:
+            return False
+
+    def _backup_file_for_sync(self, target_root, rel_path, rollback_dir, backed_up_files):
+        if rel_path in backed_up_files:
+            return
+        source_path = os.path.join(target_root, rel_path)
+        if not os.path.isfile(source_path):
+            return
+        backup_path = os.path.join(rollback_dir, "files", rel_path)
+        os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+        shutil.copy2(source_path, backup_path)
+        backed_up_files.add(rel_path)
+
+    def _rollback_incremental_sync(self, target_dir, rollback_dir, created_files, backed_up_files, removed_dirs):
+        for rel_path in sorted(created_files, reverse=True):
+            target_path = os.path.join(target_dir, rel_path)
+            if os.path.exists(target_path):
+                try:
+                    os.remove(target_path)
+                except OSError:
+                    pass
+        for rel_path in sorted(backed_up_files):
+            backup_path = os.path.join(rollback_dir, "files", rel_path)
+            target_path = os.path.join(target_dir, rel_path)
+            if os.path.exists(backup_path):
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                shutil.copy2(backup_path, target_path)
+        for rel_dir in sorted(removed_dirs):
+            os.makedirs(os.path.join(target_dir, rel_dir), exist_ok=True)
+
+    def _sync_project_dir_incremental(self, staging_dir, target_dir):
+        target_files, target_dirs = self._scan_tree(target_dir)
+        staging_files, staging_dirs = self._scan_tree(staging_dir)
+        dirs_pending_removal = target_dirs - staging_dirs
+        rollback_dir = tempfile.mkdtemp(prefix="label_export_sync_rollback_")
+        created_files = set()
+        changed_files = set()
+        deleted_files = set()
+        backed_up_files = set()
+        removed_dirs = set()
+        skipped_files = 0
+
+        try:
+            for rel_path in sorted(target_files - staging_files, reverse=True):
+                target_path = os.path.join(target_dir, rel_path)
+                if not os.path.exists(target_path):
+                    continue
+                self._backup_file_for_sync(target_dir, rel_path, rollback_dir, backed_up_files)
+                os.remove(target_path)
+                deleted_files.add(rel_path)
+
+            for rel_path in sorted(staging_files):
+                source_path = os.path.join(staging_dir, rel_path)
+                target_path = os.path.join(target_dir, rel_path)
+
+                if os.path.isdir(target_path) and not os.path.islink(target_path):
+                    nested_dirs = [
+                        rel_dir for rel_dir in dirs_pending_removal
+                        if rel_dir == rel_path or rel_dir.startswith(rel_path + os.sep)
+                    ]
+                    for rel_dir in sorted(nested_dirs, key=lambda path: path.count(os.sep), reverse=True):
+                        dir_path = os.path.join(target_dir, rel_dir)
+                        if not os.path.isdir(dir_path):
+                            continue
+                        try:
+                            os.rmdir(dir_path)
+                            removed_dirs.add(rel_dir)
+                        except OSError as exc:
+                            raise OSError(f"无法用文件替换目录，目录非空：{dir_path}") from exc
+
+                if os.path.isfile(target_path) and self._files_equal(source_path, target_path):
+                    skipped_files += 1
+                    continue
+
+                target_exists_now = os.path.exists(target_path)
+                if target_exists_now:
+                    self._backup_file_for_sync(target_dir, rel_path, rollback_dir, backed_up_files)
+                    changed_files.add(rel_path)
+                else:
+                    created_files.add(rel_path)
+
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                shutil.copy2(source_path, target_path)
+
+            for rel_dir in sorted(dirs_pending_removal - removed_dirs, key=lambda path: path.count(os.sep), reverse=True):
+                target_path = os.path.join(target_dir, rel_dir)
+                try:
+                    os.rmdir(target_path)
+                    removed_dirs.add(rel_dir)
+                except OSError:
+                    pass
+
+            return {
+                "created": len(created_files),
+                "changed": len(changed_files),
+                "deleted": len(deleted_files),
+                "skipped": skipped_files,
+            }
+        except Exception:
+            self._rollback_incremental_sync(target_dir, rollback_dir, created_files, backed_up_files, removed_dirs)
+            raise
+        finally:
+            shutil.rmtree(rollback_dir, ignore_errors=True)
+
     # ==========================================
     # 4. 核心大脑：导出 Python 代码
     # ==========================================
@@ -1322,10 +1525,9 @@ class AutoStudioWindow(QMainWindow):
         imported_resource_source = self.imported_resource_dir if (
             self.imported_resource_dir and os.path.isdir(self.imported_resource_dir)
         ) else None
+        export_resource_source = imported_resource_source
         export_temp_dir = None
         staging_project_dir = None
-        restore_root_dir = None
-        restore_project_dir = None
         renamed_backup_dir = None
         created_game_case_dir = None
         game_case_dir_existed = False
@@ -1346,6 +1548,10 @@ class AutoStudioWindow(QMainWindow):
                     return
                 if clicked == replace_btn:
                     existing_dir_strategy = "replace"
+                    existing_resource_dir = os.path.join(project_dir, "resource")
+                    if os.path.isdir(existing_resource_dir):
+                        # 替换原工程时以导出瞬间的旧 resource 为准，避免导入后新增资源被误删。
+                        export_resource_source = existing_resource_dir
                     if not imported_resource_source:
                         old_handler_path = os.path.join(project_dir, "resource", "SpecialSceneHandler.py")
                         if os.path.exists(old_handler_path):
@@ -1378,10 +1584,10 @@ class AutoStudioWindow(QMainWindow):
             resource_dir = os.path.join(staging_project_dir, "resource")
             os.makedirs(scenes_dir, exist_ok=True)
             os.makedirs(templates_dir, exist_ok=True)
-            if imported_resource_source:
+            if export_resource_source:
                 if os.path.exists(resource_dir):
                     shutil.rmtree(resource_dir)
-                shutil.copytree(imported_resource_source, resource_dir)
+                shutil.copytree(export_resource_source, resource_dir)
             else:
                 os.makedirs(resource_dir, exist_ok=True)
             file_path = os.path.join(staging_project_dir, "info.py")
@@ -1441,6 +1647,8 @@ class AutoStudioWindow(QMainWindow):
                         if not temp_pix.isNull():
                             scene_width = temp_pix.width()
                             scene_height = temp_pix.height()
+                    scene.image_width = scene_width
+                    scene.image_height = scene_height
                     scene_entry = {
                         "image": os.path.join("scenes", stage_safe_name, scene_image_name),
                         "width": scene_width,
@@ -1501,27 +1709,40 @@ class AutoStudioWindow(QMainWindow):
                 self.ensure_special_scene_handler(staging_project_dir, special_area_names)
             else:
                 self.ensure_special_scene_handler(staging_project_dir, special_area_names, preserved_handler_content)
-            if existing_dir_strategy == "replace" and os.path.exists(project_dir):
-                restore_root_dir = tempfile.mkdtemp(prefix="label_export_restore_")
-                restore_project_dir = os.path.join(restore_root_dir, os.path.basename(project_dir))
-                shutil.move(project_dir, restore_project_dir)
-            elif existing_dir_strategy == "backup" and os.path.exists(project_dir):
-                renamed_backup_dir = backup_dir
-                os.rename(project_dir, renamed_backup_dir)
-            shutil.move(staging_project_dir, project_dir)
-            project_dir_swapped = True
             created_game_case_dir = os.path.join(customs_game_examples_dir, project_name)
             game_case_dir_existed = os.path.exists(created_game_case_dir)
             os.makedirs(created_game_case_dir, exist_ok=True)
-            QMessageBox.information(self, "成功", f"项目已导出至 {project_dir}")
+            sync_stats = None
+            if existing_dir_strategy == "replace" and os.path.exists(project_dir):
+                sync_stats = self._sync_project_dir_incremental(staging_project_dir, project_dir)
+                shutil.rmtree(staging_project_dir, ignore_errors=True)
+                staging_project_dir = None
+            elif existing_dir_strategy == "backup" and os.path.exists(project_dir):
+                renamed_backup_dir = backup_dir
+                os.rename(project_dir, renamed_backup_dir)
+                shutil.move(staging_project_dir, project_dir)
+                staging_project_dir = None
+                project_dir_swapped = True
+            else:
+                shutil.move(staging_project_dir, project_dir)
+                staging_project_dir = None
+                project_dir_swapped = True
+            if sync_stats:
+                QMessageBox.information(
+                    self,
+                    "成功",
+                    f"项目已导出至 {project_dir}\n"
+                    f"新增 {sync_stats['created']} 个文件，更新 {sync_stats['changed']} 个文件，"
+                    f"删除 {sync_stats['deleted']} 个文件，跳过 {sync_stats['skipped']} 个未改动文件。",
+                )
+            else:
+                QMessageBox.information(self, "成功", f"项目已导出至 {project_dir}")
         except Exception as exc:
             if staging_project_dir and os.path.exists(staging_project_dir):
                 shutil.rmtree(staging_project_dir, ignore_errors=True)
             if project_dir_swapped and os.path.exists(project_dir):
                 shutil.rmtree(project_dir, ignore_errors=True)
-            if restore_project_dir and os.path.exists(restore_project_dir):
-                shutil.move(restore_project_dir, project_dir)
-            elif renamed_backup_dir and os.path.exists(renamed_backup_dir) and not os.path.exists(project_dir):
+            if renamed_backup_dir and os.path.exists(renamed_backup_dir) and not os.path.exists(project_dir):
                 os.rename(renamed_backup_dir, project_dir)
             if created_game_case_dir and not game_case_dir_existed and os.path.isdir(created_game_case_dir):
                 try:
@@ -1533,8 +1754,6 @@ class AutoStudioWindow(QMainWindow):
         finally:
             if export_temp_dir and os.path.isdir(export_temp_dir):
                 shutil.rmtree(export_temp_dir, ignore_errors=True)
-            if restore_root_dir and os.path.isdir(restore_root_dir):
-                shutil.rmtree(restore_root_dir, ignore_errors=True)
     def import_project(self):
         import_dir = QFileDialog.getExistingDirectory(self, "选择导入目录")
         if not import_dir:
@@ -1566,6 +1785,8 @@ class AutoStudioWindow(QMainWindow):
                             scene.pixmap = pix
                     width = scene_data.get("width", 0) or (scene.pixmap.width() if scene.pixmap else 0)
                     height = scene_data.get("height", 0) or (scene.pixmap.height() if scene.pixmap else 0)
+                    scene.image_width = int(width)
+                    scene.image_height = int(height)
                     def denormalize_rect(rect_norm):
                         if not rect_norm or width <= 0 or height <= 0:
                             return RectData(0, 0, 0, 0)

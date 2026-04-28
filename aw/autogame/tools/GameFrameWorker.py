@@ -968,6 +968,24 @@ class SendEventController:
         if busy_ids:
             raise RuntimeError(f"finger_id 已处于按下状态，不能重复占用: {busy_ids}")
 
+    def _wait_for_releasable_fingers(self, finger_ids):
+        finger_ids = list(dict.fromkeys(int(finger_id) for finger_id in finger_ids))
+        while True:
+            with self._op_lock:
+                busy_ids = [finger_id for finger_id in finger_ids if finger_id in self.mt.active_fingers]
+                if not busy_ids:
+                    return
+
+                pending_jobs = self._release_scheduler.get_jobs(busy_ids)
+                non_releasable_ids = [finger_id for finger_id in busy_ids if finger_id not in pending_jobs]
+                if non_releasable_ids:
+                    raise RuntimeError(f"finger_id 已处于按下状态，不能重复占用: {non_releasable_ids}")
+
+                next_deadline = min(deadline for deadline, _ in pending_jobs.values())
+
+            sleep_s = max(0.005, min(0.02, next_deadline - time.monotonic()))
+            time.sleep(sleep_s)
+
     def _normalize_duration(self, duration_ms):
         if duration_ms is None:
             return self.mt.frame_interval_ms
@@ -1089,27 +1107,27 @@ class SendEventController:
 
     def click(self, x0, y0, x_bias=0, y_bias=0, finger_id: int = 0, duration_ms: int = 16,
               trajectory=None, max_step_px=None):
-        with self._op_lock:
-            target_x = x0 + x_bias
-            target_y = y0 + y_bias
-            self.move_press(finger_id, (target_x, target_y))
-            self.move_to(
-                finger_id,
-                (target_x, target_y),
-                duration_ms=duration_ms,
-                trajectory=trajectory,
-                max_step_px=max_step_px,
-            )
-            self.move_up(finger_id)
+        self._wait_for_releasable_fingers([finger_id])
+        target_x = x0 + x_bias
+        target_y = y0 + y_bias
+        self.move_press(finger_id, (target_x, target_y))
+        self.move_to(
+            finger_id,
+            (target_x, target_y),
+            duration_ms=duration_ms,
+            trajectory=trajectory,
+            max_step_px=max_step_px,
+        )
+        self.move_up(finger_id)
 
     def click_down(self, x0, y0, x_bias=0, y_bias=0, dura=0, finger_id: int = 0,
                    trajectory=None, max_step_px=None):
-        with self._op_lock:
-            target_x = x0 + x_bias
-            target_y = y0 + y_bias
-            self.move_press(finger_id, (target_x, target_y))
-            if dura > 0:
-                self._schedule_release(finger_id, dura)
+        self._wait_for_releasable_fingers([finger_id])
+        target_x = x0 + x_bias
+        target_y = y0 + y_bias
+        self.move_press(finger_id, (target_x, target_y))
+        if dura > 0:
+            self._schedule_release(finger_id, dura)
 
     def move_press(self, finger_id: int, pos):
         with self._op_lock:
@@ -1190,63 +1208,60 @@ class SendEventController:
 
     def tap_single(self, x0, y0, wait=100, dura=500, x_bias=0, y_bias=1, finger_id: int = 0,
                    release: bool = True, trajectory=None, max_step_px=None):
-        with self._op_lock:
-            normalized_wait = self._normalize_duration(wait)
-            self._cancel_pending_releases([finger_id])
-            self._ensure_fingers_available([finger_id])
-            start_pos = (int(x0), int(y0))
-            end_pos = (int(x0 + x_bias), int(y0 + y_bias))
-            self.move_press(finger_id, start_pos)
-            self.move_to(
-                finger_id,
-                end_pos,
-                duration_ms=dura,
-                trajectory=trajectory,
-                max_step_px=max_step_px,
-            )
-            if not release:
-                return
-            if normalized_wait > 0:
-                self._schedule_release(finger_id, normalized_wait)
-                return
-            self._move_up_locked(finger_id)
+        normalized_wait = self._normalize_duration(wait)
+        self._wait_for_releasable_fingers([finger_id])
+        start_pos = (int(x0), int(y0))
+        end_pos = (int(x0 + x_bias), int(y0 + y_bias))
+        self.move_press(finger_id, start_pos)
+        self.move_to(
+            finger_id,
+            end_pos,
+            duration_ms=dura,
+            trajectory=trajectory,
+            max_step_px=max_step_px,
+        )
+        if not release:
+            return
+        if normalized_wait > 0:
+            self._schedule_release(finger_id, normalized_wait)
+            return
+        self.move_up(finger_id)
 
     def tap_double(self, x1, y1, x2, y2, wait=100, dura=500,
                    x1_bias=0, y1_bias=1, x2_bias=0, y2_bias=1, finger_id: int = 0,
                    release1: bool = True, release2: bool = True, trajectory=None, max_step_px=None):
-        with self._op_lock:
-            second_finger_id = finger_id + 1
-            if second_finger_id > 9:
-                raise ValueError("tap_double 的 finger_id 最大只能到 8，否则第二根手指会超出设备支持范围")
-            normalized_wait = self._normalize_duration(wait)
-            self._cancel_pending_releases([finger_id, second_finger_id])
-            self._ensure_fingers_available([finger_id, second_finger_id])
-            start_pos_map = {
-                finger_id: (int(x1), int(y1)),
-                second_finger_id: (int(x2), int(y2)),
-            }
-            end_pos_map = {
-                finger_id: (int(x1 + x1_bias), int(y1 + y1_bias)),
-                second_finger_id: (int(x2 + x2_bias), int(y2 + y2_bias)),
-            }
-            self.move_press(finger_id, start_pos_map[finger_id])
-            self.move_press(second_finger_id, start_pos_map[second_finger_id])
-            self.move_to(
-                end_pos_map,
-                duration_ms=dura,
-                trajectory=trajectory,
-                max_step_px=max_step_px,
-            )
-            if normalized_wait > 0:
-                if release1:
-                    self._schedule_release(finger_id, normalized_wait)
-                if release2:
-                    self._schedule_release(second_finger_id, normalized_wait)
-                return
+        second_finger_id = finger_id + 1
+        if second_finger_id > 9:
+            raise ValueError("tap_double 的 finger_id 最大只能到 8，否则第二根手指会超出设备支持范围")
+
+        normalized_wait = self._normalize_duration(wait)
+        self._wait_for_releasable_fingers([finger_id, second_finger_id])
+        start_pos_map = {
+            finger_id: (int(x1), int(y1)),
+            second_finger_id: (int(x2), int(y2)),
+        }
+        end_pos_map = {
+            finger_id: (int(x1 + x1_bias), int(y1 + y1_bias)),
+            second_finger_id: (int(x2 + x2_bias), int(y2 + y2_bias)),
+        }
+        self.move_press(finger_id, start_pos_map[finger_id])
+        self.move_press(second_finger_id, start_pos_map[second_finger_id])
+        self.move_to(
+            end_pos_map,
+            duration_ms=dura,
+            trajectory=trajectory,
+            max_step_px=max_step_px,
+        )
+        if normalized_wait > 0:
             if release1:
-                self._move_up_locked(finger_id)
+                self._schedule_release(finger_id, normalized_wait)
             if release2:
-                self._move_up_locked(second_finger_id)
+                self._schedule_release(second_finger_id, normalized_wait)
+            return
+        if release1:
+            self.move_up(finger_id)
+        if release2:
+            self.move_up(second_finger_id)
 
 
 class Controller:

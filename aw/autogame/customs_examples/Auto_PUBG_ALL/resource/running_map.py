@@ -1,5 +1,7 @@
+import json
+import os
 import time
-from typing import Callable, List, Optional, Tuple, TYPE_CHECKING
+from typing import Callable, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigator import MapNavigator
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.toolkit import (
@@ -9,10 +11,179 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.toolkit import (
     get_distance,
     is_location_stagnant, draw_points_with_arrows,
 )
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.utils import find_path, get_resolution
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.utils import get_resolution
 
 if TYPE_CHECKING:
     from aw.autogame.tools.GameFrameWorker import FrameWorker
+
+
+RESOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
+ROAD_DIR = os.path.join(RESOURCE_DIR, "road")
+
+
+class RoadRouteHelper:
+    """道路点路径助手。
+
+    优先使用 road_module 的拓扑路径；如果当前工程缺少 road_matrix/road_mask，
+    则退化为读取红/蓝道路点，并用 MapNavigator 规划到下一个道路点。
+    """
+
+    INTERSECTION_NODE_FILES = ("red_coords.json",)
+    ROUTE_NODE_FILES = ("blue_coords.json",)
+
+    def __init__(self, map_tool: MapNavigator):
+        self.map_tool = map_tool
+        self._nodes: Optional[List[Tuple[int, int]]] = None
+        self._intersection_nodes: Optional[List[Tuple[int, int]]] = None
+        self._topo = None
+        self._topo_load_attempted = False
+
+    def get_nodes(self) -> List[Tuple[int, int]]:
+        if self._nodes is not None:
+            return self._nodes
+
+        self._nodes = self._load_nodes(self.INTERSECTION_NODE_FILES + self.ROUTE_NODE_FILES)
+        print(f"[RoadRoute] 已加载道路点 {len(self._nodes)} 个")
+        return self._nodes
+
+    def get_intersection_nodes(self) -> List[Tuple[int, int]]:
+        if self._intersection_nodes is not None:
+            return self._intersection_nodes
+
+        self._intersection_nodes = self._load_nodes(self.INTERSECTION_NODE_FILES)
+        print(f"[RoadRoute] 已加载道路红色 node {len(self._intersection_nodes)} 个")
+        return self._intersection_nodes
+
+    def topology_available(self) -> bool:
+        return self._get_topo() is not None
+
+    def _load_nodes(self, filenames) -> List[Tuple[int, int]]:
+        nodes: List[Tuple[int, int]] = []
+        seen = set()
+        for filename in filenames:
+            path = os.path.join(ROAD_DIR, filename)
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as exc:
+                print(f"[RoadRoute] 读取道路点失败: {path}, err={exc}")
+                continue
+
+            for value in data.values():
+                if not isinstance(value, (list, tuple)) or len(value) < 2:
+                    continue
+                point = (int(value[0]), int(value[1]))
+                if point in seen:
+                    continue
+                seen.add(point)
+                nodes.append(point)
+        return nodes
+
+    def nearest_node(
+        self,
+        point: Tuple[int, int],
+        exclude: Optional[Set[Tuple[int, int]]] = None,
+        min_distance: float = 0.0,
+        topology_only: bool = False,
+    ) -> Tuple[Optional[Tuple[int, int]], float]:
+        nodes = self.get_intersection_nodes() if topology_only else self.get_nodes()
+        if not nodes:
+            return None, float("inf")
+
+        exclude = exclude or set()
+        candidates = [
+            node for node in nodes
+            if node not in exclude and get_distance(point, node) >= min_distance
+        ]
+        if not candidates:
+            return None, float("inf")
+
+        node = min(candidates, key=lambda item: get_distance(point, item))
+        return node, get_distance(point, node)
+
+    def plan_to_node(self, start: Tuple[int, int], node: Tuple[int, int]) -> List[Tuple[int, int]]:
+        topo_path = self._try_topo_path(start, node)
+        if topo_path:
+            return self._dedupe_path(topo_path)
+
+        planned = self.map_tool.plan_path(start, node)
+        if not planned:
+            planned = [node]
+        elif tuple(map(int, planned[-1])) != node:
+            planned.append(node)
+        return self._dedupe_path(planned)
+
+    def _try_topo_path(self, start: Tuple[int, int], node: Tuple[int, int]) -> List[Tuple[int, int]]:
+        topo = self._get_topo()
+        if topo is None:
+            return []
+
+        dest_key = self._find_topo_node_key(topo, node)
+        if dest_key is None:
+            return []
+
+        topo_nodes = [
+            tuple(map(int, item))
+            for item in (getattr(topo, "node_data", []) or []) + (getattr(topo, "route_node_data", []) or [])
+        ]
+        if not topo_nodes:
+            return []
+
+        start_node = min(topo_nodes, key=lambda item: get_distance(start, item))
+        prefix = []
+        if get_distance(start, start_node) > 1:
+            prefix = self.map_tool.plan_path(start, start_node) or [start_node]
+
+        try:
+            result = topo.shortest_path_from_point(
+                int(start_node[0]),
+                int(start_node[1]),
+                int(dest_key[1:]) - 1,
+            )
+        except Exception as exc:
+            print(f"[RoadRoute] road_module 规划失败，回退 A*: {exc}")
+            return []
+
+        if not result or len(result) < 3 or not result[2]:
+            return []
+
+        topo_path = [tuple(map(int, item)) for item in result[2]]
+        return prefix + topo_path
+
+    def _get_topo(self):
+        if self._topo_load_attempted:
+            return self._topo
+
+        self._topo_load_attempted = True
+        try:
+            from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.road_module import RoadTopo
+
+            self._topo = RoadTopo()
+            print("[RoadRoute] road_module 拓扑加载成功")
+        except Exception as exc:
+            self._topo = None
+            print(f"[RoadRoute] road_module 拓扑不可用，使用道路点+A*兜底: {exc}")
+        return self._topo
+
+    def _find_topo_node_key(self, topo, node: Tuple[int, int]) -> Optional[str]:
+        target = tuple(map(int, node))
+        for key, value in getattr(topo, "node_dict", {}).items():
+            if tuple(map(int, value)) == target:
+                return key
+        return None
+
+    def _dedupe_path(self, path) -> List[Tuple[int, int]]:
+        cleaned: List[Tuple[int, int]] = []
+        for point in path or []:
+            if point is None:
+                continue
+            item = tuple(map(int, point))
+            if cleaned and cleaned[-1] == item:
+                continue
+            cleaned.append(item)
+        return cleaned
 
 
 class RunningManager:
@@ -96,9 +267,17 @@ class RunningManager:
     FORBIDDEN_ESCAPE_SEARCH_DIST = 120
     FORBIDDEN_ESCAPE_FORWARD_DURA = 700
     FORBIDDEN_ESCAPE_FORWARD_WAIT = 900
+    # 道路巡游/进圈策略
+    ROAD_NODE_REACHED_TOLERANCE = 3.0
+    ROAD_PATROL_MIN_NODE_DISTANCE = 8.0
+    ROAD_CIRCLE_NODE_MAX_DISTANCE = 30.0
+    VEHICLE_ENTRY_ROADSIDE = "roadside"
+    VEHICLE_ENTRY_GARAGE = "garage"
+    VEHICLE_ENTRY_UNKNOWN = "unknown"
 
     def __init__(self, map_tool: Optional[MapNavigator] = None):
         self.map_tool = map_tool or MapNavigator()
+        self.road_helper = RoadRouteHelper(self.map_tool)
         self.game_time : Optional[float] = None
         self.screen_w, self.screen_h = get_resolution()
 
@@ -125,6 +304,10 @@ class RunningManager:
         self.last_jump_replan_time: float = 0.0
         self.ignore_vehicle_until: float = 0.0
         self.pause_sp_callback: Optional[Callable] = None
+        self.visited_road_nodes: Set[Tuple[int, int]] = set()
+        self.current_road_node: Optional[Tuple[int, int]] = None
+        self.active_vehicle_entry_source: Optional[str] = None
+        self.last_vehicle_entry_source: Optional[str] = None
 
     def reset(self, finding_car: bool = True):
         self.road_list = []
@@ -147,6 +330,10 @@ class RunningManager:
         self.last_valid_location = None
         self.last_jump_replan_time = 0.0
         self.ignore_vehicle_until = 0.0
+        self.visited_road_nodes = set()
+        self.current_road_node = None
+        self.active_vehicle_entry_source = None
+        self.last_vehicle_entry_source = None
         print("[Running] 状态已重置!")
 
     def set_game_time(self, game_time: Optional[float] = None):
@@ -181,9 +368,11 @@ class RunningManager:
         if self._is_in_vehicle(w):
             print("[Running] 检测到已经上车，切换到开车阶段")
             self._log_running_state("检测到已上车", location, direction, "切换到开车阶段")
+            entry_source = self.active_vehicle_entry_source or self.VEHICLE_ENTRY_UNKNOWN
             self._ensure_third_person_view(w, location, direction, "检测到已上车，切回第三人称")
             self.stop_auto_forward(w)
             self.reset(finding_car=False)
+            self.last_vehicle_entry_source = entry_source
             w.change_stage("开车阶段")
             return
 
@@ -214,6 +403,9 @@ class RunningManager:
 
         if self.precise_entering_car:
             self._process_precise_entry(w, location, direction)
+            return
+
+        if self.finding_car and self._handle_roadside_vehicle_entry(w, location, direction):
             return
 
         if self._handle_location_jump(location):
@@ -354,8 +546,12 @@ class RunningManager:
         self.reset()
         w.change_stage("结束阶段")
 
-    def notify_vehicle_exit(self, cooldown: float = VEHICLE_EXIT_PROTECTION):
-        self.finding_car = False
+    def notify_vehicle_exit(
+        self,
+        cooldown: float = VEHICLE_EXIT_PROTECTION,
+        finding_car: bool = False,
+    ):
+        self.finding_car = bool(finding_car)
         self.loading_road = False
         self.precise_entering_car = False
         self.precise_last_distance = None
@@ -368,7 +564,17 @@ class RunningManager:
         self.precise_view_ready = False
         self.current_view_mode = self.VIEW_MODE_THIRD
         self.ignore_vehicle_until = time.time() + cooldown
-        print(f"[Running] 收到下车通知，载具交互保护期 {cooldown:.1f}s")
+        self.current_road_node = None
+        self.active_vehicle_entry_source = None
+        print(
+            f"[Running] 收到下车通知，载具交互保护期 {cooldown:.1f}s，"
+            f"后续模式={'继续寻车' if self.finding_car else '纯跑图'}"
+        )
+
+    def consume_vehicle_entry_source(self) -> Optional[str]:
+        source = self.last_vehicle_entry_source
+        self.last_vehicle_entry_source = None
+        return source
 
     def _handle_recent_vehicle_exit(
         self,
@@ -504,47 +710,111 @@ class RunningManager:
 
     def _load_path(self, location: Tuple[int, int]):
         if self.finding_car:
-            print("[Running] 正在加载寻车路径...")
-            self._log_running_state("正在加载寻车路径", location, None, "规划路径")
-            if get_distance(location, self.R_CITY) > 50:
-                approach_path = self.map_tool.plan_path(location, self.R_CITY)
-                garage_path = find_path(self.R_CITY) or []
-                self.road_list = self._merge_paths(approach_path, garage_path)
-            else:
-                self.road_list = find_path(location) or []
+            self._load_road_patrol_path(location, reason="寻车阶段沿路巡游")
         else:
-            if self.stable_circle_angle is None:
-                print("[Running] 未获取到进圈方向，加载随机巡逻路径")
-                self._log_running_state("未获取到进圈角度", location, None, "加载随机巡逻路径")
-                self.road_list = self.map_tool.get_random_visible_points(location)
-            else:
-                print("[Running] 正在加载进圈路径...")
-                self._log_running_state("正在加载进圈路径", location, None, "规划进圈路径")
-                elapsed = self.get_elapsed_time()
-                if elapsed <= self.STAGE1_TIME:
-                    target_dist = self.STAGE1_DIS
-                elif elapsed <= self.STAGE2_TIME:
-                    target_dist = self.STAGE2_DIS
-                else:
-                    target_dist = self.STAGE3_DIS
-
-                target_point = self.map_tool.get_target_point(location, self.stable_circle_angle, target_dist)
-                self.road_list = self.map_tool.plan_path(location, target_point)
+            self._load_running_path(location)
 
         self.road_list = [tuple(map(int, p)) for p in self.road_list if p is not None]
         self.loading_road = bool(self.road_list)
         if self.loading_road:
             print(f"[Running] 路径已加载: {self.road_list}")
-            draw_points_with_arrows(self.road_list)
+            try:
+                draw_points_with_arrows(self.road_list)
+            except Exception as exc:
+                print(f"[Running] 绘制路径调试图失败: {exc}")
         else:
             print("[Running] 路径加载失败")
 
-    def _merge_paths(self, path1, path2):
-        merged = list(path1 or [])
-        for point in path2 or []:
-            if not merged or merged[-1] != point:
-                merged.append(point)
-        return merged
+    def _load_road_patrol_path(self, location: Tuple[int, int], reason: str):
+        print(f"[Running] {reason}，规划最近道路点")
+        self._log_running_state(reason, location, None, "规划到下一个道路点")
+        use_topology_nodes = self.road_helper.topology_available()
+
+        node, node_dist = self.road_helper.nearest_node(
+            location,
+            exclude=self.visited_road_nodes,
+            min_distance=0.0,
+            topology_only=use_topology_nodes,
+        )
+
+        if node is not None and node_dist <= self.ROAD_NODE_REACHED_TOLERANCE:
+            self.visited_road_nodes.add(node)
+            node, node_dist = self.road_helper.nearest_node(
+                location,
+                exclude=self.visited_road_nodes,
+                min_distance=self.ROAD_PATROL_MIN_NODE_DISTANCE,
+                topology_only=use_topology_nodes,
+            )
+
+        if node is None:
+            if self.visited_road_nodes:
+                print("[Running] 可巡游道路点已用完，清空已访问集合后重新选择")
+                self.visited_road_nodes.clear()
+                node, node_dist = self.road_helper.nearest_node(
+                    location,
+                    min_distance=self.ROAD_PATROL_MIN_NODE_DISTANCE,
+                    topology_only=use_topology_nodes,
+                )
+
+        if node is None:
+            print("[Running] 没有可用道路点，回退随机可视点巡逻")
+            self.current_road_node = None
+            self.road_list = self.map_tool.get_random_visible_points(location)
+            return
+
+        self.current_road_node = node
+        self.road_list = self.road_helper.plan_to_node(location, node)
+        print(f"[Running] 道路巡游目标 node={node}, dist={node_dist:.2f}")
+
+    def _load_running_path(self, location: Tuple[int, int]):
+        if self.stable_circle_angle is None:
+            print("[Running] 未获取到进圈方向，先沿临近道路点巡游")
+            self._load_road_patrol_path(location, reason="纯跑图道路巡游")
+            return
+
+        print("[Running] 正在加载进圈路径...")
+        self._log_running_state("正在加载进圈路径", location, None, "优先规划到进圈点附近道路点")
+        target_point = self._get_circle_target_point(location)
+        if target_point is None:
+            self._load_road_patrol_path(location, reason="进圈目标无效，先道路巡游")
+            return
+
+        road_node, road_dist = self.road_helper.nearest_node(
+            target_point,
+            topology_only=self.road_helper.topology_available(),
+        )
+        if road_node is not None and road_dist <= self.ROAD_CIRCLE_NODE_MAX_DISTANCE:
+            self.current_road_node = road_node
+            dist_to_node = get_distance(location, road_node)
+            print(
+                f"[Running] 进圈点 {target_point} 附近道路点 {road_node}, "
+                f"road_dist={road_dist:.2f}, current_dist={dist_to_node:.2f}"
+            )
+            if dist_to_node <= self.WAYPOINT_TOLERANCE:
+                self.road_list = self.map_tool.plan_path(location, target_point) or [target_point]
+            else:
+                self.road_list = self.road_helper.plan_to_node(location, road_node)
+            return
+
+        print(
+            f"[Running] 进圈点附近没有足够近的道路点 "
+            f"(nearest={road_node}, dist={road_dist:.2f})，回退 A*+mask"
+        )
+        self.current_road_node = None
+        self.road_list = self.map_tool.plan_path(location, target_point)
+
+    def _get_circle_target_point(self, location: Tuple[int, int]) -> Optional[Tuple[int, int]]:
+        if self.stable_circle_angle is None:
+            return None
+
+        elapsed = self.get_elapsed_time()
+        if elapsed <= self.STAGE1_TIME:
+            target_dist = self.STAGE1_DIS
+        elif elapsed <= self.STAGE2_TIME:
+            target_dist = self.STAGE2_DIS
+        else:
+            target_dist = self.STAGE3_DIS
+        return self.map_tool.get_target_point(location, self.stable_circle_angle, target_dist)
 
     def _handle_water_escape(
         self,
@@ -597,17 +867,15 @@ class RunningManager:
                 return self.road_list[0]
 
         if self.finding_car:
-            return self.R_CITY
+            node, _ = self.road_helper.nearest_node(
+                location,
+                exclude=self.visited_road_nodes,
+                topology_only=self.road_helper.topology_available(),
+            )
+            return node or self.R_CITY
 
         if self.stable_circle_angle is not None:
-            elapsed = self.get_elapsed_time()
-            if elapsed <= self.STAGE1_TIME:
-                target_dist = self.STAGE1_DIS
-            elif elapsed <= self.STAGE2_TIME:
-                target_dist = self.STAGE2_DIS
-            else:
-                target_dist = self.STAGE3_DIS
-            return self.map_tool.get_target_point(location, self.stable_circle_angle, target_dist)
+            return self._get_circle_target_point(location)
 
         return None
 
@@ -651,15 +919,12 @@ class RunningManager:
         target: Tuple[int, int],
         dist: float,
     ):
-        if self.finding_car and len(self.road_list) <= 1:
-            print("[Running] 已到达车库点，进入上车精调阶段")
-            self._log_running_state("已到达车库点", location, direction, "进入上车精调阶段", target, dist)
-            self._enter_precise_entry_mode(w)
-            self._process_precise_entry(w, location, direction)
-            return
-
         if self.road_list:
-            self.road_list.pop(0)
+            reached = self.road_list.pop(0)
+            if self.current_road_node is not None and get_distance(reached, self.current_road_node) <= self.ROAD_NODE_REACHED_TOLERANCE:
+                self.visited_road_nodes.add(self.current_road_node)
+                print(f"[Running] 已到达道路 node: {self.current_road_node}")
+                self.current_road_node = None
 
         if not self.road_list:
             self.loading_road = False
@@ -668,6 +933,7 @@ class RunningManager:
     def _enter_precise_entry_mode(self, w: "FrameWorker"):
         self.stop_auto_forward(w)
         self.precise_entering_car = True
+        self.active_vehicle_entry_source = self.VEHICLE_ENTRY_GARAGE
         self.precise_last_distance = None
         self.precise_idle_rounds = 0
         self.precise_face_attempt_index = 0
@@ -677,6 +943,38 @@ class RunningManager:
         self.stuck = False
         self.trapped = False
         self.loading_road = False
+
+    def _handle_roadside_vehicle_entry(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+    ) -> bool:
+        if w.get_info("驾驶"):
+            self.active_vehicle_entry_source = self.VEHICLE_ENTRY_ROADSIDE
+        if self._attempt_drive_after_move(w, "寻车跑图中检查驾驶按钮"):
+            return True
+
+        if not self._find_largest_car(w):
+            return False
+
+        print("[Running] 道路巡游中发现车辆，停止前进并执行视觉上车")
+        self._log_running_state("道路巡游发现车辆", location, direction, "视觉对车并尝试上车")
+        self.stop_auto_forward(w)
+        self.active_vehicle_entry_source = self.VEHICLE_ENTRY_ROADSIDE
+        self._switch_view_mode(
+            w,
+            self.VIEW_MODE_FIRST,
+            "道路巡游发现车辆，切换第一人称以便视觉对车",
+        )
+
+        if self._approach_visible_car(w):
+            return True
+
+        print("[Running] 本轮路边车辆上车未成功，继续沿道路寻找下一辆车")
+        self.loading_road = False
+        self.road_list = []
+        return True
 
     def _process_precise_entry(
         self,
@@ -768,10 +1066,14 @@ class RunningManager:
         w.refresh_frame()
         if self._is_in_vehicle(w):
             print("[Running] 上车成功")
+            entry_source = self.active_vehicle_entry_source or (
+                self.VEHICLE_ENTRY_GARAGE if self.precise_entering_car else self.VEHICLE_ENTRY_UNKNOWN
+            )
             self.precise_entering_car = False
             self._restore_vehicle_view(w)
             self.stop_auto_forward(w)
             self.reset(finding_car=False)
+            self.last_vehicle_entry_source = entry_source
             w.change_stage("开车阶段")
             return True
 
@@ -897,7 +1199,10 @@ class RunningManager:
         if not scene:
             return None
 
-        cars = [obj for obj in scene if int(obj[5]) == 7]
+        cars = [
+            obj for obj in scene
+            if isinstance(obj, (list, tuple)) and len(obj) >= 6 and int(obj[5]) == 7
+        ]
         if not cars:
             return None
 

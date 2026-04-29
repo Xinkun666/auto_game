@@ -132,6 +132,59 @@ class RoadTopo():
         self.intersections = self.load_intersections()
         self.get_matrix()
 
+    @staticmethod
+    def _is_point(value):
+        if not isinstance(value, (list, tuple)) or len(value) < 2:
+            return False
+        return isinstance(value[0], (int, float)) and isinstance(value[1], (int, float))
+
+    @classmethod
+    def _is_path(cls, value):
+        return isinstance(value, list) and len(value) > 0 and all(cls._is_point(point) for point in value)
+
+    @classmethod
+    def _normalize_path(cls, path):
+        return [[int(point[0]), int(point[1])] for point in path if cls._is_point(point)]
+
+    @classmethod
+    def _normalize_route_entry(cls, route):
+        if (
+            isinstance(route, (list, tuple))
+            and len(route) >= 2
+            and isinstance(route[0], (int, float))
+            and cls._is_path(route[1])
+        ):
+            path = cls._normalize_path(route[1])
+            return [int(route[0]), path]
+
+        if isinstance(route, list) and len(route) == 1 and cls._is_path(route[0]):
+            path = cls._normalize_path(route[0])
+            return [len(path), path]
+
+        if cls._is_path(route):
+            path = cls._normalize_path(route)
+            return [len(path), path]
+
+        return None
+
+    @classmethod
+    def _normalize_neighbors(cls, neighbors):
+        if neighbors == "inf":
+            return math.inf
+        if not neighbors:
+            return []
+
+        direct_route = cls._normalize_route_entry(neighbors)
+        if direct_route is not None:
+            return [direct_route]
+
+        routes = []
+        for route in neighbors:
+            normalized = cls._normalize_route_entry(route)
+            if normalized is not None:
+                routes.append(normalized)
+        return routes
+
     def get_matrix(self):
         with open(self.json_path, "r", encoding="utf-8") as f:
             road_data = json.load(f)
@@ -146,10 +199,7 @@ class RoadTopo():
         for cij, neighbors in road_data.items():
             i = int(cij.split('->')[0][1:]) - 1
             j = int(cij.split('->')[1][1:]) - 1
-            if neighbors == 'inf':
-                M[i][j] = math.inf
-            else:
-                M[i][j] = neighbors.copy()
+            M[i][j] = self._normalize_neighbors(neighbors)
         self.M = M
 
     def load_intersections(self):

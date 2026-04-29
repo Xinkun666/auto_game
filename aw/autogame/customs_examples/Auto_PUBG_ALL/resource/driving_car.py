@@ -216,6 +216,16 @@ class DrivingManager:
     def set_running_fallback_enabled(self, enabled: bool):
         self.allow_running_fallback = bool(enabled)
 
+    def skip_initial_exit_garage(self, reason: str = "roadside vehicle"):
+        self.is_first_car = False
+        self.current_stage = self.STAGE_CRUISE
+        self.exit_garage_phase = 0
+        self.exit_garage_clear_rounds = 0
+        self.exit_garage_start_location = None
+        self.last_motion_location = None
+        self.blocked_motion_count = 0
+        print(f"[Driving] 本次上车来源={reason}，跳过首次出库，直接进入巡航阶段")
+
     def process(self, w: "FrameWorker"):
         self._begin_frame()
 

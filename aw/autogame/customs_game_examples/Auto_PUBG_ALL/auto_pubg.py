@@ -44,8 +44,8 @@ PHASE_DURATIONS = {
     PHASE_DRIVING: 10,
 }
 
-DROP_TARGET_GARAGE = RunningManager.CAR_ENTRY_POINT
-DROP_TARGET_CENTER = (1024, 1024)
+DROP_TARGET_GARAGE = RunningManager.R_CITY
+DROP_TARGET_CENTER = RunningManager.R_CITY
 SP_SAVE_LONG_PRESS_MS = 3000
 
 start_game = False
@@ -182,7 +182,7 @@ def on_stage(w: "FrameWorker"):
     stage_events |= phase_timer.refresh()
 
     if previous_stage == "开车阶段" and w.current_stage == "跑图阶段":
-        running_manager.notify_vehicle_exit()
+        running_manager.notify_vehicle_exit(finding_car=phase_timer.need_drive())
 
     if "landed" in stage_events and not phase_timer.all_done():
         handle_sp_start(w)
@@ -315,6 +315,9 @@ def on_stage(w: "FrameWorker"):
 
         if "enter_开车" in stage_events:
             driving_manager.set_remaining_drive_time(phase_timer.get_remaining(PHASE_DRIVING))
+            entry_source = running_manager.consume_vehicle_entry_source()
+            if entry_source == RunningManager.VEHICLE_ENTRY_ROADSIDE:
+                driving_manager.skip_initial_exit_garage("roadside vehicle")
 
         if phase_timer.is_completed(PHASE_DRIVING):
             driving_manager.set_remaining_drive_time(0)

@@ -1318,7 +1318,10 @@ class LauncherWindow(QWidget):
             self.current_run_timed_out,
         )
         self.run_timeout_timer.stop()
-        self._log_message(f"\n[Launcher] 进程结束，exit_code={exit_code}\n")
+        finish_prefix = "进程结束"
+        if self.stop_requested:
+            finish_prefix = "进程已手动停止"
+        self._log_message(f"\n[Launcher] {finish_prefix}，exit_code={exit_code}\n")
         self._poll_preview_frame()
         run_no = self.current_run_index + 1
         self._archive_run_outputs(run_no, exit_code)

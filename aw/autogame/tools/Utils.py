@@ -129,12 +129,30 @@ def _frame_sort_key(path: Path):
     return path.name
 
 
+def _read_image_quietly(path: Path) -> Optional[np.ndarray]:
+    try:
+        if not path.exists() or not path.is_file():
+            return None
+        if path.stat().st_size <= 0:
+            return None
+        data = np.fromfile(str(path), dtype=np.uint8)
+        if data.size == 0:
+            return None
+        return cv2.imdecode(data, cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+
+
 def _create_preview_video(src_dir: Path, output_path: Path, fps: int = 10) -> Optional[str]:
     frame_paths = sorted(src_dir.glob("frame_*.jpg"), key=_frame_sort_key)
     if not frame_paths:
         return None
 
-    first_frame = cv2.imread(str(frame_paths[0]))
+    first_frame = None
+    for frame_path in frame_paths:
+        first_frame = _read_image_quietly(frame_path)
+        if first_frame is not None:
+            break
     if first_frame is None:
         return None
 
@@ -152,7 +170,7 @@ def _create_preview_video(src_dir: Path, output_path: Path, fps: int = 10) -> Op
 
     try:
         for frame_path in frame_paths:
-            frame = cv2.imread(str(frame_path))
+            frame = _read_image_quietly(frame_path)
             if frame is None:
                 continue
             if frame.shape[1] != width or frame.shape[0] != height:

@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QMenu, QFileDialog, QInputDialog, QLabel, QSplitter,
                              QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
                              QGraphicsRectItem, QGraphicsLineItem, QToolBar, QMessageBox, QFrame,
-                             QPinchGesture, QHeaderView)
+                             QPinchGesture, QHeaderView, QProgressDialog)
 from PyQt6.QtCore import Qt, QRectF, QPointF, QEvent
 from PyQt6.QtGui import QAction, QPixmap, QColor, QPen, QBrush, QImage, QPainter, QGuiApplication, QFontMetricsF
 # ==========================================
@@ -1433,7 +1433,87 @@ class AutoStudioWindow(QMainWindow):
         for rel_dir in sorted(removed_dirs):
             os.makedirs(os.path.join(target_dir, rel_dir), exist_ok=True)
 
-    def _sync_project_dir_incremental(self, staging_dir, target_dir):
+    def _create_export_progress_dialog(self, total_steps):
+        dialog = QProgressDialog("正在准备导出...", None, 0, max(1, int(total_steps)), self)
+        dialog.setWindowTitle("导出中")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setCancelButton(None)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setValue(0)
+        QApplication.processEvents()
+        return dialog
+
+    def _advance_export_progress(self, dialog, progress_state, text=None, step=1, extra_total=0):
+        if dialog is None or progress_state is None:
+            return
+        if extra_total:
+            progress_state["total"] = max(
+                progress_state.get("current", 0),
+                progress_state.get("total", 0) + int(extra_total),
+            )
+            dialog.setMaximum(max(1, progress_state["total"]))
+        if text:
+            dialog.setLabelText(text)
+        progress_state["current"] = min(
+            progress_state.get("total", 0),
+            progress_state.get("current", 0) + max(0, int(step)),
+        )
+        dialog.setValue(progress_state["current"])
+        QApplication.processEvents()
+
+    def _estimate_export_generation_steps(self):
+        if not self.project:
+            return 1
+
+        total = 6
+        for stage in self.project.stages:
+            total += 1
+            for scene in stage.scenes:
+                total += 1
+                total += max(1, len(scene.items))
+        return max(1, total)
+
+    def _estimate_tree_copy_steps(self, root_dir):
+        if not root_dir or not os.path.isdir(root_dir):
+            return 1
+        files, dirs = self._scan_tree(root_dir)
+        return max(1, 1 + len(files) + len(dirs))
+
+    def _estimate_sync_steps(self, staging_dir, target_dir):
+        staging_files, staging_dirs = self._scan_tree(staging_dir)
+        target_files, target_dirs = self._scan_tree(target_dir)
+        return max(
+            1,
+            len(target_files - staging_files)
+            + len(staging_files)
+            + len(target_dirs - staging_dirs)
+            + 1,
+        )
+
+    def _copy_tree_with_progress(self, source_dir, target_dir, progress_callback=None):
+        if os.path.exists(target_dir):
+            shutil.rmtree(target_dir)
+        os.makedirs(target_dir, exist_ok=True)
+        if progress_callback:
+            progress_callback(f"正在准备资源目录: {os.path.basename(source_dir) or 'resource'}", 1)
+
+        for current_dir, dirnames, filenames in os.walk(source_dir):
+            rel_dir = os.path.relpath(current_dir, source_dir)
+            dst_dir = target_dir if rel_dir == "." else os.path.join(target_dir, rel_dir)
+            os.makedirs(dst_dir, exist_ok=True)
+            if rel_dir != "." and progress_callback:
+                progress_callback(f"正在创建目录: {rel_dir}", 1)
+            for filename in filenames:
+                source_path = os.path.join(current_dir, filename)
+                target_path = os.path.join(dst_dir, filename)
+                shutil.copy2(source_path, target_path)
+                if progress_callback:
+                    rel_path = filename if rel_dir == "." else os.path.join(rel_dir, filename)
+                    progress_callback(f"正在复制资源: {rel_path}", 1)
+
+    def _sync_project_dir_incremental(self, staging_dir, target_dir, progress_callback=None):
         target_files, target_dirs = self._scan_tree(target_dir)
         staging_files, staging_dirs = self._scan_tree(staging_dir)
         dirs_pending_removal = target_dirs - staging_dirs
@@ -1453,6 +1533,8 @@ class AutoStudioWindow(QMainWindow):
                 self._backup_file_for_sync(target_dir, rel_path, rollback_dir, backed_up_files)
                 os.remove(target_path)
                 deleted_files.add(rel_path)
+                if progress_callback:
+                    progress_callback(f"正在删除旧文件: {rel_path}", 1)
 
             for rel_path in sorted(staging_files):
                 source_path = os.path.join(staging_dir, rel_path)
@@ -1470,11 +1552,15 @@ class AutoStudioWindow(QMainWindow):
                         try:
                             os.rmdir(dir_path)
                             removed_dirs.add(rel_dir)
+                            if progress_callback:
+                                progress_callback(f"正在移除旧目录: {rel_dir}", 1)
                         except OSError as exc:
                             raise OSError(f"无法用文件替换目录，目录非空：{dir_path}") from exc
 
                 if os.path.isfile(target_path) and self._files_equal(source_path, target_path):
                     skipped_files += 1
+                    if progress_callback:
+                        progress_callback(f"正在检查文件: {rel_path}", 1)
                     continue
 
                 target_exists_now = os.path.exists(target_path)
@@ -1486,6 +1572,9 @@ class AutoStudioWindow(QMainWindow):
 
                 os.makedirs(os.path.dirname(target_path), exist_ok=True)
                 shutil.copy2(source_path, target_path)
+                if progress_callback:
+                    action_text = "正在更新文件" if target_exists_now else "正在新增文件"
+                    progress_callback(f"{action_text}: {rel_path}", 1)
 
             for rel_dir in sorted(dirs_pending_removal - removed_dirs, key=lambda path: path.count(os.sep), reverse=True):
                 target_path = os.path.join(target_dir, rel_dir)
@@ -1494,6 +1583,9 @@ class AutoStudioWindow(QMainWindow):
                     removed_dirs.add(rel_dir)
                 except OSError:
                     pass
+                finally:
+                    if progress_callback:
+                        progress_callback(f"正在清理目录: {rel_dir}", 1)
 
             return {
                 "created": len(created_files),
@@ -1532,6 +1624,8 @@ class AutoStudioWindow(QMainWindow):
         created_game_case_dir = None
         game_case_dir_existed = False
         project_dir_swapped = False
+        progress_dialog = None
+        progress_state = None
         try:
             existing_dir_strategy = None
             if os.path.exists(project_dir):
@@ -1575,6 +1669,12 @@ class AutoStudioWindow(QMainWindow):
                     if os.path.exists(project_dir):
                         QMessageBox.critical(self, "导出失败", "修改后的工程名仍然冲突。")
                         return
+            progress_total = self._estimate_export_generation_steps()
+            progress_total += self._estimate_tree_copy_steps(export_resource_source) if export_resource_source else 1
+            progress_total += 4
+            progress_dialog = self._create_export_progress_dialog(progress_total)
+            progress_state = {"current": 0, "total": progress_total}
+            self._advance_export_progress(progress_dialog, progress_state, "正在创建导出暂存目录...", 0)
             export_temp_dir = tempfile.mkdtemp(prefix="label_export_")
             staging_project_dir = os.path.join(export_temp_dir, project_name)
             customs_game_examples_dir = os.path.join(project_root_dir, "customs_game_examples")
@@ -1584,12 +1684,18 @@ class AutoStudioWindow(QMainWindow):
             resource_dir = os.path.join(staging_project_dir, "resource")
             os.makedirs(scenes_dir, exist_ok=True)
             os.makedirs(templates_dir, exist_ok=True)
+            self._advance_export_progress(progress_dialog, progress_state, "已创建导出暂存目录", 1)
             if export_resource_source:
-                if os.path.exists(resource_dir):
-                    shutil.rmtree(resource_dir)
-                shutil.copytree(export_resource_source, resource_dir)
+                self._copy_tree_with_progress(
+                    export_resource_source,
+                    resource_dir,
+                    progress_callback=lambda text, step=1: self._advance_export_progress(
+                        progress_dialog, progress_state, text, step
+                    ),
+                )
             else:
                 os.makedirs(resource_dir, exist_ok=True)
+                self._advance_export_progress(progress_dialog, progress_state, "已创建空资源目录", 1)
             file_path = os.path.join(staging_project_dir, "info.py")
             # 生成代码逻辑
             stage_dict = {}
@@ -1623,6 +1729,7 @@ class AutoStudioWindow(QMainWindow):
                 return [x1, y1, x2, y2]
 
             for index, stage in enumerate(self.project.stages):
+                self._advance_export_progress(progress_dialog, progress_state, f"正在导出阶段: {stage.name}", 1)
                 stage_dict[stage.name] = index == 0
                 stage_entry = {"scenes": {}}
                 stage_safe_name = safe_filename(stage.name)
@@ -1631,6 +1738,12 @@ class AutoStudioWindow(QMainWindow):
                 template_stage_dir = os.path.join(templates_dir, stage_safe_name)
                 os.makedirs(template_stage_dir, exist_ok=True)
                 for scene in stage.scenes:
+                    self._advance_export_progress(
+                        progress_dialog,
+                        progress_state,
+                        f"正在处理场景: {stage.name} / {scene.name}",
+                        1,
+                    )
                     scene_pixmap = get_scene_pixmap(scene)
                     scene_safe_name = safe_filename(scene.name)
                     scene_image_name = f"{scene_safe_name}.png"
@@ -1658,6 +1771,12 @@ class AutoStudioWindow(QMainWindow):
                         "special_areas": {},
                     }
                     for item in scene.items:
+                        self._advance_export_progress(
+                            progress_dialog,
+                            progress_state,
+                            f"正在导出标注: {stage.name} / {scene.name} / {item.name}",
+                            1,
+                        )
                         rect_norm = normalize_rect(item.rect, scene_width, scene_height)
                         if item.item_type == "area":
                             scope_norm = normalize_rect(item.search_scope, scene_width, scene_height) if item.search_scope else [0, 0, 0, 0]
@@ -1705,28 +1824,50 @@ class AutoStudioWindow(QMainWindow):
 
             with open(file_path, "w", encoding='utf-8') as f:
                 f.write("\n".join(code_lines))
+            self._advance_export_progress(progress_dialog, progress_state, "正在生成 info.py", 1)
             if imported_resource_source:
                 self.ensure_special_scene_handler(staging_project_dir, special_area_names)
             else:
                 self.ensure_special_scene_handler(staging_project_dir, special_area_names, preserved_handler_content)
+            self._advance_export_progress(progress_dialog, progress_state, "正在更新 SpecialSceneHandler.py", 1)
             created_game_case_dir = os.path.join(customs_game_examples_dir, project_name)
             game_case_dir_existed = os.path.exists(created_game_case_dir)
             os.makedirs(created_game_case_dir, exist_ok=True)
             sync_stats = None
             if existing_dir_strategy == "replace" and os.path.exists(project_dir):
-                sync_stats = self._sync_project_dir_incremental(staging_project_dir, project_dir)
+                sync_steps = self._estimate_sync_steps(staging_project_dir, project_dir)
+                self._advance_export_progress(
+                    progress_dialog,
+                    progress_state,
+                    "正在计算增量替换计划...",
+                    0,
+                    extra_total=sync_steps,
+                )
+                sync_stats = self._sync_project_dir_incremental(
+                    staging_project_dir,
+                    project_dir,
+                    progress_callback=lambda text, step=1: self._advance_export_progress(
+                        progress_dialog, progress_state, text, step
+                    ),
+                )
                 shutil.rmtree(staging_project_dir, ignore_errors=True)
                 staging_project_dir = None
             elif existing_dir_strategy == "backup" and os.path.exists(project_dir):
+                self._advance_export_progress(progress_dialog, progress_state, "正在备份并替换原工程...", 1)
                 renamed_backup_dir = backup_dir
                 os.rename(project_dir, renamed_backup_dir)
                 shutil.move(staging_project_dir, project_dir)
                 staging_project_dir = None
                 project_dir_swapped = True
             else:
+                self._advance_export_progress(progress_dialog, progress_state, "正在写入导出结果...", 1)
                 shutil.move(staging_project_dir, project_dir)
                 staging_project_dir = None
                 project_dir_swapped = True
+            self._advance_export_progress(progress_dialog, progress_state, "导出完成", 0)
+            if progress_dialog and progress_state:
+                progress_dialog.setValue(progress_state["total"])
+                QApplication.processEvents()
             if sync_stats:
                 QMessageBox.information(
                     self,
@@ -1752,6 +1893,8 @@ class AutoStudioWindow(QMainWindow):
             self.project.name = original_project_name
             QMessageBox.critical(self, "导出失败", f"导出失败，已恢复导出前状态。\n\n{exc}")
         finally:
+            if progress_dialog is not None:
+                progress_dialog.close()
             if export_temp_dir and os.path.isdir(export_temp_dir):
                 shutil.rmtree(export_temp_dir, ignore_errors=True)
     def import_project(self):

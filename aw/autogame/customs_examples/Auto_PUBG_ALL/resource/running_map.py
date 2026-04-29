@@ -52,8 +52,10 @@ class RunningManager:
     CAR_ENTRY_POINT = (1131, 763)
     # 历史保留字段，表示默认入库朝向
     CAR_FACE_DIRECTION = 265
-    # 跑图阶段当前没有单独标注“第一人称”点位，直接复用其标准归一化屏幕坐标
-    FIRST_PERSON_SWITCH_POS = (0.22644163150492263, 0.9453357786242246)
+    # 跑图/开车统一通过“人称”按钮切换视角。
+    VIEW_SWITCH_BUTTON = "人称"
+    VIEW_MODE_FIRST = "first"
+    VIEW_MODE_THIRD = "third"
     # 入库失败后依次尝试的朝向序列
     PRECISE_FACE_DIRECTIONS = [265, 270, 275, 280, 285, 290]
     # 进圈角度变化超过这个阈值时，重新规划跑图路径
@@ -118,6 +120,7 @@ class RunningManager:
         self.precise_idle_rounds = 0
         self.precise_face_attempt_index = 0
         self.precise_view_ready = False
+        self.current_view_mode = self.VIEW_MODE_THIRD
         self.last_valid_location: Optional[Tuple[int, int]] = None
         self.last_jump_replan_time: float = 0.0
         self.ignore_vehicle_until: float = 0.0
@@ -140,6 +143,7 @@ class RunningManager:
         self.precise_idle_rounds = 0
         self.precise_face_attempt_index = 0
         self.precise_view_ready = False
+        self.current_view_mode = self.VIEW_MODE_THIRD
         self.last_valid_location = None
         self.last_jump_replan_time = 0.0
         self.ignore_vehicle_until = 0.0
@@ -174,6 +178,18 @@ class RunningManager:
             self._handle_rank_finish(w)
             return
 
+        if self._is_in_vehicle(w):
+            print("[Running] 检测到已经上车，切换到开车阶段")
+            self._log_running_state("检测到已上车", location, direction, "切换到开车阶段")
+            self._ensure_third_person_view(w, location, direction, "检测到已上车，切回第三人称")
+            self.stop_auto_forward(w)
+            self.reset(finding_car=False)
+            w.change_stage("开车阶段")
+            return
+
+        if self._ensure_first_person_view(w, location, direction):
+            return
+
         if self._is_in_water(w):
             self._handle_water_escape(w, location, direction)
             return
@@ -182,14 +198,6 @@ class RunningManager:
             return
 
         if self._handle_forbidden_escape(w, location, direction):
-            return
-
-        if self._is_in_vehicle(w):
-            print("[Running] 检测到已经上车，切换到开车阶段")
-            self._log_running_state("检测到已上车", location, direction, "切换到开车阶段")
-            self.stop_auto_forward(w)
-            self.reset(finding_car=False)
-            w.change_stage("开车阶段")
             return
 
         if self.find_car_times >= len(self.PRECISE_FACE_DIRECTIONS):
@@ -357,6 +365,8 @@ class RunningManager:
         self.history_locations = []
         self.stuck = False
         self.trapped = False
+        self.precise_view_ready = False
+        self.current_view_mode = self.VIEW_MODE_THIRD
         self.ignore_vehicle_until = time.time() + cooldown
         print(f"[Running] 收到下车通知，载具交互保护期 {cooldown:.1f}s")
 
@@ -822,19 +832,65 @@ class RunningManager:
         if self.precise_view_ready:
             return
         print("[Running] 到达上车点，切换第一人称以便视觉对车")
-        w.click(self.FIRST_PERSON_SWITCH_POS)
+        self._switch_view_mode(
+            w,
+            self.VIEW_MODE_FIRST,
+            "到达上车点，切换第一人称以便视觉对车",
+        )
         self.precise_view_ready = True
-        time.sleep(0.2)
-        w.refresh_frame()
 
     def _restore_vehicle_view(self, w: "FrameWorker"):
-        if not self.precise_view_ready:
-            return
         print("[Running] 上车成功，切回第三人称")
-        w.click(self.FIRST_PERSON_SWITCH_POS)
+        self._switch_view_mode(
+            w,
+            self.VIEW_MODE_THIRD,
+            "上车成功，切回第三人称",
+        )
         self.precise_view_ready = False
+
+    def set_view_mode(self, mode: str):
+        if mode in (self.VIEW_MODE_FIRST, self.VIEW_MODE_THIRD):
+            self.current_view_mode = mode
+
+    def _switch_view_mode(
+        self,
+        w: "FrameWorker",
+        target_mode: str,
+        reason: str,
+    ) -> bool:
+        if self.current_view_mode == target_mode:
+            return False
+
+        print(f"[Running] {reason}")
+        w.click(self.VIEW_SWITCH_BUTTON)
+        self.current_view_mode = target_mode
         time.sleep(0.2)
         w.refresh_frame()
+        return True
+
+    def _ensure_first_person_view(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+    ) -> bool:
+        if self.current_view_mode == self.VIEW_MODE_FIRST:
+            return False
+        self._log_running_state("人称切换", location, direction, "切换第一人称")
+        return self._switch_view_mode(w, self.VIEW_MODE_FIRST, "当前处于跑图阶段，切换第一人称")
+
+    def _ensure_third_person_view(
+        self,
+        w: "FrameWorker",
+        location: Optional[Tuple[int, int]] = None,
+        direction: Optional[float] = None,
+        reason: str = "切换第三人称",
+    ) -> bool:
+        if self.current_view_mode == self.VIEW_MODE_THIRD:
+            return False
+        if location is not None:
+            self._log_running_state("人称切换", location, direction, "切换第三人称")
+        return self._switch_view_mode(w, self.VIEW_MODE_THIRD, reason)
 
     def _find_largest_car(self, w: "FrameWorker"):
         scene = w.get_info("forward_scene")

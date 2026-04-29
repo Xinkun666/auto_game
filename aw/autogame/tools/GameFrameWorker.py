@@ -1688,6 +1688,9 @@ class Controller:
         self.touch_backend.move_up(finger_id, duration_ms=duration_ms)
 
 class FrameWorker(threading.Thread):
+    LAUNCHER_INACTIVITY_TIMEOUT_SECONDS = 5 * 60
+    WATCHDOG_CHECK_INTERVAL_SECONDS = 1.0
+
     def __init__(self, buffer, driver=None, logger=None, controller_backend=None, controller_options=None):
         super().__init__()
         self.frame_index = 0
@@ -1722,6 +1725,16 @@ class FrameWorker(threading.Thread):
         self.logger = logger
         self.running = False
         self.finished = False
+        self.failed = False
+        self.failure_code = None
+        self.failure_reason = None
+        self.failure_details = {}
+        self._failure_lock = threading.Lock()
+        self.last_control_action_time = time.monotonic()
+        self.launcher_watchdog_enabled = self._is_launcher_mode()
+        self.launcher_inactivity_timeout_seconds = self._resolve_launcher_inactivity_timeout_seconds()
+        self._watchdog_stop_event = threading.Event()
+        self._watchdog_thread = None
 
         # 触控后端统一从 config.json 读取，controller_backend 仅保留兼容旧调用签名。
         touch_backend = get_touch_backend()
@@ -1738,13 +1751,157 @@ class FrameWorker(threading.Thread):
         self.frame = None
         self.last_gc_time = time.time()
 
-        self.click = self.controller.click
-        self.click_down = self.controller.click_down
-        self.tap_single = self.controller.tap_single
-        self.tap_double = self.controller.tap_double
-        self.move_press = self.controller.move_press
-        self.move_to = self.controller.move_to
-        self.move_up = self.controller.move_up
+        self.click = self._wrap_control_action("click", self.controller.click)
+        self.click_down = self._wrap_control_action("click_down", self.controller.click_down)
+        self.tap_single = self._wrap_control_action("tap_single", self.controller.tap_single)
+        self.tap_double = self._wrap_control_action("tap_double", self.controller.tap_double)
+        self.move_press = self._wrap_control_action("move_press", self.controller.move_press)
+        self.move_to = self._wrap_control_action("move_to", self.controller.move_to)
+        self.move_up = self._wrap_control_action("move_up", self.controller.move_up)
+
+    def _is_launcher_mode(self):
+        source = os.environ.get("AUTOGAME_RUN_SOURCE", "").strip().lower()
+        vis_mode = os.environ.get("AUTOGAME_VIS_MODE", "").strip().lower()
+        return source == "launcher" or vis_mode == "launcher"
+
+    def _resolve_launcher_inactivity_timeout_seconds(self):
+        raw_value = os.environ.get("AUTOGAME_LAUNCHER_INACTIVITY_TIMEOUT_MINUTES", "").strip()
+        if not raw_value:
+            return float(self.LAUNCHER_INACTIVITY_TIMEOUT_SECONDS)
+        try:
+            minutes = float(raw_value)
+        except ValueError:
+            return float(self.LAUNCHER_INACTIVITY_TIMEOUT_SECONDS)
+        return max(0.0, minutes * 60.0)
+
+    def _wrap_control_action(self, action_name, action):
+        def _wrapped(*args, **kwargs):
+            result = action(*args, **kwargs)
+            self._record_control_action(action_name)
+            return result
+        return _wrapped
+
+    def _record_control_action(self, action_name=None):
+        self.last_control_action_time = time.monotonic()
+
+    def mark_failed(self, code, reason, **details):
+        with self._failure_lock:
+            if self.failed:
+                return False
+            self.failed = True
+            self.failure_code = str(code or "unknown_failure")
+            self.failure_reason = str(reason or "自动化执行失败")
+            self.failure_details = dict(details or {})
+        print(f"[FrameWorker] 标记失败: code={self.failure_code}, reason={self.failure_reason}")
+        return True
+
+    def _resolve_launcher_run_archive_dir(self):
+        run_index_text = os.environ.get("AUTOGAME_RUN_INDEX", "").strip()
+        batch_start_timestamp = os.environ.get("AUTOGAME_BATCH_START_TIMESTAMP", "").strip()
+        run_start_timestamp = os.environ.get("AUTOGAME_RUN_START_TIMESTAMP", "").strip()
+        if not run_index_text:
+            return None
+
+        try:
+            run_index = int(run_index_text)
+        except ValueError:
+            return None
+
+        extra_metadata = {}
+        if batch_start_timestamp:
+            extra_metadata["batch_start_timestamp"] = batch_start_timestamp
+        if run_start_timestamp:
+            extra_metadata["run_start_timestamp"] = run_start_timestamp
+
+        return resolve_run_archive_dir(run_index, extra_metadata=extra_metadata, create=True)
+
+    def _capture_launcher_unknown_screenshot(self):
+        archive_dir = self._resolve_launcher_run_archive_dir()
+        if archive_dir is None:
+            archive_dir = TEMP_DIR
+
+        screenshot_dir = os.path.join(str(archive_dir), "unknow_screenshots")
+        os.makedirs(screenshot_dir, exist_ok=True)
+
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        remote_path = f"/data/local/tmp/unknow_screen_{timestamp}.jpeg"
+        local_path = os.path.join(screenshot_dir, f"unknow_screen_{timestamp}.jpeg")
+        need_remote_rm = False
+
+        try:
+            snap_result = subprocess.run(
+                ["hdc", "shell", "snapshot_display", "-f", remote_path],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=10,
+            )
+            if snap_result.returncode != 0:
+                raise RuntimeError(snap_result.stderr.strip() or snap_result.stdout.strip())
+            need_remote_rm = True
+
+            recv_result = subprocess.run(
+                ["hdc", "file", "recv", remote_path, local_path],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=10,
+            )
+            if recv_result.returncode != 0:
+                raise RuntimeError(recv_result.stderr.strip() or recv_result.stdout.strip())
+
+            print(f"[FrameWorker] 已抓取卡死截图: {local_path}")
+            return local_path
+        except Exception as exc:
+            print(f"[FrameWorker] 抓取卡死截图失败: {exc}")
+            return None
+        finally:
+            if need_remote_rm:
+                try:
+                    subprocess.run(
+                        ["hdc", "shell", "rm", remote_path],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        timeout=5,
+                    )
+                except Exception:
+                    pass
+
+    def _handle_launcher_inactivity_timeout(self):
+        idle_seconds = max(0.0, time.monotonic() - self.last_control_action_time)
+        screenshot_path = self._capture_launcher_unknown_screenshot()
+        reason = (
+            f"launcher 模式下连续 {int(idle_seconds)} 秒未执行操控，"
+            f"已判定当前用例卡在未知界面并主动结束。"
+        )
+        if screenshot_path:
+            reason = f"{reason} 截图: {screenshot_path}"
+
+        if self.mark_failed(
+            "launcher_inactivity_timeout",
+            reason,
+            idle_seconds=idle_seconds,
+            screenshot_path=screenshot_path,
+        ):
+            self.running = False
+            self.finished = True
+
+    def _watch_launcher_inactivity(self):
+        while not self._watchdog_stop_event.wait(self.WATCHDOG_CHECK_INTERVAL_SECONDS):
+            if not self.running:
+                return
+            if self.failed:
+                return
+            if not self.launcher_watchdog_enabled:
+                return
+            if self.launcher_inactivity_timeout_seconds <= 0:
+                return
+            idle_seconds = time.monotonic() - self.last_control_action_time
+            if idle_seconds < self.launcher_inactivity_timeout_seconds:
+                continue
+            self._handle_launcher_inactivity_timeout()
+            return
 
     def loop(self):
         print("GameFrameWorker 引擎已启动")
@@ -1776,8 +1933,23 @@ class FrameWorker(threading.Thread):
 
     def start(self):
         self.running = True
+        self.finished = False
+        self.failed = False
+        self.failure_code = None
+        self.failure_reason = None
+        self.failure_details = {}
+        self.last_control_action_time = time.monotonic()
         self.thread = threading.Thread(target=self.loop, daemon=True)
         self.thread.start()
+
+        if self.launcher_watchdog_enabled:
+            self._watchdog_stop_event.clear()
+            self._watchdog_thread = threading.Thread(
+                target=self._watch_launcher_inactivity,
+                daemon=True,
+                name="LauncherInactivityWatchdog",
+            )
+            self._watchdog_thread.start()
 
         self.viz_proc = mp.Process(target=visualizer_process, args=(self.viz_queue,), daemon=True)
         self.viz_proc.start()
@@ -1788,6 +1960,11 @@ class FrameWorker(threading.Thread):
 
         self.running = False
         self.finished = True
+        self._watchdog_stop_event.set()
+
+        if self._watchdog_thread and threading.current_thread() is not self._watchdog_thread:
+            self._watchdog_thread.join(timeout=1.0)
+        self._watchdog_thread = None
 
         if self.viz_proc:
             try:

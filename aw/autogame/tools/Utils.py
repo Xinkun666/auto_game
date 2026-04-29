@@ -81,14 +81,38 @@ def _resolve_run_timestamp(extra_metadata: Optional[dict]) -> str:
     return time.strftime("%Y%m%d%H%M%S")
 
 
-def _build_archive_dir(run_index: int, extra_metadata: Optional[dict] = None) -> Path:
+def _resolve_archive_dir_path(run_index: int, extra_metadata: Optional[dict] = None) -> Path:
     batch_timestamp = _resolve_batch_start_timestamp(extra_metadata)
     run_timestamp = _resolve_run_timestamp(extra_metadata)
 
     batch_dir = TEMP_DIR / f"game_cases_{batch_timestamp}"
+    return batch_dir / f"第{run_index}次_{run_timestamp}"
+
+
+def resolve_run_archive_dir(
+    run_index: int,
+    extra_metadata: Optional[dict] = None,
+    create: bool = False,
+) -> Path:
+    archive_dir = _resolve_archive_dir_path(run_index, extra_metadata=extra_metadata)
+    if create:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+    return archive_dir
+
+
+def _build_archive_dir(
+    run_index: int,
+    extra_metadata: Optional[dict] = None,
+    reuse_existing: bool = False,
+) -> Path:
+    base_dir = _resolve_archive_dir_path(run_index, extra_metadata=extra_metadata)
+    batch_dir = base_dir.parent
     batch_dir.mkdir(parents=True, exist_ok=True)
 
-    base_dir = batch_dir / f"第{run_index}次_{run_timestamp}"
+    if reuse_existing:
+        base_dir.mkdir(parents=True, exist_ok=True)
+        return base_dir
+
     archive_dir = base_dir
     suffix = 1
     while archive_dir.exists():
@@ -147,8 +171,13 @@ def archive_run_artifacts(
     source: str,
     extra_text_files: Optional[dict[str, str]] = None,
     extra_metadata: Optional[dict] = None,
+    reuse_existing: bool = False,
 ) -> Path:
-    archive_dir = _build_archive_dir(run_index, extra_metadata=extra_metadata)
+    archive_dir = _build_archive_dir(
+        run_index,
+        extra_metadata=extra_metadata,
+        reuse_existing=reuse_existing,
+    )
     log_archive_dir = archive_dir / "logs"
     process_archive_dir = archive_dir / "process_temp_logs"
 

@@ -135,9 +135,13 @@ class GameAutomator:
 
         except Exception as e:
             print(f"\n[运行异常] GameAutomator 遇到错误: {e}")
+            raise
         finally:
             self.processor.stop()
             print(">>> 自动化处理阶段已结束，正在释放控制权回传主脚本...")
+
+        if getattr(self.processor, "failed", False):
+            raise RuntimeError(self.processor.failure_reason or "自动化执行失败")
 
 
 if __name__ == "__main__":

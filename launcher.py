@@ -341,6 +341,13 @@ class LauncherWindow(QWidget):
         self.safe_time_spin.setValue(0.0)
         self.safe_time_spin.setSuffix(" 分钟")
 
+        self.inactivity_timeout_spin = QDoubleSpinBox()
+        self.inactivity_timeout_spin.setRange(0.0, 10000.0)
+        self.inactivity_timeout_spin.setDecimals(1)
+        self.inactivity_timeout_spin.setSingleStep(1.0)
+        self.inactivity_timeout_spin.setValue(5.0)
+        self.inactivity_timeout_spin.setSuffix(" 分钟")
+
         self.start_button = QPushButton("启动")
         self.stop_button = QPushButton("停止")
         self.stop_button.setEnabled(False)
@@ -401,6 +408,7 @@ class LauncherWindow(QWidget):
         config_layout.addRow("安全温度", self.safe_temp_spin)
         config_layout.addRow("安全电量", self.safe_battery_spin)
         config_layout.addRow("安全时间", self.safe_time_spin)
+        config_layout.addRow("无操控超时", self.inactivity_timeout_spin)
         config_layout.addRow("解析结果", self.status_label)
         config_layout.addRow("运行信息", self.runtime_label)
         config_layout.addRow("", self.refresh_button)
@@ -628,15 +636,30 @@ class LauncherWindow(QWidget):
 
         self._set_status("；".join(messages))
 
-    def _build_process_environment(self, project_case: str, target_case: str) -> QProcessEnvironment:
+    def _build_process_environment(self, project_case: str, target_case: str, run_no: int) -> QProcessEnvironment:
         env = QProcessEnvironment.systemEnvironment()
         env.insert("TARGET_PROJECT_CASE", project_case)
         env.insert("TARGET_GAME_CASE", target_case)
         env.insert("AUTOGAME_VIS_MODE", "launcher")
+        env.insert("AUTOGAME_RUN_SOURCE", "launcher")
+        env.insert("AUTOGAME_RUN_INDEX", str(int(run_no)))
+        if self.current_batch_start_timestamp:
+            env.insert("AUTOGAME_BATCH_START_TIMESTAMP", self.current_batch_start_timestamp)
+        if self.current_run_start_timestamp:
+            env.insert("AUTOGAME_RUN_START_TIMESTAMP", self.current_run_start_timestamp)
+        if self.current_plan is not None:
+            env.insert(
+                "AUTOGAME_LAUNCHER_INACTIVITY_TIMEOUT_MINUTES",
+                str(float(self.current_plan.get("inactivity_timeout_minutes", 5.0))),
+            )
         LOGGER.debug(
-            "build_process_environment: project_case=%s target_case=%s",
+            "build_process_environment: project_case=%s target_case=%s run_no=%s batch_start=%s run_start=%s inactivity_timeout=%s",
             project_case,
             target_case,
+            run_no,
+            self.current_batch_start_timestamp,
+            self.current_run_start_timestamp,
+            self.current_plan.get("inactivity_timeout_minutes") if self.current_plan else None,
         )
         return env
 
@@ -653,6 +676,7 @@ class LauncherWindow(QWidget):
         self.safe_temp_spin.setEnabled(enabled)
         self.safe_battery_spin.setEnabled(enabled)
         self.safe_time_spin.setEnabled(enabled)
+        self.inactivity_timeout_spin.setEnabled(enabled)
 
     def _clear_preview_files(self):
         LOGGER.debug("clear_preview_files: dir=%s", PREVIEW_DIR)
@@ -963,6 +987,7 @@ class LauncherWindow(QWidget):
             "safe_temp": float(self.safe_temp_spin.value()),
             "safe_battery": int(self.safe_battery_spin.value()),
             "safe_minutes": float(self.safe_time_spin.value()),
+            "inactivity_timeout_minutes": float(self.inactivity_timeout_spin.value()),
             "cleanup_apps": sorted(cleanup_apps),
         }
         LOGGER.info("collect_plan result: %s", plan)
@@ -999,7 +1024,8 @@ class LauncherWindow(QWidget):
         self._log_message(
             f"[Launcher] 批量运行开始，mode={plan['mode']}, runs={plan['run_count']}, "
             f"safe_temp={plan['safe_temp']}°C, safe_battery={plan['safe_battery']}%, "
-            f"safe_time={plan['safe_minutes']}分钟, cleanup_apps={plan['cleanup_apps']}\n"
+            f"safe_time={plan['safe_minutes']}分钟, inactivity_timeout={plan['inactivity_timeout_minutes']}分钟, "
+            f"cleanup_apps={plan['cleanup_apps']}\n"
         )
         self._cleanup_apps_between_runs("批次启动前预清理")
         self._check_and_start_if_safe()
@@ -1131,7 +1157,7 @@ class LauncherWindow(QWidget):
         self.process.setProgram(sys.executable)
         self.process.setWorkingDirectory(str(ROOT_DIR))
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        self.process.setProcessEnvironment(self._build_process_environment(project_case, target_case))
+        self.process.setProcessEnvironment(self._build_process_environment(project_case, target_case, run_no))
         self.process.readyReadStandardOutput.connect(self._read_process_output)
         self.process.finished.connect(self._on_process_finished)
         self.process.errorOccurred.connect(self._on_process_error)
@@ -1215,7 +1241,9 @@ class LauncherWindow(QWidget):
                     "timed_out": self.current_run_timed_out,
                     "batch_start_timestamp": self.current_batch_start_timestamp,
                     "run_start_timestamp": self.current_run_start_timestamp,
+                    "inactivity_timeout_minutes": self.current_plan["inactivity_timeout_minutes"],
                 },
+                reuse_existing=True,
             )
             self._log_message(f"[Launcher] 本次运行产物已归档到：{archive_dir}\n")
         except Exception:

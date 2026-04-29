@@ -461,9 +461,10 @@ class MapNavigator:
         # === 场景 A: 右边更空旷 ===
         if right_score > left_score:
             if is_critical:
-                # 距离太近，需要倒车变向
-                # 注意：这里保留你提供的代码逻辑 (3)，通常倒车左打方向盘车头才会向右
-                # 但根据你的mapping，如果3是 backward_turn_right，请确保映射表符合你的预期
+                # 距离太近，需要倒车变向。
+                # 这里返回的编号语义是“车辆实际后退偏向哪一侧”，不是“方向键按哪边”。
+                # 因此右侧更空旷时返回 3，交给上层映射为 backward_turn_right；
+                # 底层实现可以是 down + left，但它的实际车辆效果应是“后退并向右脱离”。
                 return 3
             else:
                 front_right_dist = get_ray_distance(15)
@@ -475,6 +476,7 @@ class MapNavigator:
                     # === 场景 B: 左边更空旷 ===
         else:
             if is_critical:
+                # 同理，左侧更空旷时返回 6，语义上表示“后退并向左脱离”。
                 return 6
             else:
                 front_left_dist = get_ray_distance(-15)

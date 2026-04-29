@@ -30,8 +30,8 @@ class DriveContext:
 
 class DrivingManager:
     ESCAPE_ALIGN_TOLERANCE = 8
-    EXIT_GARAGE_INITIAL_FORWARD_MS = 1000
-    EXIT_GARAGE_INITIAL_FORWARD_RIGHT_MS = 1000
+    EXIT_GARAGE_INITIAL_FORWARD_MS = 2900
+    EXIT_GARAGE_INITIAL_FORWARD_RIGHT_MS = 750
     EXIT_GARAGE_VISUAL_FORWARD_MS = 900
     EXIT_GARAGE_VISUAL_TURN_MS = 800
     EXIT_GARAGE_CLEAR_ROUNDS_TO_CRUISE = 3
@@ -90,6 +90,13 @@ class DrivingManager:
     DEFAULT_MAX_DRIVING_TIME = 10 * 60
     # 车前方障碍物识别使用的画面 ROI 区域
     DRIVE_VIEW_RECT = (0.2797, 0.2826, 0.7203, 0.6175)
+    # 第三人称驾驶时，自车常出现在 ROI 底部中央，容易被 YOLO26 识别成 car。
+    # 这里用一个保守的几何规则把“底部中央的大 car 框”过滤掉，避免误判为前方大障碍。
+    SELF_VEHICLE_CLASS_IDS = {7}
+    SELF_VEHICLE_IGNORE_BOTTOM_RATIO = 0.94
+    SELF_VEHICLE_IGNORE_CENTER_TOLERANCE = 0.22
+    SELF_VEHICLE_IGNORE_MIN_WIDTH_RATIO = 0.18
+    SELF_VEHICLE_IGNORE_MIN_HEIGHT_RATIO = 0.18
 
     # 内部阶段名称：首次出库 / 正常巡航 / 驾驶结束
     STAGE_EXIT_GARAGE = "出库阶段"
@@ -956,6 +963,9 @@ class DrivingManager:
             else:
                 self._tap_single_control(w, "brake", wait=brake_wait)
 
+        # backward_turn_left/right 和 reverse_and_left/right 的命名语义
+        # 表示“车辆实际后退偏向的方向”，不是“倒车时方向键按下的方向”。
+        # 因此后退向左脱离会落到 down + right，后退向右脱离会落到 down + left。
         simple_actions = {
             "straight": lambda: self._click_down_control(w, "up"),
             "forward": lambda: self._tap_single_control(w, "up", wait=duration),
@@ -1114,21 +1124,45 @@ class DrivingManager:
             if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
                 continue
 
-            local_dets.append(
-                [
-                    inter_x1 - roi_x,
-                    inter_y1 - roi_y,
-                    inter_x2 - roi_x,
-                    inter_y2 - roi_y,
-                    conf,
-                    cls_id,
-                ]
-            )
+            local_det = [
+                inter_x1 - roi_x,
+                inter_y1 - roi_y,
+                inter_x2 - roi_x,
+                inter_y2 - roi_y,
+                conf,
+                cls_id,
+            ]
+            if self._is_self_vehicle_detection(local_det, roi_w, roi_h):
+                continue
+
+            local_dets.append(local_det)
 
         if not local_dets:
             return {"decision": "straight", "obstacles_count": 0}
 
         return self.obstacle_analyzer.analyze(local_dets)
+
+    def _is_self_vehicle_detection(self, det, roi_w: int, roi_h: int) -> bool:
+        if int(det[5]) not in self.SELF_VEHICLE_CLASS_IDS:
+            return False
+
+        x1, y1, x2, y2 = map(float, det[:4])
+        box_w = max(0.0, x2 - x1)
+        box_h = max(0.0, y2 - y1)
+        if box_w <= 0 or box_h <= 0:
+            return False
+
+        width_ratio = box_w / float(max(1, roi_w))
+        height_ratio = box_h / float(max(1, roi_h))
+        bottom_ratio = y2 / float(max(1, roi_h))
+        center_x_ratio = ((x1 + x2) / 2.0) / float(max(1, roi_w))
+
+        return (
+            bottom_ratio >= self.SELF_VEHICLE_IGNORE_BOTTOM_RATIO
+            and abs(center_x_ratio - 0.5) <= self.SELF_VEHICLE_IGNORE_CENTER_TOLERANCE
+            and width_ratio >= self.SELF_VEHICLE_IGNORE_MIN_WIDTH_RATIO
+            and height_ratio >= self.SELF_VEHICLE_IGNORE_MIN_HEIGHT_RATIO
+        )
 
     def _angle_diff(self, angle1: float, angle2: float) -> float:
         diff = abs(angle1 - angle2) % 360

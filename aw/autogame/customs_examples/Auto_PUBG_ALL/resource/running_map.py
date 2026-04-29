@@ -30,6 +30,7 @@ class RoadRouteHelper:
 
     INTERSECTION_NODE_FILES = ("red_coords.json",)
     ROUTE_NODE_FILES = ("blue_coords.json",)
+    PATH_SAMPLE_INTERVAL = 30.0
 
     def __init__(self, map_tool: MapNavigator):
         self.map_tool = map_tool
@@ -106,14 +107,14 @@ class RoadRouteHelper:
     def plan_to_node(self, start: Tuple[int, int], node: Tuple[int, int]) -> List[Tuple[int, int]]:
         topo_path = self._try_topo_path(start, node)
         if topo_path:
-            return self._dedupe_path(topo_path)
+            return self._sample_path(self._dedupe_path(topo_path))
 
         planned = self.map_tool.plan_path(start, node)
         if not planned:
             planned = [node]
         elif tuple(map(int, planned[-1])) != node:
             planned.append(node)
-        return self._dedupe_path(planned)
+        return self._sample_path(self._dedupe_path(planned))
 
     def _try_topo_path(self, start: Tuple[int, int], node: Tuple[int, int]) -> List[Tuple[int, int]]:
         topo = self._get_topo()
@@ -185,6 +186,25 @@ class RoadRouteHelper:
             cleaned.append(item)
         return cleaned
 
+    def _sample_path(self, path: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+        if len(path) <= 2:
+            return path
+
+        sampled = [path[0]]
+        prev = path[0]
+        distance_since_last = 0.0
+
+        for point in path[1:-1]:
+            distance_since_last += get_distance(prev, point)
+            if distance_since_last >= self.PATH_SAMPLE_INTERVAL:
+                sampled.append(point)
+                distance_since_last = 0.0
+            prev = point
+
+        if sampled[-1] != path[-1]:
+            sampled.append(path[-1])
+        return sampled
+
 
 class RunningManager:
     """
@@ -202,8 +222,12 @@ class RunningManager:
     STUCK_HISTORY_LEN = 10
     # 长时困死判定窗口：连续多少帧都在局部小范围打转算“困死”
     TRAPPED_HISTORY_LEN = 50
-    # 到路径点多近时认为“已经到达”
-    WAYPOINT_TOLERANCE = 2.0
+    # 距离目标点 10 内停止自动前进，改用短摇杆精确逼近；小于 5 才消费该路径点。
+    WAYPOINT_TOLERANCE = 5.0
+    WAYPOINT_PRECISE_APPROACH_DISTANCE = 10.0
+    WAYPOINT_PRECISE_BIAS_Y = -120
+    WAYPOINT_PRECISE_DURA = 180
+    WAYPOINT_PRECISE_WAIT = 350
     # 单帧位置跳变超过这个距离时，认为定位异常，需要重规划
     LOCATION_JUMP_THRESHOLD = 25.0
     # 位置跳变后，多久内不重复触发重规划
@@ -441,9 +465,14 @@ class RunningManager:
         dist = get_distance(location, target)
         print(f"[Running] Loc: {location}, Target: {target}, Dist: {dist:.2f}")
 
-        if 0 <= dist <= self.WAYPOINT_TOLERANCE:
+        if 0 <= dist < self.WAYPOINT_TOLERANCE:
             print(f"[Running] 到达 {target} 点附近")
             self._handle_waypoint_arrival(w, location, direction, target, dist)
+            return
+
+        if 0 <= dist <= self.WAYPOINT_PRECISE_APPROACH_DISTANCE:
+            print(f"[Running] 距离目标点 {dist:.2f}，切换精确逼近")
+            self._precise_approach_waypoint(w, location, direction, target, dist)
             return
 
         self._move_towards_target(w, location, direction, target)
@@ -1318,6 +1347,42 @@ class RunningManager:
         w.tap_single("视角", x_bias=int(x_bias), dura=dura_time, wait=250)
         w.refresh_frame()
         return False
+
+    def _precise_approach_waypoint(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+        target: Tuple[int, int],
+        dist: float,
+    ):
+        self.stop_auto_forward(w)
+
+        if direction is None:
+            print("[Running] 精确逼近时当前朝向无效，等待下一帧")
+            self._log_running_state("精确逼近朝向无效", location, None, "等待下一帧", target, dist)
+            return
+
+        aligned = self._align_to_point(w, location, direction, target, threshold=5)
+        if not aligned:
+            self._log_running_state("精确逼近调方向", location, direction, "先对齐目标点", target, dist)
+            return
+
+        self._log_running_state(
+            "精确逼近目标点",
+            location,
+            direction,
+            f"短推摇杆 {self.WAYPOINT_PRECISE_DURA}ms",
+            target,
+            dist,
+        )
+        w.tap_single(
+            "摇杆",
+            y_bias=self.WAYPOINT_PRECISE_BIAS_Y,
+            dura=self.WAYPOINT_PRECISE_DURA,
+            wait=self.WAYPOINT_PRECISE_WAIT,
+        )
+        w.refresh_frame()
 
     def _move_towards_target(
         self,

@@ -29,12 +29,24 @@ class DriveContext:
 
 
 class DrivingManager:
-    # 首次出库必须对齐到的固定角度
-    TARGET_FIRST_DIR = 115
-    FIRST_ALIGN_TOLERANCE = 1
     ESCAPE_ALIGN_TOLERANCE = 8
-    EXIT_GARAGE_WARMUP_FORWARD_MS = 700
-    EXIT_GARAGE_BRAKE_MS = 500
+    EXIT_GARAGE_INITIAL_FORWARD_MS = 1000
+    EXIT_GARAGE_INITIAL_FORWARD_RIGHT_MS = 1000
+    EXIT_GARAGE_VISUAL_FORWARD_MS = 900
+    EXIT_GARAGE_VISUAL_TURN_MS = 800
+    EXIT_GARAGE_CLEAR_ROUNDS_TO_CRUISE = 3
+    EXIT_GARAGE_SUCCESS_DISTANCE = 8.0
+    EXIT_GARAGE_WALL_CLASS_IDS = {9, 19}
+    EXIT_GARAGE_WALL_MIN_CONF = 0.35
+    EXIT_GARAGE_WALL_MIN_AREA_RATIO = 0.003
+    EXIT_GARAGE_WALL_MIN_BOTTOM_RATIO = 0.30
+    EXIT_GARAGE_WALL_MIN_WIDTH_RATIO = 0.05
+    EXIT_GARAGE_WALL_BLOCK_RATIO = 0.18
+    EXIT_GARAGE_SECTORS = {
+        "left": (0.0, 0.38),
+        "center": (0.28, 0.72),
+        "right": (0.62, 1.0),
+    }
 
     # 车辆方向与目标方向的允许误差；小于该值时直接视为已对齐
     ALIGN_THRESHOLD = 8
@@ -110,7 +122,9 @@ class DrivingManager:
 
         self.is_first_car = True
         self.current_stage = self.STAGE_EXIT_GARAGE
-        self.exit_garage_warmup_done = False
+        self.exit_garage_phase = 0
+        self.exit_garage_clear_rounds = 0
+        self.exit_garage_start_location: Optional[Tuple[int, int]] = None
 
         self.circle_angles: List[float] = []
         self.stable_circle_angle: Optional[float] = None
@@ -162,7 +176,9 @@ class DrivingManager:
         self.driving_start_time = None
         self.is_first_car = True
         self.current_stage = self.STAGE_EXIT_GARAGE
-        self.exit_garage_warmup_done = False
+        self.exit_garage_phase = 0
+        self.exit_garage_clear_rounds = 0
+        self.exit_garage_start_location = None
 
         self.circle_angles = []
         self.stable_circle_angle = None
@@ -223,7 +239,7 @@ class DrivingManager:
 
         if self.current_stage == self.STAGE_EXIT_GARAGE:
             print("[Driving] 当前阶段: 出库阶段")
-            self._handle_first_car_alignment(w, context.direction)
+            self._handle_first_car_alignment(w, context)
             self._finalize_frame(w)
             return
 
@@ -372,37 +388,91 @@ class DrivingManager:
         else:
             print("[Driving] 路径规划失败，回退自由巡航")
 
-    def _handle_first_car_alignment(self, w: "FrameWorker", direction: float):
-        if not self.exit_garage_warmup_done:
-            print(
-                f"[Driving] 首次出库先前开 {self.EXIT_GARAGE_WARMUP_FORWARD_MS}ms，"
-                f"随后立即刹停 {self.EXIT_GARAGE_BRAKE_MS}ms"
+    def _handle_first_car_alignment(self, w: "FrameWorker", context: DriveContext):
+        if self.exit_garage_start_location is None:
+            self.exit_garage_start_location = context.location
+
+        if self.exit_garage_phase == 0:
+            print(f"[Driving] 首次出库第 1 步：固定前进 {self.EXIT_GARAGE_INITIAL_FORWARD_MS}ms")
+            self._log_drive_state(
+                "首次出库",
+                context,
+                f"forward({self.EXIT_GARAGE_INITIAL_FORWARD_MS}ms)",
+                self.stable_circle_angle,
             )
-            self._tap_single_control(w, "up", wait=self.EXIT_GARAGE_WARMUP_FORWARD_MS, dura=100)
-            self._tap_single_control(w, "brake", wait=self.EXIT_GARAGE_BRAKE_MS)
-            self.exit_garage_warmup_done = True
+            self._tap_single_control(w, "up", wait=self.EXIT_GARAGE_INITIAL_FORWARD_MS, dura=100)
+            self.exit_garage_phase = 1
             return
 
-        turn_dir, _, diff = calculate_move_count(direction, self.TARGET_FIRST_DIR)
-        if turn_dir is not None and diff > self.FIRST_ALIGN_TOLERANCE:
-            duration = self._get_exit_alignment_duration(diff)
-            action = "forward_turn_left" if turn_dir == "left" else "forward_turn_right"
-            print(
-                f"[Driving] 出库角度修正: current={direction:.1f}, "
-                f"target={self.TARGET_FIRST_DIR}, diff={diff:.2f}, "
-                f"action={action}, steer_duration={duration}ms, "
-                f"post_brake={self.EXIT_GARAGE_BRAKE_MS}ms"
+        if self.exit_garage_phase == 1:
+            print(f"[Driving] 首次出库第 2 步：前进并向右打方向 {self.EXIT_GARAGE_INITIAL_FORWARD_RIGHT_MS}ms")
+            self._log_drive_state(
+                "首次出库",
+                context,
+                f"forward_turn_right({self.EXIT_GARAGE_INITIAL_FORWARD_RIGHT_MS}ms)",
+                self.stable_circle_angle,
             )
-            self._execute_exit_garage_alignment(w, turn_dir, duration)
+            self._tap_double_control(w, "up", "right", wait=self.EXIT_GARAGE_INITIAL_FORWARD_RIGHT_MS)
+            self.exit_garage_phase = 2
             return
 
-        self._tap_single_control(w, "up", wait=5000, dura=100)
-        self.is_first_car = False
-        self.current_stage = self.STAGE_CRUISE
-        self.exit_garage_warmup_done = False
-        self.last_motion_location = None
-        self.blocked_motion_count = 0
-        print("[Driving] 出库完成，进入巡航阶段")
+        distance_from_start = get_distance(context.location, self.exit_garage_start_location)
+        wall_state = self._analyze_exit_garage_stone_walls(w)
+        front_blocked = wall_state["center_blocked"]
+        left_blocked = wall_state["left_blocked"]
+        right_blocked = wall_state["right_blocked"]
+
+        print(
+            "[Driving] 出库视觉判断: "
+            f"front_blocked={front_blocked}, left_blocked={left_blocked}, right_blocked={right_blocked}, "
+            f"distance={distance_from_start:.2f}, clear_rounds={self.exit_garage_clear_rounds}"
+        )
+
+        if (
+            distance_from_start >= self.EXIT_GARAGE_SUCCESS_DISTANCE
+            or (
+                not front_blocked
+                and self.exit_garage_clear_rounds >= self.EXIT_GARAGE_CLEAR_ROUNDS_TO_CRUISE
+                and distance_from_start >= (self.EXIT_GARAGE_SUCCESS_DISTANCE * 0.5)
+            )
+        ):
+            self._finish_exit_garage()
+            print("[Driving] 出库完成，进入巡航阶段")
+            return
+
+        if not front_blocked:
+            self.exit_garage_clear_rounds += 1
+            self._log_drive_state(
+                "出库阶段前方无石墙",
+                context,
+                f"forward({self.EXIT_GARAGE_VISUAL_FORWARD_MS}ms)",
+                self.stable_circle_angle,
+            )
+            self._tap_single_control(w, "up", wait=self.EXIT_GARAGE_VISUAL_FORWARD_MS, dura=100)
+            return
+
+        self.exit_garage_clear_rounds = 0
+
+        left_score = float(wall_state["left_score"])
+        right_score = float(wall_state["right_score"])
+        if not left_blocked and right_blocked:
+            steer = "left"
+        elif not right_blocked and left_blocked:
+            steer = "right"
+        else:
+            steer = "left" if left_score < right_score else "right"
+
+        self._log_drive_state(
+            "出库阶段前方存在石墙",
+            context,
+            f"forward_turn_{steer}({self.EXIT_GARAGE_VISUAL_TURN_MS}ms)",
+            self.stable_circle_angle,
+        )
+        print(
+            f"[Driving] 出库阶段根据石墙分布调整方向: steer={steer}, "
+            f"left_score={left_score:.3f}, right_score={right_score:.3f}"
+        )
+        self._tap_double_control(w, "up", steer, wait=self.EXIT_GARAGE_VISUAL_TURN_MS)
 
     def _handle_forbidden_escape(self, w: "FrameWorker", context: DriveContext) -> bool:
         if self.map_tool.is_walkable(context.location):
@@ -589,7 +659,89 @@ class DrivingManager:
     def _execute_exit_garage_alignment(self, w: "FrameWorker", turn_dir: str, duration: int):
         steer_key = "left" if turn_dir == "left" else "right"
         self._tap_double_control(w, "up", steer_key, wait=duration)
-        self._tap_single_control(w, "brake", wait=self.EXIT_GARAGE_BRAKE_MS)
+        self._tap_single_control(w, "brake", wait=500)
+
+    def _finish_exit_garage(self):
+        self.is_first_car = False
+        self.current_stage = self.STAGE_CRUISE
+        self.exit_garage_phase = 0
+        self.exit_garage_clear_rounds = 0
+        self.exit_garage_start_location = None
+        self.last_motion_location = None
+        self.blocked_motion_count = 0
+
+    def _analyze_exit_garage_stone_walls(self, w: "FrameWorker") -> Dict[str, float]:
+        detections = w.get_info("forward_scene")
+        frame = getattr(w, "frame", None)
+        if not detections or frame is None or not hasattr(frame, "shape"):
+            return {
+                "left_score": 0.0,
+                "center_score": 0.0,
+                "right_score": 0.0,
+                "left_blocked": False,
+                "center_blocked": False,
+                "right_blocked": False,
+            }
+
+        frame_h, frame_w = frame.shape[:2]
+        rx1, ry1, rx2, ry2 = self.DRIVE_VIEW_RECT
+        roi_x1 = float(frame_w) * float(rx1)
+        roi_y1 = float(frame_h) * float(ry1)
+        roi_x2 = float(frame_w) * float(rx2)
+        roi_y2 = float(frame_h) * float(ry2)
+        roi_w = max(1.0, roi_x2 - roi_x1)
+        roi_h = max(1.0, roi_y2 - roi_y1)
+
+        sector_scores = {name: 0.0 for name in self.EXIT_GARAGE_SECTORS}
+
+        for det in detections:
+            if not isinstance(det, (list, tuple)) or len(det) < 6:
+                continue
+
+            x1, y1, x2, y2, conf, cls_id = det[:6]
+            if int(cls_id) not in self.EXIT_GARAGE_WALL_CLASS_IDS:
+                continue
+            if float(conf) < self.EXIT_GARAGE_WALL_MIN_CONF:
+                continue
+
+            inter_x1 = max(float(x1), roi_x1)
+            inter_y1 = max(float(y1), roi_y1)
+            inter_x2 = min(float(x2), roi_x2)
+            inter_y2 = min(float(y2), roi_y2)
+            if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+                continue
+
+            local_x1 = inter_x1 - roi_x1
+            local_x2 = inter_x2 - roi_x1
+            local_y2 = inter_y2 - roi_y1
+            width_ratio = (local_x2 - local_x1) / roi_w
+            area_ratio = ((local_x2 - local_x1) * (inter_y2 - inter_y1)) / (roi_w * roi_h)
+            bottom_ratio = local_y2 / roi_h
+
+            if width_ratio < self.EXIT_GARAGE_WALL_MIN_WIDTH_RATIO:
+                continue
+            if area_ratio < self.EXIT_GARAGE_WALL_MIN_AREA_RATIO:
+                continue
+            if bottom_ratio < self.EXIT_GARAGE_WALL_MIN_BOTTOM_RATIO:
+                continue
+
+            for name, (start_ratio, end_ratio) in self.EXIT_GARAGE_SECTORS.items():
+                sector_x1 = roi_w * float(start_ratio)
+                sector_x2 = roi_w * float(end_ratio)
+                overlap = max(0.0, min(local_x2, sector_x2) - max(local_x1, sector_x1))
+                if overlap <= 0:
+                    continue
+                sector_width = max(1.0, sector_x2 - sector_x1)
+                sector_scores[name] += overlap / sector_width
+
+        return {
+            "left_score": sector_scores["left"],
+            "center_score": sector_scores["center"],
+            "right_score": sector_scores["right"],
+            "left_blocked": sector_scores["left"] >= self.EXIT_GARAGE_WALL_BLOCK_RATIO,
+            "center_blocked": sector_scores["center"] >= self.EXIT_GARAGE_WALL_BLOCK_RATIO,
+            "right_blocked": sector_scores["right"] >= self.EXIT_GARAGE_WALL_BLOCK_RATIO,
+        }
 
     def _get_turn_duration(
         self,

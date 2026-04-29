@@ -62,8 +62,10 @@ class DrivingManager:
     # 困死判定时，轨迹围绕中心点打转的半径范围
     TRAPPED_RADIUS_MIN = 1.0
     TRAPPED_RADIUS_MAX = 2.0
-    # 已经进入不可通行区域后，连续脱困失败多少次就直接结束当前局
-    FORBIDDEN_ESCAPE_FAIL_LIMIT = 8
+    # 已经进入不可通行区域后，连续多少次“没有朝安全点靠近”才结束当前局
+    FORBIDDEN_ESCAPE_FAIL_LIMIT = 16
+    # 黑区脱离时，只要到最近安全点的距离缩短超过这个值，就认为本轮有进展
+    FORBIDDEN_ESCAPE_PROGRESS_EPS = 1.0
     # 前方黑区检测距离：基础值，以及速度 2/3 时更远的提前量
     FORBIDDEN_BASE_CHECK_DISTANCE = 10
     FORBIDDEN_SPEED2_CHECK_DISTANCE = 14
@@ -143,6 +145,7 @@ class DrivingManager:
         self.history_locations: List[Tuple[int, int]] = []
         self.trapped = False
         self.forbidden_escape_failures = 0
+        self.forbidden_escape_last_distance: Optional[float] = None
 
         self.last_motion_mode: Optional[str] = None
         self.last_motion_steer: Optional[str] = None
@@ -197,6 +200,7 @@ class DrivingManager:
         self.history_locations = []
         self.trapped = False
         self.forbidden_escape_failures = 0
+        self.forbidden_escape_last_distance = None
 
         self.last_motion_mode = None
         self.last_motion_steer = None
@@ -483,11 +487,39 @@ class DrivingManager:
     def _handle_forbidden_escape(self, w: "FrameWorker", context: DriveContext) -> bool:
         if self.map_tool.is_walkable(context.location):
             self.forbidden_escape_failures = 0
+            self.forbidden_escape_last_distance = None
             return False
 
         safe_point = self.map_tool.get_nearest_safe_point(context.location, max_search_dist=120)
-        self.forbidden_escape_failures += 1
-        print(f"[Driving] 已进入不可通行区域，执行角度脱离 attempt={self.forbidden_escape_failures}")
+        progress_text = ""
+
+        if safe_point is None:
+            self.forbidden_escape_failures += 1
+            self.forbidden_escape_last_distance = None
+            progress_text = "safe_point=None"
+        else:
+            safe_distance = get_distance(context.location, safe_point)
+            if self.forbidden_escape_last_distance is None:
+                self.forbidden_escape_failures = 0
+                progress_text = f"safe_dist={safe_distance:.2f}, first_track"
+            elif safe_distance <= self.forbidden_escape_last_distance - self.FORBIDDEN_ESCAPE_PROGRESS_EPS:
+                self.forbidden_escape_failures = 0
+                progress_text = (
+                    f"safe_dist={safe_distance:.2f}, "
+                    f"prev={self.forbidden_escape_last_distance:.2f}, progress"
+                )
+            else:
+                self.forbidden_escape_failures += 1
+                progress_text = (
+                    f"safe_dist={safe_distance:.2f}, "
+                    f"prev={self.forbidden_escape_last_distance:.2f}, no_progress"
+                )
+            self.forbidden_escape_last_distance = safe_distance
+
+        print(
+            "[Driving] 已进入不可通行区域，执行角度脱离 "
+            f"attempt={self.forbidden_escape_failures}, {progress_text}"
+        )
 
         if self.forbidden_escape_failures >= self.FORBIDDEN_ESCAPE_FAIL_LIMIT:
             print("[Driving] 不可通行区域脱困多次失败，结束当前局")

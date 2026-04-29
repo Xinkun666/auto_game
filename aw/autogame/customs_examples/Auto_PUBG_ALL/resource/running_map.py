@@ -277,6 +277,9 @@ class RunningManager:
     CAR_VISUAL_FORWARD_DURA = 320
     CAR_VISUAL_FORWARD_WAIT = 600
     CAR_VISUAL_SEARCH_MAX_STEPS = 8
+    # 路边发现远车后，允许跨帧追车，避免车辆框短暂丢失后又回头追原道路点。
+    ROADSIDE_CAR_LOST_LIMIT = 8
+    ROADSIDE_CAR_PURSUIT_STEP_LIMIT = 24
     # 落水后，上浮和向前划水脱离水面的操作参数
     WATER_FLOAT_DURA = 2000
     WATER_FORWARD_BIAS_Y = -280
@@ -332,6 +335,9 @@ class RunningManager:
         self.current_road_node: Optional[Tuple[int, int]] = None
         self.active_vehicle_entry_source: Optional[str] = None
         self.last_vehicle_entry_source: Optional[str] = None
+        self.roadside_car_pursuing = False
+        self.roadside_car_lost_rounds = 0
+        self.roadside_car_steps = 0
 
     def reset(self, finding_car: bool = True):
         self.road_list = []
@@ -358,6 +364,9 @@ class RunningManager:
         self.current_road_node = None
         self.active_vehicle_entry_source = None
         self.last_vehicle_entry_source = None
+        self.roadside_car_pursuing = False
+        self.roadside_car_lost_rounds = 0
+        self.roadside_car_steps = 0
         print("[Running] 状态已重置!")
 
     def set_game_time(self, game_time: Optional[float] = None):
@@ -595,6 +604,9 @@ class RunningManager:
         self.ignore_vehicle_until = time.time() + cooldown
         self.current_road_node = None
         self.active_vehicle_entry_source = None
+        self.roadside_car_pursuing = False
+        self.roadside_car_lost_rounds = 0
+        self.roadside_car_steps = 0
         print(
             f"[Running] 收到下车通知，载具交互保护期 {cooldown:.1f}s，"
             f"后续模式={'继续寻车' if self.finding_car else '纯跑图'}"
@@ -984,26 +996,102 @@ class RunningManager:
         if self._attempt_drive_after_move(w, "寻车跑图中检查驾驶按钮"):
             return True
 
-        if not self._find_largest_car(w):
+        car = self._find_largest_car(w)
+        if not self.roadside_car_pursuing and not car:
             return False
 
-        print("[Running] 道路巡游中发现车辆，停止前进并执行视觉上车")
-        self._log_running_state("道路巡游发现车辆", location, direction, "视觉对车并尝试上车")
+        if not self.roadside_car_pursuing:
+            self._start_roadside_car_pursuit(w, location, direction)
+
+        return self._process_roadside_car_pursuit(w, location, direction)
+
+    def _start_roadside_car_pursuit(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+    ):
+        print("[Running] 道路巡游中发现车辆，进入路边追车模式")
+        self._log_running_state("道路巡游发现车辆", location, direction, "锁定车辆并尝试靠近上车")
         self.stop_auto_forward(w)
         self.active_vehicle_entry_source = self.VEHICLE_ENTRY_ROADSIDE
+        self.roadside_car_pursuing = True
+        self.roadside_car_lost_rounds = 0
+        self.roadside_car_steps = 0
+        self._discard_current_road_target()
         self._switch_view_mode(
             w,
             self.VIEW_MODE_FIRST,
             "道路巡游发现车辆，切换第一人称以便视觉对车",
         )
 
-        if self._approach_visible_car(w):
+    def _process_roadside_car_pursuit(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+    ) -> bool:
+        self.roadside_car_steps += 1
+
+        if self._attempt_drive_after_move(
+            w,
+            f"路边追车前检查驾驶按钮 {self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}",
+        ):
             return True
 
-        print("[Running] 本轮路边车辆上车未成功，继续沿道路寻找下一辆车")
+        aligned = self._align_to_visible_car(w)
+        if aligned is None:
+            self.roadside_car_lost_rounds += 1
+            print(
+                f"[Running] 路边追车中车辆暂时丢失 "
+                f"{self.roadside_car_lost_rounds}/{self.ROADSIDE_CAR_LOST_LIMIT}，保持方向继续靠近"
+            )
+            if self.roadside_car_lost_rounds > self.ROADSIDE_CAR_LOST_LIMIT:
+                self._give_up_roadside_car_pursuit("连续多帧未重新识别到车辆")
+                return True
+        elif not aligned:
+            self.roadside_car_lost_rounds = 0
+            return True
+        else:
+            self.roadside_car_lost_rounds = 0
+            print(
+                f"[Running] 路边追车已对准车辆，前推靠近 "
+                f"{self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}"
+            )
+
+        w.tap_single(
+            "摇杆",
+            y_bias=self.CAR_VISUAL_FORWARD_BIAS_Y,
+            dura=self.CAR_VISUAL_FORWARD_DURA,
+            wait=self.CAR_VISUAL_FORWARD_WAIT,
+        )
+        w.refresh_frame()
+
+        if self._attempt_drive_after_move(
+            w,
+            f"路边追车靠近后尝试上车 {self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}",
+        ):
+            return True
+
+        if self.roadside_car_steps >= self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT:
+            self._give_up_roadside_car_pursuit("追车步数达到上限")
+        return True
+
+    def _discard_current_road_target(self):
+        if self.current_road_node is not None:
+            self.visited_road_nodes.add(self.current_road_node)
+            print(f"[Running] 放弃当前道路 node，避免追车失败后回头: {self.current_road_node}")
+        self.current_road_node = None
         self.loading_road = False
         self.road_list = []
-        return True
+
+    def _give_up_roadside_car_pursuit(self, reason: str):
+        print(f"[Running] 路边追车放弃: {reason}，从当前位置重新规划下一段道路")
+        self.roadside_car_pursuing = False
+        self.roadside_car_lost_rounds = 0
+        self.roadside_car_steps = 0
+        self.active_vehicle_entry_source = None
+        self._discard_current_road_target()
 
     def _process_precise_entry(
         self,

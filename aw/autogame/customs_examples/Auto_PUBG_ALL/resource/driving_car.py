@@ -75,6 +75,9 @@ class DrivingManager:
 
     # 速度 2 时自动刹车的冷却时间，避免频繁点刹
     BRAKE_COOLDOWN_SPEED2 = 2.0
+    # 前方无障碍直行时，不长按油门，改为分段推进：按 3s，松开停 0.5s。
+    STRAIGHT_PULSE_FORWARD_MS = 3000
+    STRAIGHT_PULSE_PAUSE_S = 0.5
 
     # 驾驶结束时，停车和下车前的操作时长
     TIME_BRAKE = 3000
@@ -1008,7 +1011,7 @@ class DrivingManager:
         # 表示“车辆实际后退偏向的方向”，不是“倒车时方向键按下的方向”。
         # 因此后退向左脱离会落到 down + right，后退向右脱离会落到 down + left。
         simple_actions = {
-            "straight": lambda: self._click_down_control(w, "up"),
+            "straight": lambda: self._drive_straight_pulse(w),
             "forward": lambda: self._tap_single_control(w, "up", wait=duration),
             "backward": lambda: self._tap_single_control(w, "down", wait=duration),
             "backward_turn_left": lambda: self._tap_double_control(w, "down", "right", wait=duration),
@@ -1027,6 +1030,14 @@ class DrivingManager:
 
         executor()
         self._record_motion_action(action)
+
+    def _drive_straight_pulse(self, w: "FrameWorker"):
+        print(
+            f"[Driving] 前方无障碍，分段直行: "
+            f"forward={self.STRAIGHT_PULSE_FORWARD_MS}ms, pause={self.STRAIGHT_PULSE_PAUSE_S:.1f}s"
+        )
+        self._tap_single_control(w, "up", wait=self.STRAIGHT_PULSE_FORWARD_MS, dura=100)
+        time.sleep(self.STRAIGHT_PULSE_PAUSE_S)
 
     def _needs_pre_brake(self, action: str, speed: Optional[int]) -> bool:
         if speed != 3:

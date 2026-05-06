@@ -309,6 +309,7 @@ class RunningManager:
     VEHICLE_ENTRY_UNKNOWN = "unknown"
     CAR_SEARCH_GARAGE = "garage"
     CAR_SEARCH_ROADSIDE = "roadside"
+    JUMP_CLICK_COOLDOWN = 0.8
 
     def __init__(self, map_tool: Optional[MapNavigator] = None):
         self.map_tool = map_tool or MapNavigator()
@@ -338,6 +339,7 @@ class RunningManager:
         self.current_view_mode = self.VIEW_MODE_THIRD
         self.last_valid_location: Optional[Tuple[int, int]] = None
         self.last_jump_replan_time: float = 0.0
+        self.last_jump_click_time: float = 0.0
         self.ignore_vehicle_until: float = 0.0
         self.pause_sp_callback: Optional[Callable] = None
         self.visited_road_nodes: Set[Tuple[int, int]] = set()
@@ -371,6 +373,7 @@ class RunningManager:
         self.current_view_mode = self.VIEW_MODE_THIRD
         self.last_valid_location = None
         self.last_jump_replan_time = 0.0
+        self.last_jump_click_time = 0.0
         self.ignore_vehicle_until = 0.0
         self.visited_road_nodes = set()
         self.current_road_node = None
@@ -486,6 +489,8 @@ class RunningManager:
             self._log_running_state("人物卡死", location, direction, "执行脱困")
             self._perform_unstuck_action(w, location)
             return
+
+        self._click_jump_if_available(w, location, direction)
 
         if not self.loading_road or not self.road_list:
             self._load_path(location)
@@ -635,6 +640,7 @@ class RunningManager:
         self.precise_view_ready = False
         self.current_view_mode = self.VIEW_MODE_THIRD
         self.ignore_vehicle_until = time.time() + cooldown
+        self.last_jump_click_time = 0.0
         self.current_road_node = None
         self.current_segment_start = None
         self.active_vehicle_entry_source = None
@@ -1020,6 +1026,25 @@ class RunningManager:
         self.stuck = False
         self.loading_road = False
 
+    def _click_jump_if_available(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+    ) -> bool:
+        if not w.get_info("跳跃"):
+            return False
+
+        now = time.time()
+        if now - self.last_jump_click_time < self.JUMP_CLICK_COOLDOWN:
+            return False
+
+        self.last_jump_click_time = now
+        print("[Running] 跑图过程中发现跳跃键，点击跳跃")
+        self._log_running_state("跑图发现跳跃键", location, direction, "点击跳跃")
+        w.click("跳跃")
+        return True
+
     def _handle_waypoint_arrival(
         self,
         w: "FrameWorker",
@@ -1298,6 +1323,10 @@ class RunningManager:
         self._ensure_precise_view(w)
 
         if self._attempt_drive_after_move(w, "已到达上车点，先检查驾驶按钮"):
+            return
+
+        if self.car_search_mode == self.CAR_SEARCH_GARAGE and not self._find_largest_car(w):
+            self._switch_to_roadside_car_search("已到达车库上车点，但当前画面未检测到车辆")
             return
 
         print("[Running] 已对准车库，开始视觉对车并前推尝试上车")

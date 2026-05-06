@@ -11,7 +11,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.toolkit import (
     get_distance,
     is_location_stagnant, draw_points_with_arrows,
 )
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.utils import get_resolution
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.utils import find_path, get_resolution
 
 if TYPE_CHECKING:
     from aw.autogame.tools.GameFrameWorker import FrameWorker
@@ -307,6 +307,8 @@ class RunningManager:
     VEHICLE_ENTRY_ROADSIDE = "roadside"
     VEHICLE_ENTRY_GARAGE = "garage"
     VEHICLE_ENTRY_UNKNOWN = "unknown"
+    CAR_SEARCH_GARAGE = "garage"
+    CAR_SEARCH_ROADSIDE = "roadside"
 
     def __init__(self, map_tool: Optional[MapNavigator] = None):
         self.map_tool = map_tool or MapNavigator()
@@ -342,6 +344,7 @@ class RunningManager:
         self.current_road_node: Optional[Tuple[int, int]] = None
         self.active_vehicle_entry_source: Optional[str] = None
         self.last_vehicle_entry_source: Optional[str] = None
+        self.car_search_mode = self.CAR_SEARCH_GARAGE
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_steps = 0
@@ -373,6 +376,7 @@ class RunningManager:
         self.current_road_node = None
         self.active_vehicle_entry_source = None
         self.last_vehicle_entry_source = None
+        self.car_search_mode = self.CAR_SEARCH_GARAGE if finding_car else self.CAR_SEARCH_ROADSIDE
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_steps = 0
@@ -433,12 +437,18 @@ class RunningManager:
             return
 
         if self.find_car_times >= len(self.PRECISE_FACE_DIRECTIONS):
+            if self.finding_car and self.car_search_mode == self.CAR_SEARCH_GARAGE:
+                self._switch_to_roadside_car_search("车库多角度视觉找车未成功")
+                return
             print(f"[Running] 已连续{len(self.PRECISE_FACE_DIRECTIONS)}次未成功上车，结束当前局")
             self._log_running_state("上车尝试已达上限", location, direction, "结束当前局")
             self._handle_death(w)
             return
 
         if self.correct_position_times >= 5:
+            if self.finding_car and self.car_search_mode == self.CAR_SEARCH_GARAGE:
+                self._switch_to_roadside_car_search("车库上车点精调长时间无进展")
+                return
             print("[Running] 连续5次未找到车辆交互点，结束当前局")
             self._log_running_state("精调阶段长时间无进展", location, direction, "结束当前局")
             self._handle_death(w)
@@ -448,7 +458,11 @@ class RunningManager:
             self._process_precise_entry(w, location, direction)
             return
 
-        if self.finding_car and self._handle_roadside_vehicle_entry(w, location, direction):
+        if (
+            self.finding_car
+            and self.car_search_mode == self.CAR_SEARCH_ROADSIDE
+            and self._handle_roadside_vehicle_entry(w, location, direction)
+        ):
             return
 
         if self._handle_location_jump(location):
@@ -511,7 +525,10 @@ class RunningManager:
         target: Optional[Tuple[int, int]] = None,
         dist: Optional[float] = None,
     ):
-        stage = "寻车跑图" if self.finding_car else "普通跑图"
+        if self.finding_car:
+            stage = "车库找车" if self.car_search_mode == self.CAR_SEARCH_GARAGE else "道路找车"
+        else:
+            stage = "普通跑图"
         direction_text = "None" if direction is None else f"{direction:.1f}"
         circle_text = "None" if self.stable_circle_angle is None else f"{self.stable_circle_angle:.1f}"
         target_text = str(target) if target is not None else "None"
@@ -621,6 +638,7 @@ class RunningManager:
         self.current_road_node = None
         self.current_segment_start = None
         self.active_vehicle_entry_source = None
+        self.car_search_mode = self.CAR_SEARCH_ROADSIDE if self.finding_car else self.CAR_SEARCH_GARAGE
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_steps = 0
@@ -770,7 +788,10 @@ class RunningManager:
 
     def _load_path(self, location: Tuple[int, int]):
         if self.finding_car:
-            self._load_road_patrol_path(location, reason="寻车阶段沿路巡游")
+            if self.car_search_mode == self.CAR_SEARCH_GARAGE:
+                self._load_garage_find_path(location)
+            else:
+                self._load_road_patrol_path(location, reason="车库无车，寻车阶段沿路巡游")
         else:
             self._load_running_path(location)
 
@@ -785,6 +806,31 @@ class RunningManager:
                 print(f"[Running] 绘制路径调试图失败: {exc}")
         else:
             print("[Running] 路径加载失败")
+
+    def _load_garage_find_path(self, location: Tuple[int, int]):
+        print("[Running] 正在加载车库优先寻车路径...")
+        self._log_running_state("正在加载车库寻车路径", location, None, "先去车库取车")
+        self.current_road_node = None
+
+        if get_distance(location, self.R_CITY) > 50:
+            approach_path = self.map_tool.plan_path(location, self.R_CITY) or []
+            garage_path = find_path(self.R_CITY) or self.map_tool.plan_path(self.R_CITY, self.CAR_ENTRY_POINT) or []
+            self.road_list = self._merge_paths(approach_path, garage_path)
+        else:
+            self.road_list = find_path(location) or self.map_tool.plan_path(location, self.CAR_ENTRY_POINT) or []
+
+        if not self.road_list or tuple(map(int, self.road_list[-1])) != self.CAR_ENTRY_POINT:
+            self.road_list = self._merge_paths(self.road_list, [self.CAR_ENTRY_POINT])
+
+    def _merge_paths(self, path1, path2):
+        merged = [tuple(map(int, point)) for point in (path1 or []) if point is not None]
+        for point in path2 or []:
+            if point is None:
+                continue
+            item = tuple(map(int, point))
+            if not merged or merged[-1] != item:
+                merged.append(item)
+        return merged
 
     def _load_road_patrol_path(self, location: Tuple[int, int], reason: str):
         print(f"[Running] {reason}，规划最近道路点")
@@ -928,6 +974,8 @@ class RunningManager:
                 return self.road_list[0]
 
         if self.finding_car:
+            if self.car_search_mode == self.CAR_SEARCH_GARAGE:
+                return self.CAR_ENTRY_POINT
             node, _ = self.road_helper.nearest_node(
                 location,
                 exclude=self.visited_road_nodes,
@@ -980,6 +1028,17 @@ class RunningManager:
         target: Tuple[int, int],
         dist: float,
     ):
+        if (
+            self.finding_car
+            and self.car_search_mode == self.CAR_SEARCH_GARAGE
+            and len(self.road_list) <= 1
+        ):
+            print("[Running] 已到达车库上车点，进入上车精调阶段")
+            self._log_running_state("已到达车库上车点", location, direction, "进入上车精调阶段", target, dist)
+            self._enter_precise_entry_mode(w)
+            self._process_precise_entry(w, location, direction)
+            return
+
         if self.road_list:
             reached = self.road_list.pop(0)
             self.current_segment_start = reached
@@ -1180,6 +1239,27 @@ class RunningManager:
         self.active_vehicle_entry_source = None
         self._discard_current_road_target()
 
+    def _switch_to_roadside_car_search(self, reason: str):
+        print(f"[Running] {reason}，判定车库暂无可上车辆，切换到沿路找车")
+        self.car_search_mode = self.CAR_SEARCH_ROADSIDE
+        self.precise_entering_car = False
+        self.precise_last_distance = None
+        self.precise_idle_rounds = 0
+        self.precise_face_attempt_index = 0
+        self.precise_view_ready = False
+        self.find_car_times = 0
+        self.correct_position_times = 0
+        self.loading_road = False
+        self.road_list = []
+        self.current_segment_start = None
+        self.current_road_node = None
+        self.visited_road_nodes = set()
+        self.active_vehicle_entry_source = None
+        self.roadside_car_pursuing = False
+        self.roadside_car_lost_rounds = 0
+        self.roadside_car_steps = 0
+        self.roadside_car_last_area_ratio = None
+
     def _process_precise_entry(
         self,
         w: "FrameWorker",
@@ -1298,10 +1378,18 @@ class RunningManager:
         return False
 
     def _handle_visual_entry_failure(self, w: "FrameWorker"):
-        self.find_car_times += 1
-        print(f"[Running] 视觉寻车未成功，累计失败 {self.find_car_times}")
-        if self.find_car_times >= len(self.PRECISE_FACE_DIRECTIONS):
+        current_direction = self._get_current_precise_face_direction()
+        self.precise_face_attempt_index += 1
+        self.find_car_times = self.precise_face_attempt_index
+        print(
+            f"[Running] 车库朝向 {current_direction} 视觉寻车未成功，"
+            f"累计失败 {self.find_car_times}/{len(self.PRECISE_FACE_DIRECTIONS)}"
+        )
+        if self.precise_face_attempt_index >= len(self.PRECISE_FACE_DIRECTIONS):
             return
+
+        next_direction = self._get_current_precise_face_direction()
+        print(f"[Running] 回到车库上车点后切换到朝向 {next_direction} 再试")
         self._return_to_entry_point(w)
 
     def _get_current_precise_face_direction(self) -> int:

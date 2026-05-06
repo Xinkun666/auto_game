@@ -281,8 +281,8 @@ class RunningManager:
     CAR_VISUAL_SEARCH_MAX_STEPS = 8
     CAR_VISUAL_DYNAMIC_MIN_AREA_RATIO = 0.002
     CAR_VISUAL_DYNAMIC_MAX_AREA_RATIO = 0.04
-    CAR_VISUAL_DYNAMIC_MIN_WAIT = 600
-    CAR_VISUAL_DYNAMIC_MAX_WAIT = 2400
+    CAR_VISUAL_DYNAMIC_MIN_WAIT = 900
+    CAR_VISUAL_DYNAMIC_MAX_WAIT = 4200
     # 路边发现远车后，允许跨帧追车，避免车辆框短暂丢失后又回头追原道路点。
     ROADSIDE_CAR_LOST_LIMIT = 8
     ROADSIDE_CAR_PURSUIT_STEP_LIMIT = 24
@@ -1152,9 +1152,9 @@ class RunningManager:
         )
         w.refresh_frame()
 
-        if self._attempt_drive_after_move(
+        if self._click_drive_directly_after_move(
             w,
-            f"路边追车靠近后尝试上车 {self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}",
+            f"路边追车靠近后直接点击驾驶 {self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}",
         ):
             return True
 
@@ -1266,6 +1266,19 @@ class RunningManager:
         if location is not None:
             self._log_running_state("检测到驾驶按钮", location, direction, "点击上车")
         w.click(drive_btn)
+        return self._finish_drive_entry_click(w)
+
+    def _click_drive_directly_after_move(self, w: "FrameWorker", reason: str) -> bool:
+        print(f"[Running] {reason}，不预检查按钮，直接点击驾驶")
+        location = self._get_location(w)
+        direction = self._get_scalar(w.get_info("direction"))
+        if location is not None:
+            self._log_running_state("执行上车尝试", location, direction, reason)
+
+        w.click("驾驶")
+        return self._finish_drive_entry_click(w)
+
+    def _finish_drive_entry_click(self, w: "FrameWorker") -> bool:
         time.sleep(1)
         w.refresh_frame()
         if self._is_in_vehicle(w):
@@ -1503,7 +1516,7 @@ class RunningManager:
             )
             w.refresh_frame()
 
-            if self._attempt_drive_after_move(w, f"视觉对车后尝试上车 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}"):
+            if self._click_drive_directly_after_move(w, f"视觉对车后直接点击驾驶 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}"):
                 return True
 
         return False

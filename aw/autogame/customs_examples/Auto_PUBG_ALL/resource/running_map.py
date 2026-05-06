@@ -250,6 +250,9 @@ class RunningManager:
     # 车库无车后，先准确离开到路边，再开始道路巡游找车。
     GARAGE_TO_ROADSIDE_POINTS = ((1134, 762), (1134, 771))
     GARAGE_TO_ROADSIDE_TOLERANCE = 2.0
+    GARAGE_TO_ROADSIDE_FORWARD_BIAS_Y = -300
+    GARAGE_TO_ROADSIDE_FORWARD_DURA = 300
+    GARAGE_TO_ROADSIDE_FORWARD_WAIT = 5000
     # 历史保留字段，表示默认入库朝向
     CAR_FACE_DIRECTION = 265
     # 跑图/开车统一通过“人称”按钮切换视角。
@@ -515,6 +518,9 @@ class RunningManager:
         target = self.road_list[0]
         dist = get_distance(location, target)
         print(f"[Running] Loc: {location}, Target: {target}, Dist: {dist:.2f}")
+
+        if self._handle_garage_to_roadside_forward_push(w, location, direction, target):
+            return
 
         arrival_tolerance = self._get_current_waypoint_tolerance()
         if 0 <= dist < arrival_tolerance:
@@ -1066,6 +1072,53 @@ class RunningManager:
         if self.garage_to_roadside_route_active:
             return self.GARAGE_TO_ROADSIDE_TOLERANCE
         return self.WAYPOINT_TOLERANCE
+
+    def _handle_garage_to_roadside_forward_push(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+        target: Tuple[int, int],
+    ) -> bool:
+        if not self.garage_to_roadside_route_active or len(self.road_list) != 1:
+            return False
+
+        if tuple(map(int, target)) != tuple(map(int, self.GARAGE_TO_ROADSIDE_POINTS[-1])):
+            return False
+
+        if direction is None:
+            print("[Running] 离库前推阶段当前朝向无效，等待下一帧")
+            return True
+
+        aligned = self._align_to_point(w, location, direction, target, threshold=3)
+        if not aligned:
+            self._log_running_state("车库离库前推", location, direction, "先对准路边方向", target)
+            return True
+
+        print(
+            f"[Running] 已到达车库离库点，方向对准 {target}，"
+            f"直接前推 {self.GARAGE_TO_ROADSIDE_FORWARD_WAIT}ms"
+        )
+        self._log_running_state(
+            "车库离库前推",
+            location,
+            direction,
+            f"前推 {self.GARAGE_TO_ROADSIDE_FORWARD_WAIT}ms 后开始道路找车",
+            target,
+        )
+        w.tap_single(
+            "摇杆",
+            y_bias=self.GARAGE_TO_ROADSIDE_FORWARD_BIAS_Y,
+            dura=self.GARAGE_TO_ROADSIDE_FORWARD_DURA,
+            wait=self.GARAGE_TO_ROADSIDE_FORWARD_WAIT,
+        )
+        w.refresh_frame()
+        self.garage_to_roadside_route_active = False
+        self.loading_road = False
+        self.road_list = []
+        self.current_segment_start = None
+        print("[Running] 车库离库前推完成，下一帧开始规划道路 node 找车")
+        return True
 
     def _handle_waypoint_arrival(
         self,

@@ -247,6 +247,9 @@ class RunningManager:
     R_CITY = (1136, 783)
     # 车库附近的精确上车点
     CAR_ENTRY_POINT = (1131, 763)
+    # 车库无车后，先准确离开到路边，再开始道路巡游找车。
+    GARAGE_TO_ROADSIDE_POINTS = ((1134, 762), (1134, 771))
+    GARAGE_TO_ROADSIDE_TOLERANCE = 2.0
     # 历史保留字段，表示默认入库朝向
     CAR_FACE_DIRECTION = 265
     # 跑图/开车统一通过“人称”按钮切换视角。
@@ -347,6 +350,7 @@ class RunningManager:
         self.active_vehicle_entry_source: Optional[str] = None
         self.last_vehicle_entry_source: Optional[str] = None
         self.car_search_mode = self.CAR_SEARCH_GARAGE
+        self.garage_to_roadside_route_active = False
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_steps = 0
@@ -380,6 +384,7 @@ class RunningManager:
         self.active_vehicle_entry_source = None
         self.last_vehicle_entry_source = None
         self.car_search_mode = self.CAR_SEARCH_GARAGE if finding_car else self.CAR_SEARCH_ROADSIDE
+        self.garage_to_roadside_route_active = False
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_steps = 0
@@ -439,6 +444,8 @@ class RunningManager:
         if self._handle_forbidden_escape(w, location, direction):
             return
 
+        self._click_jump_if_available(w, location, direction)
+
         if self.find_car_times >= len(self.PRECISE_FACE_DIRECTIONS):
             if self.finding_car and self.car_search_mode == self.CAR_SEARCH_GARAGE:
                 self._switch_to_roadside_car_search("车库多角度视觉找车未成功")
@@ -464,6 +471,7 @@ class RunningManager:
         if (
             self.finding_car
             and self.car_search_mode == self.CAR_SEARCH_ROADSIDE
+            and not self.garage_to_roadside_route_active
             and self._handle_roadside_vehicle_entry(w, location, direction)
         ):
             return
@@ -490,8 +498,6 @@ class RunningManager:
             self._perform_unstuck_action(w, location)
             return
 
-        self._click_jump_if_available(w, location, direction)
-
         if not self.loading_road or not self.road_list:
             self._load_path(location)
 
@@ -499,7 +505,8 @@ class RunningManager:
             print("[Running] 当前没有可执行路径")
             return
 
-        self._advance_waypoint_by_projection(location)
+        if not self.garage_to_roadside_route_active:
+            self._advance_waypoint_by_projection(location)
         if not self.road_list:
             print("[Running] 当前路径已按投影走完，下一帧重新规划")
             self.loading_road = False
@@ -509,12 +516,16 @@ class RunningManager:
         dist = get_distance(location, target)
         print(f"[Running] Loc: {location}, Target: {target}, Dist: {dist:.2f}")
 
-        if 0 <= dist < self.WAYPOINT_TOLERANCE:
+        arrival_tolerance = self._get_current_waypoint_tolerance()
+        if 0 <= dist < arrival_tolerance:
             print(f"[Running] 到达 {target} 点附近")
             self._handle_waypoint_arrival(w, location, direction, target, dist)
             return
 
-        if len(self.road_list) <= 1 and 0 <= dist <= self.WAYPOINT_PRECISE_APPROACH_DISTANCE:
+        if (
+            (self.garage_to_roadside_route_active or len(self.road_list) <= 1)
+            and 0 <= dist <= self.WAYPOINT_PRECISE_APPROACH_DISTANCE
+        ):
             print(f"[Running] 距离目标点 {dist:.2f}，切换精确逼近")
             self._precise_approach_waypoint(w, location, direction, target, dist)
             return
@@ -645,6 +656,7 @@ class RunningManager:
         self.current_segment_start = None
         self.active_vehicle_entry_source = None
         self.car_search_mode = self.CAR_SEARCH_ROADSIDE if self.finding_car else self.CAR_SEARCH_GARAGE
+        self.garage_to_roadside_route_active = False
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_steps = 0
@@ -793,7 +805,12 @@ class RunningManager:
         return True
 
     def _load_path(self, location: Tuple[int, int]):
-        if self.finding_car:
+        if self.garage_to_roadside_route_active:
+            print("[Running] 继续加载车库离库路线，先到路边再找车")
+            self.road_list = list(self.GARAGE_TO_ROADSIDE_POINTS)
+            self.current_road_node = None
+            self.current_segment_start = None
+        elif self.finding_car:
             if self.car_search_mode == self.CAR_SEARCH_GARAGE:
                 self._load_garage_find_path(location)
             else:
@@ -1040,10 +1057,15 @@ class RunningManager:
             return False
 
         self.last_jump_click_time = now
-        print("[Running] 跑图过程中发现跳跃键，点击跳跃")
-        self._log_running_state("跑图发现跳跃键", location, direction, "点击跳跃")
+        print("[Running] 发现跳跃键，点击跳跃")
+        self._log_running_state("发现跳跃键", location, direction, "点击跳跃")
         w.click("跳跃")
         return True
+
+    def _get_current_waypoint_tolerance(self) -> float:
+        if self.garage_to_roadside_route_active:
+            return self.GARAGE_TO_ROADSIDE_TOLERANCE
+        return self.WAYPOINT_TOLERANCE
 
     def _handle_waypoint_arrival(
         self,
@@ -1053,6 +1075,19 @@ class RunningManager:
         target: Tuple[int, int],
         dist: float,
     ):
+        if self.garage_to_roadside_route_active:
+            if self.road_list:
+                reached = self.road_list.pop(0)
+                self.current_segment_start = reached
+                print(f"[Running] 已到达车库离库点: {reached}")
+
+            if not self.road_list:
+                self.garage_to_roadside_route_active = False
+                self.loading_road = False
+                self.current_segment_start = None
+                print("[Running] 车库离库路线已完成，下一帧开始规划道路 node 找车")
+            return
+
         if (
             self.finding_car
             and self.car_search_mode == self.CAR_SEARCH_GARAGE
@@ -1265,7 +1300,7 @@ class RunningManager:
         self._discard_current_road_target()
 
     def _switch_to_roadside_car_search(self, reason: str):
-        print(f"[Running] {reason}，判定车库暂无可上车辆，切换到沿路找车")
+        print(f"[Running] {reason}，判定车库暂无可上车辆，先离开车库再切换到沿路找车")
         self.car_search_mode = self.CAR_SEARCH_ROADSIDE
         self.precise_entering_car = False
         self.precise_last_distance = None
@@ -1274,12 +1309,13 @@ class RunningManager:
         self.precise_view_ready = False
         self.find_car_times = 0
         self.correct_position_times = 0
-        self.loading_road = False
-        self.road_list = []
+        self.loading_road = True
+        self.road_list = list(self.GARAGE_TO_ROADSIDE_POINTS)
         self.current_segment_start = None
         self.current_road_node = None
         self.visited_road_nodes = set()
         self.active_vehicle_entry_source = None
+        self.garage_to_roadside_route_active = True
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_steps = 0
@@ -1292,6 +1328,7 @@ class RunningManager:
         direction: Optional[float],
     ):
         self.stop_auto_forward(w)
+        self._click_jump_if_available(w, location, direction)
 
         if direction is None:
             print("[Running] 精调阶段当前朝向无效，等待下一帧")

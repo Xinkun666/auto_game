@@ -228,6 +228,8 @@ class RunningManager:
     WAYPOINT_PRECISE_BIAS_Y = -120
     WAYPOINT_PRECISE_DURA = 180
     WAYPOINT_PRECISE_WAIT = 350
+    WAYPOINT_PROJECTION_PASS_RATIO = 1.0
+    WAYPOINT_PROJECTION_CORRIDOR = 12.0
     # 单帧位置跳变超过这个距离时，认为定位异常，需要重规划
     LOCATION_JUMP_THRESHOLD = 25.0
     # 位置跳变后，多久内不重复触发重规划
@@ -277,6 +279,10 @@ class RunningManager:
     CAR_VISUAL_FORWARD_DURA = 320
     CAR_VISUAL_FORWARD_WAIT = 600
     CAR_VISUAL_SEARCH_MAX_STEPS = 8
+    CAR_VISUAL_DYNAMIC_MIN_AREA_RATIO = 0.002
+    CAR_VISUAL_DYNAMIC_MAX_AREA_RATIO = 0.04
+    CAR_VISUAL_DYNAMIC_MIN_WAIT = 600
+    CAR_VISUAL_DYNAMIC_MAX_WAIT = 2400
     # 路边发现远车后，允许跨帧追车，避免车辆框短暂丢失后又回头追原道路点。
     ROADSIDE_CAR_LOST_LIMIT = 8
     ROADSIDE_CAR_PURSUIT_STEP_LIMIT = 24
@@ -311,6 +317,7 @@ class RunningManager:
         self.road_list: List[Tuple[int, int]] = []
         self.locations: List[Tuple[int, int]] = []
         self.history_locations: List[Tuple[int, int]] = []
+        self.current_segment_start: Optional[Tuple[int, int]] = None
 
         self.auto_forward = False
         self.stuck = False
@@ -338,11 +345,13 @@ class RunningManager:
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_steps = 0
+        self.roadside_car_last_area_ratio: Optional[float] = None
 
     def reset(self, finding_car: bool = True):
         self.road_list = []
         self.locations = []
         self.history_locations = []
+        self.current_segment_start = None
         self.auto_forward = False
         self.stuck = False
         self.trapped = False
@@ -367,6 +376,7 @@ class RunningManager:
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_steps = 0
+        self.roadside_car_last_area_ratio = None
         print("[Running] 状态已重置!")
 
     def set_game_time(self, game_time: Optional[float] = None):
@@ -470,6 +480,12 @@ class RunningManager:
             print("[Running] 当前没有可执行路径")
             return
 
+        self._advance_waypoint_by_projection(location)
+        if not self.road_list:
+            print("[Running] 当前路径已按投影走完，下一帧重新规划")
+            self.loading_road = False
+            return
+
         target = self.road_list[0]
         dist = get_distance(location, target)
         print(f"[Running] Loc: {location}, Target: {target}, Dist: {dist:.2f}")
@@ -479,7 +495,7 @@ class RunningManager:
             self._handle_waypoint_arrival(w, location, direction, target, dist)
             return
 
-        if 0 <= dist <= self.WAYPOINT_PRECISE_APPROACH_DISTANCE:
+        if len(self.road_list) <= 1 and 0 <= dist <= self.WAYPOINT_PRECISE_APPROACH_DISTANCE:
             print(f"[Running] 距离目标点 {dist:.2f}，切换精确逼近")
             self._precise_approach_waypoint(w, location, direction, target, dist)
             return
@@ -603,10 +619,12 @@ class RunningManager:
         self.current_view_mode = self.VIEW_MODE_THIRD
         self.ignore_vehicle_until = time.time() + cooldown
         self.current_road_node = None
+        self.current_segment_start = None
         self.active_vehicle_entry_source = None
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_steps = 0
+        self.roadside_car_last_area_ratio = None
         print(
             f"[Running] 收到下车通知，载具交互保护期 {cooldown:.1f}s，"
             f"后续模式={'继续寻车' if self.finding_car else '纯跑图'}"
@@ -743,6 +761,7 @@ class RunningManager:
         self.last_jump_replan_time = now
         self.loading_road = False
         self.road_list = []
+        self.current_segment_start = None
         self.locations = [location]
         self.history_locations = [location]
         self.stuck = False
@@ -757,6 +776,7 @@ class RunningManager:
 
         self.road_list = [tuple(map(int, p)) for p in self.road_list if p is not None]
         self.loading_road = bool(self.road_list)
+        self.current_segment_start = location if self.loading_road else None
         if self.loading_road:
             print(f"[Running] 路径已加载: {self.road_list}")
             try:
@@ -962,6 +982,7 @@ class RunningManager:
     ):
         if self.road_list:
             reached = self.road_list.pop(0)
+            self.current_segment_start = reached
             if self.current_road_node is not None and get_distance(reached, self.current_road_node) <= self.ROAD_NODE_REACHED_TOLERANCE:
                 self.visited_road_nodes.add(self.current_road_node)
                 print(f"[Running] 已到达道路 node: {self.current_road_node}")
@@ -969,7 +990,65 @@ class RunningManager:
 
         if not self.road_list:
             self.loading_road = False
+            self.current_segment_start = None
             print("[Running] 当前路径已走完，准备重新规划")
+
+    def _advance_waypoint_by_projection(self, location: Tuple[int, int]):
+        while len(self.road_list) >= 2:
+            if self.current_segment_start is None:
+                self.current_segment_start = location
+                return
+
+            target = self.road_list[0]
+            next_target = self.road_list[1]
+            passed_current = self._projection_ratio(self.current_segment_start, target, location)
+            next_ratio, next_dist = self._projection_ratio_and_distance(target, next_target, location)
+
+            should_advance = (
+                passed_current >= self.WAYPOINT_PROJECTION_PASS_RATIO
+                or (0.0 <= next_ratio <= 1.0 and next_dist <= self.WAYPOINT_PROJECTION_CORRIDOR)
+            )
+            if not should_advance:
+                return
+
+            reached = self.road_list.pop(0)
+            self.current_segment_start = reached
+            print(
+                f"[Running] 投影已越过锚点，切换下一个目标: reached={reached}, "
+                f"passed={passed_current:.2f}, next_ratio={next_ratio:.2f}, next_dist={next_dist:.2f}"
+            )
+            if self.current_road_node is not None and get_distance(reached, self.current_road_node) <= self.ROAD_NODE_REACHED_TOLERANCE:
+                self.visited_road_nodes.add(self.current_road_node)
+                self.current_road_node = None
+
+        if not self.road_list:
+            self.loading_road = False
+            self.current_segment_start = None
+
+    def _projection_ratio(self, start: Tuple[int, int], end: Tuple[int, int], point: Tuple[int, int]) -> float:
+        ratio, _ = self._projection_ratio_and_distance(start, end, point)
+        return ratio
+
+    def _projection_ratio_and_distance(
+        self,
+        start: Tuple[int, int],
+        end: Tuple[int, int],
+        point: Tuple[int, int],
+    ) -> Tuple[float, float]:
+        sx, sy = start
+        ex, ey = end
+        px, py = point
+        vx = ex - sx
+        vy = ey - sy
+        length_sq = vx * vx + vy * vy
+        if length_sq <= 0:
+            return 0.0, get_distance(point, end)
+
+        ratio = ((px - sx) * vx + (py - sy) * vy) / float(length_sq)
+        clamped = max(0.0, min(1.0, ratio))
+        proj_x = sx + vx * clamped
+        proj_y = sy + vy * clamped
+        return ratio, get_distance(point, (proj_x, proj_y))
 
     def _enter_precise_entry_mode(self, w: "FrameWorker"):
         self.stop_auto_forward(w)
@@ -1018,6 +1097,7 @@ class RunningManager:
         self.roadside_car_pursuing = True
         self.roadside_car_lost_rounds = 0
         self.roadside_car_steps = 0
+        self.roadside_car_last_area_ratio = None
         self._discard_current_road_target()
         self._switch_view_mode(
             w,
@@ -1059,11 +1139,16 @@ class RunningManager:
                 f"{self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}"
             )
 
+        forward_wait = self._get_dynamic_car_forward_wait()
+        print(
+            f"[Running] 路边追车前推时间 wait={forward_wait}ms, "
+            f"car_area_ratio={self.roadside_car_last_area_ratio}"
+        )
         w.tap_single(
             "摇杆",
             y_bias=self.CAR_VISUAL_FORWARD_BIAS_Y,
             dura=self.CAR_VISUAL_FORWARD_DURA,
-            wait=self.CAR_VISUAL_FORWARD_WAIT,
+            wait=forward_wait,
         )
         w.refresh_frame()
 
@@ -1084,12 +1169,14 @@ class RunningManager:
         self.current_road_node = None
         self.loading_road = False
         self.road_list = []
+        self.current_segment_start = None
 
     def _give_up_roadside_car_pursuit(self, reason: str):
         print(f"[Running] 路边追车放弃: {reason}，从当前位置重新规划下一段道路")
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_steps = 0
+        self.roadside_car_last_area_ratio = None
         self.active_vehicle_entry_source = None
         self._discard_current_road_target()
 
@@ -1325,6 +1412,32 @@ class RunningManager:
 
         return max(cars, key=lambda x: (x[2] - x[0]) * (x[3] - x[1]))
 
+    def _get_detection_area_ratio(self, w: "FrameWorker", det) -> Optional[float]:
+        frame = getattr(w, "frame", None)
+        if frame is None or not hasattr(frame, "shape"):
+            return None
+        try:
+            frame_h, frame_w = frame.shape[:2]
+            frame_area = float(max(1, int(frame_w) * int(frame_h)))
+            box_area = max(0.0, float(det[2]) - float(det[0])) * max(0.0, float(det[3]) - float(det[1]))
+            return box_area / frame_area
+        except Exception:
+            return None
+
+    def _get_dynamic_car_forward_wait(self) -> int:
+        ratio = self.roadside_car_last_area_ratio
+        if ratio is None:
+            return self.CAR_VISUAL_FORWARD_WAIT
+
+        min_ratio = self.CAR_VISUAL_DYNAMIC_MIN_AREA_RATIO
+        max_ratio = self.CAR_VISUAL_DYNAMIC_MAX_AREA_RATIO
+        clamped = max(min_ratio, min(max_ratio, ratio))
+        progress = (clamped - min_ratio) / max(0.000001, max_ratio - min_ratio)
+        wait = self.CAR_VISUAL_DYNAMIC_MAX_WAIT - progress * (
+            self.CAR_VISUAL_DYNAMIC_MAX_WAIT - self.CAR_VISUAL_DYNAMIC_MIN_WAIT
+        )
+        return int(round(wait))
+
     def _get_visual_frame_width(self, w: "FrameWorker") -> Optional[int]:
         frame = getattr(w, "frame", None)
         if frame is None:
@@ -1338,6 +1451,11 @@ class RunningManager:
         car = self._find_largest_car(w)
         if not car:
             return None
+
+        if self.roadside_car_pursuing:
+            area_ratio = self._get_detection_area_ratio(w, car)
+            if area_ratio is not None:
+                self.roadside_car_last_area_ratio = area_ratio
 
         frame_w = self._get_visual_frame_width(w)
         if not frame_w:

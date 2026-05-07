@@ -33,7 +33,7 @@ class DrivingManager:
     EXIT_GARAGE_INITIAL_FORWARD_MS = 3000
     EXIT_GARAGE_INITIAL_REVERSE_LEFT_MS = 750
     EXIT_GARAGE_VISUAL_FORWARD_MS = 900
-    EXIT_GARAGE_VISUAL_TURN_MS = 800
+    EXIT_GARAGE_VISUAL_TURN_MS = 500
     EXIT_GARAGE_CLEAR_ROUNDS_TO_CRUISE = 3
     EXIT_GARAGE_SUCCESS_DISTANCE = 8.0
     EXIT_GARAGE_WALL_CLASS_IDS = {9, 19}
@@ -596,11 +596,11 @@ class DrivingManager:
 
         sector = self.map_tool.get_avoidance_action(context.location, context.direction)
         action_map = {
-            1: ("forward_turn_right", 300),
-            2: ("forward_turn_right", 700),
+            1: ("forward_turn_right", 220),
+            2: ("forward_turn_right", 450),
             3: ("backward_turn_right", 2000),
-            4: ("forward_turn_left", 300),
-            5: ("forward_turn_left", 700),
+            4: ("forward_turn_left", 220),
+            5: ("forward_turn_left", 450),
             6: ("backward_turn_left", 2000),
         }
         action = action_map.get(sector)
@@ -612,7 +612,7 @@ class DrivingManager:
             print("[Driving] 高速接近不可通行区域，先执行预刹车")
             self._tap_single_control(w, "brake", wait=self.FORBIDDEN_HIGH_SPEED_BRAKE_WAIT)
             if action[0].startswith("forward_turn_"):
-                duration += 250
+                duration += 150
             elif action[0].startswith("backward_turn_"):
                 duration += 400
 
@@ -641,12 +641,12 @@ class DrivingManager:
         coverage_ratio = float(context.obstacle_info.get("coverage_ratio", 0.0) or 0.0)
         severe_block = hard_obstacle_count > 0 or coverage_ratio >= 0.45
         action_map = {
-            "slight_left": ("forward_turn_left", 320 if severe_block else 250),
-            "small_left": ("forward_turn_left", 560 if severe_block else 450),
-            "large_left": ("forward_turn_left", 860 if severe_block else 700),
-            "slight_right": ("forward_turn_right", 320 if severe_block else 250),
-            "small_right": ("forward_turn_right", 560 if severe_block else 450),
-            "large_right": ("forward_turn_right", 860 if severe_block else 700),
+            "slight_left": ("forward_turn_left", 220 if severe_block else 160),
+            "small_left": ("forward_turn_left", 380 if severe_block else 300),
+            "large_left": ("forward_turn_left", 620 if severe_block else 500),
+            "slight_right": ("forward_turn_right", 220 if severe_block else 160),
+            "small_right": ("forward_turn_right", 380 if severe_block else 300),
+            "large_right": ("forward_turn_right", 620 if severe_block else 500),
             "reverse_and_left": ("reverse_and_left", 1400 if severe_block else 1000),
             "reverse_and_right": ("reverse_and_right", 1400 if severe_block else 1000),
         }

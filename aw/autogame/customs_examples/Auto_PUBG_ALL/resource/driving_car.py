@@ -30,8 +30,8 @@ class DriveContext:
 
 class DrivingManager:
     ESCAPE_ALIGN_TOLERANCE = 8
-    EXIT_GARAGE_INITIAL_FORWARD_MS = 2900
-    EXIT_GARAGE_INITIAL_FORWARD_RIGHT_MS = 750
+    EXIT_GARAGE_INITIAL_FORWARD_MS = 3000
+    EXIT_GARAGE_INITIAL_REVERSE_LEFT_MS = 750
     EXIT_GARAGE_VISUAL_FORWARD_MS = 900
     EXIT_GARAGE_VISUAL_TURN_MS = 800
     EXIT_GARAGE_CLEAR_ROUNDS_TO_CRUISE = 3
@@ -416,26 +416,27 @@ class DrivingManager:
             self.exit_garage_start_location = context.location
 
         if self.exit_garage_phase == 0:
-            print(f"[Driving] 首次出库第 1 步：固定前进 {self.EXIT_GARAGE_INITIAL_FORWARD_MS}ms")
+            print(f"[Driving] 首次出库第 1 步：固定前进 {self.EXIT_GARAGE_INITIAL_FORWARD_MS}ms 后点击刹车")
             self._log_drive_state(
                 "首次出库",
                 context,
-                f"forward({self.EXIT_GARAGE_INITIAL_FORWARD_MS}ms)",
+                f"forward({self.EXIT_GARAGE_INITIAL_FORWARD_MS}ms)+brake_click",
                 self.stable_circle_angle,
             )
             self._tap_single_control(w, "up", wait=self.EXIT_GARAGE_INITIAL_FORWARD_MS, dura=100)
+            self._click_control(w, "brake")
             self.exit_garage_phase = 1
             return
 
         if self.exit_garage_phase == 1:
-            print(f"[Driving] 首次出库第 2 步：前进并向右打方向 {self.EXIT_GARAGE_INITIAL_FORWARD_RIGHT_MS}ms")
+            print(f"[Driving] 首次出库第 2 步：倒车并向左打方向 {self.EXIT_GARAGE_INITIAL_REVERSE_LEFT_MS}ms")
             self._log_drive_state(
                 "首次出库",
                 context,
-                f"forward_turn_right({self.EXIT_GARAGE_INITIAL_FORWARD_RIGHT_MS}ms)",
+                f"reverse_turn_left({self.EXIT_GARAGE_INITIAL_REVERSE_LEFT_MS}ms)",
                 self.stable_circle_angle,
             )
-            self._tap_double_control(w, "up", "right", wait=self.EXIT_GARAGE_INITIAL_FORWARD_RIGHT_MS)
+            self._tap_double_control(w, "down", "left", wait=self.EXIT_GARAGE_INITIAL_REVERSE_LEFT_MS)
             self.exit_garage_phase = 2
             return
 

@@ -55,8 +55,12 @@ class DrivingManager:
 
     # 连续多少帧位置几乎不变时，判定车辆被卡住
     STUCK_REPEAT_LIMIT = 7
+    # 连续按前进/前进+方向但位置不变时，更早认为可能撞到未识别障碍物。
+    FORWARD_BLOCK_REPEAT_LIMIT = 3
     # 两次位置变化小于该距离时，视为基本没动
     STUCK_LOCATION_EPS = 0.2
+    FORWARD_BLOCK_BACKWARD_MS = 2000
+    FORWARD_BLOCK_TURN_MS = 600
     # 困死判定窗口：连续多少帧都在局部很小范围打转才算真正困死
     TRAPPED_HISTORY_LEN = 80
     # 困死判定时，轨迹围绕中心点打转的半径范围
@@ -155,6 +159,7 @@ class DrivingManager:
         self.last_motion_location: Optional[Tuple[int, int]] = None
         self.last_motion_started_at = 0.0
         self.blocked_motion_count = 0
+        self.forward_block_recovery_active = False
         self.last_auto_brake_time = 0.0
         self.allow_running_fallback = True
         self.pause_sp_callback: Optional[Callable] = None
@@ -210,6 +215,7 @@ class DrivingManager:
         self.last_motion_location = None
         self.last_motion_started_at = 0.0
         self.blocked_motion_count = 0
+        self.forward_block_recovery_active = False
         self.last_auto_brake_time = 0.0
         self.allow_running_fallback = True
 
@@ -288,7 +294,14 @@ class DrivingManager:
             self._finalize_frame(w)
             return
 
-        if self._check_motion_block(context):
+        motion_blocked = self._check_motion_block(context)
+        if self._check_forward_motion_block(context):
+            print("[Driving] 连续前进3帧位置不变，执行前进卡住恢复")
+            self._handle_forward_motion_block(w, context)
+            self._finalize_frame(w)
+            return
+
+        if motion_blocked:
             print("[Driving] 检测到连续7帧位置不变，执行倒车避障")
             self._handle_motion_block(w, context)
             self._finalize_frame(w)
@@ -856,6 +869,95 @@ class DrivingManager:
 
         self.last_motion_location = context.location
         return self.blocked_motion_count >= self.STUCK_REPEAT_LIMIT
+
+    def _check_forward_motion_block(self, context: DriveContext) -> bool:
+        if self.current_stage in (self.STAGE_EXIT_GARAGE, self.STAGE_FINISH):
+            return False
+        if self.forward_block_recovery_active:
+            return False
+        if self.last_motion_mode != "forward":
+            return False
+        if self.last_motion_location is None:
+            return False
+
+        stuck = get_distance(context.location, self.last_motion_location) <= self.STUCK_LOCATION_EPS
+        return stuck and self.blocked_motion_count >= self.FORWARD_BLOCK_REPEAT_LIMIT
+
+    def _handle_forward_motion_block(self, w: "FrameWorker", context: DriveContext):
+        self.forward_block_recovery_active = True
+        self.blocked_motion_count = 0
+        print("[Driving] 前进卡住恢复：先倒车 2000ms")
+        self._log_drive_state(
+            "连续前进但位置不变",
+            context,
+            f"backward({self.FORWARD_BLOCK_BACKWARD_MS}ms)",
+            self.stable_circle_angle,
+        )
+        self._tap_single_control(w, "down", wait=self.FORWARD_BLOCK_BACKWARD_MS, dura=100)
+        w.refresh_frame()
+
+        updated_context = self._build_context(w) or context
+        decision = updated_context.decision or "straight"
+        if decision != "straight":
+            print(f"[Driving] 倒车后检测到障碍物，转入视觉避障 decision={decision}")
+            self._handle_visual_avoidance(w, updated_context)
+        else:
+            steer = self._choose_less_obstructed_side(w)
+            print(f"[Driving] 倒车后未检测到明确障碍，选择全场景障碍较少侧: {steer}")
+            self._log_drive_state(
+                "前进卡住后全场景择路",
+                updated_context,
+                f"forward_turn_{steer}({self.FORWARD_BLOCK_TURN_MS}ms)",
+                self.stable_circle_angle,
+            )
+            self._execute_maneuver(
+                w,
+                f"forward_turn_{steer}",
+                speed=updated_context.speed,
+                duration=self.FORWARD_BLOCK_TURN_MS,
+                brake_with_steer=True,
+            )
+
+        self.forward_block_recovery_active = False
+
+    def _choose_less_obstructed_side(self, w: "FrameWorker") -> str:
+        detections = w.get_info("forward_scene")
+        frame = getattr(w, "frame", None)
+        if not detections or frame is None or not hasattr(frame, "shape"):
+            return self._get_opposite_steer(self.last_motion_steer or self._get_default_steer())
+
+        frame_h, frame_w = frame.shape[:2]
+        center_x = float(frame_w) / 2.0
+        left_score = 0.0
+        right_score = 0.0
+
+        for det in detections:
+            if not isinstance(det, (list, tuple)) or len(det) < 6:
+                continue
+            x1, y1, x2, y2, conf, cls_id = det[:6]
+            if int(cls_id) not in ObstacleAvoidanceAnalyzer.CLASS_CONFIG:
+                continue
+            if float(conf) < 0.25:
+                continue
+
+            box_w = max(0.0, float(x2) - float(x1))
+            box_h = max(0.0, float(y2) - float(y1))
+            if box_w <= 0 or box_h <= 0:
+                continue
+
+            area_ratio = (box_w * box_h) / float(max(1, int(frame_w) * int(frame_h)))
+            box_center_x = (float(x1) + float(x2)) / 2.0
+            if box_center_x < center_x:
+                left_score += area_ratio
+            else:
+                right_score += area_ratio
+
+        if left_score == right_score:
+            return self._get_opposite_steer(self.last_motion_steer or self._get_default_steer())
+        return "left" if left_score < right_score else "right"
+
+    def _get_opposite_steer(self, steer: Optional[str]) -> str:
+        return "left" if steer == "right" else "right"
 
     def _handle_motion_block(self, w: "FrameWorker", context: DriveContext):
         steer = self.last_motion_steer or self._decision_to_steer(context.decision) or "right"

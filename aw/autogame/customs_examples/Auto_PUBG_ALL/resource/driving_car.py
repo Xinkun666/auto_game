@@ -56,10 +56,10 @@ class DrivingManager:
     # 连续多少帧位置几乎不变时，判定车辆被卡住
     STUCK_REPEAT_LIMIT = 7
     # 连续按前进/前进+方向但位置不变时，更早认为可能撞到未识别障碍物。
-    FORWARD_BLOCK_REPEAT_LIMIT = 3
+    FORWARD_BLOCK_REPEAT_LIMIT = 2
     # 两次位置变化小于该距离时，视为基本没动
     STUCK_LOCATION_EPS = 0.2
-    FORWARD_BLOCK_BACKWARD_MS = 2000
+    FORWARD_BLOCK_BACKWARD_TURN_MS = 2000
     FORWARD_BLOCK_TURN_MS = 600
     # 困死判定窗口：连续多少帧都在局部很小范围打转才算真正困死
     TRAPPED_HISTORY_LEN = 80
@@ -254,6 +254,12 @@ class DrivingManager:
             self._finalize_frame(w)
             return
 
+        if self._is_out_of_vehicle(w):
+            print("[Driving] 检测到人物已下车，切回跑图阶段")
+            self._handle_unexpected_vehicle_exit(w)
+            self._finalize_frame(w)
+            return
+
         context = self._build_context(w)
         if context is None:
             print("[Driving] 当前位置或朝向无效，等待下一帧")
@@ -296,7 +302,7 @@ class DrivingManager:
 
         motion_blocked = self._check_motion_block(context)
         if self._check_forward_motion_block(context):
-            print("[Driving] 连续前进3帧位置不变，执行前进卡住恢复")
+            print("[Driving] 连续前进2帧位置不变，执行前进卡住恢复")
             self._handle_forward_motion_block(w, context)
             self._finalize_frame(w)
             return
@@ -886,37 +892,48 @@ class DrivingManager:
     def _handle_forward_motion_block(self, w: "FrameWorker", context: DriveContext):
         self.forward_block_recovery_active = True
         self.blocked_motion_count = 0
-        print("[Driving] 前进卡住恢复：先倒车 2000ms")
-        self._log_drive_state(
-            "连续前进但位置不变",
-            context,
-            f"backward({self.FORWARD_BLOCK_BACKWARD_MS}ms)",
-            self.stable_circle_angle,
-        )
-        self._tap_single_control(w, "down", wait=self.FORWARD_BLOCK_BACKWARD_MS, dura=100)
-        w.refresh_frame()
 
-        updated_context = self._build_context(w) or context
-        decision = updated_context.decision or "straight"
+        decision = context.decision or "straight"
         if decision != "straight":
-            print(f"[Driving] 倒车后检测到障碍物，转入视觉避障 decision={decision}")
-            self._handle_visual_avoidance(w, updated_context)
+            print(f"[Driving] 前进卡住且当前检测到障碍物，转入视觉避障 decision={decision}")
+            self._handle_visual_avoidance(w, context)
         else:
             steer = self._choose_less_obstructed_side(w)
-            print(f"[Driving] 倒车后未检测到明确障碍，选择全场景障碍较少侧: {steer}")
+            print(f"[Driving] 前进卡住但前方未检测到明确障碍，倒车并向 {steer} 规避")
             self._log_drive_state(
                 "前进卡住后全场景择路",
-                updated_context,
-                f"forward_turn_{steer}({self.FORWARD_BLOCK_TURN_MS}ms)",
+                context,
+                f"backward_turn_{steer}({self.FORWARD_BLOCK_BACKWARD_TURN_MS}ms)",
                 self.stable_circle_angle,
             )
             self._execute_maneuver(
                 w,
-                f"forward_turn_{steer}",
-                speed=updated_context.speed,
-                duration=self.FORWARD_BLOCK_TURN_MS,
+                f"backward_turn_{steer}",
+                speed=context.speed,
+                duration=self.FORWARD_BLOCK_BACKWARD_TURN_MS,
                 brake_with_steer=True,
             )
+            w.refresh_frame()
+            updated_context = self._build_context(w) or context
+            if (updated_context.decision or "straight") != "straight":
+                print(f"[Driving] 倒车规避后检测到障碍物，继续视觉避障 decision={updated_context.decision}")
+                self._handle_visual_avoidance(w, updated_context)
+            else:
+                forward_steer = self._choose_less_obstructed_side(w)
+                print(f"[Driving] 倒车后仍无明确障碍，按障碍较少侧前进: {forward_steer}")
+                self._log_drive_state(
+                    "倒车规避后全场景择路",
+                    updated_context,
+                    f"forward_turn_{forward_steer}({self.FORWARD_BLOCK_TURN_MS}ms)",
+                    self.stable_circle_angle,
+                )
+                self._execute_maneuver(
+                    w,
+                    f"forward_turn_{forward_steer}",
+                    speed=updated_context.speed,
+                    duration=self.FORWARD_BLOCK_TURN_MS,
+                    brake_with_steer=True,
+                )
 
         self.forward_block_recovery_active = False
 
@@ -1246,6 +1263,18 @@ class DrivingManager:
 
     def _has_rank_info(self, w: "FrameWorker") -> bool:
         return bool(w.get_info("个人排名")) or bool(w.get_info("队伍排名"))
+
+    def _is_out_of_vehicle(self, w: "FrameWorker") -> bool:
+        on_foot_ui_visible = bool(w.get_info("左拳头")) or bool(w.get_info("子弹"))
+        vehicle_ui_visible = any(
+            w.get_info(name)
+            for name in ("自动前进", "急刹", "加速")
+        )
+        return on_foot_ui_visible and not vehicle_ui_visible
+
+    def _handle_unexpected_vehicle_exit(self, w: "FrameWorker"):
+        self.reset(max_driving_time=self.max_driving_time)
+        w.change_stage("跑图阶段")
 
     def _analyze_obstacles(self, w: "FrameWorker") -> Dict[str, Any]:
         detections = w.get_info("forward_scene")

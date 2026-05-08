@@ -31,7 +31,7 @@ class DriveContext:
 class DrivingManager:
     ESCAPE_ALIGN_TOLERANCE = 8
     EXIT_GARAGE_INITIAL_FORWARD_MS = 3000
-    EXIT_GARAGE_INITIAL_REVERSE_LEFT_MS = 850
+    EXIT_GARAGE_INITIAL_REVERSE_LEFT_MS = 1000
     EXIT_GARAGE_VISUAL_FORWARD_MS = 900
     EXIT_GARAGE_VISUAL_TURN_MS = 500
     EXIT_GARAGE_CLEAR_ROUNDS_TO_CRUISE = 3
@@ -163,6 +163,7 @@ class DrivingManager:
         self.last_auto_brake_time = 0.0
         self.allow_running_fallback = True
         self.pause_sp_callback: Optional[Callable] = None
+        self.next_running_finding_car: Optional[bool] = None
 
         self._frame_action_executed = False
 
@@ -218,12 +219,20 @@ class DrivingManager:
         self.forward_block_recovery_active = False
         self.last_auto_brake_time = 0.0
         self.allow_running_fallback = True
+        self.next_running_finding_car = None
 
         self._frame_action_executed = False
         print("[Driving] 状态已重置!")
 
     def set_running_fallback_enabled(self, enabled: bool):
         self.allow_running_fallback = bool(enabled)
+
+    def consume_running_transition_finding_car(self, default: bool) -> bool:
+        finding_car = self.next_running_finding_car
+        self.next_running_finding_car = None
+        if finding_car is None:
+            return bool(default)
+        return bool(finding_car)
 
     def skip_initial_exit_garage(self, reason: str = "roadside vehicle"):
         self.is_first_car = False
@@ -1059,6 +1068,7 @@ class DrivingManager:
         self._tap_single_control(w, "brake", wait=self.TIME_BRAKE, dura=100)
         self._click_control(w, "off_car")
         self.reset(max_driving_time=self.max_driving_time)
+        self.next_running_finding_car = False
         w.change_stage("跑图阶段")
 
     def _exit_vehicle_to_running(self, w: "FrameWorker", reason: str):
@@ -1067,6 +1077,7 @@ class DrivingManager:
         self._tap_single_control(w, "brake", wait=800, dura=80)
         self._click_control(w, "off_car")
         self.reset(max_driving_time=self.max_driving_time)
+        self.next_running_finding_car = False
         w.change_stage("跑图阶段")
 
     def _handle_death(self, w: "FrameWorker"):

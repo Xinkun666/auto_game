@@ -182,7 +182,10 @@ def on_stage(w: "FrameWorker"):
     stage_events |= phase_timer.refresh()
 
     if previous_stage == "开车阶段" and w.current_stage == "跑图阶段":
-        running_manager.notify_vehicle_exit(finding_car=phase_timer.need_drive())
+        finding_car = driving_manager.consume_running_transition_finding_car(
+            default=phase_timer.need_drive()
+        )
+        running_manager.notify_vehicle_exit(finding_car=finding_car)
 
     if "landed" in stage_events and not phase_timer.all_done():
         handle_sp_start(w)

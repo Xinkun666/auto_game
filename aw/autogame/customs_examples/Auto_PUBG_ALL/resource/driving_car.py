@@ -34,6 +34,9 @@ class DrivingManager:
     EXIT_GARAGE_INITIAL_REVERSE_LEFT_MS = 1000
     EXIT_GARAGE_VISUAL_FORWARD_MS = 900
     EXIT_GARAGE_VISUAL_TURN_MS = 500
+    EXIT_GARAGE_CENTERING_FORWARD_MS = 650
+    EXIT_GARAGE_CENTERING_MIN_TURN_MS = 180
+    EXIT_GARAGE_CENTERING_MAX_TURN_MS = 360
     EXIT_GARAGE_CLEAR_ROUNDS_TO_CRUISE = 3
     EXIT_GARAGE_SUCCESS_DISTANCE = 8.0
     EXIT_GARAGE_WALL_CLASS_IDS = {9, 19}
@@ -42,6 +45,8 @@ class DrivingManager:
     EXIT_GARAGE_WALL_MIN_BOTTOM_RATIO = 0.30
     EXIT_GARAGE_WALL_MIN_WIDTH_RATIO = 0.05
     EXIT_GARAGE_WALL_BLOCK_RATIO = 0.18
+    EXIT_GARAGE_GATE_MIN_WIDTH_RATIO = 0.18
+    EXIT_GARAGE_GATE_CENTER_DEADZONE = 0.05
     EXIT_GARAGE_SECTORS = {
         "left": (0.0, 0.38),
         "center": (0.28, 0.72),
@@ -477,6 +482,8 @@ class DrivingManager:
         print(
             "[Driving] 出库视觉判断: "
             f"front_blocked={front_blocked}, left_blocked={left_blocked}, right_blocked={right_blocked}, "
+            f"gate_found={wall_state['gate_found']}, gate_offset={wall_state['gate_center_offset']:.3f}, "
+            f"gate_width={wall_state['gate_width_ratio']:.3f}, "
             f"distance={distance_from_start:.2f}, clear_rounds={self.exit_garage_clear_rounds}"
         )
 
@@ -503,6 +510,45 @@ class DrivingManager:
             self._tap_single_control(w, "up", wait=self.EXIT_GARAGE_VISUAL_FORWARD_MS, dura=100)
             return
 
+        if wall_state["gate_found"]:
+            self.exit_garage_clear_rounds = 0
+            offset = float(wall_state["gate_center_offset"])
+
+            if abs(offset) <= self.EXIT_GARAGE_GATE_CENTER_DEADZONE:
+                self._log_drive_state(
+                    "出库阶段出口居中",
+                    context,
+                    f"forward({self.EXIT_GARAGE_CENTERING_FORWARD_MS}ms)",
+                    self.stable_circle_angle,
+                )
+                print(
+                    "[Driving] 出库阶段检测到左右石墙形成出口，出口基本居中，"
+                    f"gate_offset={offset:.3f}"
+                )
+                self._tap_single_control(
+                    w,
+                    "up",
+                    wait=self.EXIT_GARAGE_CENTERING_FORWARD_MS,
+                    dura=100,
+                )
+                return
+
+            steer = "right" if offset > 0 else "left"
+            duration = self._get_exit_gate_centering_duration(offset)
+            self._log_drive_state(
+                "出库阶段对准车库出口",
+                context,
+                f"forward_turn_{steer}({duration}ms)",
+                self.stable_circle_angle,
+            )
+            print(
+                f"[Driving] 出库阶段检测到左右石墙形成出口，微调对准中间: "
+                f"steer={steer}, duration={duration}, gate_offset={offset:.3f}, "
+                f"gate_width={wall_state['gate_width_ratio']:.3f}"
+            )
+            self._tap_double_control(w, "up", steer, wait=duration)
+            return
+
         self.exit_garage_clear_rounds = 0
 
         left_score = float(wall_state["left_score"])
@@ -525,6 +571,11 @@ class DrivingManager:
             f"left_score={left_score:.3f}, right_score={right_score:.3f}"
         )
         self._tap_double_control(w, "up", steer, wait=self.EXIT_GARAGE_VISUAL_TURN_MS)
+
+    def _get_exit_gate_centering_duration(self, offset: float) -> int:
+        ratio = min(1.0, abs(offset) / 0.25)
+        span = self.EXIT_GARAGE_CENTERING_MAX_TURN_MS - self.EXIT_GARAGE_CENTERING_MIN_TURN_MS
+        return int(round(self.EXIT_GARAGE_CENTERING_MIN_TURN_MS + span * ratio))
 
     def _handle_forbidden_escape(self, w: "FrameWorker", context: DriveContext) -> bool:
         if self.map_tool.is_walkable(context.location):
@@ -761,6 +812,9 @@ class DrivingManager:
                 "left_blocked": False,
                 "center_blocked": False,
                 "right_blocked": False,
+                "gate_found": False,
+                "gate_center_offset": 0.0,
+                "gate_width_ratio": 0.0,
             }
 
         frame_h, frame_w = frame.shape[:2]
@@ -773,6 +827,8 @@ class DrivingManager:
         roi_h = max(1.0, roi_y2 - roi_y1)
 
         sector_scores = {name: 0.0 for name in self.EXIT_GARAGE_SECTORS}
+        left_wall_inner_edge: Optional[float] = None
+        right_wall_inner_edge: Optional[float] = None
 
         for det in detections:
             if not isinstance(det, (list, tuple)) or len(det) < 6:
@@ -805,6 +861,20 @@ class DrivingManager:
             if bottom_ratio < self.EXIT_GARAGE_WALL_MIN_BOTTOM_RATIO:
                 continue
 
+            center_ratio = ((local_x1 + local_x2) * 0.5) / roi_w
+            if center_ratio < 0.5:
+                left_wall_inner_edge = (
+                    local_x2
+                    if left_wall_inner_edge is None
+                    else max(left_wall_inner_edge, local_x2)
+                )
+            else:
+                right_wall_inner_edge = (
+                    local_x1
+                    if right_wall_inner_edge is None
+                    else min(right_wall_inner_edge, local_x1)
+                )
+
             for name, (start_ratio, end_ratio) in self.EXIT_GARAGE_SECTORS.items():
                 sector_x1 = roi_w * float(start_ratio)
                 sector_x2 = roi_w * float(end_ratio)
@@ -814,6 +884,17 @@ class DrivingManager:
                 sector_width = max(1.0, sector_x2 - sector_x1)
                 sector_scores[name] += overlap / sector_width
 
+        gate_found = False
+        gate_center_offset = 0.0
+        gate_width_ratio = 0.0
+        if left_wall_inner_edge is not None and right_wall_inner_edge is not None:
+            gate_width = max(0.0, right_wall_inner_edge - left_wall_inner_edge)
+            gate_width_ratio = gate_width / roi_w
+            if gate_width_ratio >= self.EXIT_GARAGE_GATE_MIN_WIDTH_RATIO:
+                gate_center = (left_wall_inner_edge + right_wall_inner_edge) * 0.5
+                gate_center_offset = (gate_center / roi_w) - 0.5
+                gate_found = True
+
         return {
             "left_score": sector_scores["left"],
             "center_score": sector_scores["center"],
@@ -821,6 +902,9 @@ class DrivingManager:
             "left_blocked": sector_scores["left"] >= self.EXIT_GARAGE_WALL_BLOCK_RATIO,
             "center_blocked": sector_scores["center"] >= self.EXIT_GARAGE_WALL_BLOCK_RATIO,
             "right_blocked": sector_scores["right"] >= self.EXIT_GARAGE_WALL_BLOCK_RATIO,
+            "gate_found": gate_found,
+            "gate_center_offset": gate_center_offset,
+            "gate_width_ratio": gate_width_ratio,
         }
 
     def _get_turn_duration(

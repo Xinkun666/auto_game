@@ -423,6 +423,9 @@ class RunningManager:
             self._handle_rank_finish(w)
             return
 
+        if self._handle_recent_vehicle_exit(w, location, direction):
+            return
+
         if self._is_in_vehicle(w):
             print("[Running] 检测到已经上车，切换到开车阶段")
             self._log_running_state("检测到已上车", location, direction, "切换到开车阶段")
@@ -439,9 +442,6 @@ class RunningManager:
 
         if self._is_in_water(w):
             self._handle_water_escape(w, location, direction)
-            return
-
-        if self._handle_recent_vehicle_exit(w, location, direction):
             return
 
         if self._handle_forbidden_escape(w, location, direction):

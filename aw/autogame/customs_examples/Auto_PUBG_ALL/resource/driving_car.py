@@ -1,12 +1,7 @@
-import os
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-import cv2
-import numpy as np
-
-from aw.autogame.tools.Utils import find_template_center_multiscale
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigator import MapNavigator
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.obstacle_analyzer import (
     ObstacleAvoidanceAnalyzer,
@@ -34,58 +29,6 @@ class DriveContext:
 
 
 class DrivingManager:
-    RESOURCE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    UI_TEMPLATE_ORIGIN_SIZE = (2832, 1316)
-    UI_MATCH_THRESHOLD = 0.70
-    UI_SEARCH_BUFFER_RATIO = 0.10
-
-    OUT_OF_VEHICLE_MARKERS = (
-        {
-            "name": "左拳头",
-            "rect": (0.06938584153774027, 0.46409227125628955, 0.11533052039381153, 0.5629641029587165),
-            "template": "templates/跑图阶段/游戏场景__左拳头.png",
-            "match_mode": "gray",
-        },
-        {
-            "name": "子弹",
-            "rect": (0.0684481950304735, 0.46308337501442803, 0.11298640412564462, 0.561955206716855),
-            "template": "templates/跑图阶段/游戏场景2__子弹.png",
-            "match_mode": "gray",
-        },
-        {
-            "name": "跳跃",
-            "rect": (0.9125786163522014, 0.6618340310833286, 0.9465408805031449, 0.722739003268911),
-            "template": "templates/跑图阶段/跳跃__跳跃.png",
-            "match_mode": "gray",
-        },
-        {
-            "name": "驾驶",
-            "rect": (0.6668102382490648, 0.3966926622064118, 0.689852590979628, 0.44933072699918564),
-            "template": "templates/跑图阶段/驾驶__驾驶.png",
-            "match_mode": "gray",
-        },
-    )
-    VEHICLE_UI_MARKERS = (
-        {
-            "name": "自动前进",
-            "rect": (0.7364779874213838, 0.45746401330504105, 0.7817610062893083, 0.5467913058438952),
-            "template": "templates/跑图阶段/开车__自动前进.png",
-            "match_mode": "gray",
-        },
-        {
-            "name": "急刹",
-            "rect": (0.07106918238993712, 0.6198772724665941, 0.10440251572327044, 0.7064976773527558),
-            "template": "templates/跑图阶段/开车__急刹.png",
-            "match_mode": "gray",
-        },
-        {
-            "name": "加速",
-            "rect": (0.08867924528301888, 0.2964041979698343, 0.12830188679245286, 0.38979182198772727),
-            "template": "templates/跑图阶段/开车__加速.png",
-            "match_mode": "gray",
-        },
-    )
-
     ESCAPE_ALIGN_TOLERANCE = 8
     EXIT_GARAGE_INITIAL_FORWARD_MS = 3000
     EXIT_GARAGE_INITIAL_REVERSE_LEFT_MS = 1000
@@ -222,7 +165,6 @@ class DrivingManager:
         self.pause_sp_callback: Optional[Callable] = None
         self.next_running_finding_car: Optional[bool] = None
 
-        self._ui_template_cache: Dict[str, Optional[np.ndarray]] = {}
         self._frame_action_executed = False
 
     def set_game_time(self, game_time: Optional[float] = None):
@@ -1334,101 +1276,30 @@ class DrivingManager:
         return bool(w.get_info("个人排名")) or bool(w.get_info("队伍排名"))
 
     def _is_out_of_vehicle(self, w: "FrameWorker") -> bool:
-        on_foot_marker = self._detect_ui_marker(w, self.OUT_OF_VEHICLE_MARKERS)
-        if not on_foot_marker:
+        if w.get_info("驾驶"):
+            print("[Driving] 检测到驾驶按钮，判定已意外下车")
+            return True
+
+        on_foot_ui_visible = any(
+            bool(w.get_info(name))
+            for name in ("左拳头", "子弹", "跳跃")
+        )
+        if not on_foot_ui_visible:
             return False
 
-        vehicle_marker = self._detect_ui_marker(w, self.VEHICLE_UI_MARKERS)
-        if vehicle_marker:
-            print(
-                f"[Driving] 同时检测到步行UI({on_foot_marker})和车载UI({vehicle_marker})，"
-                "暂不切换跑图"
-            )
+        vehicle_ui_visible = any(
+            bool(w.get_info(name))
+            for name in ("自动前进", "急刹", "加速")
+        )
+        if vehicle_ui_visible:
             return False
 
-        print(f"[Driving] 检测到步行UI({on_foot_marker})，判定已意外下车")
+        print("[Driving] 检测到步行UI，判定已意外下车")
         return True
 
     def _handle_unexpected_vehicle_exit(self, w: "FrameWorker"):
         self.reset(max_driving_time=self.max_driving_time)
         w.change_stage("跑图阶段")
-
-    def _detect_ui_marker(self, w: "FrameWorker", markers) -> Optional[str]:
-        for marker in markers:
-            name = marker["name"]
-            if w.get_info(name):
-                return name
-
-        frame = getattr(w, "frame", None)
-        if frame is None or not hasattr(frame, "shape"):
-            return None
-
-        for marker in markers:
-            if self._match_ui_template(frame, marker):
-                return marker["name"]
-        return None
-
-    def _match_ui_template(self, frame, marker: Dict[str, Any]) -> bool:
-        template = self._load_ui_template(marker["template"])
-        if template is None:
-            return False
-
-        frame_h, frame_w = frame.shape[:2]
-        origin_w, origin_h = self.UI_TEMPLATE_ORIGIN_SIZE
-        rect = marker["rect"]
-        x1 = int(rect[0] * frame_w)
-        y1 = int(rect[1] * frame_h)
-        x2 = int(rect[2] * frame_w)
-        y2 = int(rect[3] * frame_h)
-
-        crop_w = max(1, x2 - x1)
-        crop_h = max(1, y2 - y1)
-        buf_w = int(crop_w * self.UI_SEARCH_BUFFER_RATIO)
-        buf_h = int(crop_h * self.UI_SEARCH_BUFFER_RATIO)
-        sx1 = max(0, x1 - buf_w)
-        sy1 = max(0, y1 - buf_h)
-        sx2 = min(frame_w, x2 + buf_w)
-        sy2 = min(frame_h, y2 + buf_h)
-        search_img = frame[sy1:sy2, sx1:sx2]
-        if search_img.size == 0:
-            return False
-
-        scale = min(frame_w / origin_w, frame_h / origin_h)
-        tpl_h, tpl_w = template.shape[:2]
-        new_w = max(1, int(tpl_w * scale))
-        new_h = max(1, int(tpl_h * scale))
-        if new_w > search_img.shape[1] or new_h > search_img.shape[0]:
-            return False
-
-        resized_template = cv2.resize(template, (new_w, new_h))
-        return bool(
-            find_template_center_multiscale(
-                search_img,
-                resized_template,
-                threshold=self.UI_MATCH_THRESHOLD,
-                match_mode=marker.get("match_mode", "gray"),
-            )
-        )
-
-    def _load_ui_template(self, template_path: str) -> Optional[np.ndarray]:
-        cached = self._ui_template_cache.get(template_path)
-        if template_path in self._ui_template_cache:
-            return cached
-
-        full_path = os.path.join(self.RESOURCE_DIR, template_path)
-        if not os.path.exists(full_path):
-            self._ui_template_cache[template_path] = None
-            return None
-
-        try:
-            data = np.fromfile(full_path, dtype=np.uint8)
-            template = cv2.imdecode(data, cv2.IMREAD_COLOR) if data.size else None
-        except Exception as exc:
-            print(f"[Driving] 下车状态模板读取失败: {full_path}, err={exc}")
-            template = None
-
-        self._ui_template_cache[template_path] = template
-        return template
 
     def _analyze_obstacles(self, w: "FrameWorker") -> Dict[str, Any]:
         detections = w.get_info("forward_scene")

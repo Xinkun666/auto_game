@@ -1399,6 +1399,23 @@ class RunningManager:
         )
 
         if dist_to_entry > 0:
+            if self.car_search_mode == self.CAR_SEARCH_GARAGE:
+                self._ensure_precise_view(w)
+                if self._attempt_drive_after_move(w, "靠近车库上车点时先检查驾驶按钮"):
+                    return
+                if self._find_largest_car(w):
+                    print("[Running] 靠近车库上车点时已识别到车辆，提前视觉对车并尝试上车")
+                    self._log_running_state(
+                        "靠近车库上车点已识别到车辆",
+                        location,
+                        direction,
+                        "不再强制到达上车点，直接视觉对车并前推上车",
+                        self.CAR_ENTRY_POINT,
+                        dist_to_entry,
+                    )
+                    if self._approach_visible_car(w):
+                        return
+
             self._update_precise_progress(dist_to_entry)
             self._align_to_point(w, location, direction, self.CAR_ENTRY_POINT, threshold=3)
             w.tap_single("摇杆", y_bias=-120, dura=180, wait=350)

@@ -1,3 +1,5 @@
+import json
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -26,6 +28,139 @@ class DriveContext:
     speed: Optional[int]
     decision: str
     obstacle_info: Dict[str, Any]
+
+
+class TurnCalibration:
+    DEFAULT_DEG_PER_MS = 0.08
+    MIN_DEG_PER_MS = 0.02
+    MAX_DEG_PER_MS = 0.20
+    MIN_DURATION_MS = 120
+    MAX_DURATION_MS = 650
+    LEARNING_RATE = 0.2
+    MIN_OBSERVED_DEG = 3.0
+    MAX_OBSERVED_DEG = 120.0
+
+    def __init__(self, path: Optional[str] = None):
+        resource_dir = os.path.dirname(os.path.abspath(__file__))
+        self.path = path or os.path.join(resource_dir, "driving_turn_calibration.json")
+        self.data: Dict[str, Dict[str, Any]] = {}
+        self.load()
+
+    def load(self):
+        if not os.path.exists(self.path):
+            return
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception as exc:
+            print(f"[TurnCalibration] 读取转向标定失败: {exc}")
+            return
+        if isinstance(raw, dict):
+            self.data = {
+                str(key): value
+                for key, value in raw.items()
+                if isinstance(value, dict)
+            }
+
+    def save(self):
+        try:
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump(self.data, f, ensure_ascii=False, indent=2, sort_keys=True)
+        except Exception as exc:
+            print(f"[TurnCalibration] 保存转向标定失败: {exc}")
+
+    def estimate_duration(
+        self,
+        action: str,
+        speed: Optional[int],
+        diff: float,
+        fallback_ms: int,
+        max_duration_ms: Optional[int] = None,
+    ) -> int:
+        key = self._key(action, speed)
+        rate = self._get_rate(key)
+        estimated = int(round(float(diff) / rate))
+        duration = self._clamp_duration(estimated, max_duration_ms=max_duration_ms)
+        if key not in self.data:
+            duration = min(
+                duration,
+                self._clamp_duration(fallback_ms, max_duration_ms=max_duration_ms),
+            )
+        return duration
+
+    def observe(
+        self,
+        action: str,
+        speed: Optional[int],
+        before_angle: float,
+        after_angle: float,
+        duration_ms: int,
+    ) -> bool:
+        if duration_ms <= 0:
+            return False
+
+        observed_deg = self._observed_turn_degrees(action, before_angle, after_angle)
+        if observed_deg is None:
+            return False
+        if not (self.MIN_OBSERVED_DEG <= observed_deg <= self.MAX_OBSERVED_DEG):
+            return False
+
+        observed_rate = observed_deg / float(duration_ms)
+        observed_rate = self._clamp_rate(observed_rate)
+        key = self._key(action, speed)
+        old_rate = self._get_rate(key)
+        samples = int(self.data.get(key, {}).get("samples", 0) or 0)
+        alpha = self.LEARNING_RATE if samples > 0 else 1.0
+        new_rate = self._clamp_rate(old_rate * (1.0 - alpha) + observed_rate * alpha)
+        self.data[key] = {
+            "deg_per_ms": new_rate,
+            "samples": samples + 1,
+            "updated_at": time.time(),
+        }
+        self.save()
+        print(
+            f"[TurnCalibration] 更新转向标定: key={key}, observed={observed_deg:.1f}deg/"
+            f"{duration_ms}ms, rate={new_rate:.4f}, samples={samples + 1}"
+        )
+        return True
+
+    def _key(self, action: str, speed: Optional[int]) -> str:
+        return f"{action}:{self._speed_bucket(speed)}"
+
+    def _speed_bucket(self, speed: Optional[int]) -> str:
+        if speed is None or speed <= 1:
+            return "speed_low"
+        if speed == 2:
+            return "speed_2"
+        return "speed_3"
+
+    def _get_rate(self, key: str) -> float:
+        value = self.data.get(key, {}).get("deg_per_ms", self.DEFAULT_DEG_PER_MS)
+        try:
+            return self._clamp_rate(float(value))
+        except (TypeError, ValueError):
+            return self.DEFAULT_DEG_PER_MS
+
+    def _clamp_rate(self, value: float) -> float:
+        return max(self.MIN_DEG_PER_MS, min(self.MAX_DEG_PER_MS, value))
+
+    def _clamp_duration(self, value: int, max_duration_ms: Optional[int] = None) -> int:
+        max_duration = self.MAX_DURATION_MS if max_duration_ms is None else int(max_duration_ms)
+        return max(self.MIN_DURATION_MS, min(max_duration, int(value)))
+
+    def _observed_turn_degrees(
+        self,
+        action: str,
+        before_angle: float,
+        after_angle: float,
+    ) -> Optional[float]:
+        right_delta = (float(after_angle) - float(before_angle)) % 360.0
+        left_delta = (float(before_angle) - float(after_angle)) % 360.0
+        if action.endswith("_right"):
+            return right_delta if right_delta <= 180.0 else None
+        if action.endswith("_left"):
+            return left_delta if left_delta <= 180.0 else None
+        return None
 
 
 class DrivingManager:
@@ -64,8 +199,33 @@ class DrivingManager:
     FORWARD_BLOCK_REPEAT_LIMIT = 2
     # 两次位置变化小于该距离时，视为基本没动
     STUCK_LOCATION_EPS = 0.2
-    FORWARD_BLOCK_BACKWARD_TURN_MS = 2000
+    # 前进连续短时不动时只做轻量倒车微调，避免倒车转向过久直接掉头。
+    FORWARD_BLOCK_BACKWARD_TURN_MS = 700
     FORWARD_BLOCK_TURN_MS = 600
+    # 空旷区域连续前进不动到该帧数后，认为车辆可能没油，切回跑图处理。
+    NO_FUEL_FORWARD_STALL_LIMIT = 4
+    NO_FUEL_MAX_OBSTACLE_COVERAGE = 0.02
+    MOTION_BLOCK_BACKWARD_TURN_MS = 800
+    ROUTE_DEVIATION_REPLAN_DISTANCE = 35.0
+    ROUTE_DEVIATION_LOOKAHEAD_POINTS = 8
+    ROUTE_REPLAN_COOLDOWN_S = 3.0
+    LOCAL_AVOIDANCE_REPEAT_DISTANCE = 12.0
+    LOCAL_AVOIDANCE_REPEAT_LIMIT = 2
+    ROUTE_SKIP_AFTER_AVOIDANCE = 5
+    ROUTE_BLOCKED_POINT_RADIUS = 25.0
+    ROUTE_TURN_MAX_DURATION_MS = 650
+    FORBIDDEN_TURN_MAX_DURATION_MS = 1500
+    VISUAL_AVOIDANCE_TURN_MAX_DURATION_MS = 1200
+    VISUAL_AVOIDANCE_ANGLE_MAP = {
+        "slight_left": 12,
+        "slight_right": 12,
+        "small_left": 24,
+        "small_right": 24,
+        "large_left": 40,
+        "large_right": 40,
+        "reverse_and_left": 50,
+        "reverse_and_right": 50,
+    }
     # 困死判定窗口：连续多少帧都在局部很小范围打转才算真正困死
     TRAPPED_HISTORY_LEN = 80
     # 困死判定时，轨迹围绕中心点打转的半径范围
@@ -136,6 +296,7 @@ class DrivingManager:
         self.map_tool = map_tool or MapNavigator()
         self.max_driving_time = max_driving_time
         self.obstacle_analyzer: Optional[ObstacleAvoidanceAnalyzer] = None
+        self.turn_calibration = TurnCalibration()
 
         self.game_time: Optional[float] = None
         self.driving_start_time: Optional[float] = None
@@ -147,9 +308,13 @@ class DrivingManager:
         self.exit_garage_start_location: Optional[Tuple[int, int]] = None
 
         self.circle_angles: List[float] = []
+        self.latest_circle_angle: Optional[float] = None
         self.stable_circle_angle: Optional[float] = None
         self.last_planned_circle_angle: Optional[float] = None
         self.road_list: List[Tuple[int, int]] = []
+        self.route_replan_cooldown_until = 0.0
+        self.last_avoidance_location: Optional[Tuple[int, int]] = None
+        self.local_avoidance_fail_count = 0
 
         self.prior_angle: Optional[float] = None
         self.prior_location: Optional[Tuple[int, int]] = None
@@ -164,6 +329,8 @@ class DrivingManager:
         self.last_motion_location: Optional[Tuple[int, int]] = None
         self.last_motion_started_at = 0.0
         self.blocked_motion_count = 0
+        self.no_fuel_stall_count = 0
+        self.motion_stalled_this_frame = False
         self.forward_block_recovery_active = False
         self.last_auto_brake_time = 0.0
         self.allow_running_fallback = True
@@ -204,9 +371,13 @@ class DrivingManager:
         self.exit_garage_start_location = None
 
         self.circle_angles = []
+        self.latest_circle_angle = None
         self.stable_circle_angle = None
         self.last_planned_circle_angle = None
         self.road_list = []
+        self.route_replan_cooldown_until = 0.0
+        self.last_avoidance_location = None
+        self.local_avoidance_fail_count = 0
 
         self.prior_angle = None
         self.prior_location = None
@@ -221,6 +392,8 @@ class DrivingManager:
         self.last_motion_location = None
         self.last_motion_started_at = 0.0
         self.blocked_motion_count = 0
+        self.no_fuel_stall_count = 0
+        self.motion_stalled_this_frame = False
         self.forward_block_recovery_active = False
         self.last_auto_brake_time = 0.0
         self.allow_running_fallback = True
@@ -315,6 +488,16 @@ class DrivingManager:
             return
 
         motion_blocked = self._check_motion_block(context)
+        if self._check_probable_no_fuel(context):
+            finding_car = self._should_find_car_after_no_fuel()
+            self._exit_vehicle_to_running(
+                w,
+                "空旷区域连续前进不动，疑似车辆没油，切回跑图阶段",
+                finding_car=finding_car,
+            )
+            self._finalize_frame(w)
+            return
+
         if self._check_forward_motion_block(context):
             print("[Driving] 连续前进2帧位置不变，执行前进卡住恢复")
             self._handle_forward_motion_block(w, context)
@@ -399,6 +582,7 @@ class DrivingManager:
             self._load_path(location)
 
         self._consume_waypoints(location)
+        self._repair_route_after_deviation(location)
         if self.road_list:
             target = self.road_list[0]
             target_direction = calculate_angle(location, target)
@@ -443,6 +627,84 @@ class DrivingManager:
                 print(f"[Driving] 绘制路径调试图失败: {exc}")
         else:
             print("[Driving] 路径规划失败，回退自由巡航")
+
+    def _repair_route_after_deviation(self, location: Tuple[int, int]):
+        if not self.road_list:
+            return
+
+        check_points = self.road_list[:self.ROUTE_DEVIATION_LOOKAHEAD_POINTS]
+        nearest_idx, nearest_dist = min(
+            enumerate(check_points),
+            key=lambda item: get_distance(location, item[1]),
+        )
+
+        if nearest_idx > 0:
+            skipped = self.road_list[:nearest_idx]
+            del self.road_list[:nearest_idx]
+            print(
+                f"[Driving] 车辆已越过部分路径点，跳过 {len(skipped)} 个旧路径点，"
+                f"nearest_dist={nearest_dist:.2f}"
+            )
+
+        if nearest_dist <= self.ROUTE_DEVIATION_REPLAN_DISTANCE:
+            return
+
+        now = time.time()
+        if now < self.route_replan_cooldown_until:
+            return
+
+        print(
+            f"[Driving] 当前位置偏离规划路线过远 nearest_dist={nearest_dist:.2f}，"
+            "从当前位置重规划进圈路线"
+        )
+        self.route_replan_cooldown_until = now + self.ROUTE_REPLAN_COOLDOWN_S
+        self._load_path(location)
+
+    def _record_local_avoidance(self, context: DriveContext, reason: str):
+        location = context.location
+        if self.last_avoidance_location is None:
+            self.local_avoidance_fail_count = 1
+        elif get_distance(location, self.last_avoidance_location) <= self.LOCAL_AVOIDANCE_REPEAT_DISTANCE:
+            self.local_avoidance_fail_count += 1
+        else:
+            self.local_avoidance_fail_count = 1
+
+        self.last_avoidance_location = location
+        print(
+            f"[Driving] 记录局部避障: reason={reason}, "
+            f"count={self.local_avoidance_fail_count}, loc={location}"
+        )
+
+        if self.local_avoidance_fail_count < self.LOCAL_AVOIDANCE_REPEAT_LIMIT:
+            return
+
+        self.local_avoidance_fail_count = 0
+        self._recover_route_after_repeated_avoidance(location, reason)
+
+    def _recover_route_after_repeated_avoidance(self, location: Tuple[int, int], reason: str):
+        if not self.road_list:
+            self.last_planned_circle_angle = None
+            print(f"[Driving] 避障反复失败但当前无路径点，等待下一轮重规划: reason={reason}")
+            return
+
+        skipped = 0
+        min_skip = min(self.ROUTE_SKIP_AFTER_AVOIDANCE, len(self.road_list))
+        while self.road_list and skipped < min_skip:
+            self.road_list.pop(0)
+            skipped += 1
+
+        while self.road_list and get_distance(location, self.road_list[0]) <= self.ROUTE_BLOCKED_POINT_RADIUS:
+            self.road_list.pop(0)
+            skipped += 1
+
+        self.route_replan_cooldown_until = time.time() + self.ROUTE_REPLAN_COOLDOWN_S
+        if not self.road_list:
+            self.last_planned_circle_angle = None
+
+        print(
+            f"[Driving] 同一区域避障反复失败，跳过疑似受阻路径点: "
+            f"reason={reason}, skipped={skipped}, remain={len(self.road_list)}"
+        )
 
     def _handle_first_car_alignment(self, w: "FrameWorker", context: DriveContext):
         if self.exit_garage_start_location is None:
@@ -583,6 +845,7 @@ class DrivingManager:
             self.forbidden_escape_last_distance = None
             return False
 
+        self._record_local_avoidance(context, "已进入不可通行区域")
         safe_point = self.map_tool.get_nearest_safe_point(context.location, max_search_dist=120)
         progress_text = ""
 
@@ -628,7 +891,6 @@ class DrivingManager:
         target_direction = calculate_angle(context.location, safe_point)
         turn_dir, _, diff = calculate_move_count(context.direction, target_direction)
         use_backward = diff > 90
-        duration = self._get_turn_duration(diff, fine=False, reverse=use_backward)
 
         if use_backward:
             if turn_dir is None or diff <= self.ESCAPE_ALIGN_TOLERANCE:
@@ -642,6 +904,8 @@ class DrivingManager:
                 return True
 
             action = f"backward_turn_{turn_dir}"
+            fallback_duration = self._get_turn_duration(diff, fine=False, reverse=True)
+            max_duration = self.FORBIDDEN_TURN_MAX_DURATION_MS
         else:
             if turn_dir is None or diff <= self.ESCAPE_ALIGN_TOLERANCE:
                 action_text = "forward(700ms)"
@@ -654,6 +918,16 @@ class DrivingManager:
                 return True
 
             action = f"forward_turn_{turn_dir}"
+            fallback_duration = self._get_turn_duration(diff, fine=False)
+            max_duration = self.ROUTE_TURN_MAX_DURATION_MS
+
+        duration = self._get_calibrated_turn_duration(
+            action,
+            context.speed,
+            diff,
+            fallback_duration,
+            max_duration,
+        )
 
         action_text = f"{action}({duration}ms)"
         self._log_drive_state(
@@ -666,48 +940,71 @@ class DrivingManager:
             f"[Driving] 黑区脱离: safe_point={safe_point}, target={target_direction:.1f}, "
             f"diff={diff:.2f}, action={action}, duration={duration}, mode={'backward' if use_backward else 'forward'}"
         )
-        self._execute_maneuver(w, action, speed=context.speed, duration=duration, brake_with_steer=True)
+        self._execute_calibrated_turn(
+            w,
+            context,
+            action,
+            duration,
+            brake_with_steer=True,
+            skip_obstacle_learning=False,
+        )
         return True
 
     def _handle_forbidden_ahead(self, w: "FrameWorker", context: DriveContext) -> bool:
         if not self._has_forbidden_ahead(context):
             return False
 
+        self._record_local_avoidance(context, "前方不可通行区域")
         sector = self.map_tool.get_avoidance_action(context.location, context.direction)
         action_map = {
             1: ("forward_turn_right", 220),
             2: ("forward_turn_right", 450),
-            3: ("backward_turn_right", 2000),
+            3: ("backward_turn_right", 1500),
             4: ("forward_turn_left", 220),
             5: ("forward_turn_left", 450),
-            6: ("backward_turn_left", 2000),
+            6: ("backward_turn_left", 1500),
         }
         action = action_map.get(sector)
         if action is None:
             return False
 
-        duration = action[1]
+        action_name = action[0]
+        desired_degrees = self._avoidance_action_degrees(action_name, action[1])
+        max_duration = (
+            self.FORBIDDEN_TURN_MAX_DURATION_MS
+            if action_name.startswith("backward_turn_")
+            else self.ROUTE_TURN_MAX_DURATION_MS
+        )
+        duration = self._get_calibrated_turn_duration(
+            action_name,
+            context.speed,
+            desired_degrees,
+            action[1],
+            max_duration,
+        )
         if context.speed is not None and context.speed >= 3:
             print("[Driving] 高速接近不可通行区域，先执行预刹车")
             self._tap_single_control(w, "brake", wait=self.FORBIDDEN_HIGH_SPEED_BRAKE_WAIT)
-            if action[0].startswith("forward_turn_"):
+            if action_name.startswith("forward_turn_"):
                 duration += 150
-            elif action[0].startswith("backward_turn_"):
-                duration += 400
+            elif action_name.startswith("backward_turn_"):
+                duration += 250
+            duration = min(duration, max_duration)
 
         print(f"[Driving] 前方不可通行，地图规避 sector={sector}, action={action}")
         self._log_drive_state(
             "前方有不可通行区域",
             context,
-            f"{action[0]}({duration}ms)",
+            f"{action_name}({duration}ms)",
             self.stable_circle_angle,
         )
-        self._execute_maneuver(
+        self._execute_calibrated_turn(
             w,
-            action=action[0],
-            speed=context.speed,
+            context,
+            action_name,
             duration=duration,
             brake_with_steer=True,
+            skip_obstacle_learning=False,
         )
         return True
 
@@ -726,13 +1023,28 @@ class DrivingManager:
             "slight_right": ("forward_turn_right", 220 if severe_block else 160),
             "small_right": ("forward_turn_right", 380 if severe_block else 300),
             "large_right": ("forward_turn_right", 620 if severe_block else 500),
-            "reverse_and_left": ("reverse_and_left", 1400 if severe_block else 1000),
-            "reverse_and_right": ("reverse_and_right", 1400 if severe_block else 1000),
+            "reverse_and_left": ("reverse_and_left", 1100 if severe_block else 750),
+            "reverse_and_right": ("reverse_and_right", 1100 if severe_block else 750),
         }
         action = action_map.get(decision)
         if action is None:
             return False
 
+        self._record_local_avoidance(context, f"视觉避障:{decision}")
+        action_name = action[0]
+        desired_degrees = self.VISUAL_AVOIDANCE_ANGLE_MAP.get(decision, 25)
+        max_duration = (
+            self.VISUAL_AVOIDANCE_TURN_MAX_DURATION_MS
+            if action_name.startswith(("backward_turn_", "reverse_and_"))
+            else self.ROUTE_TURN_MAX_DURATION_MS
+        )
+        duration = self._get_calibrated_turn_duration(
+            action_name,
+            context.speed,
+            desired_degrees,
+            action[1],
+            max_duration,
+        )
         situation_map = {
             "slight_left": "前方有小障碍物",
             "slight_right": "前方有小障碍物",
@@ -747,10 +1059,17 @@ class DrivingManager:
         self._log_drive_state(
             situation_map.get(decision, "前方有障碍物"),
             context,
-            f"{action[0]}({action[1]}ms)",
+            f"{action_name}({duration}ms)",
             self.stable_circle_angle,
         )
-        self._execute_maneuver(w, action=action[0], speed=context.speed, duration=action[1], brake_with_steer=True)
+        self._execute_calibrated_turn(
+            w,
+            context,
+            action_name,
+            duration=duration,
+            brake_with_steer=True,
+            skip_obstacle_learning=False,
+        )
         return True
 
     def _drive_toward_target(
@@ -777,10 +1096,85 @@ class DrivingManager:
             return
 
         action = f"forward_turn_{turn_dir}"
-        duration = self._get_turn_duration(diff, fine=False)
+        fallback_duration = self._get_turn_duration(diff, fine=False)
+        duration = self._get_calibrated_turn_duration(
+            action,
+            context.speed,
+            diff,
+            fallback_duration,
+            self.ROUTE_TURN_MAX_DURATION_MS,
+        )
 
         self._log_drive_state("发现进圈角度，进行对齐", context, f"{action}({duration}ms)", target_direction)
-        self._execute_maneuver(w, action, speed=context.speed, duration=duration, brake_with_steer=False)
+        self._execute_calibrated_turn(
+            w,
+            context,
+            action,
+            duration,
+            brake_with_steer=False,
+            skip_obstacle_learning=True,
+        )
+
+    def _get_calibrated_turn_duration(
+        self,
+        action: str,
+        speed: Optional[int],
+        desired_degrees: float,
+        fallback_duration: int,
+        max_duration: int,
+    ) -> int:
+        return self.turn_calibration.estimate_duration(
+            action,
+            speed,
+            desired_degrees,
+            fallback_duration,
+            max_duration_ms=max_duration,
+        )
+
+    def _avoidance_action_degrees(self, action: str, fallback_duration: int) -> float:
+        if action.startswith("forward_turn_"):
+            return max(8.0, min(70.0, float(fallback_duration) / 10.0))
+        if action.startswith(("backward_turn_", "reverse_and_")):
+            return max(15.0, min(90.0, float(fallback_duration) / 14.0))
+        return max(8.0, min(70.0, float(fallback_duration) / 10.0))
+
+    def _execute_calibrated_turn(
+        self,
+        w: "FrameWorker",
+        context: DriveContext,
+        action: str,
+        duration: int,
+        brake_with_steer: bool = False,
+        skip_obstacle_learning: bool = False,
+    ):
+        before_direction = context.direction
+        self._execute_maneuver(
+            w,
+            action,
+            speed=context.speed,
+            duration=duration,
+            brake_with_steer=brake_with_steer,
+        )
+
+        if not w.refresh_frame():
+            return
+        self._frame_action_executed = False
+
+        after_direction = self._get_scalar(w.get_info("direction"))
+        if after_direction is None:
+            print("[TurnCalibration] 本次转向后方向无效，跳过学习")
+            return
+        if skip_obstacle_learning and self._has_front_obstacle(context):
+            print("[TurnCalibration] 本次转向前存在障碍/黑区风险，跳过学习")
+            return
+
+        self.turn_calibration.observe(
+            action,
+            context.speed,
+            before_direction,
+            after_direction,
+            duration,
+        )
 
     def _get_exit_alignment_duration(self, diff: float) -> int:
         if diff <= 0:
@@ -951,6 +1345,7 @@ class DrivingManager:
         return min(760, int(diff * 8))
 
     def _check_motion_block(self, context: DriveContext) -> bool:
+        self.motion_stalled_this_frame = False
         if self.current_stage in (self.STAGE_EXIT_GARAGE, self.STAGE_FINISH):
             self.last_motion_location = context.location
             self.blocked_motion_count = 1
@@ -963,6 +1358,7 @@ class DrivingManager:
 
         if get_distance(context.location, self.last_motion_location) <= self.STUCK_LOCATION_EPS:
             self.blocked_motion_count += 1
+            self.motion_stalled_this_frame = True
         else:
             self.blocked_motion_count = 1
 
@@ -982,6 +1378,67 @@ class DrivingManager:
         stuck = get_distance(context.location, self.last_motion_location) <= self.STUCK_LOCATION_EPS
         return stuck and self.blocked_motion_count >= self.FORWARD_BLOCK_REPEAT_LIMIT
 
+    def _check_probable_no_fuel(self, context: DriveContext) -> bool:
+        if self.current_stage in (self.STAGE_EXIT_GARAGE, self.STAGE_FINISH):
+            self.no_fuel_stall_count = 0
+            return False
+        if self.last_motion_mode != "forward":
+            self.no_fuel_stall_count = 0
+            return False
+        if not self._is_open_forward_stall(context):
+            self.no_fuel_stall_count = 0
+            return False
+        if not self.motion_stalled_this_frame:
+            self.no_fuel_stall_count = 0
+            return False
+
+        self.no_fuel_stall_count += 1
+        if self.no_fuel_stall_count < self.NO_FUEL_FORWARD_STALL_LIMIT:
+            return False
+
+        print(
+            "[Driving] 疑似没油判定成立: "
+            f"stall_frames={self.no_fuel_stall_count}, loc={context.location}, "
+            f"circle={self._current_circle_angle_text()}"
+        )
+        return True
+
+    def _is_open_forward_stall(self, context: DriveContext) -> bool:
+        if not self.map_tool.is_walkable(context.location):
+            return False
+        if self._has_forbidden_ahead(context):
+            return False
+        if (context.decision or "straight") != "straight":
+            return False
+
+        obstacle_count = int(context.obstacle_info.get("obstacles_count", 0) or 0)
+        hard_obstacle_count = int(context.obstacle_info.get("hard_obstacles_count", 0) or 0)
+        coverage_ratio = float(context.obstacle_info.get("coverage_ratio", 0.0) or 0.0)
+        if obstacle_count > 0 or hard_obstacle_count > 0:
+            return False
+        return coverage_ratio <= self.NO_FUEL_MAX_OBSTACLE_COVERAGE
+
+    def _should_find_car_after_no_fuel(self) -> bool:
+        circle_angle = self.stable_circle_angle
+        if circle_angle is None:
+            circle_angle = self.latest_circle_angle
+
+        if circle_angle is not None:
+            print(
+                f"[Driving] 疑似没油且检测到进圈角度 {circle_angle:.1f}，"
+                "放弃寻车，切跑图优先进圈"
+            )
+            return False
+
+        print("[Driving] 疑似没油且未检测到进圈角度，切跑图后沿附近道路寻车")
+        return True
+
+    def _current_circle_angle_text(self) -> str:
+        circle_angle = self.stable_circle_angle
+        if circle_angle is None:
+            circle_angle = self.latest_circle_angle
+        return "None" if circle_angle is None else f"{circle_angle:.1f}"
+
     def _handle_forward_motion_block(self, w: "FrameWorker", context: DriveContext):
         self.forward_block_recovery_active = True
         self.blocked_motion_count = 0
@@ -993,6 +1450,7 @@ class DrivingManager:
         else:
             steer = self._choose_less_obstructed_side(w)
             print(f"[Driving] 前进卡住但前方未检测到明确障碍，倒车并向 {steer} 规避")
+            self._record_local_avoidance(context, "前进卡住")
             self._log_drive_state(
                 "前进卡住后全场景择路",
                 context,
@@ -1077,9 +1535,21 @@ class DrivingManager:
             f"[Driving] 快速脱困: stuck_frames={self.blocked_motion_count}, "
             f"steer={steer}, action={action}"
         )
-        self._log_drive_state("车辆连续多帧位置不变", context, f"{action}(1000ms)", self.stable_circle_angle)
+        self._record_local_avoidance(context, "连续多帧位置不变")
+        self._log_drive_state(
+            "车辆连续多帧位置不变",
+            context,
+            f"{action}({self.MOTION_BLOCK_BACKWARD_TURN_MS}ms)",
+            self.stable_circle_angle,
+        )
         self.blocked_motion_count = 0
-        self._execute_maneuver(w, action, speed=context.speed, duration=1000, brake_with_steer=True)
+        self._execute_maneuver(
+            w,
+            action,
+            speed=context.speed,
+            duration=self.MOTION_BLOCK_BACKWARD_TURN_MS,
+            brake_with_steer=True,
+        )
 
     def _decision_to_steer(self, decision: str) -> Optional[str]:
         if "left" in decision:
@@ -1155,13 +1625,18 @@ class DrivingManager:
         self.next_running_finding_car = False
         w.change_stage("跑图阶段")
 
-    def _exit_vehicle_to_running(self, w: "FrameWorker", reason: str):
+    def _exit_vehicle_to_running(
+        self,
+        w: "FrameWorker",
+        reason: str,
+        finding_car: bool = False,
+    ):
         print(f"[Driving] {reason}")
         self.current_stage = self.STAGE_FINISH
         self._tap_single_control(w, "brake", wait=800, dura=80)
         self._click_control(w, "off_car")
         self.reset(max_driving_time=self.max_driving_time)
-        self.next_running_finding_car = False
+        self.next_running_finding_car = bool(finding_car)
         w.change_stage("跑图阶段")
 
     def _handle_death(self, w: "FrameWorker"):
@@ -1191,6 +1666,7 @@ class DrivingManager:
         if angle is None:
             return
 
+        self.latest_circle_angle = angle
         self.circle_angles.append(angle)
         if len(self.circle_angles) < 30:
             self.stable_circle_angle = None

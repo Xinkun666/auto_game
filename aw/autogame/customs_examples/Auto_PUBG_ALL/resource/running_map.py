@@ -267,6 +267,11 @@ class RunningManager:
     PRECISE_FORWARD_BIAS_Y = -220
     PRECISE_FORWARD_DURA = 550
     PRECISE_FORWARD_WAIT = 2500
+    # 精调靠近车库上车点时也要有脱困保护，否则跑到车库背面会一直顶墙。
+    PRECISE_ENTRY_STUCK_SWITCH_LIMIT = 3
+    PRECISE_ENTRY_IDLE_UNSTUCK_ROUNDS = 4
+    # 进入最后上车点附近后属于微调/找驾驶按钮，不再按位置不变判定卡死。
+    PRECISE_ENTRY_MICRO_ADJUST_RADIUS = 5.0
     # 精调上车时，向右或向左单次小幅试探的摇杆参数
     PRECISE_LATERAL_STEP_BIAS = 150
     PRECISE_LATERAL_STEP_DURA = 220
@@ -340,6 +345,7 @@ class RunningManager:
         self.precise_entering_car = False
         self.precise_last_distance: Optional[float] = None
         self.precise_idle_rounds = 0
+        self.precise_stuck_recoveries = 0
         self.precise_face_attempt_index = 0
         self.precise_view_ready = False
         self.current_view_mode = self.VIEW_MODE_THIRD
@@ -375,6 +381,7 @@ class RunningManager:
         self.precise_entering_car = False
         self.precise_last_distance = None
         self.precise_idle_rounds = 0
+        self.precise_stuck_recoveries = 0
         self.precise_face_attempt_index = 0
         self.precise_view_ready = False
         self.current_view_mode = self.VIEW_MODE_THIRD
@@ -649,6 +656,7 @@ class RunningManager:
         self.precise_entering_car = False
         self.precise_last_distance = None
         self.precise_idle_rounds = 0
+        self.precise_stuck_recoveries = 0
         self.road_list = []
         self.locations = []
         self.history_locations = []
@@ -1228,6 +1236,7 @@ class RunningManager:
         self.active_vehicle_entry_source = self.VEHICLE_ENTRY_GARAGE
         self.precise_last_distance = None
         self.precise_idle_rounds = 0
+        self.precise_stuck_recoveries = 0
         self.precise_face_attempt_index = 0
         self.precise_view_ready = False
         self.locations = []
@@ -1358,6 +1367,7 @@ class RunningManager:
         self.precise_entering_car = False
         self.precise_last_distance = None
         self.precise_idle_rounds = 0
+        self.precise_stuck_recoveries = 0
         self.precise_face_attempt_index = 0
         self.precise_view_ready = False
         self.find_car_times = 0
@@ -1398,7 +1408,14 @@ class RunningManager:
             dist_to_entry,
         )
 
-        if dist_to_entry > 0:
+        in_micro_adjust_zone = dist_to_entry <= self.PRECISE_ENTRY_MICRO_ADJUST_RADIUS
+        if (
+            not in_micro_adjust_zone
+            and self._handle_precise_entry_blocked(w, location, direction, dist_to_entry)
+        ):
+            return
+
+        if dist_to_entry > self.PRECISE_ENTRY_MICRO_ADJUST_RADIUS:
             if self.car_search_mode == self.CAR_SEARCH_GARAGE:
                 self._ensure_precise_view(w)
                 if self._attempt_drive_after_move(w, "靠近车库上车点时先检查驾驶按钮"):
@@ -1416,13 +1433,19 @@ class RunningManager:
                     if self._approach_visible_car(w):
                         return
 
-            self._update_precise_progress(dist_to_entry)
+            if self._update_precise_progress(dist_to_entry):
+                self._handle_precise_entry_no_progress(w, location, direction, dist_to_entry)
+                return
+
             self._align_to_point(w, location, direction, self.CAR_ENTRY_POINT, threshold=3)
             w.tap_single("摇杆", y_bias=-120, dura=180, wait=350)
             w.refresh_frame()
             return
 
-        print(f"[Running] 已到达上车点，先对准车库朝向 {self.CAR_FACE_DIRECTION}")
+        print(
+            f"[Running] 已进入上车点微调区 dist={dist_to_entry:.2f}，"
+            f"先对准车库朝向 {self.CAR_FACE_DIRECTION}"
+        )
         face_aligned = self._align_to_direction(w, direction, self.CAR_FACE_DIRECTION, threshold=3)
         if not face_aligned:
             return
@@ -1450,22 +1473,116 @@ class RunningManager:
 
         self._handle_visual_entry_failure(w)
 
-    def _update_precise_progress(self, dist_to_entry: float):
+    def _handle_precise_entry_blocked(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+        dist_to_entry: float,
+    ) -> bool:
+        self._check_if_stuck(location)
+        self._check_if_trapped(location)
+
+        if self.trapped:
+            if self.car_search_mode == self.CAR_SEARCH_GARAGE:
+                self._switch_to_roadside_car_search("精调靠近车库上车点时局部打转")
+                return True
+            print("[Running] 精调上车阶段人物困死，结束当前局")
+            self._log_running_state("精调上车困死", location, direction, "结束当前局", self.CAR_ENTRY_POINT, dist_to_entry)
+            self._handle_death(w)
+            return True
+
+        if not self.stuck:
+            return False
+
+        self.precise_stuck_recoveries += 1
+        print(
+            f"[Running] 精调靠近上车点时卡住，执行脱困 "
+            f"{self.precise_stuck_recoveries}/{self.PRECISE_ENTRY_STUCK_SWITCH_LIMIT}"
+        )
+        self._log_running_state(
+            "精调上车卡住",
+            location,
+            direction,
+            "执行脱困并重新逼近上车点",
+            self.CAR_ENTRY_POINT,
+            dist_to_entry,
+        )
+
+        if (
+            self.car_search_mode == self.CAR_SEARCH_GARAGE
+            and self.precise_stuck_recoveries >= self.PRECISE_ENTRY_STUCK_SWITCH_LIMIT
+        ):
+            self._switch_to_roadside_car_search("多次靠近车库上车点卡住")
+            return True
+
+        self._reset_precise_entry_motion_state(location)
+        self._perform_unstuck_action(w, location)
+        self._reset_precise_entry_motion_state(self._get_location(w) or location)
+        return True
+
+    def _handle_precise_entry_no_progress(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+        dist_to_entry: float,
+    ):
+        self.precise_stuck_recoveries += 1
+        print(
+            f"[Running] 靠近车库上车点距离无进展，执行脱困 "
+            f"{self.precise_stuck_recoveries}/{self.PRECISE_ENTRY_STUCK_SWITCH_LIMIT}"
+        )
+        self._log_running_state(
+            "精调上车无进展",
+            location,
+            direction,
+            "执行脱困并重试上车点",
+            self.CAR_ENTRY_POINT,
+            dist_to_entry,
+        )
+
+        if (
+            self.car_search_mode == self.CAR_SEARCH_GARAGE
+            and self.precise_stuck_recoveries >= self.PRECISE_ENTRY_STUCK_SWITCH_LIMIT
+        ):
+            self._switch_to_roadside_car_search("多次靠近车库上车点无进展")
+            return
+
+        self._reset_precise_entry_motion_state(location)
+        self._perform_unstuck_action(w, location)
+        self._reset_precise_entry_motion_state(self._get_location(w) or location)
+
+    def _reset_precise_entry_motion_state(self, location: Tuple[int, int]):
+        self.precise_last_distance = None
+        self.precise_idle_rounds = 0
+        self.locations = [location]
+        self.history_locations = [location]
+        self.stuck = False
+        self.trapped = False
+        self.loading_road = False
+        self.road_list = [self.CAR_ENTRY_POINT]
+        self.current_segment_start = None
+
+    def _update_precise_progress(self, dist_to_entry: float) -> bool:
         if self.precise_last_distance is None:
             self.precise_last_distance = dist_to_entry
             self.precise_idle_rounds = 0
-            return
+            return False
 
         if dist_to_entry < self.precise_last_distance:
             self.precise_last_distance = dist_to_entry
             self.precise_idle_rounds = 0
-            return
+            self.precise_stuck_recoveries = 0
+            return False
 
         self.precise_idle_rounds += 1
-        if self.precise_idle_rounds >= 8:
+        if self.precise_idle_rounds >= self.PRECISE_ENTRY_IDLE_UNSTUCK_ROUNDS:
             self.correct_position_times += 1
             self.precise_idle_rounds = 0
             print(f"[Running] 精调阶段长时间无进展，累计失败 {self.correct_position_times}")
+            return True
+        return False
 
     def _attempt_drive_after_move(self, w: "FrameWorker", reason: str) -> bool:
         print(f"[Running] {reason}，尝试点击驾驶按钮")
@@ -1551,6 +1668,7 @@ class RunningManager:
     def _return_to_entry_point(self, w: "FrameWorker"):
         self.precise_last_distance = None
         self.precise_idle_rounds = 0
+        self.precise_stuck_recoveries = 0
 
         for _ in range(6):
             location = self._get_location(w)

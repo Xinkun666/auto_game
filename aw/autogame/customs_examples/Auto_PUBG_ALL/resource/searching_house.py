@@ -1,9 +1,10 @@
-# import time
-# import cv2
-# import math
-# import numpy as np
-# from datetime import datetime
-from typing import TYPE_CHECKING
+import math
+import os
+import time
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
+
+import cv2
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigator import MapNavigator
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.toolkit import *
 from aw.autogame.tools.Utils import *
@@ -14,6 +15,35 @@ if TYPE_CHECKING:
 
 
 class Searching_House:
+    HOUSE_INDOOR = 0
+    HOUSE_OUTDOOR = 1
+    HOUSE_ROOFTOP = 2
+
+    STATUS_SCAN_ROOM = "SCAN_ROOM"
+    STATUS_LOOT_ITEM = "LOOT_ITEM"
+    STATUS_SELECT_DOOR = "SELECT_DOOR"
+    STATUS_APPROACH_DOOR = "APPROACH_DOOR"
+    STATUS_ENTER_NEXT_ROOM = "ENTER_NEXT_ROOM"
+    STATUS_FINISHED = "FINISHED"
+
+    SUPPLY_CLASS_IDS = {1}
+    PICK_MENU_CLASS_IDS = {3}
+    DOOR_CLASS_IDS = {0, 4}
+    ROOM_CLUSTER_SIZE = 4.0
+    ROOM_LOOT_LIMIT = 3
+    ROOM_SCAN_STEPS = 6
+    ROOM_SCAN_TURN_BIAS = 430
+    ROOM_SCAN_TURN_DEGREES = 60.0
+    TARGET_DEDUP_ANGLE = 8.0
+    TARGET_DEDUP_BOX_H = 24.0
+    TARGET_MATCH_ANGLE = 14.0
+    ITEM_APPROACH_MAX_STEPS = 8
+    PICK_MENU_AUTO_PICKUP_WAIT = 5.0
+    DOOR_APPROACH_MAX_STEPS = 8
+    ROOM_TRANSITION_DISTANCE = 1.6
+    CENTER_TOLERANCE_PX = 90
+    MAX_ROOMS_PER_FLOOR = 12
+
     def __init__(self):
         self.map_tool = MapNavigator()
         self.house_data = load_json(
@@ -46,25 +76,628 @@ class Searching_House:
         self.doors = []  # [(绝对角度, 框高)]
         self.player_yaw = 0.0  # 累计旋转角度（0° = 进入房间时的朝向）
 
-    def process(self, w: 'FrameWorker'):
-        self.start_searching(w)
+        self.reset()
 
-        # location = check_location(w.get_info('location')[0])
-        # direction = w.get_info('direction')
-        #
-        # if location is None:
-        #     print('位置值是None，尝试向前移动一段距离刷新位置...')
-        #     w.tap_single('摇杆', y_bias=-300, wait=500)
-        #     return
-        #
-        # # 0. 基础设置
-        # if not self.first_view:
-        #     w.click('第一人称')
-        #     self.first_view = True
-        #
-        #
-        #
-        # self.searching_logic(w, location, direction)
+    def reset(self):
+        self.status = self.STATUS_SCAN_ROOM
+        self.current_room_id = None
+        self.current_room_location: Optional[Tuple[int, int]] = None
+        self.visited_rooms = set()
+        self.room_loot_counts: Dict[Any, int] = {}
+        self.room_supplies: Dict[Any, List[Dict[str, Any]]] = {}
+        self.room_doors: Dict[Any, List[Dict[str, Any]]] = {}
+        self.visited_supply_ids = set()
+        self.visited_door_ids = set()
+        self.bad_door_ids = set()
+        self.room_stack: List[Dict[str, Any]] = []
+        self.active_supply: Optional[Dict[str, Any]] = None
+        self.active_door: Optional[Dict[str, Any]] = None
+        self.item_approach_steps = 0
+        self.door_approach_steps = 0
+        self.door_entry_start_location: Optional[Tuple[int, int]] = None
+        self.rooms_searched = 0
+        self.search_complete = False
+        self.auto_forward = False
+        self.history_locations = []
+        self.supplies = []
+        self.doors = []
+        self.player_yaw = 0.0
+
+    def process(self, w: 'FrameWorker'):
+        location = self._get_location(w)
+        direction = self._get_scalar(w.get_info("direction"))
+        house_scene = self._get_house_scene(w)
+
+        if location is None:
+            print("[HouseLoot] 当前位置无效，小步移动刷新坐标")
+            w.tap_single("摇杆", y_bias=-180, dura=180, wait=350)
+            w.refresh_frame()
+            return
+
+        if house_scene == self.HOUSE_ROOFTOP:
+            print("[HouseLoot] 检测到屋顶，停止一层搜房并切回跑图")
+            self.reset()
+            w.change_stage("跑图阶段")
+            return
+
+        if house_scene == self.HOUSE_OUTDOOR:
+            print("[HouseLoot] 当前已在屋外，搜房结束，切回跑图")
+            self.reset()
+            w.change_stage("跑图阶段")
+            return
+
+        if house_scene != self.HOUSE_INDOOR:
+            print(f"[HouseLoot] house_scene={house_scene}，等待进入屋内")
+            return
+
+        if self.current_room_id is None:
+            self._enter_room(location)
+
+        if self.rooms_searched >= self.MAX_ROOMS_PER_FLOOR:
+            print("[HouseLoot] 已达到单层最大房间数，结束搜房")
+            self._finish_house_search(w)
+            return
+
+        if self.status == self.STATUS_SCAN_ROOM:
+            self._scan_current_room(w, location)
+            self.status = self.STATUS_LOOT_ITEM
+            return
+
+        if self.status == self.STATUS_LOOT_ITEM:
+            if self._process_loot_item(w, location, direction):
+                return
+            self.status = self.STATUS_SELECT_DOOR
+            return
+
+        if self.status == self.STATUS_SELECT_DOOR:
+            self._select_next_door_or_finish(w, location)
+            return
+
+        if self.status == self.STATUS_APPROACH_DOOR:
+            self._process_door_approach(w, location, direction)
+            return
+
+        if self.status == self.STATUS_ENTER_NEXT_ROOM:
+            self._confirm_enter_next_room(w, location)
+            return
+
+        if self.status == self.STATUS_FINISHED:
+            self._finish_house_search(w)
+            return
+
+    def _enter_room(self, location: Tuple[int, int]):
+        room_id = self._make_room_id(location)
+        if room_id not in self.visited_rooms:
+            self.rooms_searched += 1
+        self.current_room_id = room_id
+        self.current_room_location = location
+        self.visited_rooms.add(room_id)
+        self.room_loot_counts.setdefault(room_id, 0)
+        self.room_supplies.setdefault(room_id, [])
+        self.room_doors.setdefault(room_id, [])
+        self.history_locations = []
+        print(f"[HouseLoot] 进入房间 room={room_id}, loc={location}, rooms={self.rooms_searched}")
+
+    def _scan_current_room(self, w: 'FrameWorker', location: Tuple[int, int]):
+        room_id = self.current_room_id or self._make_room_id(location)
+        self.current_room_id = room_id
+        self.current_room_location = location
+        self.room_supplies[room_id] = []
+        self.room_doors[room_id] = []
+        self.supplies = []
+        self.doors = []
+
+        print(f"[HouseLoot] 开始扫描当前房间 room={room_id}")
+        for step in range(self.ROOM_SCAN_STEPS):
+            w.refresh_frame()
+            direction = self._get_scalar(w.get_info("direction"))
+            scene = self._get_forward_scene(w)
+            if direction is not None:
+                self._collect_room_targets(room_id, scene, direction)
+            if step < self.ROOM_SCAN_STEPS - 1:
+                w.tap_single("视角", x_bias=self.ROOM_SCAN_TURN_BIAS, dura=800, wait=500)
+                self.update_yaw(self.ROOM_SCAN_TURN_DEGREES)
+
+        supplies = self.room_supplies.get(room_id, [])
+        doors = self.room_doors.get(room_id, [])
+        print(
+            f"[HouseLoot] 房间扫描完成 room={room_id}, "
+            f"supplies={len(supplies)}, doors={len(doors)}"
+        )
+
+    def _collect_room_targets(self, room_id, scene: Sequence[Sequence[float]], direction: float):
+        for det in scene:
+            if not self._valid_detection(det):
+                continue
+
+            class_id = int(det[5])
+            if class_id in self.SUPPLY_CLASS_IDS:
+                target = self._make_target(room_id, det, direction, "supply")
+                if self._is_new_target(self.room_supplies[room_id], target):
+                    self.room_supplies[room_id].append(target)
+                    self.supplies.append((target["abs_angle"], target["box_h"]))
+                    print(
+                        f"[HouseLoot] 记录物资 angle={target['abs_angle']:.1f}, "
+                        f"box_h={target['box_h']:.1f}, id={target['id']}"
+                    )
+            elif class_id in self.DOOR_CLASS_IDS:
+                target = self._make_target(room_id, det, direction, "door")
+                if self._is_new_target(self.room_doors[room_id], target):
+                    self.room_doors[room_id].append(target)
+                    self.doors.append((target["abs_angle"], target["box_h"]))
+                    print(
+                        f"[HouseLoot] 记录室内门 angle={target['abs_angle']:.1f}, "
+                        f"box_h={target['box_h']:.1f}, id={target['id']}"
+                    )
+
+    def _process_loot_item(
+        self,
+        w: 'FrameWorker',
+        location: Tuple[int, int],
+        direction: Optional[float],
+    ) -> bool:
+        room_id = self.current_room_id
+        if room_id is None:
+            return False
+
+        if self.room_loot_counts.get(room_id, 0) >= self.ROOM_LOOT_LIMIT:
+            print(f"[HouseLoot] 当前房间已搜够 {self.ROOM_LOOT_LIMIT} 个物资")
+            self.active_supply = None
+            return False
+
+        if self.active_supply is None:
+            self.active_supply = self._select_next_supply(room_id)
+            self.item_approach_steps = 0
+            if self.active_supply is None:
+                print("[HouseLoot] 当前房间没有可继续拾取的物资")
+                return False
+
+        if self._click_pickup_if_available(w):
+            self._mark_supply_done(room_id, self.active_supply)
+            return True
+
+        if direction is None:
+            print("[HouseLoot] 当前朝向无效，等待下一帧继续拾取")
+            return True
+
+        target = self._find_matching_target(w, self.active_supply, self.SUPPLY_CLASS_IDS)
+        if target is None:
+            if self.item_approach_steps == 0:
+                self._align_direction_blocking(w, direction, self.active_supply["abs_angle"], tolerance=8)
+                self.item_approach_steps += 1
+                return True
+
+            print("[HouseLoot] 物资目标丢失，跳过当前物资")
+            self.visited_supply_ids.add(self.active_supply["id"])
+            self.active_supply = None
+            self.item_approach_steps = 0
+            return True
+
+        aligned = self._align_to_target(w, target, tolerance_px=self.CENTER_TOLERANCE_PX)
+        w.refresh_frame()
+        if not aligned:
+            return True
+
+        if self._click_pickup_if_available(w):
+            self._mark_supply_done(room_id, self.active_supply)
+            return True
+
+        if self.item_approach_steps >= self.ITEM_APPROACH_MAX_STEPS:
+            print("[HouseLoot] 靠近物资多次仍未拾取，跳过")
+            self.visited_supply_ids.add(self.active_supply["id"])
+            self.active_supply = None
+            self.item_approach_steps = 0
+            return True
+
+        print(
+            f"[HouseLoot] 靠近物资 step={self.item_approach_steps + 1}/"
+            f"{self.ITEM_APPROACH_MAX_STEPS}"
+        )
+        self._move_forward(w, dura=260, wait=420)
+        self.item_approach_steps += 1
+        return True
+
+    def _select_next_supply(self, room_id) -> Optional[Dict[str, Any]]:
+        supplies = [
+            target for target in self.room_supplies.get(room_id, [])
+            if target["id"] not in self.visited_supply_ids
+        ]
+        if not supplies:
+            return None
+
+        supplies.sort(
+            key=lambda target: (
+                -target["area"],
+                abs(target["center_x"] - self._frame_width() / 2.0),
+                -target["center_y"],
+            )
+        )
+        target = supplies[0]
+        print(
+            f"[HouseLoot] 选择物资 angle={target['abs_angle']:.1f}, "
+            f"box_h={target['box_h']:.1f}"
+        )
+        return target
+
+    def _mark_supply_done(self, room_id, target: Dict[str, Any]):
+        self.visited_supply_ids.add(target["id"])
+        self.room_loot_counts[room_id] = self.room_loot_counts.get(room_id, 0) + 1
+        print(
+            f"[HouseLoot] 完成拾取 room={room_id}, "
+            f"count={self.room_loot_counts[room_id]}/{self.ROOM_LOOT_LIMIT}"
+        )
+        self.active_supply = None
+        self.item_approach_steps = 0
+
+    def _select_next_door_or_finish(self, w: 'FrameWorker', location: Tuple[int, int]):
+        room_id = self.current_room_id
+        if room_id is None:
+            self.status = self.STATUS_SCAN_ROOM
+            return
+
+        door = self._select_next_door(room_id)
+        if door is not None:
+            self.active_door = door
+            self.door_approach_steps = 0
+            self.status = self.STATUS_APPROACH_DOOR
+            print(f"[HouseLoot] 选择未探索门 angle={door['abs_angle']:.1f}, id={door['id']}")
+            return
+
+        if self.room_stack:
+            backtrack = self.room_stack.pop()
+            self.active_door = {
+                "id": f"backtrack:{room_id}:{len(self.room_stack)}",
+                "room_id": room_id,
+                "kind": "backtrack",
+                "abs_angle": backtrack["return_angle"],
+                "target_room_id": backtrack["room_id"],
+                "box_h": 0.0,
+                "area": 0.0,
+                "center_x": self._frame_width() / 2.0,
+                "center_y": 0.0,
+            }
+            self.door_approach_steps = 0
+            self.status = self.STATUS_APPROACH_DOOR
+            print(
+                f"[HouseLoot] 当前房间无新门，回退到上个房间 "
+                f"target_room={backtrack['room_id']}, angle={backtrack['return_angle']:.1f}"
+            )
+            return
+
+        print("[HouseLoot] 当前楼层没有可继续探索的门，搜房完成")
+        self.status = self.STATUS_FINISHED
+
+    def _select_next_door(self, room_id) -> Optional[Dict[str, Any]]:
+        doors = [
+            target for target in self.room_doors.get(room_id, [])
+            if target["id"] not in self.visited_door_ids
+            and target["id"] not in self.bad_door_ids
+        ]
+        if not doors:
+            return None
+
+        if self.room_stack:
+            return_angle = self.room_stack[-1]["return_angle"]
+            forward_doors = [
+                target for target in doors
+                if self._angle_diff(target["abs_angle"], return_angle) > 25.0
+            ]
+            if forward_doors:
+                doors = forward_doors
+            else:
+                return None
+
+        doors.sort(
+            key=lambda target: (
+                -target["area"],
+                abs(target["center_x"] - self._frame_width() / 2.0),
+            )
+        )
+        return doors[0]
+
+    def _process_door_approach(
+        self,
+        w: 'FrameWorker',
+        location: Tuple[int, int],
+        direction: Optional[float],
+    ):
+        if self.active_door is None:
+            self.status = self.STATUS_SELECT_DOOR
+            return
+
+        if direction is None:
+            print("[HouseLoot] 当前朝向无效，等待下一帧继续靠门")
+            return
+
+        if self.active_door.get("kind") == "backtrack":
+            self._align_direction_blocking(w, direction, self.active_door["abs_angle"], tolerance=8)
+        else:
+            target = self._find_matching_target(w, self.active_door, self.DOOR_CLASS_IDS)
+            if target is not None:
+                aligned = self._align_to_target(w, target, tolerance_px=self.CENTER_TOLERANCE_PX)
+                w.refresh_frame()
+                if not aligned:
+                    return
+            else:
+                self._align_direction_blocking(w, direction, self.active_door["abs_angle"], tolerance=8)
+
+        w.refresh_frame()
+        if w.get_info("开门"):
+            print("[HouseLoot] 检测到开门按钮，先开门")
+            w.click("开门")
+            time.sleep(0.7)
+            w.refresh_frame()
+        elif w.get_info("关门"):
+            print("[HouseLoot] 门已经打开，准备进入")
+
+        if self.door_approach_steps >= self.DOOR_APPROACH_MAX_STEPS:
+            print("[HouseLoot] 靠近门多次无进展，标记该门不可用")
+            if self.active_door.get("kind") != "backtrack":
+                self.bad_door_ids.add(self.active_door["id"])
+            self.active_door = None
+            self.status = self.STATUS_SELECT_DOOR
+            return
+
+        if self.door_entry_start_location is None:
+            self.door_entry_start_location = location
+
+        print(
+            f"[HouseLoot] 向门内推进 step={self.door_approach_steps + 1}/"
+            f"{self.DOOR_APPROACH_MAX_STEPS}"
+        )
+        self._move_forward(w, dura=340, wait=650)
+        self.door_approach_steps += 1
+        self.status = self.STATUS_ENTER_NEXT_ROOM
+
+    def _confirm_enter_next_room(self, w: 'FrameWorker', location: Tuple[int, int]):
+        house_scene = self._get_house_scene(w)
+        if self.active_door is None:
+            self.status = self.STATUS_SELECT_DOOR
+            return
+
+        if house_scene == self.HOUSE_OUTDOOR:
+            print("[HouseLoot] 通过该门到了屋外，停止搜房并切跑图")
+            self._finish_house_search(w)
+            return
+
+        if house_scene == self.HOUSE_ROOFTOP:
+            print("[HouseLoot] 通过该门到了屋顶，标记该门不可走")
+            if self.active_door.get("kind") != "backtrack":
+                self.bad_door_ids.add(self.active_door["id"])
+            self._move_backward(w)
+            self.active_door = None
+            self.door_entry_start_location = None
+            self.status = self.STATUS_SELECT_DOOR
+            return
+
+        if house_scene != self.HOUSE_INDOOR:
+            print("[HouseLoot] 过门后室内状态不稳定，继续确认")
+            return
+
+        start_location = self.door_entry_start_location or location
+        moved = get_distance(start_location, location)
+        new_room_id = self._make_room_id(location)
+        if moved < self.ROOM_TRANSITION_DISTANCE and new_room_id == self.current_room_id:
+            self.status = self.STATUS_APPROACH_DOOR
+            return
+
+        if self.active_door.get("kind") == "backtrack":
+            target_room_id = self.active_door.get("target_room_id")
+            self.current_room_id = target_room_id or new_room_id
+            self.current_room_location = location
+            self.active_door = None
+            self.door_entry_start_location = None
+            self.status = self.STATUS_SCAN_ROOM
+            print(f"[HouseLoot] 已回退到上一房间 room={self.current_room_id}")
+            return
+
+        current_room_id = self.current_room_id
+        self.visited_door_ids.add(self.active_door["id"])
+        return_angle = (self.active_door["abs_angle"] + 180.0) % 360.0
+        self.room_stack.append({"room_id": current_room_id, "return_angle": return_angle})
+        self.active_door = None
+        self.door_entry_start_location = None
+        self._enter_room(location)
+        self.status = self.STATUS_SCAN_ROOM
+
+    def _finish_house_search(self, w: 'FrameWorker'):
+        print("[HouseLoot] 一层搜房完成，切回跑图阶段")
+        self.stop_auto_forward(w)
+        self.reset()
+        w.change_stage("跑图阶段")
+
+    def _click_pickup_if_available(self, w: 'FrameWorker') -> bool:
+        if self._find_largest_target(self._get_forward_scene(w), self.PICK_MENU_CLASS_IDS):
+            print(
+                f"[HouseLoot] 检测到 pick_menu，已到物资跟前，"
+                f"等待自动拾取 {self.PICK_MENU_AUTO_PICKUP_WAIT:.1f}s"
+            )
+            self.stop_auto_forward(w)
+            time.sleep(self.PICK_MENU_AUTO_PICKUP_WAIT)
+            w.refresh_frame()
+            return True
+
+        pickup = w.get_info("拾取首个物资")
+        if not pickup:
+            return False
+
+        print("[HouseLoot] 检测到拾取按钮，点击拾取")
+        w.click(pickup if not isinstance(pickup, bool) else "拾取首个物资")
+        time.sleep(self.PICK_MENU_AUTO_PICKUP_WAIT)
+        w.refresh_frame()
+        return True
+
+    def _find_matching_target(
+        self,
+        w: 'FrameWorker',
+        expected: Dict[str, Any],
+        class_ids: set,
+    ) -> Optional[Sequence[float]]:
+        direction = self._get_scalar(w.get_info("direction"))
+        if direction is None:
+            return self._find_largest_target(self._get_forward_scene(w), class_ids)
+
+        candidates = []
+        for det in self._get_forward_scene(w):
+            if not self._valid_detection(det) or int(det[5]) not in class_ids:
+                continue
+            abs_angle = self._detection_abs_angle(det, direction)
+            diff = self._angle_diff(abs_angle, expected["abs_angle"])
+            if diff <= self.TARGET_MATCH_ANGLE:
+                candidates.append((diff, self._detection_area(det), det))
+
+        if candidates:
+            candidates.sort(key=lambda item: (item[0], -item[1]))
+            return candidates[0][2]
+        return self._find_largest_target(self._get_forward_scene(w), class_ids)
+
+    def _find_largest_target(
+        self,
+        detections: Sequence[Sequence[float]],
+        class_ids: set,
+    ) -> Optional[Sequence[float]]:
+        candidates = [
+            obj for obj in detections
+            if self._valid_detection(obj) and int(obj[5]) in class_ids
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=self._detection_area)
+
+    def _align_to_target(self, w: 'FrameWorker', target: Sequence[float], tolerance_px=80) -> bool:
+        frame_w = self._frame_width()
+        center_x = (float(target[0]) + float(target[2])) / 2.0
+        offset = center_x - (frame_w / 2.0)
+        if abs(offset) <= tolerance_px:
+            return True
+
+        bias = int(max(-400, min(400, offset * 0.33)))
+        print(f"[HouseLoot] 视觉对齐目标 offset={offset:.1f}, bias={bias}")
+        w.tap_single("视角", x_bias=bias, dura=500, wait=500)
+        return False
+
+    def _align_direction_blocking(self, w, current_dir, target_angle, tolerance=5):
+        current_dir = self._get_scalar(current_dir)
+        if current_dir is None:
+            return False
+        for _ in range(8):
+            turn_dir, px, diff = calculate_move_count(current_dir, target_angle)
+            if diff <= tolerance:
+                return True
+            x_bias = px if turn_dir == 'right' else -px
+            w.tap_single('视角', x_bias=int(x_bias), dura=700, wait=450)
+            w.refresh_frame()
+            current_dir = self._get_scalar(w.get_info('direction'))
+            if current_dir is None:
+                return False
+        return False
+
+    def _move_forward(self, w: 'FrameWorker', dura=300, wait=500):
+        self.stop_auto_forward(w)
+        w.tap_single("摇杆", y_bias=-300, dura=dura, wait=wait)
+        w.refresh_frame()
+
+    def _move_backward(self, w: 'FrameWorker'):
+        self.stop_auto_forward(w)
+        w.tap_single("摇杆", y_bias=300, dura=320, wait=600)
+        w.refresh_frame()
+
+    def _get_house_scene(self, w: 'FrameWorker') -> Optional[int]:
+        value = w.get_info("house_scene")
+        if value is None:
+            value = w.get_info("hosue_scene")
+        if isinstance(value, (list, tuple)) and len(value) == 1:
+            value = value[0]
+        if isinstance(value, bool):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _get_location(self, w: 'FrameWorker') -> Optional[Tuple[int, int]]:
+        info = w.get_info("location")
+        if info is None:
+            return None
+        if isinstance(info, (list, tuple)):
+            if len(info) >= 2 and not isinstance(info[0], (list, tuple)):
+                return check_location(info)
+            if len(info) > 0:
+                return check_location(info[0])
+        return None
+
+    def _get_forward_scene(self, w: 'FrameWorker') -> List[Sequence[float]]:
+        scene = w.get_info("forward_scene")
+        if not scene or isinstance(scene, bool):
+            return []
+        return list(scene)
+
+    def _get_scalar(self, value) -> Optional[float]:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, (list, tuple)) and value:
+            first = value[0]
+            if isinstance(first, (int, float)):
+                return float(first)
+        return None
+
+    def _make_room_id(self, location: Tuple[int, int]):
+        return (
+            int(round(float(location[0]) / self.ROOM_CLUSTER_SIZE)),
+            int(round(float(location[1]) / self.ROOM_CLUSTER_SIZE)),
+        )
+
+    def _make_target(self, room_id, det: Sequence[float], direction: float, kind: str) -> Dict[str, Any]:
+        abs_angle = self._detection_abs_angle(det, direction)
+        box_h = max(0.0, float(det[3]) - float(det[1]))
+        center_x = (float(det[0]) + float(det[2])) / 2.0
+        center_y = (float(det[1]) + float(det[3])) / 2.0
+        angle_bucket = int(round(abs_angle / self.TARGET_DEDUP_ANGLE))
+        height_bucket = int(round(box_h / self.TARGET_DEDUP_BOX_H))
+        return {
+            "id": f"{kind}:{room_id}:{angle_bucket}:{height_bucket}:{int(det[5])}",
+            "room_id": room_id,
+            "kind": kind,
+            "abs_angle": abs_angle,
+            "box_h": box_h,
+            "area": self._detection_area(det),
+            "center_x": center_x,
+            "center_y": center_y,
+            "class_id": int(det[5]),
+        }
+
+    def _is_new_target(self, targets: List[Dict[str, Any]], target: Dict[str, Any]) -> bool:
+        for item in targets:
+            if self._angle_diff(item["abs_angle"], target["abs_angle"]) <= self.TARGET_DEDUP_ANGLE:
+                if abs(item["box_h"] - target["box_h"]) <= self.TARGET_DEDUP_BOX_H:
+                    return False
+        return True
+
+    def _valid_detection(self, det: Sequence[float]) -> bool:
+        if not isinstance(det, (list, tuple)) or len(det) < 6:
+            return False
+        try:
+            return float(det[2]) > float(det[0]) and float(det[3]) > float(det[1])
+        except (TypeError, ValueError):
+            return False
+
+    def _detection_abs_angle(self, det: Sequence[float], direction: float) -> float:
+        center_x = (float(det[0]) + float(det[2])) / 2.0
+        rel_angle = self.pixel_to_angle(center_x)
+        return (float(direction) + rel_angle) % 360.0
+
+    def _detection_area(self, det: Sequence[float]) -> float:
+        return max(0.0, float(det[2]) - float(det[0])) * max(0.0, float(det[3]) - float(det[1]))
+
+    def _frame_width(self) -> float:
+        try:
+            inf_w, inf_h = get_wh()
+            return float(max(inf_w, inf_h))
+        except Exception:
+            return float(self.screen_w)
+
+    def _angle_diff(self, a: float, b: float) -> float:
+        return abs((float(a) - float(b) + 180.0) % 360.0 - 180.0)
 
     def searching_logic(self, w: 'FrameWorker', current_loc, current_direction):
 
@@ -413,14 +1046,20 @@ class Searching_House:
             w.click('自动前进')
             self.auto_forward = False
 
-    def align_direction_blocking(self, w, current_dir, target_angle):
+    def align_direction_blocking(self, w, current_dir, target_angle, tolerance=5):
+        current_dir = self._get_scalar(current_dir)
+        if current_dir is None:
+            return False
         for _ in range(10):
             turn_dir, px, diff = calculate_move_count(current_dir, target_angle)
-            if diff <= 5: return True
+            if diff <= tolerance:
+                return True
             x_bias = px if turn_dir == 'right' else - px
             w.tap_single('视角', x_bias=int(x_bias), dura=800, wait=500)
             w.refresh_frame()
-            current_dir = w.get_info('direction')
+            current_dir = self._get_scalar(w.get_info('direction'))
+            if current_dir is None:
+                return False
         return False
 
     def align_direction(self, w, tar_loc, threshold=5):
@@ -613,8 +1252,9 @@ class Searching_House:
 
     def pixel_to_angle(self, px: float) -> float:
         """像素水平坐标 -> 相对角度（度）"""
-        center = self.screen_w / 2
-        return (px - center) / (self.screen_w / 2) * (80 / 2)
+        frame_w = self._frame_width()
+        center = frame_w / 2.0
+        return (float(px) - center) / center * (80.0 / 2.0)
 
     def update_yaw(self, delta):
         """每次旋转后调用，更新绝对朝向"""

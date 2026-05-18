@@ -81,11 +81,12 @@ def prepare_round():
     drop_target = DROP_TARGET_GARAGE if need_drive else DROP_TARGET_CENTER
 
     parachute_manager.reset()
-    parachute_manager.configure(target_pos=drop_target, landing_stage="跑图阶段")
+    parachute_manager.configure(target_pos=drop_target, landing_stage="搜房阶段")
 
     running_manager.reset(finding_car=need_drive)
 
     driving_manager.reset()
+    searching_house_manager.reset()
     house_exit_manager.reset()
 
     print(
@@ -293,8 +294,8 @@ def on_stage(w: "FrameWorker"):
         return
 
     if w.current_stage == "搜房阶段":
-        time.sleep(1)
-        pass
+        searching_house_manager.process(w)
+        return
         # house_scene = w.get_info("house_scene")
         # if isinstance(house_scene, (list, tuple)) and len(house_scene) == 1:
         #     house_scene = house_scene[0]

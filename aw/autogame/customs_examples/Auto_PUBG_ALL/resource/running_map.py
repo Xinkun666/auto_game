@@ -247,6 +247,8 @@ class RunningManager:
     R_CITY = (1136, 783)
     # 车库附近的精确上车点
     CAR_ENTRY_POINT = (1131, 763)
+    # 距离车库上车点太远时，不再绕路去车库，直接切换沿路找车。
+    GARAGE_SEARCH_MAX_DISTANCE = 50.0
     # 车库无车后，先准确离开到路边，再开始道路巡游找车。
     GARAGE_TO_ROADSIDE_POINTS = ((1134, 762), (1134, 771))
     GARAGE_TO_ROADSIDE_TOLERANCE = 2.0
@@ -272,6 +274,8 @@ class RunningManager:
     PRECISE_ENTRY_IDLE_UNSTUCK_ROUNDS = 4
     # 进入最后上车点附近后属于微调/找驾驶按钮，不再按位置不变判定卡死。
     PRECISE_ENTRY_MICRO_ADJUST_RADIUS = 5.0
+    # 车库精调阶段方向值累计异常达到该次数后，不再继续车库找车。
+    PRECISE_ENTRY_INVALID_DIRECTION_LIMIT = 5
     # 精调上车时，向右或向左单次小幅试探的摇杆参数
     PRECISE_LATERAL_STEP_BIAS = 150
     PRECISE_LATERAL_STEP_DURA = 220
@@ -348,6 +352,7 @@ class RunningManager:
         self.precise_stuck_recoveries = 0
         self.precise_face_attempt_index = 0
         self.precise_view_ready = False
+        self.precise_invalid_direction_count = 0
         self.current_view_mode = self.VIEW_MODE_THIRD
         self.last_valid_location: Optional[Tuple[int, int]] = None
         self.last_jump_replan_time: float = 0.0
@@ -384,6 +389,7 @@ class RunningManager:
         self.precise_stuck_recoveries = 0
         self.precise_face_attempt_index = 0
         self.precise_view_ready = False
+        self.precise_invalid_direction_count = 0
         self.current_view_mode = self.VIEW_MODE_THIRD
         self.last_valid_location = None
         self.last_jump_replan_time = 0.0
@@ -663,6 +669,7 @@ class RunningManager:
         self.stuck = False
         self.trapped = False
         self.precise_view_ready = False
+        self.precise_invalid_direction_count = 0
         self.current_view_mode = self.VIEW_MODE_THIRD
         self.ignore_vehicle_until = time.time() + cooldown
         self.last_jump_click_time = 0.0
@@ -826,7 +833,14 @@ class RunningManager:
             self.current_segment_start = None
         elif self.finding_car:
             if self.car_search_mode == self.CAR_SEARCH_GARAGE:
-                self._load_garage_find_path(location)
+                if self._should_skip_garage_search(location):
+                    self._switch_to_roadside_car_search(
+                        "距离车库点过远",
+                        leave_garage_route=False,
+                    )
+                    self._load_road_patrol_path(location, reason="距离车库点过远，直接沿路找车")
+                else:
+                    self._load_garage_find_path(location)
             else:
                 self._load_road_patrol_path(location, reason="车库无车，寻车阶段沿路巡游")
         else:
@@ -858,6 +872,24 @@ class RunningManager:
 
         if not self.road_list or tuple(map(int, self.road_list[-1])) != self.CAR_ENTRY_POINT:
             self.road_list = self._merge_paths(self.road_list, [self.CAR_ENTRY_POINT])
+
+    def _should_skip_garage_search(self, location: Tuple[int, int]) -> bool:
+        dist_to_garage = get_distance(location, self.CAR_ENTRY_POINT)
+        if dist_to_garage <= self.GARAGE_SEARCH_MAX_DISTANCE:
+            return False
+        print(
+            f"[Running] 当前距离车库上车点 {dist_to_garage:.2f} "
+            f"> {self.GARAGE_SEARCH_MAX_DISTANCE:.2f}，跳过车库找车"
+        )
+        self._log_running_state(
+            "距离车库点过远",
+            location,
+            None,
+            "跳过车库，直接切换到沿路找车",
+            self.CAR_ENTRY_POINT,
+            dist_to_garage,
+        )
+        return True
 
     def _merge_paths(self, path1, path2):
         merged = [tuple(map(int, point)) for point in (path1 or []) if point is not None]
@@ -1239,6 +1271,7 @@ class RunningManager:
         self.precise_stuck_recoveries = 0
         self.precise_face_attempt_index = 0
         self.precise_view_ready = False
+        self.precise_invalid_direction_count = 0
         self.locations = []
         self.history_locations = []
         self.stuck = False
@@ -1361,8 +1394,11 @@ class RunningManager:
         self.active_vehicle_entry_source = None
         self._discard_current_road_target()
 
-    def _switch_to_roadside_car_search(self, reason: str):
-        print(f"[Running] {reason}，判定车库暂无可上车辆，先离开车库再切换到沿路找车")
+    def _switch_to_roadside_car_search(self, reason: str, leave_garage_route: bool = True):
+        if leave_garage_route:
+            print(f"[Running] {reason}，判定车库暂无可上车辆，先离开车库再切换到沿路找车")
+        else:
+            print(f"[Running] {reason}，直接切换到沿路找车")
         self.car_search_mode = self.CAR_SEARCH_ROADSIDE
         self.precise_entering_car = False
         self.precise_last_distance = None
@@ -1370,15 +1406,16 @@ class RunningManager:
         self.precise_stuck_recoveries = 0
         self.precise_face_attempt_index = 0
         self.precise_view_ready = False
+        self.precise_invalid_direction_count = 0
         self.find_car_times = 0
         self.correct_position_times = 0
-        self.loading_road = True
-        self.road_list = list(self.GARAGE_TO_ROADSIDE_POINTS)
+        self.loading_road = bool(leave_garage_route)
+        self.road_list = list(self.GARAGE_TO_ROADSIDE_POINTS) if leave_garage_route else []
         self.current_segment_start = None
         self.current_road_node = None
         self.visited_road_nodes = set()
         self.active_vehicle_entry_source = None
-        self.garage_to_roadside_route_active = True
+        self.garage_to_roadside_route_active = bool(leave_garage_route)
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_steps = 0
@@ -1399,6 +1436,8 @@ class RunningManager:
 
         dist_to_entry = get_distance(location, self.CAR_ENTRY_POINT)
         print(f"[Running] 精调上车中，当前位置 {location}，上车点 {self.CAR_ENTRY_POINT}，距离 {dist_to_entry:.2f}")
+        if self._handle_precise_invalid_direction(location, direction, dist_to_entry):
+            return
         self._log_running_state(
             "正在精调上车",
             location,
@@ -1472,6 +1511,39 @@ class RunningManager:
             return
 
         self._handle_visual_entry_failure(w)
+
+    def _handle_precise_invalid_direction(
+        self,
+        location: Tuple[int, int],
+        direction: Optional[float],
+        dist_to_entry: float,
+    ) -> bool:
+        if self.car_search_mode != self.CAR_SEARCH_GARAGE or direction != -1:
+            return False
+
+        self.precise_invalid_direction_count += 1
+        print(
+            f"[Running] 车库靠近/精调阶段方向值为 -1，累计 "
+            f"{self.precise_invalid_direction_count}/{self.PRECISE_ENTRY_INVALID_DIRECTION_LIMIT}"
+        )
+        self._log_running_state(
+            "车库靠近方向异常",
+            location,
+            direction,
+            "累计方向 -1，暂不继续靠近车库点",
+            self.CAR_ENTRY_POINT,
+            dist_to_entry,
+        )
+        if self.precise_invalid_direction_count >= self.PRECISE_ENTRY_INVALID_DIRECTION_LIMIT:
+            self._switch_to_roadside_car_search("车库点方向多次为 -1")
+        return True
+
+    def _is_garage_entry_target(self, target: Tuple[int, int]) -> bool:
+        return (
+            self.finding_car
+            and self.car_search_mode == self.CAR_SEARCH_GARAGE
+            and tuple(map(int, target)) == tuple(map(int, self.CAR_ENTRY_POINT))
+        )
 
     def _handle_precise_entry_blocked(
         self,
@@ -1918,6 +1990,10 @@ class RunningManager:
         dist: float,
     ):
         self.stop_auto_forward(w)
+
+        if self._is_garage_entry_target(target) and direction == -1:
+            self._handle_precise_invalid_direction(location, direction, dist)
+            return
 
         if direction is None:
             print("[Running] 精确逼近时当前朝向无效，等待下一帧")

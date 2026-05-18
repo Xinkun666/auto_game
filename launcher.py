@@ -358,6 +358,9 @@ class LauncherWindow(QWidget):
         self.preview_overlay_button = QPushButton("显示标注")
         self.preview_overlay_button.setCheckable(True)
         self.preview_overlay_button.setChecked(False)
+        self.preview_points_button = QPushButton("显示控点")
+        self.preview_points_button.setCheckable(True)
+        self.preview_points_button.setChecked(False)
 
         self.output_edit = QPlainTextEdit()
         self.output_edit.setReadOnly(True)
@@ -420,6 +423,7 @@ class LauncherWindow(QWidget):
         action_layout.addWidget(self.stop_button)
         action_layout.addWidget(self.keep_process_on_manual_stop_button)
         action_layout.addWidget(self.preview_overlay_button)
+        action_layout.addWidget(self.preview_points_button)
         action_layout.addStretch(1)
         main_layout.addLayout(action_layout)
 
@@ -459,6 +463,7 @@ class LauncherWindow(QWidget):
         self.stop_button.clicked.connect(self._stop_run)
         self.keep_process_on_manual_stop_button.toggled.connect(self._toggle_keep_process_on_manual_stop)
         self.preview_overlay_button.toggled.connect(self._toggle_preview_overlay)
+        self.preview_points_button.toggled.connect(self._toggle_preview_points)
         self.preview_timer.timeout.connect(self._poll_preview_frame)
         self.safety_timer.timeout.connect(self._check_and_start_if_safe)
         self.run_timeout_timer.timeout.connect(self._handle_run_timeout)
@@ -493,6 +498,11 @@ class LauncherWindow(QWidget):
     def _toggle_preview_overlay(self, checked: bool):
         self.preview_overlay_button.setText("隐藏标注" if checked else "显示标注")
         LOGGER.info("preview overlay toggled: %s", checked)
+        self._refresh_preview_pixmap()
+
+    def _toggle_preview_points(self, checked: bool):
+        self.preview_points_button.setText("隐藏控点" if checked else "显示控点")
+        LOGGER.info("preview points toggled: %s", checked)
         self._refresh_preview_pixmap()
 
     def _toggle_keep_process_on_manual_stop(self, checked: bool):
@@ -867,7 +877,9 @@ class LauncherWindow(QWidget):
     def _build_preview_display_pixmap(self) -> QPixmap:
         if self.latest_preview_pixmap is None:
             return QPixmap()
-        if not self.preview_overlay_button.isChecked():
+        show_overlay = self.preview_overlay_button.isChecked()
+        show_points = self.preview_points_button.isChecked()
+        if not show_overlay and not show_points:
             return self.latest_preview_pixmap
 
         payload = self.latest_preview_payload or {}
@@ -884,11 +896,12 @@ class LauncherWindow(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         screen_width, screen_height = get_resolution()
 
-        colors = {
-            "areas": QColor(80, 220, 120),
-            "points": QColor(80, 190, 255),
-            "special_areas": QColor(255, 140, 80),
-        }
+        colors = {}
+        if show_overlay:
+            colors["areas"] = QColor(80, 220, 120)
+            colors["special_areas"] = QColor(255, 140, 80)
+        if show_points:
+            colors["points"] = QColor(80, 190, 255)
 
         for scene_name, scene_data in scenes.items():
             if not isinstance(scene_data, dict):

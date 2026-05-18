@@ -59,8 +59,9 @@ def resolve_area_rect(image_width, image_height, area_config):
 
 def infer_anchor_config_from_rect(origin_width, origin_height, rect):
     """
-    Infer an anchor config from a legacy normalized rect if the whole rect stays
-    inside one screen quadrant. Return None when the rect crosses any centerline.
+    Infer an anchor config from a legacy normalized rect only when the whole
+    rect stays inside one screen quadrant and is closer to that screen corner
+    than to the centerlines. Return None for center-leaning rects.
     """
     x1_norm, y1_norm, x2_norm, y2_norm = [float(v) for v in rect]
 
@@ -72,6 +73,14 @@ def infer_anchor_config_from_rect(origin_width, origin_height, rect):
     if not ((in_left or in_right) and (in_top or in_bottom)):
         return None
 
+    close_to_left_edge = in_left and x1_norm <= (0.5 - x2_norm)
+    close_to_right_edge = in_right and (1.0 - x2_norm) <= (x1_norm - 0.5)
+    close_to_top_edge = in_top and y1_norm <= (0.5 - y2_norm)
+    close_to_bottom_edge = in_bottom and (1.0 - y2_norm) <= (y1_norm - 0.5)
+
+    if not ((close_to_left_edge or close_to_right_edge) and (close_to_top_edge or close_to_bottom_edge)):
+        return None
+
     x1 = int(x1_norm * origin_width)
     y1 = int(y1_norm * origin_height)
     x2 = int(x2_norm * origin_width)
@@ -81,25 +90,25 @@ def infer_anchor_config_from_rect(origin_width, origin_height, rect):
         "height": max(0, y2 - y1),
     }
 
-    if in_top and in_left:
+    if close_to_top_edge and close_to_left_edge:
         return {
             "anchor": "top_left",
             "offset": {"left": x1, "top": y1},
             "size": size,
         }
-    if in_top and in_right:
+    if close_to_top_edge and close_to_right_edge:
         return {
             "anchor": "top_right",
             "offset": {"right": int(origin_width) - x2, "top": y1},
             "size": size,
         }
-    if in_bottom and in_left:
+    if close_to_bottom_edge and close_to_left_edge:
         return {
             "anchor": "bottom_left",
             "offset": {"left": x1, "bottom": int(origin_height) - y2},
             "size": size,
         }
-    if in_bottom and in_right:
+    if close_to_bottom_edge and close_to_right_edge:
         return {
             "anchor": "bottom_right",
             "offset": {"right": int(origin_width) - x2, "bottom": int(origin_height) - y2},

@@ -35,7 +35,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from aw.autogame.tools.Utils import archive_run_artifacts
+from aw.autogame.tools.Utils import archive_run_artifacts, get_resolution
+from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 
 ROOT_DIR = Path(__file__).resolve().parent
 TESTCASES_DIR = ROOT_DIR / "testcases"
@@ -818,19 +819,43 @@ class LauncherWindow(QWidget):
     def _draw_stage_rect(
         self,
         painter: QPainter,
-        rect_data,
+        area_config,
         pixmap_width: int,
         pixmap_height: int,
+        origin_width: int,
+        origin_height: int,
         color: QColor,
         label: str,
     ):
-        if not isinstance(rect_data, (list, tuple)) or len(rect_data) != 4:
+        try:
+            if isinstance(area_config, dict):
+                screen_width, screen_height = (None, None)
+                if "anchor" in area_config:
+                    screen_width, screen_height = get_resolution()
+                x1, y1, x2, y2 = resolve_area_rect_for_frame(
+                    pixmap_width,
+                    pixmap_height,
+                    area_config,
+                    screen_width,
+                    screen_height,
+                    origin_width,
+                    origin_height,
+                )
+            elif isinstance(area_config, (list, tuple)) and len(area_config) == 4:
+                x1, y1, x2, y2 = resolve_area_rect_for_frame(
+                    pixmap_width,
+                    pixmap_height,
+                    {"rect": area_config},
+                    None,
+                    None,
+                    origin_width,
+                    origin_height,
+                )
+            else:
+                return
+        except Exception:
             return
 
-        x1 = int(float(rect_data[0]) * pixmap_width)
-        y1 = int(float(rect_data[1]) * pixmap_height)
-        x2 = int(float(rect_data[2]) * pixmap_width)
-        y2 = int(float(rect_data[3]) * pixmap_height)
         width = max(1, x2 - x1)
         height = max(1, y2 - y1)
 
@@ -875,13 +900,14 @@ class LauncherWindow(QWidget):
                 for item_name, item_data in items.items():
                     if not isinstance(item_data, dict):
                         continue
-                    rect = item_data.get("rect")
                     label = f"{scene_name}/{item_name}"
                     self._draw_stage_rect(
                         painter,
-                        rect,
+                        item_data,
                         pixmap.width(),
                         pixmap.height(),
+                        int(scene_data.get("width") or pixmap.width()),
+                        int(scene_data.get("height") or pixmap.height()),
                         color,
                         label,
                     )

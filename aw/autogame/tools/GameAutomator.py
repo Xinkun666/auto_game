@@ -11,6 +11,7 @@ class GameAutomator:
         self.driver = driver
         self.logger = logger
 
+        self.screen_w, self.screen_h = wait_for_landscape_resolution_stable()
         self.W, self.H = get_wh()
         if get_screen_mode() == "0":
             rotation_mode = get_display_rotation()

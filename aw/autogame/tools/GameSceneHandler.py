@@ -2,6 +2,7 @@ import os
 import importlib
 import concurrent.futures
 from aw.autogame.tools.Utils import *
+from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 import numpy as np
 
 project_case = os.environ.get("TARGET_PROJECT_CASE")
@@ -23,7 +24,21 @@ class GameImageProcessor:
         self.template_cache = self._load_templates()
         self.special_handler = SpecialHandler
         self.task_config = None
-        self.h, self.w = get_wh()
+        self.screen_w, self.screen_h = self._resolve_screen_resolution()
+
+    def _resolve_screen_resolution(self):
+        env_w = os.environ.get("AUTOGAME_SCREEN_WIDTH")
+        env_h = os.environ.get("AUTOGAME_SCREEN_HEIGHT")
+        if env_w and env_h:
+            try:
+                return int(env_w), int(env_h)
+            except ValueError:
+                pass
+
+        screen_w, screen_h = get_resolution()
+        if screen_w and screen_h:
+            return int(screen_w), int(screen_h)
+        return None, None
 
     def _load_templates(self):
         cache = {}
@@ -58,9 +73,21 @@ class GameImageProcessor:
 
                 # Case 1: 特殊区域
                 if task_type == 'special':
-                    rect = config.get('rect')
-                    if rect:
-                        x1, y1, x2, y2 = [int(v * s) for v, s in zip(rect, [curr_w, curr_h, curr_w, curr_h])]
+                    area_config = config.get('area_config') or config
+                    if 'anchor' in area_config or 'rect' in area_config:
+                        x1, y1, x2, y2 = resolve_area_rect_for_frame(
+                            curr_w,
+                            curr_h,
+                            area_config,
+                            self.screen_w,
+                            self.screen_h,
+                            origin_w,
+                            origin_h,
+                        )
+                        x1 = max(0, min(curr_w, x1))
+                        y1 = max(0, min(curr_h, y1))
+                        x2 = max(0, min(curr_w, x2))
+                        y2 = max(0, min(curr_h, y2))
                         target_img = np.ascontiguousarray(raw_frame[y1:y2, x1:x2]).copy()
                     else:
                         target_img = np.ascontiguousarray(raw_frame).copy()
@@ -209,6 +236,7 @@ class StageLogicController:
                 tasks_config[task_key] = {
                     'type': 'special',
                     'rect': sa_data.get('rect'),
+                    'area_config': sa_data,
                     'handler_name': sa_name,
                     'origin_width': origin_w,
                     'origin_height': origin_h

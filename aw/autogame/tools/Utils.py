@@ -505,6 +505,43 @@ def convert_scene_point_by_current_rotation(x, y, scene_width, scene_height,
         current_rotation,
     )
 
+def get_runtime_screen_resolution():
+    env_w = os.environ.get("AUTOGAME_SCREEN_WIDTH")
+    env_h = os.environ.get("AUTOGAME_SCREEN_HEIGHT")
+    if env_w and env_h:
+        try:
+            return int(env_w), int(env_h)
+        except ValueError:
+            pass
+    screen_w, screen_h = get_resolution()
+    if screen_w and screen_h:
+        return int(screen_w), int(screen_h)
+    return None, None
+
+
+def select_scene_resolution(scene_content, screen_width=None, screen_height=None):
+    if not isinstance(scene_content, dict) or "resolutions" not in scene_content:
+        return scene_content
+
+    resolutions = scene_content.get("resolutions", {})
+    if not isinstance(resolutions, dict) or not resolutions:
+        return {}
+
+    if screen_width and screen_height:
+        exact_key = f"{int(screen_width)}_{int(screen_height)}"
+        if exact_key in resolutions:
+            return resolutions[exact_key]
+        for value in resolutions.values():
+            if (
+                isinstance(value, dict)
+                and int(value.get("width") or 0) == int(screen_width)
+                and int(value.get("height") or 0) == int(screen_height)
+            ):
+                return value
+
+    return next(iter(resolutions.values()))
+
+
 def extract_absolute_points(stage_info):
     """
     将游戏各阶段场景中的控点（Points）从百分比归一化坐标转换为屏幕绝对像素坐标。
@@ -529,11 +566,13 @@ def extract_absolute_points(stage_info):
               }
     """
     absolute_points = {}
+    screen_w, screen_h = get_runtime_screen_resolution()
 
     for stage_name, stage_content in stage_info.items():
         scenes = stage_content.get('scenes', {})
 
         for scene_name, scene_content in scenes.items():
+            scene_content = select_scene_resolution(scene_content, screen_w, screen_h)
             # 获取当前场景的画布大小（标注时的原始分辨率）
             img_w = scene_content.get('width', 1)
             img_h = scene_content.get('height', 1)

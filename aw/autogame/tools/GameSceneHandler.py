@@ -222,6 +222,7 @@ class StageLogicController:
 
         # 遍历该阶段下的所有场景和区域
         for scene_name, scene_info in scenes.items():
+            scene_info = select_scene_resolution(scene_info, self.processor.screen_w, self.processor.screen_h)
             origin_w = scene_info.get('width')
             origin_h = scene_info.get('height')
 

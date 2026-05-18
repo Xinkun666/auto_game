@@ -10,7 +10,7 @@ import re
 import keyword
 import hashlib
 from dataclasses import dataclass, field, asdict
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QTreeWidget, QTreeWidgetItem, QPushButton,
                              QMenu, QFileDialog, QInputDialog, QLabel, QSplitter,
@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QPinchGesture, QHeaderView, QProgressDialog)
 from PyQt6.QtCore import Qt, QRectF, QPointF, QEvent
 from PyQt6.QtGui import QAction, QPixmap, QColor, QPen, QBrush, QImage, QPainter, QGuiApplication, QFontMetricsF
+from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 # ==========================================
 # 1. 数据模型 (Data Structure)
 # ==========================================
@@ -495,6 +496,38 @@ class AutoStudioWindow(QMainWindow):
             self.status_label.setText(f"工程 {name} 已创建。请添加阶段。")
     def set_current_work_stage(self, stage: Optional[StageData]):
         self.current_work_stage = stage
+
+    def _scene_size_label(self, scene: SceneData) -> str:
+        width, height = self._get_scene_image_size(scene)
+        if width > 0 and height > 0:
+            return f"{width} * {height}"
+        return "未抓图/未导入图片"
+
+    def _group_scenes_by_name(self, stage: StageData) -> Dict[str, List[SceneData]]:
+        grouped = {}
+        for scene in stage.scenes:
+            grouped.setdefault(scene.name, []).append(scene)
+        return grouped
+
+    def _find_stage_for_scene(self, scene_data: SceneData) -> Optional[StageData]:
+        if not self.project or not scene_data:
+            return None
+        for stage in self.project.stages:
+            if scene_data in stage.scenes:
+                return stage
+        return None
+
+    def _find_scene_peers(self, scene_data: SceneData) -> List[SceneData]:
+        stage = self._find_stage_for_scene(scene_data)
+        if not stage:
+            return []
+        return [scene for scene in stage.scenes if scene.name == scene_data.name and scene is not scene_data]
+
+    def _find_scene_item(self, scene: SceneData, item_type: str, name: str) -> Optional[ItemData]:
+        for item in scene.items:
+            if item.item_type == item_type and item.name == name:
+                return item
+        return None
     def rename_project(self):
         if not self.project:
             return
@@ -527,28 +560,38 @@ class AutoStudioWindow(QMainWindow):
             s_node.setToolTip(0, stage_text)
             s_node.setData(0, Qt.ItemDataRole.UserRole, stage)
             stage_items[stage.id] = s_node
-            for scene in stage.scenes:
-                sc_node = QTreeWidgetItem(s_node)
-                scene_text = f"场景: {scene.name}"
-                sc_node.setText(0, scene_text)
-                sc_node.setToolTip(0, scene_text)
-                sc_node.setData(0, Qt.ItemDataRole.UserRole, scene)
-                scene_items[scene.id] = sc_node
-                for item in scene.items:
-                    i_node = QTreeWidgetItem(sc_node)
-                    if item.item_type == 'area':
-                        type_icon = "[区域]"
-                    elif item.item_type == 'special_area':
-                        type_icon = "[特殊区域]"
-                    else:
-                        type_icon = "[控点]"
-                    item_text = f"{type_icon} {item.name}"
-                    i_node.setText(0, item_text)
-                    i_node.setToolTip(0, item_text)
-                    vis_text = "显示" if item.visible else "隐藏"
-                    i_node.setText(1, vis_text)
-                    i_node.setToolTip(1, vis_text)
-                    i_node.setData(0, Qt.ItemDataRole.UserRole, item)
+            for scene_name, scenes in self._group_scenes_by_name(stage).items():
+                group_node = QTreeWidgetItem(s_node)
+                scene_text = f"场景: {scene_name}"
+                group_node.setText(0, scene_text)
+                group_node.setToolTip(0, scene_text)
+                group_node.setData(0, Qt.ItemDataRole.UserRole, {
+                    "kind": "scene_group",
+                    "stage": stage,
+                    "scene_name": scene_name,
+                })
+                for scene in scenes:
+                    sc_node = QTreeWidgetItem(group_node)
+                    scene_text = self._scene_size_label(scene)
+                    sc_node.setText(0, scene_text)
+                    sc_node.setToolTip(0, scene_text)
+                    sc_node.setData(0, Qt.ItemDataRole.UserRole, scene)
+                    scene_items[scene.id] = sc_node
+                    for item in scene.items:
+                        i_node = QTreeWidgetItem(sc_node)
+                        if item.item_type == 'area':
+                            type_icon = "[区域]"
+                        elif item.item_type == 'special_area':
+                            type_icon = "[特殊区域]"
+                        else:
+                            type_icon = "[控点]"
+                        item_text = f"{type_icon} {item.name}"
+                        i_node.setText(0, item_text)
+                        i_node.setToolTip(0, item_text)
+                        vis_text = "显示" if item.visible else "隐藏"
+                        i_node.setText(1, vis_text)
+                        i_node.setToolTip(1, vis_text)
+                        i_node.setData(0, Qt.ItemDataRole.UserRole, item)
         self.tree.resizeColumnToContents(0)
         self.tree.resizeColumnToContents(1)
         self.restore_expanded_ids(expanded_ids, stage_items, scene_items)
@@ -614,8 +657,25 @@ class AutoStudioWindow(QMainWindow):
             btn_delete = QPushButton("🗑 删除阶段")
             btn_delete.clicked.connect(lambda: self.delete_stage(data))
             self.action_layout.addWidget(btn_delete)
+        elif isinstance(data, dict) and data.get("kind") == "scene_group":
+            self.current_stage = data.get("stage")
+            self.set_current_work_stage(self.current_stage)
+            self.current_scene = None
+            self.clear_scene_display()
+            scene_name = data.get("scene_name", "")
+            lbl = QLabel(f"当前场景: {scene_name}")
+            self.action_layout.addWidget(lbl)
+            btn_add_res = QPushButton("复制控件到不同分辨率")
+            btn_add_res.clicked.connect(lambda: self.copy_scene_to_different_resolution(self.current_stage, scene_name))
+            self.action_layout.addWidget(btn_add_res)
+            btn_rename = QPushButton("✏️ 修改场景名称")
+            btn_rename.clicked.connect(lambda: self.rename_scene_group(self.current_stage, scene_name))
+            self.action_layout.addWidget(btn_rename)
+            btn_delete = QPushButton("🗑 删除整个场景")
+            btn_delete.clicked.connect(lambda: self.delete_scene_group(self.current_stage, scene_name))
+            self.action_layout.addWidget(btn_delete)
         elif isinstance(data, SceneData):
-            self.current_stage = item.parent().data(0, Qt.ItemDataRole.UserRole)
+            self.current_stage = self._find_stage_for_scene(data)
             self.set_current_work_stage(self.current_stage)
             self.current_scene = data
             self.show_scene_image(data)
@@ -635,6 +695,9 @@ class AutoStudioWindow(QMainWindow):
             self.action_layout.addWidget(btn_area)
             self.action_layout.addWidget(btn_ctrl)
             self.action_layout.addWidget(btn_sp_area)
+            btn_copy_resolution = QPushButton("复制控件到不同分辨率")
+            btn_copy_resolution.clicked.connect(lambda: self.copy_scene_to_different_resolution(self.current_stage, data.name, data))
+            self.action_layout.addWidget(btn_copy_resolution)
             btn_copy_scene = QPushButton("📋 复制场景")
             btn_copy_scene.clicked.connect(lambda: self.copy_scene(data))
             self.action_layout.addWidget(btn_copy_scene)
@@ -647,8 +710,7 @@ class AutoStudioWindow(QMainWindow):
         elif isinstance(data, ItemData):
             scene_node = item.parent()
             self.current_scene = scene_node.data(0, Qt.ItemDataRole.UserRole) if scene_node else None
-            stage_node = scene_node.parent() if scene_node else None
-            self.current_stage = stage_node.data(0, Qt.ItemDataRole.UserRole) if stage_node else self.current_stage
+            self.current_stage = self._find_stage_for_scene(self.current_scene)
             self.set_current_work_stage(self.current_stage)
             # 同一场景下只重绘标注，避免点击时触发自动适配
             if self.canvas.active_scene_data is self.current_scene and self.canvas.current_pixmap:
@@ -750,10 +812,27 @@ class AutoStudioWindow(QMainWindow):
             paste_action.triggered.connect(lambda: self.paste_scene_to_stage(data))
             menu.addAction(paste_action)
             menu.addSeparator()
+        elif isinstance(data, dict) and data.get("kind") == "scene_group":
+            copy_resolution_action = QAction("复制控件到不同分辨率", self)
+            copy_resolution_action.triggered.connect(
+                lambda: self.copy_scene_to_different_resolution(data.get("stage"), data.get("scene_name", ""))
+            )
+            menu.addAction(copy_resolution_action)
+            rename_group_action = QAction("✏️ 修改场景名称", self)
+            rename_group_action.triggered.connect(
+                lambda: self.rename_scene_group(data.get("stage"), data.get("scene_name", ""))
+            )
+            menu.addAction(rename_group_action)
+            menu.addSeparator()
         elif isinstance(data, SceneData):
             copy_action = QAction("📋 复制场景", self)
             copy_action.triggered.connect(lambda: self.copy_scene(data))
             menu.addAction(copy_action)
+            copy_resolution_action = QAction("复制控件到不同分辨率", self)
+            copy_resolution_action.triggered.connect(
+                lambda: self.copy_scene_to_different_resolution(self._find_stage_for_scene(data), data.name, data)
+            )
+            menu.addAction(copy_resolution_action)
             menu.addSeparator()
         del_action = QAction("删除", self)
         del_action.triggered.connect(lambda: self.delete_item(item, data))
@@ -828,12 +907,18 @@ class AutoStudioWindow(QMainWindow):
                 self.current_stage = None
             if self.current_work_stage == data:
                 self.set_current_work_stage(self.project.stages[0] if self.project.stages else None)
+        elif isinstance(data, dict) and data.get("kind") == "scene_group":
+            self.delete_scene_group(data.get("stage"), data.get("scene_name", ""))
+            return
         elif isinstance(data, SceneData):
-            parent_data.scenes.remove(data)
+            stage = self._find_stage_for_scene(data)
+            if stage:
+                stage.scenes.remove(data)
             if self.current_scene == data:
                 self.current_scene = None
         elif isinstance(data, ItemData):
             parent_data.items.remove(data)
+            self.sync_deleted_item_to_scene_peers(parent_data, data)
             self.show_scene_image(parent_data)  # refresh view
         self.update_tree_view()
     # --- 场景与绘图逻辑 ---
@@ -878,15 +963,26 @@ class AutoStudioWindow(QMainWindow):
             return None
         if old_w <= 0 or old_h <= 0 or new_w <= 0 or new_h <= 0:
             return self._clone_rect(rect)
-        x1 = rect.x / old_w
-        y1 = rect.y / old_h
-        x2 = (rect.x + rect.w) / old_w
-        y2 = (rect.y + rect.h) / old_h
+        rect_norm = [
+            rect.x / old_w,
+            rect.y / old_h,
+            (rect.x + rect.w) / old_w,
+            (rect.y + rect.h) / old_h,
+        ]
+        x1, y1, x2, y2 = resolve_area_rect_for_frame(
+            new_w,
+            new_h,
+            {"rect": rect_norm},
+            new_w,
+            new_h,
+            old_w,
+            old_h,
+        )
         return RectData(
-            x1 * new_w,
-            y1 * new_h,
-            (x2 - x1) * new_w,
-            (y2 - y1) * new_h,
+            x1,
+            y1,
+            x2 - x1,
+            y2 - y1,
         )
 
     def _rescale_scene_items_for_new_image(self, scene: SceneData, old_size, new_size):
@@ -923,6 +1019,40 @@ class AutoStudioWindow(QMainWindow):
             visible=item.visible,
             match_mode=item.match_mode or "gray",
         )
+
+    def _clone_item_for_scene_size(self, item: ItemData, source_size: Tuple[int, int], target_size: Tuple[int, int]) -> ItemData:
+        old_w, old_h = source_size
+        new_w, new_h = target_size
+        return ItemData(
+            id=str(random.randint(10000, 99999)),
+            name=item.name,
+            item_type=item.item_type,
+            rect=self._scale_rect_between_images(item.rect, old_w, old_h, new_w, new_h),
+            search_scope=self._scale_rect_between_images(item.search_scope, old_w, old_h, new_w, new_h),
+            visible=item.visible,
+            match_mode=item.match_mode or "gray",
+        )
+
+    def sync_added_item_to_scene_peers(self, source_scene: SceneData, item_data: ItemData):
+        source_size = self._get_scene_image_size(source_scene)
+        for peer in self._find_scene_peers(source_scene):
+            if self._find_scene_item(peer, item_data.item_type, item_data.name):
+                continue
+            peer_size = self._get_scene_image_size(peer)
+            peer.items.append(self._clone_item_for_scene_size(item_data, source_size, peer_size))
+
+    def sync_deleted_item_to_scene_peers(self, source_scene: SceneData, item_data: ItemData):
+        for peer in self._find_scene_peers(source_scene):
+            target = self._find_scene_item(peer, item_data.item_type, item_data.name)
+            if target:
+                peer.items.remove(target)
+
+    def sync_renamed_item_to_scene_peers(self, source_scene: SceneData, item_data: ItemData, old_name: str):
+        for peer in self._find_scene_peers(source_scene):
+            target = self._find_scene_item(peer, item_data.item_type, old_name)
+            if target:
+                target.name = item_data.name
+                target.match_mode = item_data.match_mode or target.match_mode
     def _clone_scene(self, scene: SceneData, new_name: Optional[str] = None) -> SceneData:
         pixmap = None
         if scene.pixmap and not scene.pixmap.isNull():
@@ -961,6 +1091,101 @@ class AutoStudioWindow(QMainWindow):
         self.update_tree_view()
         self.select_data_in_tree(pasted_scene)
         self.status_label.setText(f"已将场景 {self.scene_clipboard.name} 粘贴到阶段 {stage.name}。")
+
+    def _load_new_resolution_pixmap(self, source_scene: SceneData):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("复制到不同分辨率")
+        msg.setText("请选择新分辨率图片来源。")
+        capture_btn = msg.addButton("抓图", QMessageBox.ButtonRole.ActionRole)
+        import_btn = msg.addButton("导入图片", QMessageBox.ButtonRole.ActionRole)
+        cancel_btn = msg.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == cancel_btn:
+            return None, None
+        if clicked == capture_btn:
+            remote_path = "/data/local/tmp/screenCasting.jpeg"
+            local_dir = tempfile.gettempdir()
+            local_path = os.path.join(local_dir, f"screenCasting_{source_scene.id}_{random.randint(1000, 9999)}.jpeg")
+            try:
+                subprocess.run(["hdc", "shell", "snapshot_display", "-f", remote_path],
+                               check=True, capture_output=True, text=True)
+                subprocess.run(["hdc", "file", "recv", remote_path, local_path],
+                               check=True, capture_output=True, text=True)
+            except subprocess.CalledProcessError as exc:
+                QMessageBox.critical(self, "抓图失败", f"HDc 命令执行失败：\n{exc.stderr or exc.stdout}")
+                return None, None
+            pixmap = QPixmap(local_path)
+            if pixmap.isNull():
+                QMessageBox.critical(self, "抓图失败", "读取截图文件失败，请检查路径或权限。")
+                return None, None
+            return local_path, pixmap
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择不同分辨率图片",
+            "",
+            "Images (*.png *.jpg *.jpeg *.bmp)"
+        )
+        if not file_path:
+            return None, None
+        pixmap = QPixmap(file_path)
+        if pixmap.isNull():
+            QMessageBox.critical(self, "导入失败", "读取图片失败，请检查文件格式或路径。")
+            return None, None
+        return file_path, pixmap
+
+    def copy_scene_to_different_resolution(
+        self,
+        stage: Optional[StageData],
+        scene_name: str,
+        source_scene: Optional[SceneData] = None,
+    ):
+        if not stage:
+            QMessageBox.warning(self, "提示", "请先选择一个阶段。")
+            return
+        candidates = [scene for scene in stage.scenes if scene.name == scene_name]
+        if not candidates:
+            QMessageBox.warning(self, "提示", "未找到可复制的源场景。")
+            return
+        source_scene = source_scene or candidates[0]
+        source_size = self._get_scene_image_size(source_scene)
+        if source_size[0] <= 0 or source_size[1] <= 0:
+            QMessageBox.warning(self, "提示", "源场景还没有有效图片，无法进行分辨率转换。")
+            return
+        image_path, pixmap = self._load_new_resolution_pixmap(source_scene)
+        if not image_path or not pixmap or pixmap.isNull():
+            return
+        new_size = (pixmap.width(), pixmap.height())
+        if new_size == source_size:
+            QMessageBox.warning(self, "分辨率相同", "复制目标必须是不同分辨率的图片。")
+            return
+        for scene in candidates:
+            if self._get_scene_image_size(scene) == new_size:
+                QMessageBox.warning(self, "分辨率已存在", f"场景 {scene_name} 已经存在 {new_size[0]} * {new_size[1]}。")
+                return
+        new_scene = SceneData(
+            id=str(random.randint(1000, 9999)),
+            name=scene_name,
+            image_path=image_path,
+            pixmap=pixmap,
+            image_width=new_size[0],
+            image_height=new_size[1],
+            items=[
+                self._clone_item_for_scene_size(item, source_size, new_size)
+                for item in source_scene.items
+            ],
+        )
+        stage.scenes.append(new_scene)
+        self.current_stage = stage
+        self.set_current_work_stage(stage)
+        self.current_scene = new_scene
+        self.last_expand_stage_id = stage.id
+        self.last_expand_scene_id = new_scene.id
+        self.update_tree_view()
+        self.select_data_in_tree(new_scene)
+        self.status_label.setText(
+            f"已将场景 {scene_name} 的组件转换到 {new_size[0]} * {new_size[1]}，可在新图片上微调。"
+        )
     def capture_image(self, scene_data):
         # 通过 hdc 截图并拉取到本地，再显示到工作区
         remote_path = "/data/local/tmp/screenCasting.jpeg"
@@ -1072,6 +1297,7 @@ class AutoStudioWindow(QMainWindow):
             if mode == 'area':
                 new_item.search_scope = rect_data
             self.current_scene.items.append(new_item)
+            self.sync_added_item_to_scene_peers(self.current_scene, new_item)
             if self.current_stage:
                 self.last_expand_stage_id = self.current_stage.id
             self.last_expand_scene_id = self.current_scene.id
@@ -1092,7 +1318,9 @@ class AutoStudioWindow(QMainWindow):
         name = self.prompt_unique_name("修改名称", "新名称:", text=item_data.name,
                                        existing_names=existing_names)
         if name:
+            old_name = item_data.name
             item_data.name = name
+            self.sync_renamed_item_to_scene_peers(self.current_scene, item_data, old_name)
             self.status_label.setText(f"已更新名称为 {name}")
             self.update_tree_view()
             self.canvas.redraw_overlays(self.current_scene)
@@ -1100,6 +1328,7 @@ class AutoStudioWindow(QMainWindow):
         if not self.current_scene:
             return
         self.current_scene.items.remove(item_data)
+        self.sync_deleted_item_to_scene_peers(self.current_scene, item_data)
         self.status_label.setText(f"已删除 {item_data.name}")
         self.update_tree_view()
         self.canvas.redraw_overlays(self.current_scene)
@@ -1136,18 +1365,46 @@ class AutoStudioWindow(QMainWindow):
             self.set_current_work_stage(self.project.stages[0] if self.project.stages else None)
         self.update_tree_view()
     def rename_scene(self, scene_data: SceneData):
-        if not self.current_stage:
+        stage = self._find_stage_for_scene(scene_data) or self.current_stage
+        if not stage:
             return
         name = self.prompt_unique_name("修改场景名称", "新名称:", text=scene_data.name,
-                                       existing_names=[s.name for s in self.current_stage.scenes if s != scene_data])
+                                       existing_names=sorted({s.name for s in stage.scenes if s.name != scene_data.name}))
         if name:
-            scene_data.name = name
+            old_name = scene_data.name
+            for scene in stage.scenes:
+                if scene.name == old_name:
+                    scene.name = name
             self.status_label.setText(f"已更新场景名称为 {name}")
             self.update_tree_view()
-    def delete_scene(self, scene_data: SceneData):
-        if not self.current_stage:
+
+    def rename_scene_group(self, stage: Optional[StageData], scene_name: str):
+        if not stage:
             return
-        self.current_stage.scenes.remove(scene_data)
+        name = self.prompt_unique_name("修改场景名称", "新名称:", text=scene_name,
+                                       existing_names=sorted({s.name for s in stage.scenes if s.name != scene_name}))
+        if name:
+            for scene in stage.scenes:
+                if scene.name == scene_name:
+                    scene.name = name
+            self.status_label.setText(f"已更新场景名称为 {name}")
+            self.update_tree_view()
+
+    def delete_scene_group(self, stage: Optional[StageData], scene_name: str):
+        if not stage:
+            return
+        stage.scenes = [scene for scene in stage.scenes if scene.name != scene_name]
+        if self.current_scene and self.current_scene.name == scene_name:
+            self.current_scene = None
+            self.clear_scene_display()
+        self.status_label.setText(f"已删除场景 {scene_name} 的所有分辨率。")
+        self.update_tree_view()
+
+    def delete_scene(self, scene_data: SceneData):
+        stage = self._find_stage_for_scene(scene_data) or self.current_stage
+        if not stage:
+            return
+        stage.scenes.remove(scene_data)
         if self.current_scene == scene_data:
             self.current_scene = None
             self.canvas.scene.clear()
@@ -1183,6 +1440,11 @@ class AutoStudioWindow(QMainWindow):
         if not ok or not mode:
             return
         item_data.match_mode = mode
+        if self.current_scene:
+            for peer in self._find_scene_peers(self.current_scene):
+                target = self._find_scene_item(peer, item_data.item_type, item_data.name)
+                if target:
+                    target.match_mode = mode
         self.status_label.setText(f"已将区域 {item_data.name} 的匹配模式设置为 {mode}")
         self.update_tree_view()
         if self.current_scene:
@@ -1737,76 +1999,88 @@ class AutoStudioWindow(QMainWindow):
                 os.makedirs(scenes_stage_dir, exist_ok=True)
                 template_stage_dir = os.path.join(templates_dir, stage_safe_name)
                 os.makedirs(template_stage_dir, exist_ok=True)
-                for scene in stage.scenes:
-                    self._advance_export_progress(
-                        progress_dialog,
-                        progress_state,
-                        f"正在处理场景: {stage.name} / {scene.name}",
-                        1,
-                    )
-                    scene_pixmap = get_scene_pixmap(scene)
-                    scene_safe_name = safe_filename(scene.name)
-                    scene_image_name = f"{scene_safe_name}.png"
-                    scene_image_path = os.path.join(scenes_stage_dir, scene_image_name)
-                    scene_width = 0
-                    scene_height = 0
-                    if scene_pixmap:
-                        scene_width = scene_pixmap.width()
-                        scene_height = scene_pixmap.height()
-                        scene_pixmap.save(scene_image_path)
-                    elif scene.image_path and os.path.exists(scene.image_path):
-                        shutil.copy(scene.image_path, scene_image_path)
-                        temp_pix = QPixmap(scene_image_path)
-                        if not temp_pix.isNull():
-                            scene_width = temp_pix.width()
-                            scene_height = temp_pix.height()
-                    scene.image_width = scene_width
-                    scene.image_height = scene_height
-                    scene_entry = {
-                        "image": os.path.join("scenes", stage_safe_name, scene_image_name),
-                        "width": scene_width,
-                        "height": scene_height,
-                        "areas": {},
-                        "points": {},
-                        "special_areas": {},
-                    }
-                    for item in scene.items:
+                for scene_name, scene_versions in self._group_scenes_by_name(stage).items():
+                    scene_safe_name = safe_filename(scene_name)
+                    exported_versions = {}
+                    has_multiple_versions = len(scene_versions) > 1
+                    for scene in scene_versions:
                         self._advance_export_progress(
                             progress_dialog,
                             progress_state,
-                            f"正在导出标注: {stage.name} / {scene.name} / {item.name}",
+                            f"正在处理场景: {stage.name} / {scene.name}",
                             1,
                         )
-                        rect_norm = normalize_rect(item.rect, scene_width, scene_height)
-                        if item.item_type == "area":
-                            scope_norm = normalize_rect(item.search_scope, scene_width, scene_height) if item.search_scope else [0, 0, 0, 0]
-                            template_name = f"{scene_safe_name}__{safe_filename(item.name)}.png"
-                            template_path = os.path.join(template_stage_dir, template_name)
-                            if scene_pixmap:
-                                crop_rect = QRectF(item.rect.x, item.rect.y, item.rect.w, item.rect.h).toRect()
-                                cropped = scene_pixmap.copy(crop_rect)
-                                cropped.save(template_path)
-                            scene_entry["areas"][item.name] = {
-                                "rect": rect_norm,
-                                "search_scope": scope_norm,
-                                "match_mode": item.match_mode or "gray",
-                                "template": os.path.join("templates", stage_safe_name, template_name),
-                            }
-                        elif item.item_type == "control":
-                            scene_entry["points"][item.name] = {"rect": rect_norm}
-                        elif item.item_type == "special_area":
-                            special_area_names.add(item.name)
-                            template_name = f"{scene_safe_name}__{safe_filename(item.name)}.png"
-                            template_path = os.path.join(template_stage_dir, template_name)
-                            if scene_pixmap:
-                                crop_rect = QRectF(item.rect.x, item.rect.y, item.rect.w, item.rect.h).toRect()
-                                cropped = scene_pixmap.copy(crop_rect)
-                                cropped.save(template_path)
-                            scene_entry["special_areas"][item.name] = {
-                                "rect": rect_norm,
-                                "template": os.path.join("templates", stage_safe_name, template_name),
-                            }
-                    stage_entry["scenes"][scene.name] = scene_entry
+                        scene_pixmap = get_scene_pixmap(scene)
+                        scene_width = 0
+                        scene_height = 0
+                        if scene_pixmap:
+                            scene_width = scene_pixmap.width()
+                            scene_height = scene_pixmap.height()
+                        elif scene.image_path and os.path.exists(scene.image_path):
+                            temp_pix = QPixmap(scene.image_path)
+                            if not temp_pix.isNull():
+                                scene_width = temp_pix.width()
+                                scene_height = temp_pix.height()
+                        scene.image_width = scene_width
+                        scene.image_height = scene_height
+                        resolution_key = f"{scene_width}_{scene_height}"
+                        name_suffix = f"__{resolution_key}" if has_multiple_versions else ""
+                        scene_image_name = f"{scene_safe_name}{name_suffix}.png"
+                        scene_image_path = os.path.join(scenes_stage_dir, scene_image_name)
+                        if scene_pixmap:
+                            scene_pixmap.save(scene_image_path)
+                        elif scene.image_path and os.path.exists(scene.image_path):
+                            shutil.copy(scene.image_path, scene_image_path)
+                        scene_entry = {
+                            "image": os.path.join("scenes", stage_safe_name, scene_image_name),
+                            "width": scene_width,
+                            "height": scene_height,
+                            "areas": {},
+                            "points": {},
+                            "special_areas": {},
+                        }
+                        for item in scene.items:
+                            self._advance_export_progress(
+                                progress_dialog,
+                                progress_state,
+                                f"正在导出标注: {stage.name} / {scene.name} / {item.name}",
+                                1,
+                            )
+                            rect_norm = normalize_rect(item.rect, scene_width, scene_height)
+                            item_template_stem = f"{scene_safe_name}{name_suffix}__{safe_filename(item.name)}"
+                            if item.item_type == "area":
+                                scope_norm = normalize_rect(item.search_scope, scene_width, scene_height) if item.search_scope else [0, 0, 0, 0]
+                                template_name = f"{item_template_stem}.png"
+                                template_path = os.path.join(template_stage_dir, template_name)
+                                if scene_pixmap:
+                                    crop_rect = QRectF(item.rect.x, item.rect.y, item.rect.w, item.rect.h).toRect()
+                                    cropped = scene_pixmap.copy(crop_rect)
+                                    cropped.save(template_path)
+                                scene_entry["areas"][item.name] = {
+                                    "rect": rect_norm,
+                                    "search_scope": scope_norm,
+                                    "match_mode": item.match_mode or "gray",
+                                    "template": os.path.join("templates", stage_safe_name, template_name),
+                                }
+                            elif item.item_type == "control":
+                                scene_entry["points"][item.name] = {"rect": rect_norm}
+                            elif item.item_type == "special_area":
+                                special_area_names.add(item.name)
+                                template_name = f"{item_template_stem}.png"
+                                template_path = os.path.join(template_stage_dir, template_name)
+                                if scene_pixmap:
+                                    crop_rect = QRectF(item.rect.x, item.rect.y, item.rect.w, item.rect.h).toRect()
+                                    cropped = scene_pixmap.copy(crop_rect)
+                                    cropped.save(template_path)
+                                scene_entry["special_areas"][item.name] = {
+                                    "rect": rect_norm,
+                                    "template": os.path.join("templates", stage_safe_name, template_name),
+                                }
+                        exported_versions[resolution_key] = scene_entry
+                    if has_multiple_versions:
+                        stage_entry["scenes"][scene_name] = {"resolutions": exported_versions}
+                    else:
+                        stage_entry["scenes"][scene_name] = next(iter(exported_versions.values()))
                 stage_info[stage.name] = stage_entry
 
             code_lines = []
@@ -1915,60 +2189,15 @@ class AutoStudioWindow(QMainWindow):
             new_project = ProjectData(name=project_name)
             for stage_name, stage_data in stage_info.items():
                 stage = StageData(id=str(random.randint(1000, 9999)), name=stage_name)
-                stage_control_names = set()
+                stage_control_names = {}
                 scenes = stage_data.get("scenes", {}) if isinstance(stage_data, dict) else {}
                 for scene_name, scene_data in scenes.items():
-                    scene = SceneData(id=str(random.randint(1000, 9999)), name=scene_name)
-                    image_rel = scene_data.get("image", "")
-                    image_path = os.path.join(import_dir, image_rel) if image_rel else ""
-                    scene.image_path = image_path
-                    if image_path and os.path.exists(image_path):
-                        pix = QPixmap(image_path)
-                        if not pix.isNull():
-                            scene.pixmap = pix
-                    width = scene_data.get("width", 0) or (scene.pixmap.width() if scene.pixmap else 0)
-                    height = scene_data.get("height", 0) or (scene.pixmap.height() if scene.pixmap else 0)
-                    scene.image_width = int(width)
-                    scene.image_height = int(height)
-                    def denormalize_rect(rect_norm):
-                        if not rect_norm or width <= 0 or height <= 0:
-                            return RectData(0, 0, 0, 0)
-                        x1, y1, x2, y2 = rect_norm
-                        return RectData(x1 * width, y1 * height, (x2 - x1) * width, (y2 - y1) * height)
-                    for name, area_data in scene_data.get("areas", {}).items():
-                        rect = denormalize_rect(area_data.get("rect"))
-                        scope = denormalize_rect(area_data.get("search_scope"))
-                        item = ItemData(
-                            id=str(random.randint(10000, 99999)),
-                            name=name,
-                            item_type="area",
-                            rect=rect,
-                            search_scope=scope,
-                            match_mode=area_data.get("match_mode", "gray"),
-                        )
-                        scene.items.append(item)
-                    for name, point_data in scene_data.get("points", {}).items():
-                        if name in stage_control_names:
-                            raise ValueError(f"阶段内控点名称重复: {stage_name} -> {name}")
-                        stage_control_names.add(name)
-                        rect = denormalize_rect(point_data.get("rect"))
-                        item = ItemData(
-                            id=str(random.randint(10000, 99999)),
-                            name=name,
-                            item_type="control",
-                            rect=rect
-                        )
-                        scene.items.append(item)
-                    for name, sp_data in scene_data.get("special_areas", {}).items():
-                        rect = denormalize_rect(sp_data.get("rect"))
-                        item = ItemData(
-                            id=str(random.randint(10000, 99999)),
-                            name=name,
-                            item_type="special_area",
-                            rect=rect
-                        )
-                        scene.items.append(item)
-                    stage.scenes.append(scene)
+                    scene_versions = scene_data.get("resolutions", {}) if isinstance(scene_data, dict) else {}
+                    if not scene_versions:
+                        scene_versions = {"": scene_data}
+                    for _, scene_version_data in scene_versions.items():
+                        scene = self._import_scene_version(import_dir, stage_name, scene_name, scene_version_data, stage_control_names)
+                        stage.scenes.append(scene)
                 new_project.stages.append(stage)
             self.project = new_project
             resource_dir = os.path.join(import_dir, "resource")
@@ -1991,6 +2220,62 @@ class AutoStudioWindow(QMainWindow):
             self.status_label.setText(f"工程 {project_name} 已导入。")
         except Exception as exc:
             QMessageBox.critical(self, "导入失败", f"无法导入项目：\n{exc}")
+
+    def _import_scene_version(self, import_dir, stage_name, scene_name, scene_data, stage_control_names):
+        scene = SceneData(id=str(random.randint(1000, 9999)), name=scene_name)
+        image_rel = scene_data.get("image", "")
+        image_path = os.path.join(import_dir, image_rel) if image_rel else ""
+        scene.image_path = image_path
+        if image_path and os.path.exists(image_path):
+            pix = QPixmap(image_path)
+            if not pix.isNull():
+                scene.pixmap = pix
+        width = scene_data.get("width", 0) or (scene.pixmap.width() if scene.pixmap else 0)
+        height = scene_data.get("height", 0) or (scene.pixmap.height() if scene.pixmap else 0)
+        scene.image_width = int(width)
+        scene.image_height = int(height)
+
+        def denormalize_rect(rect_norm):
+            if not rect_norm or width <= 0 or height <= 0:
+                return RectData(0, 0, 0, 0)
+            x1, y1, x2, y2 = rect_norm
+            return RectData(x1 * width, y1 * height, (x2 - x1) * width, (y2 - y1) * height)
+
+        for name, area_data in scene_data.get("areas", {}).items():
+            rect = denormalize_rect(area_data.get("rect"))
+            scope = denormalize_rect(area_data.get("search_scope"))
+            item = ItemData(
+                id=str(random.randint(10000, 99999)),
+                name=name,
+                item_type="area",
+                rect=rect,
+                search_scope=scope,
+                match_mode=area_data.get("match_mode", "gray"),
+            )
+            scene.items.append(item)
+        for name, point_data in scene_data.get("points", {}).items():
+            previous_scene_name = stage_control_names.get(name)
+            if previous_scene_name is not None and previous_scene_name != scene_name:
+                raise ValueError(f"阶段内控点名称重复: {stage_name} -> {name}")
+            stage_control_names[name] = scene_name
+            rect = denormalize_rect(point_data.get("rect"))
+            item = ItemData(
+                id=str(random.randint(10000, 99999)),
+                name=name,
+                item_type="control",
+                rect=rect
+            )
+            scene.items.append(item)
+        for name, sp_data in scene_data.get("special_areas", {}).items():
+            rect = denormalize_rect(sp_data.get("rect"))
+            item = ItemData(
+                id=str(random.randint(10000, 99999)),
+                name=name,
+                item_type="special_area",
+                rect=rect
+            )
+            scene.items.append(item)
+        return scene
 # ==========================================
 # 5. 启动入口
 # ==========================================

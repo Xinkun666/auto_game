@@ -35,7 +35,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from aw.autogame.tools.Utils import archive_run_artifacts, get_resolution
+from aw.autogame.tools.Utils import archive_run_artifacts, get_resolution, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -893,6 +893,7 @@ class LauncherWindow(QWidget):
         for scene_name, scene_data in scenes.items():
             if not isinstance(scene_data, dict):
                 continue
+            scene_data = select_scene_resolution(scene_data, screen_width, screen_height)
             for item_type, color in colors.items():
                 items = scene_data.get(item_type, {})
                 if not isinstance(items, dict):

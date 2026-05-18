@@ -119,11 +119,12 @@ def resolve_area_rect_for_frame(
     origin_height=None,
 ):
     """
-    Resolve an area to the current frame pixel coordinates.
+    Resolve an area to the requested target coordinate system.
 
     Area configs are defined in the scene annotation coordinate system. Runtime
     first resolves them against the real screen size, then scales the resolved
-    real-screen rect back to the resized frame used by the vision pipeline.
+    real-screen rect to the requested target size. For vision crops the target
+    is the resized frame; for touch points the target is the real screen size.
     """
     has_screen_size = screen_width and screen_height and int(screen_width) > 0 and int(screen_height) > 0
     has_origin_size = origin_width and origin_height and int(origin_width) > 0 and int(origin_height) > 0

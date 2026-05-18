@@ -99,14 +99,24 @@ class GameImageProcessor:
                 # Case 2: 模板匹配
                 elif task_type == 'template':
                     scope = config.get('scope')
+                    scope_config = config.get('scope_config')
                     tpl_relative_path = config.get('template_path')
                     match_mode = config.get('match_mode', 'gray')
 
-                    if scope:
-                        px_min_x = int(scope[0] * curr_w)
-                        px_min_y = int(scope[1] * curr_h)
-                        px_max_x = int(scope[2] * curr_w)
-                        px_max_y = int(scope[3] * curr_h)
+                    if scope_config or scope:
+                        px_min_x, px_min_y, px_max_x, px_max_y = resolve_area_rect_for_frame(
+                            curr_w,
+                            curr_h,
+                            scope_config or {"rect": scope},
+                            self.screen_w,
+                            self.screen_h,
+                            origin_w,
+                            origin_h,
+                        )
+                        px_min_x = max(0, min(curr_w, px_min_x))
+                        px_min_y = max(0, min(curr_h, px_min_y))
+                        px_max_x = max(0, min(curr_w, px_max_x))
+                        px_max_y = max(0, min(curr_h, px_max_y))
 
                         w_rect = px_max_x - px_min_x
                         h_rect = px_max_y - px_min_y
@@ -220,9 +230,18 @@ class StageLogicController:
             for area_name, area_data in areas.items():
                 task_key = f"{scene_name}__{area_name}"
                 scope = area_data.get('search_scope', area_data.get('rect'))
+                if area_data.get('search_scope'):
+                    scope_config = {'rect': area_data.get('search_scope')}
+                elif 'anchor' in area_data:
+                    scope_config = area_data
+                elif area_data.get('rect'):
+                    scope_config = {'rect': area_data.get('rect')}
+                else:
+                    scope_config = None
                 tasks_config[task_key] = {
                     'type': 'template',
                     'scope': scope,
+                    'scope_config': scope_config,
                     'template_path': area_data.get('template'),
                     'match_mode': area_data.get('match_mode', 'gray'),
                     'origin_width': origin_w,

@@ -14,6 +14,7 @@ from typing import Dict, Tuple
 import numpy as np
 
 from aw.autogame.tools.Utils import *
+from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 from aw.autogame.tools.GameSceneHandler import StageLogicController
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1330,6 +1331,15 @@ class Controller:
 
     def _get_cached_resolution(self):
         if self._cached_resolution is None:
+            env_w = os.environ.get("AUTOGAME_SCREEN_WIDTH")
+            env_h = os.environ.get("AUTOGAME_SCREEN_HEIGHT")
+            if env_w and env_h:
+                try:
+                    self._cached_resolution = (int(env_w), int(env_h))
+                    return self._cached_resolution
+                except ValueError:
+                    pass
+
             res_w, res_h = get_resolution()
             if res_w is not None and res_h is not None:
                 self._cached_resolution = (int(res_w), int(res_h))
@@ -1482,11 +1492,6 @@ class Controller:
         rect = button_data.get("rect")
         if rect and len(rect) == 4:
             trace["rect"] = list(rect)
-        if self.backend != "sendevent":
-            result = (x + x_bias, y + y_bias)
-            trace["display_output"] = result
-            return (result, trace) if return_trace else result
-
         current_res = self._get_cached_resolution()
         trace["cached_resolution"] = current_res
         if not current_res or current_res[0] is None or current_res[1] is None:
@@ -1494,19 +1499,33 @@ class Controller:
             trace["display_output"] = result
             return (result, trace) if return_trace else result
 
-        current_rotation = self._get_cached_rotation()
         src_width = int(button_data.get("scene_width") or 0)
         src_height = int(button_data.get("scene_height") or 0)
         dst_width, dst_height = int(current_res[0]), int(current_res[1])
         trace["scene_size"] = (src_width, src_height)
-        trace["display_rotation"] = current_rotation
         trace["screen_size"] = (dst_width, dst_height)
         if src_width <= 0 or src_height <= 0:
             result = (x + x_bias, y + y_bias)
             trace["display_output"] = result
             return (result, trace) if return_trace else result
 
-        if norm_pos and len(norm_pos) == 2:
+        if "anchor" in button_data or (rect and len(rect) == 4):
+            area_config = button_data if "anchor" in button_data else {"rect": rect}
+            mapped_rect = resolve_area_rect_for_frame(
+                dst_width,
+                dst_height,
+                area_config,
+                dst_width,
+                dst_height,
+                src_width,
+                src_height,
+            )
+            scaled_x = int(round((mapped_rect[0] + mapped_rect[2]) / 2.0))
+            scaled_y = int(round((mapped_rect[1] + mapped_rect[3]) / 2.0))
+            scaled_x = min(max(scaled_x, 0), max(dst_width - 1, 0))
+            scaled_y = min(max(scaled_y, 0), max(dst_height - 1, 0))
+            trace["mapped_rect_to_screen"] = mapped_rect
+        elif norm_pos and len(norm_pos) == 2:
             mapped_x = float(norm_pos[0]) * float(dst_width)
             mapped_y = float(norm_pos[1]) * float(dst_height)
             scaled_x = int(round(mapped_x))
@@ -1514,6 +1533,7 @@ class Controller:
             scaled_x = min(max(scaled_x, 0), max(dst_width - 1, 0))
             scaled_y = min(max(scaled_y, 0), max(dst_height - 1, 0))
             trace["mapped_from_norm_to_screen"] = (mapped_x, mapped_y)
+            trace["mapped_rect_to_screen"] = None
         else:
             scaled_x, scaled_y = scale_point(
                 x, y,
@@ -1521,9 +1541,17 @@ class Controller:
                 dst_width, dst_height,
             )
             trace["mapped_from_norm_to_screen"] = None
+            trace["mapped_rect_to_screen"] = None
 
         trace["scaled_xy"] = (scaled_x, scaled_y)
         trace["pre_rotation_xy"] = (scaled_x + x_bias, scaled_y + y_bias)
+        if self.backend != "sendevent":
+            result = (scaled_x + x_bias, scaled_y + y_bias)
+            trace["display_output"] = result
+            return (result, trace) if return_trace else result
+
+        current_rotation = self._get_cached_rotation()
+        trace["display_rotation"] = current_rotation
         result = convert_display_point_by_rotation(
             scaled_x + x_bias,
             scaled_y + y_bias,

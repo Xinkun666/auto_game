@@ -560,6 +560,10 @@ def extract_absolute_points(stage_info):
                     "scene_width": int(img_w),
                     "scene_height": int(img_h),
                 }
+                if "anchor" in point_content:
+                    absolute_points[key]["anchor"] = point_content.get("anchor")
+                    absolute_points[key]["offset"] = dict(point_content.get("offset", {}))
+                    absolute_points[key]["size"] = dict(point_content.get("size", {}))
 
     return absolute_points
 

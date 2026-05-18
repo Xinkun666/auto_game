@@ -824,14 +824,13 @@ class LauncherWindow(QWidget):
         pixmap_height: int,
         origin_width: int,
         origin_height: int,
+        screen_width: Optional[int],
+        screen_height: Optional[int],
         color: QColor,
         label: str,
     ):
         try:
             if isinstance(area_config, dict):
-                screen_width, screen_height = (None, None)
-                if "anchor" in area_config:
-                    screen_width, screen_height = get_resolution()
                 x1, y1, x2, y2 = resolve_area_rect_for_frame(
                     pixmap_width,
                     pixmap_height,
@@ -883,6 +882,7 @@ class LauncherWindow(QWidget):
         pixmap = self.latest_preview_pixmap.copy()
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        screen_width, screen_height = get_resolution()
 
         colors = {
             "areas": QColor(80, 220, 120),
@@ -908,6 +908,8 @@ class LauncherWindow(QWidget):
                         pixmap.height(),
                         int(scene_data.get("width") or pixmap.width()),
                         int(scene_data.get("height") or pixmap.height()),
+                        screen_width,
+                        screen_height,
                         color,
                         label,
                     )

@@ -23,35 +23,3 @@ STAGE_INFO = {
     '选择地图阶段': {'scenes': {'点击地图': {'image': 'scenes\\选择地图阶段\\点击地图.png', 'width': 2832, 'height': 1316, 'areas': {}, 'points': {'地图': {'rect': [0.11017346460384433, 0.16646787990714734, 0.13924050632911392, 0.20581483333974582]}}, 'special_areas': {}}, '选择模式': {'image': 'scenes\\选择地图阶段\\选择模式.png', 'width': 2832, 'height': 1316, 'areas': {'对号': {'rect': [0.7393040910102683, 0.3349001804070575, 0.7620869597625105, 0.3771398428007404], 'search_scope': [0.5072667604313172, 0.06557825572099743, 0.9601500234411626, 0.883793107870673], 'match_mode': 'gray', 'template': 'templates\\选择地图阶段\\选择模式__对号.png'}}, 'points': {'经典模式': {'rect': [0.10314111579934365, 0.21186821079091478, 0.13080168776371306, 0.24314399428862127]}, '切换': {'rect': [0.5358649789029536, 0.021186821079091478, 0.5846225972808251, 0.05851598202796694]}, '海岛': {'rect': [0.83356774496015, 0.4489588276283671, 0.8574777308954523, 0.47720792240048904]}, '确定': {'rect': [0.8790436005625877, 0.9191044763358254, 0.9132676980778244, 0.9584514297684239]}}, 'special_areas': {}}}},
     '结束阶段': {'scenes': {'1': {'image': 'scenes\\结束阶段\\1.png', 'width': 2832, 'height': 1316, 'areas': {}, 'points': {'设置': {'rect': [0.8163522012578617, 0.004060331479038826, 0.8446540880503145, 0.06361185983827494]}}, 'special_areas': {}}, '2': {'image': 'scenes\\结束阶段\\2.png', 'width': 2832, 'height': 1316, 'areas': {}, 'points': {'返回大厅': {'rect': [0.06918238993710693, 0.9027470321729657, 0.1628930817610063, 0.9704192234902794]}}, 'special_areas': {}}, '3': {'image': 'scenes\\结束阶段\\3.png', 'width': 2832, 'height': 1316, 'areas': {}, 'points': {'确定': {'rect': [0.5578616352201259, 0.6861960199575616, 0.5943396226415095, 0.7322131100533349]}}, 'special_areas': {}}, 'sp': {'image': 'scenes\\结束阶段\\sp.png', 'width': 2832, 'height': 1316, 'areas': {}, 'points': {'sp': {'rect': [0.024378809188935768, 0.27240198530260473, 0.07219878105954054, 0.31780231618637217]}}, 'special_areas': {}}}},
 }
-
-MINIMAP_ANCHOR_AREA = {
-    'anchor': 'top_right',
-    'offset': {
-        'right': 103,
-        'top': 0,
-    },
-    'size': {
-        'width': 323,
-        'height': 316,
-    },
-}
-
-
-def _apply_minimap_anchor_area_config():
-    for stage_data in STAGE_INFO.values():
-        scenes = stage_data.get('scenes', {})
-        for scene_data in scenes.values():
-            special_areas = scene_data.get('special_areas', {})
-            for area_name in ('location', 'white_angle'):
-                area_data = special_areas.get(area_name)
-                if not isinstance(area_data, dict):
-                    continue
-                area_data.pop('rect', None)
-                area_data.update({
-                    'anchor': MINIMAP_ANCHOR_AREA['anchor'],
-                    'offset': dict(MINIMAP_ANCHOR_AREA['offset']),
-                    'size': dict(MINIMAP_ANCHOR_AREA['size']),
-                })
-
-
-_apply_minimap_anchor_area_config()

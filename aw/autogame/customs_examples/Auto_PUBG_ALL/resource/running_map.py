@@ -304,8 +304,12 @@ class RunningManager:
     CAR_VISUAL_DYNAMIC_MID_WAIT = 2600
     CAR_VISUAL_DYNAMIC_FAR_WAIT = 5200
     CAR_VISUAL_DYNAMIC_MAX_WAIT = 7200
+    # 落地后寻车超过该时间仍未上车，则结束当前局；该阶段仍计入跑图时间。
+    CAR_SEARCH_TIMEOUT = 5 * 60
     # 路边发现远车后，允许跨帧追车，避免车辆框短暂丢失后又回头追原道路点。
-    ROADSIDE_CAR_LOST_LIMIT = 8
+    ROADSIDE_CAR_LOST_LIMIT = 5
+    # 已经看到车并前推靠近后，若目标丢失，只额外前推一次；仍丢失则视为误识别。
+    ROADSIDE_CAR_LOST_FORWARD_LIMIT = 1
     ROADSIDE_CAR_PURSUIT_STEP_LIMIT = 24
     ROADSIDE_CAR_MAX_ROAD_DISTANCE = 10.0
     ROADSIDE_CAR_MAX_PLAYER_ROAD_DISTANCE = 10.0
@@ -379,6 +383,7 @@ class RunningManager:
         self.garage_to_roadside_route_active = False
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
+        self.roadside_car_lost_after_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio: Optional[float] = None
 
@@ -415,6 +420,7 @@ class RunningManager:
         self.garage_to_roadside_route_active = False
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
+        self.roadside_car_lost_after_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
         print("[Running] 状态已重置!")
@@ -473,6 +479,9 @@ class RunningManager:
             return
 
         self._click_jump_if_available(w, location, direction)
+
+        if self._handle_car_search_timeout(w, location, direction):
+            return
 
         if self.find_car_times >= len(self.PRECISE_FACE_DIRECTIONS):
             if self.finding_car and self.car_search_mode == self.CAR_SEARCH_GARAGE:
@@ -651,6 +660,35 @@ class RunningManager:
     def _has_rank_info(self, w: "FrameWorker") -> bool:
         return bool(w.get_info("个人排名")) or bool(w.get_info("队伍排名"))
 
+    def _handle_car_search_timeout(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+    ) -> bool:
+        if not self.finding_car:
+            return False
+
+        if self.game_time is None:
+            self.set_game_time()
+
+        elapsed = self.get_elapsed_time()
+        if elapsed < self.CAR_SEARCH_TIMEOUT:
+            return False
+
+        print(
+            f"[Running] 落地后寻车已超过 {self.CAR_SEARCH_TIMEOUT:.0f}s 仍未上车，"
+            "结束当前局并开始下一局"
+        )
+        self._log_running_state(
+            "寻车超时",
+            location,
+            direction,
+            f"寻车耗时 {elapsed:.1f}s，计入跑图时间，结束当前局",
+        )
+        self._handle_death(w)
+        return True
+
     def _handle_death(self, w: "FrameWorker"):
         self.stop_auto_forward(w)
         self.reset()
@@ -695,6 +733,7 @@ class RunningManager:
         self.garage_to_roadside_route_active = False
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
+        self.roadside_car_lost_after_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
         print(
@@ -1327,6 +1366,7 @@ class RunningManager:
         self.active_vehicle_entry_source = self.VEHICLE_ENTRY_ROADSIDE
         self.roadside_car_pursuing = True
         self.roadside_car_lost_rounds = 0
+        self.roadside_car_lost_after_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
         self._discard_current_road_target()
@@ -1353,18 +1393,26 @@ class RunningManager:
         aligned = self._align_to_visible_car(w)
         if aligned is None:
             self.roadside_car_lost_rounds += 1
+            self.roadside_car_lost_after_forward_pushes += 1
             print(
                 f"[Running] 路边追车中车辆暂时丢失 "
-                f"{self.roadside_car_lost_rounds}/{self.ROADSIDE_CAR_LOST_LIMIT}，保持方向继续靠近"
+                f"{self.roadside_car_lost_rounds}/{self.ROADSIDE_CAR_LOST_LIMIT}，"
+                f"前推后丢失 {self.roadside_car_lost_after_forward_pushes}/"
+                f"{self.ROADSIDE_CAR_LOST_FORWARD_LIMIT}，保持方向继续靠近"
             )
+            if self.roadside_car_lost_after_forward_pushes > self.ROADSIDE_CAR_LOST_FORWARD_LIMIT:
+                self._give_up_roadside_car_pursuit("前推后连续丢失车辆，判定为误识别")
+                return True
             if self.roadside_car_lost_rounds > self.ROADSIDE_CAR_LOST_LIMIT:
                 self._give_up_roadside_car_pursuit("连续多帧未重新识别到车辆")
                 return True
         elif not aligned:
             self.roadside_car_lost_rounds = 0
+            self.roadside_car_lost_after_forward_pushes = 0
             return True
         else:
             self.roadside_car_lost_rounds = 0
+            self.roadside_car_lost_after_forward_pushes = 0
             print(
                 f"[Running] 路边追车已对准车辆，前推靠近 "
                 f"{self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}"
@@ -1406,6 +1454,7 @@ class RunningManager:
         print(f"[Running] 路边追车放弃: {reason}，从当前位置重新规划下一段道路")
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
+        self.roadside_car_lost_after_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
         self.active_vehicle_entry_source = None
@@ -1435,6 +1484,7 @@ class RunningManager:
         self.garage_to_roadside_route_active = bool(leave_garage_route)
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
+        self.roadside_car_lost_after_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
 

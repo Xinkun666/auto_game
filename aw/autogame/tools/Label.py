@@ -1009,6 +1009,14 @@ class AutoStudioWindow(QMainWindow):
         scene_data.image_width, scene_data.image_height = new_size
         return resized_items
 
+    def _refresh_tree_for_scene(self, scene_data: SceneData):
+        stage = self._find_stage_for_scene(scene_data)
+        if stage:
+            self.last_expand_stage_id = stage.id
+        self.last_expand_scene_id = scene_data.id
+        self.update_tree_view()
+        self.select_data_in_tree(scene_data)
+
     def _clone_item(self, item: ItemData) -> ItemData:
         return ItemData(
             id=str(random.randint(10000, 99999)),
@@ -1206,6 +1214,7 @@ class AutoStudioWindow(QMainWindow):
         resized_items = self._replace_scene_image(scene_data, local_path, img)
         self.canvas.set_image(img)
         self.canvas.redraw_overlays(scene_data)
+        self._refresh_tree_for_scene(scene_data)
         if resized_items:
             self.status_label.setText("抓图成功，已按新图片尺寸同步缩放已有标注。")
             return
@@ -1225,6 +1234,7 @@ class AutoStudioWindow(QMainWindow):
             return
         resized_items = self._replace_scene_image(scene_data, file_path, img)
         self.show_scene_image(scene_data)
+        self._refresh_tree_for_scene(scene_data)
         if resized_items:
             self.status_label.setText("图片已导入，已按新图片尺寸同步缩放已有标注。")
             return

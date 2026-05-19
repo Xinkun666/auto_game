@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import cv2
+from aw.autogame.integrations.pubg_room_search import HouseSearchAdapter
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigator import MapNavigator
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.toolkit import *
 from aw.autogame.tools.Utils import *
@@ -75,6 +76,8 @@ class Searching_House:
         self.supplies = []  # [(绝对角度, 框高)]
         self.doors = []  # [(绝对角度, 框高)]
         self.player_yaw = 0.0  # 累计旋转角度（0° = 进入房间时的朝向）
+        self.pubg_room_search_adapter: Optional[HouseSearchAdapter] = None
+        self.pubg_room_search_attempted = False
 
         self.reset()
 
@@ -102,6 +105,8 @@ class Searching_House:
         self.supplies = []
         self.doors = []
         self.player_yaw = 0.0
+        self.pubg_room_search_adapter = None
+        self.pubg_room_search_attempted = False
 
     def process(self, w: 'FrameWorker'):
         location = self._get_location(w)
@@ -128,6 +133,9 @@ class Searching_House:
 
         if house_scene != self.HOUSE_INDOOR:
             print(f"[HouseLoot] house_scene={house_scene}，等待进入屋内")
+            return
+
+        if self._try_pubg_room_search(w, source="indoor_process"):
             return
 
         if self.current_room_id is None:
@@ -881,6 +889,8 @@ class Searching_House:
             #     # 左移后重新进入房屋
             #     w.tap_single('摇杆', y_bias=-300, dura=300, wait=100)
 
+            if self._try_pubg_room_search(w, source="final_entry"):
+                return
             self.start_searching(w)
             self.completed_houses.add(self.current_house_id)
             print(f"[Finish] 房屋 {self.current_house_id} 完成")
@@ -889,6 +899,41 @@ class Searching_House:
             self.prepare_next_target_logic(exit_direction)
             self.current_house_id = None
             self.status = "IDLE"
+
+    def _try_pubg_room_search(self, w: 'FrameWorker', source: str) -> bool:
+        if self.pubg_room_search_attempted:
+            return False
+
+        adapter = self.pubg_room_search_adapter
+        if adapter is None:
+            adapter = HouseSearchAdapter.from_config(w)
+            self.pubg_room_search_adapter = adapter
+        if adapter is None:
+            return False
+
+        self.pubg_room_search_attempted = True
+        print(f"[PubgRoomSearch] 开始接管搜房: source={source}")
+        result = adapter.search_current_house()
+        extra = f", reason={result.reason}" if result.reason else ""
+        print(
+            f"[PubgRoomSearch] 搜房返回: result={result.result_name}, "
+            f"ok={result.ok}, fallback={result.fallback_to_legacy}{extra}"
+        )
+
+        if result.ok:
+            self.reset()
+            finish_stage = adapter.config.get("finish_stage") or "跑图阶段"
+            w.change_stage(finish_stage)
+            return True
+
+        if result.fallback_to_legacy:
+            print("[PubgRoomSearch] 切回旧搜房逻辑兜底")
+            return False
+
+        self.reset()
+        finish_stage = adapter.config.get("finish_stage") or "跑图阶段"
+        w.change_stage(finish_stage)
+        return True
 
     def update_and_check_stuck(self, current_loc):
         self.history_locations.append(current_loc)

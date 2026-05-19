@@ -308,6 +308,7 @@ class RunningManager:
     ROADSIDE_CAR_LOST_LIMIT = 8
     ROADSIDE_CAR_PURSUIT_STEP_LIMIT = 24
     ROADSIDE_CAR_MAX_ROAD_DISTANCE = 10.0
+    ROADSIDE_CAR_MAX_PLAYER_ROAD_DISTANCE = 10.0
     ROADSIDE_CAR_ESTIMATE_FOV_DEGREES = 70.0
     ROADSIDE_CAR_DISTANCE_SCALE = 1.6
     ROADSIDE_CAR_MIN_ESTIMATED_DISTANCE = 5.0
@@ -1904,10 +1905,44 @@ class RunningManager:
         direction: Optional[float],
         car,
     ) -> bool:
+        player_road_node, player_road_dist = self.road_helper.nearest_node(location, topology_only=False)
+        if (
+            player_road_node is not None
+            and player_road_dist <= self.ROADSIDE_CAR_MAX_PLAYER_ROAD_DISTANCE
+        ):
+            print(
+                f"[Running] 发现车辆且人物已在路边，当前位置 {location}, "
+                f"最近道路点 {player_road_node}, player_road_dist={player_road_dist:.2f}，开始追车"
+            )
+            self._log_running_state(
+                "路边车辆确认",
+                location,
+                direction,
+                (
+                    f"人物靠近道路点 {player_road_dist:.2f} <= "
+                    f"{self.ROADSIDE_CAR_MAX_PLAYER_ROAD_DISTANCE:.2f}，放宽车辆路边判断"
+                ),
+                player_road_node,
+                player_road_dist,
+            )
+            return True
+
         estimate = self._estimate_car_map_position(w, location, direction, car)
         if estimate is None:
             print("[Running] 发现车辆但无法估算车辆地图位置，暂不追车")
-            self._log_running_state("路边车辆过滤", location, direction, "无法估算车辆位置，忽略该车辆")
+            self._log_running_state(
+                "路边车辆过滤",
+                location,
+                direction,
+                (
+                    "无法估算车辆位置，且人物不在道路点附近，忽略该车辆"
+                    if player_road_node is None
+                    else (
+                        f"无法估算车辆位置，人物离道路点 {player_road_dist:.2f} > "
+                        f"{self.ROADSIDE_CAR_MAX_PLAYER_ROAD_DISTANCE:.2f}，忽略该车辆"
+                    )
+                ),
+            )
             return False
 
         estimated_pos, estimated_distance, estimated_direction = estimate

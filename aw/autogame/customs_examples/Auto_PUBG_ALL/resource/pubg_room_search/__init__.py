@@ -1,4 +1,4 @@
-from aw.autogame.integrations.pubg_room_search.adapter import (
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.adapter import (
     HouseSearchAdapter,
     HouseSearchRunResult,
 )

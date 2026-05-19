@@ -5,12 +5,12 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from aw.autogame.integrations.pubg_room_search.action_adapter import AutoGameActionProxy
-from aw.autogame.integrations.pubg_room_search.config import (
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.action_adapter import AutoGameActionProxy
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.config import (
     ensure_pubg_test_import_path,
     get_pubg_room_search_config,
 )
-from aw.autogame.integrations.pubg_room_search.frame_adapter import AutoGameRoomPicCapture
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.frame_adapter import AutoGameRoomPicCapture
 
 
 @dataclass

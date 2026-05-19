@@ -47,8 +47,10 @@ PHASE_DURATIONS = {
 DROP_TARGET_GARAGE = RunningManager.R_CITY
 DROP_TARGET_CENTER = RunningManager.R_CITY
 SP_SAVE_LONG_PRESS_MS = 3000
+START_GAME_VERIFY_DELAY = 5.0
 
 start_game = False
+start_game_click_time = None
 final_shutdown_pending = False
 next_phase_report_time = 0.0
 all_done_reported = False
@@ -176,7 +178,7 @@ def maybe_report_phase_remaining():
 
 
 def on_stage(w: "FrameWorker"):
-    global start_game, final_shutdown_pending
+    global start_game, start_game_click_time, final_shutdown_pending
 
     previous_stage = phase_timer.last_stage
     stage_events = phase_timer.sync_stage(w.current_stage)
@@ -271,10 +273,18 @@ def on_stage(w: "FrameWorker"):
             w.click("放弃")
             w.refresh_frame()
 
+        if start_game and start_game_click_time is not None:
+            if time.time() - start_game_click_time >= START_GAME_VERIFY_DELAY:
+                if w.get_info("开始游戏"):
+                    print("[StartGame] 开始游戏按钮仍可识别，判定上次点击未生效，准备重试")
+                    start_game = False
+                    start_game_click_time = None
+
         if w.get_info("房子"):
             if not start_game:
                 w.click("开始游戏")
                 start_game = True
+                start_game_click_time = time.time()
             w.refresh_frame()
 
         if w.get_info("提示"):
@@ -287,6 +297,7 @@ def on_stage(w: "FrameWorker"):
             prepare_round()
             w.change_stage("跳伞阶段")
             start_game = False
+            start_game_click_time = None
             return
 
     if w.current_stage == "跳伞阶段":

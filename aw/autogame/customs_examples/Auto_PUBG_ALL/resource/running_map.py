@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import time
 from typing import Callable, List, Optional, Set, Tuple, TYPE_CHECKING
@@ -293,14 +294,24 @@ class RunningManager:
     CAR_VISUAL_FORWARD_BIAS_Y = -220
     CAR_VISUAL_FORWARD_DURA = 320
     CAR_VISUAL_FORWARD_WAIT = 600
-    CAR_VISUAL_SEARCH_MAX_STEPS = 8
-    CAR_VISUAL_DYNAMIC_MIN_AREA_RATIO = 0.002
-    CAR_VISUAL_DYNAMIC_MAX_AREA_RATIO = 0.04
-    CAR_VISUAL_DYNAMIC_MIN_WAIT = 900
-    CAR_VISUAL_DYNAMIC_MAX_WAIT = 4200
+    CAR_VISUAL_SEARCH_MAX_STEPS = 4
+    CAR_VISUAL_DYNAMIC_FAR_AREA_RATIO = 0.0015
+    CAR_VISUAL_DYNAMIC_MID_AREA_RATIO = 0.012
+    CAR_VISUAL_DYNAMIC_NEAR_AREA_RATIO = 0.045
+    CAR_VISUAL_DYNAMIC_VERY_NEAR_AREA_RATIO = 0.08
+    CAR_VISUAL_DYNAMIC_MIN_WAIT = 320
+    CAR_VISUAL_DYNAMIC_NEAR_WAIT = 650
+    CAR_VISUAL_DYNAMIC_MID_WAIT = 2600
+    CAR_VISUAL_DYNAMIC_FAR_WAIT = 5200
+    CAR_VISUAL_DYNAMIC_MAX_WAIT = 7200
     # 路边发现远车后，允许跨帧追车，避免车辆框短暂丢失后又回头追原道路点。
     ROADSIDE_CAR_LOST_LIMIT = 8
     ROADSIDE_CAR_PURSUIT_STEP_LIMIT = 24
+    ROADSIDE_CAR_MAX_ROAD_DISTANCE = 10.0
+    ROADSIDE_CAR_ESTIMATE_FOV_DEGREES = 70.0
+    ROADSIDE_CAR_DISTANCE_SCALE = 1.6
+    ROADSIDE_CAR_MIN_ESTIMATED_DISTANCE = 5.0
+    ROADSIDE_CAR_MAX_ESTIMATED_DISTANCE = 70.0
     # 落水后，上浮和向前划水脱离水面的操作参数
     WATER_FLOAT_DURA = 2000
     WATER_FORWARD_BIAS_Y = -280
@@ -363,7 +374,7 @@ class RunningManager:
         self.current_road_node: Optional[Tuple[int, int]] = None
         self.active_vehicle_entry_source: Optional[str] = None
         self.last_vehicle_entry_source: Optional[str] = None
-        self.car_search_mode = self.CAR_SEARCH_GARAGE
+        self.car_search_mode = self.CAR_SEARCH_ROADSIDE
         self.garage_to_roadside_route_active = False
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
@@ -399,7 +410,7 @@ class RunningManager:
         self.current_road_node = None
         self.active_vehicle_entry_source = None
         self.last_vehicle_entry_source = None
-        self.car_search_mode = self.CAR_SEARCH_GARAGE if finding_car else self.CAR_SEARCH_ROADSIDE
+        self.car_search_mode = self.CAR_SEARCH_ROADSIDE
         self.garage_to_roadside_route_active = False
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
@@ -1294,6 +1305,8 @@ class RunningManager:
             return False
 
         if not self.roadside_car_pursuing:
+            if not self._is_roadside_car_candidate(w, location, direction, car):
+                return False
             self._start_roadside_car_pursuit(w, location, direction)
 
         return self._process_roadside_car_pursuit(w, location, direction)
@@ -1851,19 +1864,117 @@ class RunningManager:
         except Exception:
             return None
 
+    def _estimate_car_map_position(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+        det,
+    ) -> Optional[Tuple[Tuple[int, int], float, float]]:
+        if direction is None or direction < 0:
+            return None
+
+        frame_w = self._get_visual_frame_width(w)
+        if not frame_w:
+            return None
+
+        area_ratio = self._get_detection_area_ratio(w, det)
+        if area_ratio is None or area_ratio <= 0:
+            return None
+
+        car_center_x = (float(det[0]) + float(det[2])) / 2.0
+        center_offset_ratio = (car_center_x - (float(frame_w) / 2.0)) / max(1.0, float(frame_w) / 2.0)
+        angle_offset = center_offset_ratio * (self.ROADSIDE_CAR_ESTIMATE_FOV_DEGREES / 2.0)
+        estimated_direction = (float(direction) + angle_offset) % 360.0
+        estimated_distance = self.ROADSIDE_CAR_DISTANCE_SCALE / math.sqrt(area_ratio)
+        estimated_distance = max(
+            self.ROADSIDE_CAR_MIN_ESTIMATED_DISTANCE,
+            min(self.ROADSIDE_CAR_MAX_ESTIMATED_DISTANCE, estimated_distance),
+        )
+
+        rad = math.radians(estimated_direction - 90.0)
+        estimated_x = int(round(float(location[0]) + estimated_distance * math.cos(rad)))
+        estimated_y = int(round(float(location[1]) + estimated_distance * math.sin(rad)))
+        return (estimated_x, estimated_y), estimated_distance, estimated_direction
+
+    def _is_roadside_car_candidate(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+        car,
+    ) -> bool:
+        estimate = self._estimate_car_map_position(w, location, direction, car)
+        if estimate is None:
+            print("[Running] 发现车辆但无法估算车辆地图位置，暂不追车")
+            self._log_running_state("路边车辆过滤", location, direction, "无法估算车辆位置，忽略该车辆")
+            return False
+
+        estimated_pos, estimated_distance, estimated_direction = estimate
+        road_node, road_dist = self.road_helper.nearest_node(estimated_pos, topology_only=False)
+        if road_node is None:
+            print(f"[Running] 发现车辆但附近没有道路点，估算位置 {estimated_pos}，暂不追车")
+            self._log_running_state("路边车辆过滤", location, direction, "车辆附近无道路点，忽略该车辆", estimated_pos)
+            return False
+
+        if road_dist > self.ROADSIDE_CAR_MAX_ROAD_DISTANCE:
+            print(
+                f"[Running] 发现车辆但不在路边，估算车位 {estimated_pos}, "
+                f"最近道路点 {road_node}, road_dist={road_dist:.2f}, "
+                f"car_dist={estimated_distance:.2f}, car_dir={estimated_direction:.1f}，放弃追车"
+            )
+            self._log_running_state(
+                "路边车辆过滤",
+                location,
+                direction,
+                f"车辆离道路点 {road_dist:.2f} > {self.ROADSIDE_CAR_MAX_ROAD_DISTANCE:.2f}，忽略该车辆",
+                estimated_pos,
+                road_dist,
+            )
+            return False
+
+        print(
+            f"[Running] 发现路边车辆，估算车位 {estimated_pos}, "
+            f"最近道路点 {road_node}, road_dist={road_dist:.2f}, "
+            f"car_dist={estimated_distance:.2f}, car_dir={estimated_direction:.1f}"
+        )
+        self._log_running_state(
+            "路边车辆确认",
+            location,
+            direction,
+            f"车辆靠近道路点 {road_dist:.2f}，开始追车",
+            estimated_pos,
+            road_dist,
+        )
+        return True
+
     def _get_dynamic_car_forward_wait(self) -> int:
         ratio = self.roadside_car_last_area_ratio
         if ratio is None:
             return self.CAR_VISUAL_FORWARD_WAIT
 
-        min_ratio = self.CAR_VISUAL_DYNAMIC_MIN_AREA_RATIO
-        max_ratio = self.CAR_VISUAL_DYNAMIC_MAX_AREA_RATIO
-        clamped = max(min_ratio, min(max_ratio, ratio))
-        progress = (clamped - min_ratio) / max(0.000001, max_ratio - min_ratio)
-        wait = self.CAR_VISUAL_DYNAMIC_MAX_WAIT - progress * (
-            self.CAR_VISUAL_DYNAMIC_MAX_WAIT - self.CAR_VISUAL_DYNAMIC_MIN_WAIT
+        if ratio <= self.CAR_VISUAL_DYNAMIC_FAR_AREA_RATIO:
+            return self.CAR_VISUAL_DYNAMIC_MAX_WAIT
+        if ratio >= self.CAR_VISUAL_DYNAMIC_VERY_NEAR_AREA_RATIO:
+            return self.CAR_VISUAL_DYNAMIC_MIN_WAIT
+
+        wait = self._interpolate_car_forward_wait(
+            ratio,
+            [
+                (self.CAR_VISUAL_DYNAMIC_FAR_AREA_RATIO, self.CAR_VISUAL_DYNAMIC_MAX_WAIT),
+                (self.CAR_VISUAL_DYNAMIC_MID_AREA_RATIO, self.CAR_VISUAL_DYNAMIC_FAR_WAIT),
+                (self.CAR_VISUAL_DYNAMIC_NEAR_AREA_RATIO, self.CAR_VISUAL_DYNAMIC_MID_WAIT),
+                (self.CAR_VISUAL_DYNAMIC_VERY_NEAR_AREA_RATIO, self.CAR_VISUAL_DYNAMIC_NEAR_WAIT),
+            ],
         )
         return int(round(wait))
+
+    def _interpolate_car_forward_wait(self, ratio: float, anchors) -> float:
+        for (left_ratio, left_wait), (right_ratio, right_wait) in zip(anchors, anchors[1:]):
+            if left_ratio <= ratio <= right_ratio:
+                progress = (ratio - left_ratio) / max(0.000001, right_ratio - left_ratio)
+                return left_wait + progress * (right_wait - left_wait)
+        return anchors[-1][1]
 
     def _get_visual_frame_width(self, w: "FrameWorker") -> Optional[int]:
         frame = getattr(w, "frame", None)

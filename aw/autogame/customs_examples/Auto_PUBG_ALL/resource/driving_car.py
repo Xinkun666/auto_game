@@ -216,6 +216,10 @@ class DrivingManager:
     ROUTE_TURN_MAX_DURATION_MS = 650
     FORBIDDEN_TURN_MAX_DURATION_MS = 1500
     VISUAL_AVOIDANCE_TURN_MAX_DURATION_MS = 1200
+    VISUAL_CLOSE_REVERSE_MS = 1050
+    VISUAL_CLOSE_BOTTOM_RATIO = 0.82
+    VISUAL_CLOSE_AREA_RATIO = 0.10
+    VISUAL_CLOSE_COVERAGE_RATIO = 0.52
     VISUAL_AVOIDANCE_ANGLE_MAP = {
         "slight_left": 12,
         "slight_right": 12,
@@ -1032,6 +1036,16 @@ class DrivingManager:
 
         self._record_local_avoidance(context, f"视觉避障:{decision}")
         action_name = action[0]
+        if action_name.startswith("forward_turn_") and self._is_close_visual_block(context):
+            steer = self._decision_to_steer(decision) or self._choose_less_obstructed_side(w)
+            action_name = f"reverse_and_{steer}"
+            print(
+                f"[Driving] 障碍物已贴近车头，放弃前进转向，先倒车脱离: "
+                f"decision={decision}, steer={steer}, "
+                f"bottom={float(context.obstacle_info.get('max_bottom_ratio', 0.0) or 0.0):.2f}, "
+                f"area={float(context.obstacle_info.get('max_area_ratio', 0.0) or 0.0):.2f}, "
+                f"coverage={coverage_ratio:.2f}, stalled={self.motion_stalled_this_frame}"
+            )
         desired_degrees = self.VISUAL_AVOIDANCE_ANGLE_MAP.get(decision, 25)
         max_duration = (
             self.VISUAL_AVOIDANCE_TURN_MAX_DURATION_MS
@@ -1042,7 +1056,7 @@ class DrivingManager:
             action_name,
             context.speed,
             desired_degrees,
-            action[1],
+            max(action[1], self.VISUAL_CLOSE_REVERSE_MS) if action_name.startswith("reverse_and_") else action[1],
             max_duration,
         )
         situation_map = {
@@ -1071,6 +1085,30 @@ class DrivingManager:
             skip_obstacle_learning=False,
         )
         return True
+
+    def _is_close_visual_block(self, context: DriveContext) -> bool:
+        obstacle_info = context.obstacle_info or {}
+        coverage_ratio = float(obstacle_info.get("coverage_ratio", 0.0) or 0.0)
+        max_bottom_ratio = float(obstacle_info.get("max_bottom_ratio", 0.0) or 0.0)
+        max_area_ratio = float(obstacle_info.get("max_area_ratio", 0.0) or 0.0)
+        center_blocked = bool(obstacle_info.get("center_blocked"))
+        near_center_bottom_blocked = bool(obstacle_info.get("near_center_bottom_blocked"))
+        hard_obstacle_count = int(obstacle_info.get("hard_obstacles_count", 0) or 0)
+
+        if coverage_ratio >= self.VISUAL_CLOSE_COVERAGE_RATIO:
+            return True
+        if near_center_bottom_blocked:
+            return True
+        if (
+            max_bottom_ratio >= self.VISUAL_CLOSE_BOTTOM_RATIO
+            and (max_area_ratio >= self.VISUAL_CLOSE_AREA_RATIO or center_blocked or hard_obstacle_count > 0)
+        ):
+            return True
+        if self.motion_stalled_this_frame and (center_blocked or coverage_ratio >= 0.30):
+            return True
+        if self.blocked_motion_count >= self.FORWARD_BLOCK_REPEAT_LIMIT and (center_blocked or coverage_ratio >= 0.30):
+            return True
+        return False
 
     def _drive_toward_target(
         self,
@@ -1909,7 +1947,38 @@ class DrivingManager:
         if not local_dets:
             return {"decision": "straight", "obstacles_count": 0}
 
-        return self.obstacle_analyzer.analyze(local_dets)
+        obstacle_info = self.obstacle_analyzer.analyze(local_dets)
+        self._attach_close_obstacle_metrics(obstacle_info, local_dets, roi_w, roi_h)
+        return obstacle_info
+
+    def _attach_close_obstacle_metrics(self, obstacle_info: Dict[str, Any], local_dets, roi_w: int, roi_h: int):
+        max_bottom_ratio = 0.0
+        max_area_ratio = 0.0
+        near_center_bottom_blocked = False
+        center_x = float(roi_w) / 2.0
+
+        for det in local_dets:
+            x1, y1, x2, y2, conf, cls_id = det[:6]
+            cfg = ObstacleAvoidanceAnalyzer.CLASS_CONFIG.get(int(cls_id))
+            if not cfg or float(conf) < 0.25:
+                continue
+
+            box_w = max(0.0, float(x2) - float(x1))
+            box_h = max(0.0, float(y2) - float(y1))
+            if box_w <= 0 or box_h <= 0:
+                continue
+
+            bottom_ratio = float(y2) / float(max(1, roi_h))
+            area_ratio = (box_w * box_h) / float(max(1, roi_w * roi_h))
+            max_bottom_ratio = max(max_bottom_ratio, bottom_ratio)
+            max_area_ratio = max(max_area_ratio, area_ratio)
+
+            if float(x1) <= center_x <= float(x2) and bottom_ratio >= self.VISUAL_CLOSE_BOTTOM_RATIO:
+                near_center_bottom_blocked = True
+
+        obstacle_info["max_bottom_ratio"] = max_bottom_ratio
+        obstacle_info["max_area_ratio"] = max_area_ratio
+        obstacle_info["near_center_bottom_blocked"] = near_center_bottom_blocked
 
     def _is_self_vehicle_detection(self, det, roi_w: int, roi_h: int) -> bool:
         if int(det[5]) not in self.SELF_VEHICLE_CLASS_IDS:

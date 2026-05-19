@@ -229,6 +229,12 @@ class RunningManager:
     WAYPOINT_PRECISE_BIAS_Y = -120
     WAYPOINT_PRECISE_DURA = 180
     WAYPOINT_PRECISE_WAIT = 350
+    UNSTUCK_MOVE_THRESHOLD = 0.8
+    UNSTUCK_STEP_DURA = 360
+    UNSTUCK_STEP_WAIT = 900
+    UNSTUCK_TURN_BIAS = 360
+    UNSTUCK_TURN_DURA = 420
+    UNSTUCK_TURN_WAIT = 300
     WAYPOINT_PROJECTION_PASS_RATIO = 1.0
     WAYPOINT_PROJECTION_CORRIDOR = 12.0
     # 单帧位置跳变超过这个距离时，认为定位异常，需要重规划
@@ -1115,33 +1121,76 @@ class RunningManager:
         self.stop_auto_forward(w)
 
         if w.get_info("跳跃"):
-            print("[Running] 尝试跳跃脱困")
-            self._log_running_state("人物卡死", current_loc, None, "尝试跳跃脱困")
+            print("[Running] 尝试跳跃配合侧移脱困")
+            self._log_running_state("人物卡死", current_loc, None, "跳跃后侧移/斜退脱困")
             w.click("跳跃")
-            time.sleep(0.2)
-            w.tap_single("摇杆", y_bias=-300, dura=400, wait=1000)
-            w.refresh_frame()
-            new_loc = self._get_location(w)
-            if new_loc and get_distance(current_loc, new_loc) > 0.5:
-                print("[Running] 跳跃脱困成功")
-                self.stuck = False
-                self.loading_road = False
+            time.sleep(0.15)
+            if self._try_unstuck_move(w, current_loc, "跳跃后左侧移", -280, 0):
+                return
+            if self._try_unstuck_move(w, current_loc, "跳跃后右侧移", 280, 0):
                 return
 
-        print("[Running] 跳跃无效，执行 U 型脱困")
-        self._log_running_state("跳跃脱困失败", current_loc, None, "执行U型脱困")
-        for bias_x, bias_y in ((0, 300), (300, 0), (-300, 0), (0, -300)):
-            w.tap_single("摇杆", x_bias=bias_x, y_bias=bias_y, dura=300, wait=1200)
-            w.refresh_frame()
-            new_loc = self._get_location(w)
-            if new_loc and get_distance(current_loc, new_loc) > 0.5:
-                print("[Running] 位移恢复，重新规划路径")
-                self.stuck = False
-                self.loading_road = False
+        print("[Running] 执行侧退绕障脱困")
+        self._log_running_state("人物卡死", current_loc, None, "执行侧退绕障脱困")
+        for label, bias_x, bias_y in (
+            ("左后撤", -240, 260),
+            ("右后撤", 240, 260),
+            ("左侧移", -300, 0),
+            ("右侧移", 300, 0),
+            ("后撤拉开距离", 0, 300),
+        ):
+            if self._try_unstuck_move(w, current_loc, label, bias_x, bias_y):
                 return
 
+        for label, turn_bias in (("左转绕开", -self.UNSTUCK_TURN_BIAS), ("右转绕开", self.UNSTUCK_TURN_BIAS)):
+            print(f"[Running] {label}，避开原前方障碍后再试探前进")
+            self._log_running_state("人物卡死", current_loc, None, label)
+            w.tap_single("视角", x_bias=turn_bias, dura=self.UNSTUCK_TURN_DURA, wait=self.UNSTUCK_TURN_WAIT)
+            w.refresh_frame()
+            if self._try_unstuck_move(w, current_loc, f"{label}后前进", 0, -260):
+                return
+
+        print("[Running] 本轮脱困未产生有效位移，清空路径等待下一帧重新判断")
         self.stuck = False
         self.loading_road = False
+        self.road_list = []
+        self.current_segment_start = None
+
+    def _try_unstuck_move(
+        self,
+        w: "FrameWorker",
+        origin: Tuple[int, int],
+        label: str,
+        x_bias: int,
+        y_bias: int,
+    ) -> bool:
+        print(f"[Running] 脱困动作: {label}, x_bias={x_bias}, y_bias={y_bias}")
+        w.tap_single(
+            "摇杆",
+            x_bias=x_bias,
+            y_bias=y_bias,
+            dura=self.UNSTUCK_STEP_DURA,
+            wait=self.UNSTUCK_STEP_WAIT,
+        )
+        w.refresh_frame()
+        new_loc = self._get_location(w)
+        if not new_loc:
+            return False
+
+        moved = get_distance(origin, new_loc)
+        if moved < self.UNSTUCK_MOVE_THRESHOLD:
+            return False
+
+        print(f"[Running] 脱困产生有效位移 {moved:.2f}，从新位置重新规划路径")
+        self.stuck = False
+        self.trapped = False
+        self.loading_road = False
+        self.road_list = []
+        self.current_segment_start = None
+        self.locations = [new_loc]
+        self.history_locations = [new_loc]
+        self.last_valid_location = new_loc
+        return True
 
     def _click_jump_if_available(
         self,

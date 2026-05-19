@@ -13,6 +13,24 @@ PyQt6
 scikit-learn
 ultralytics
 
+# 搜房 pubg_room_search 适配层
+# 代码位置: aw/autogame/customs_examples/Auto_PUBG_ALL/resource/pubg_room_search/
+# 本仓库内适配层依赖的 pip 包已由上面的 numpy/opencv-python/torch/torchvision/Pillow/ultralytics 覆盖。
+#
+# 额外环境配置:
+# 1. 需要准备 pubg_test 工程，并确保存在:
+#    pubg_test/control_proxy/src/gametest_proxy/
+# 2. 默认自动查找位置是 auto_game 同级目录下的 pubg_test；也可以设置:
+#    export PUBG_TEST_PATH=/path/to/pubg_test
+# 3. 开启搜房:
+#    export AUTOGAME_PUBG_ROOM_SEARCH=1
+#    或在 aw/autogame/config/config.json 的 pubg_room_search.enabled 配置为 true
+# 4. mixed_yolo 模式需要可访问 YOLO 服务，默认:
+#    yolo_host=localhost, yolo_port=6666
+# 5. replay/dsl_replay 或门校准使用 sam3 时，需要可访问 SAM3 服务，默认:
+#    sam3_host=localhost, sam3_port=12345
+# 6. gametest_proxy 来自 pubg_test/control_proxy/src，不是 PyPI 包，不能通过 pip install 安装。
+#
 # 拉流相关
 grpcio
 protobuf

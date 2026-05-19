@@ -341,11 +341,17 @@ class RunningManager:
     ROAD_NODE_REACHED_TOLERANCE = 3.0
     ROAD_PATROL_MIN_NODE_DISTANCE = 8.0
     ROAD_CIRCLE_NODE_MAX_DISTANCE = 30.0
+    CIRCLE_RANDOM_ROUTE_MIN_DIST = 25
+    CIRCLE_RANDOM_ROUTE_MAX_DIST = 90
+    CIRCLE_RANDOM_ROUTE_NUM_POINTS = 12
     VEHICLE_ENTRY_ROADSIDE = "roadside"
     VEHICLE_ENTRY_GARAGE = "garage"
     VEHICLE_ENTRY_UNKNOWN = "unknown"
     CAR_SEARCH_GARAGE = "garage"
     CAR_SEARCH_ROADSIDE = "roadside"
+    RUNNING_ROUTE_CIRCLE = "circle"
+    RUNNING_ROUTE_PATROL = "patrol"
+    RUNNING_ROUTE_RANDOM_AROUND_CIRCLE = "random_around_circle"
     JUMP_CLICK_COOLDOWN = 0.8
 
     def __init__(self, map_tool: Optional[MapNavigator] = None):
@@ -392,6 +398,9 @@ class RunningManager:
         self.roadside_car_lost_after_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio: Optional[float] = None
+        self.current_running_route_kind: Optional[str] = None
+        self.last_circle_target_point: Optional[Tuple[int, int]] = None
+        self.circle_route_completed = False
 
     def reset(self, finding_car: bool = True):
         self.road_list = []
@@ -429,6 +438,9 @@ class RunningManager:
         self.roadside_car_lost_after_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
+        self.current_running_route_kind = None
+        self.last_circle_target_point = None
+        self.circle_route_completed = False
         print("[Running] 状态已重置!")
 
     def set_game_time(self, game_time: Optional[float] = None):
@@ -552,6 +564,7 @@ class RunningManager:
             self._advance_waypoint_by_projection(location)
         if not self.road_list:
             print("[Running] 当前路径已按投影走完，下一帧重新规划")
+            self._mark_running_route_completed_if_needed(location, "投影判定路径走完")
             self.loading_road = False
             return
 
@@ -635,6 +648,7 @@ class RunningManager:
 
         if self.stable_circle_angle is None:
             self.stable_circle_angle = angle
+            self.circle_route_completed = False
             print(f"[Running] 获取到进圈方向: {angle:.1f}")
             if not self.finding_car:
                 self.loading_road = False
@@ -643,6 +657,7 @@ class RunningManager:
         if self._angle_diff(self.stable_circle_angle, angle) >= self.CIRCLE_REPLAN_THRESHOLD:
             print(f"[Running] 进圈方向更新: {self.stable_circle_angle:.1f} -> {angle:.1f}")
             self.stable_circle_angle = angle
+            self.circle_route_completed = False
             if not self.finding_car:
                 self.loading_road = False
 
@@ -742,6 +757,7 @@ class RunningManager:
         self.roadside_car_lost_after_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
+        self.current_running_route_kind = None
         print(
             f"[Running] 收到下车通知，载具交互保护期 {cooldown:.1f}s，"
             f"后续模式={'继续寻车' if self.finding_car else '纯跑图'}"
@@ -891,6 +907,7 @@ class RunningManager:
             self.road_list = list(self.GARAGE_TO_ROADSIDE_POINTS)
             self.current_road_node = None
             self.current_segment_start = None
+            self.current_running_route_kind = None
         elif self.finding_car:
             if self.car_search_mode == self.CAR_SEARCH_GARAGE:
                 if self._should_skip_garage_search(location):
@@ -996,16 +1013,25 @@ class RunningManager:
             print("[Running] 没有可用道路点，回退随机可视点巡逻")
             self.current_road_node = None
             self.road_list = self.map_tool.get_random_visible_points(location)
+            self.current_running_route_kind = self.RUNNING_ROUTE_PATROL if not self.finding_car else None
             return
 
         self.current_road_node = node
         self.road_list = self.road_helper.plan_to_node(location, node)
+        self.current_running_route_kind = self.RUNNING_ROUTE_PATROL if not self.finding_car else None
         print(f"[Running] 道路巡游目标 node={node}, dist={node_dist:.2f}")
 
     def _load_running_path(self, location: Tuple[int, int]):
         if self.stable_circle_angle is None:
             print("[Running] 未获取到进圈方向，先沿临近道路点巡游")
             self._load_road_patrol_path(location, reason="纯跑图道路巡游")
+            return
+
+        if self.circle_route_completed and self.last_circle_target_point is not None:
+            if self._load_circle_random_running_path(location):
+                return
+            print("[Running] 圈中心附近随机跑图规划失败，回退道路巡游")
+            self._load_road_patrol_path(location, reason="圈中心随机规划失败，先道路巡游")
             return
 
         print("[Running] 正在加载进圈路径...")
@@ -1030,6 +1056,8 @@ class RunningManager:
                 self.road_list = self.map_tool.plan_path(location, target_point) or [target_point]
             else:
                 self.road_list = self.road_helper.plan_to_node(location, road_node)
+            self.last_circle_target_point = target_point
+            self.current_running_route_kind = self.RUNNING_ROUTE_CIRCLE
             return
 
         print(
@@ -1038,6 +1066,36 @@ class RunningManager:
         )
         self.current_road_node = None
         self.road_list = self.map_tool.plan_path(location, target_point)
+        self.last_circle_target_point = target_point
+        self.current_running_route_kind = self.RUNNING_ROUTE_CIRCLE
+
+    def _load_circle_random_running_path(self, location: Tuple[int, int]) -> bool:
+        anchor = self.last_circle_target_point
+        if anchor is None:
+            return False
+
+        print(f"[Running] 已完成进圈路线，围绕圈目标 {anchor} 随机规划跑图路线")
+        self._log_running_state("圈内随机跑图", location, None, "围绕上次圈目标随机规划可通行路线", anchor)
+        candidates = self.map_tool.get_random_visible_points(
+            anchor,
+            num_points=self.CIRCLE_RANDOM_ROUTE_NUM_POINTS,
+            min_dist=self.CIRCLE_RANDOM_ROUTE_MIN_DIST,
+            max_dist=self.CIRCLE_RANDOM_ROUTE_MAX_DIST,
+        )
+
+        for candidate in candidates:
+            candidate = tuple(map(int, candidate))
+            if get_distance(location, candidate) <= self.WAYPOINT_TOLERANCE:
+                continue
+            path = self.map_tool.plan_path(location, candidate)
+            if path:
+                self.current_road_node = None
+                self.road_list = path
+                self.current_running_route_kind = self.RUNNING_ROUTE_RANDOM_AROUND_CIRCLE
+                print(f"[Running] 圈目标附近随机跑图目标 {candidate}, path_len={len(path)}")
+                return True
+
+        return False
 
     def _get_circle_target_point(self, location: Tuple[int, int]) -> Optional[Tuple[int, int]]:
         if self.stable_circle_angle is None:
@@ -1307,6 +1365,20 @@ class RunningManager:
             self.loading_road = False
             self.current_segment_start = None
             print("[Running] 当前路径已走完，准备重新规划")
+            self._mark_running_route_completed_if_needed(location, "到达路径终点")
+
+    def _mark_running_route_completed_if_needed(self, location: Tuple[int, int], reason: str):
+        if self.finding_car or self.current_running_route_kind != self.RUNNING_ROUTE_CIRCLE:
+            return
+
+        self.circle_route_completed = True
+        self.current_running_route_kind = None
+        if self.last_circle_target_point is None:
+            self.last_circle_target_point = location
+        print(
+            f"[Running] {reason}，本次进圈路线已完成；"
+            f"后续跑图围绕圈目标 {self.last_circle_target_point} 随机规划"
+        )
 
     def _advance_waypoint_by_projection(self, location: Tuple[int, int]):
         while len(self.road_list) >= 2:

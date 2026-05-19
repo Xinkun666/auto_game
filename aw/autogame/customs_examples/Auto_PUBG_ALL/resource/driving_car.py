@@ -274,6 +274,7 @@ class DrivingManager:
     SELF_VEHICLE_BOTTOM_INTERSECT_TOLERANCE = 2.0
     SELF_VEHICLE_MIN_SIDE_COVER_RATIO = 0.06
     SELF_VEHICLE_MIN_TOTAL_WIDTH_RATIO = 0.18
+    HORN_MISSING_EXIT_FRAME_LIMIT = 5
 
     # 内部阶段名称：首次出库 / 正常巡航 / 驾驶结束
     STAGE_EXIT_GARAGE = "出库阶段"
@@ -340,6 +341,7 @@ class DrivingManager:
         self.allow_running_fallback = True
         self.pause_sp_callback: Optional[Callable] = None
         self.next_running_finding_car: Optional[bool] = None
+        self.horn_missing_frames = 0
 
         self._frame_action_executed = False
 
@@ -402,6 +404,7 @@ class DrivingManager:
         self.last_auto_brake_time = 0.0
         self.allow_running_fallback = True
         self.next_running_finding_car = None
+        self.horn_missing_frames = 0
 
         self._frame_action_executed = False
         print("[Driving] 状态已重置!")
@@ -1878,6 +1881,28 @@ class DrivingManager:
             print("[Driving] 检测到驾驶按钮，判定已意外下车")
             return True
 
+        strong_vehicle_ui_visible = any(
+            bool(w.get_info(name))
+            for name in ("漂移", "自动前进", "急刹", "加速")
+        )
+
+        if self._is_configured_info(w, "喇叭"):
+            if w.get_info("喇叭"):
+                self.horn_missing_frames = 0
+            else:
+                self.horn_missing_frames += 1
+                if (
+                    self.horn_missing_frames >= self.HORN_MISSING_EXIT_FRAME_LIMIT
+                    and not strong_vehicle_ui_visible
+                ):
+                    print(
+                        f"[Driving] 喇叭连续 {self.horn_missing_frames} 帧消失，"
+                        "判定可能已下车"
+                    )
+                    return True
+        else:
+            self.horn_missing_frames = 0
+
         on_foot_ui_visible = any(
             bool(w.get_info(name))
             for name in ("左拳头", "子弹", "跳跃")
@@ -1887,13 +1912,20 @@ class DrivingManager:
 
         vehicle_ui_visible = any(
             bool(w.get_info(name))
-            for name in ("自动前进", "急刹", "加速")
-        )
+            for name in ("喇叭", "漂移", "自动前进", "急刹", "加速")
+        ) or strong_vehicle_ui_visible
         if vehicle_ui_visible:
             return False
 
         print("[Driving] 检测到步行UI，判定已意外下车")
         return True
+
+    def _is_configured_info(self, w: "FrameWorker", area_name: str) -> bool:
+        suffix = f"__{area_name}"
+        return any(
+            str(key).endswith(suffix)
+            for key in getattr(w, "stage_info", {}).keys()
+        )
 
     def _handle_unexpected_vehicle_exit(self, w: "FrameWorker"):
         self.reset(max_driving_time=self.max_driving_time)

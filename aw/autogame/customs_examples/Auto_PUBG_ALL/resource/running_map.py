@@ -632,6 +632,9 @@ class RunningManager:
                 self.loading_road = False
 
     def _is_in_vehicle(self, w: "FrameWorker") -> bool:
+        if any(w.get_info(name) for name in ("漂移", "喇叭")):
+            return True
+
         on_foot_ui_missing = not w.get_info("左拳头") and not w.get_info("子弹")
         vehicle_ui_visible = any(
             w.get_info(name)

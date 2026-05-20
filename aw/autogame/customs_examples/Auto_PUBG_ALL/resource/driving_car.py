@@ -481,7 +481,11 @@ class DrivingManager:
         if self.trapped:
             print("[Driving] 车辆长时间在 1~2 距离范围内打转，判定困死")
             if self.allow_running_fallback:
-                self._exit_vehicle_to_running(w, "车辆困死，切回跑图阶段")
+                self._exit_vehicle_to_running(
+                    w,
+                    "车辆困死，切回跑图阶段",
+                    finding_car=True,
+                )
             else:
                 self._handle_death(w)
             self._finalize_frame(w)

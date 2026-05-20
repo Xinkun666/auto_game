@@ -322,6 +322,7 @@ def on_stage(w: "FrameWorker"):
             finalize_automation(w)
             return
 
+        running_manager.set_drive_required(phase_timer.need_drive())
         running_manager.process(w)
         return
 

@@ -370,6 +370,7 @@ class RunningManager:
         self.trapped = False
 
         self.stable_circle_angle: Optional[float] = None
+        self.drive_required = True
         self.find_car_times = 0
         self.correct_position_times = 0
         self.finding_car = True
@@ -411,6 +412,7 @@ class RunningManager:
         self.stuck = False
         self.trapped = False
         self.stable_circle_angle = None
+        self.drive_required = bool(finding_car)
         self.find_car_times = 0
         self.correct_position_times = 0
         self.finding_car = finding_car
@@ -447,6 +449,9 @@ class RunningManager:
         self.game_time = time.time() if game_time is None else game_time
         print(f'[Running] 游戏开始时间设置为： {self.game_time:.3f}')
 
+    def set_drive_required(self, required: bool):
+        self.drive_required = bool(required)
+
     def get_elapsed_time(self) -> float:
         if self.game_time is None:
             return 0.0
@@ -461,6 +466,7 @@ class RunningManager:
 
         direction = self._get_scalar(w.get_info("direction"))
         self._update_circle_angle(w.get_info("white_angle"))
+        self._refresh_finding_car_policy(w, location, direction)
 
         if self._is_dead(w):
             print("[Running] 检测到死亡!")
@@ -661,6 +667,52 @@ class RunningManager:
             if not self.finding_car:
                 self.loading_road = False
 
+    def _need_circle_now(self) -> bool:
+        return self.stable_circle_angle is not None and not self.circle_route_completed
+
+    def _refresh_finding_car_policy(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+    ):
+        should_find_car = self.drive_required and not self._need_circle_now()
+        if should_find_car == self.finding_car:
+            return
+
+        if should_find_car:
+            print("[Running] 开车阶段未完成且当前不需要进圈，恢复沿路找车")
+            self._log_running_state("恢复找车", location, direction, "到最近道路点继续找车")
+            self.finding_car = True
+            self._switch_to_roadside_car_search(
+                "开车未完成且进圈路线已处理",
+                leave_garage_route=False,
+            )
+            return
+
+        print("[Running] 当前需要进圈，暂停找车并优先进圈")
+        self._log_running_state("暂停找车", location, direction, "优先进圈")
+        self.stop_auto_forward(w)
+        self.finding_car = False
+        self.precise_entering_car = False
+        self.precise_last_distance = None
+        self.precise_idle_rounds = 0
+        self.precise_stuck_recoveries = 0
+        self.precise_face_attempt_index = 0
+        self.precise_view_ready = False
+        self.precise_invalid_direction_count = 0
+        self.loading_road = False
+        self.road_list = []
+        self.current_segment_start = None
+        self.current_road_node = None
+        self.active_vehicle_entry_source = None
+        self.garage_to_roadside_route_active = False
+        self.roadside_car_pursuing = False
+        self.roadside_car_lost_rounds = 0
+        self.roadside_car_lost_after_forward_pushes = 0
+        self.roadside_car_steps = 0
+        self.roadside_car_last_area_ratio = None
+
     def _is_in_vehicle(self, w: "FrameWorker") -> bool:
         if any(w.get_info(name) for name in ("漂移", "喇叭")):
             return True
@@ -731,6 +783,7 @@ class RunningManager:
         cooldown: float = VEHICLE_EXIT_PROTECTION,
         finding_car: bool = False,
     ):
+        self.drive_required = bool(finding_car)
         self.finding_car = bool(finding_car)
         self.loading_road = False
         self.precise_entering_car = False
@@ -1461,7 +1514,7 @@ class RunningManager:
     ) -> bool:
         if w.get_info("驾驶"):
             self.active_vehicle_entry_source = self.VEHICLE_ENTRY_ROADSIDE
-        if self._attempt_drive_after_move(w, "寻车跑图中检查驾驶按钮"):
+        if self._attempt_drive_after_move(w, "跑图中检查驾驶按钮"):
             return True
 
         car = self._find_largest_car(w)
@@ -1469,8 +1522,9 @@ class RunningManager:
             return False
 
         if not self.roadside_car_pursuing:
+            self.stop_auto_forward(w)
             if not self._is_roadside_car_candidate(w, location, direction, car):
-                return False
+                return True
             self._start_roadside_car_pursuit(w, location, direction)
 
         return self._process_roadside_car_pursuit(w, location, direction)
@@ -1586,6 +1640,7 @@ class RunningManager:
             print(f"[Running] {reason}，判定车库暂无可上车辆，先离开车库再切换到沿路找车")
         else:
             print(f"[Running] {reason}，直接切换到沿路找车")
+        self.finding_car = True
         self.car_search_mode = self.CAR_SEARCH_ROADSIDE
         self.precise_entering_car = False
         self.precise_last_distance = None
@@ -2101,61 +2156,22 @@ class RunningManager:
             )
             return True
 
-        estimate = self._estimate_car_map_position(w, location, direction, car)
-        if estimate is None:
-            print("[Running] 发现车辆但无法估算车辆地图位置，暂不追车")
-            self._log_running_state(
-                "路边车辆过滤",
-                location,
-                direction,
-                (
-                    "无法估算车辆位置，且人物不在道路点附近，忽略该车辆"
-                    if player_road_node is None
-                    else (
-                        f"无法估算车辆位置，人物离道路点 {player_road_dist:.2f} > "
-                        f"{self.ROADSIDE_CAR_MAX_PLAYER_ROAD_DISTANCE:.2f}，忽略该车辆"
-                    )
-                ),
-            )
-            return False
-
-        estimated_pos, estimated_distance, estimated_direction = estimate
-        road_node, road_dist = self.road_helper.nearest_node(estimated_pos, topology_only=False)
-        if road_node is None:
-            print(f"[Running] 发现车辆但附近没有道路点，估算位置 {estimated_pos}，暂不追车")
-            self._log_running_state("路边车辆过滤", location, direction, "车辆附近无道路点，忽略该车辆", estimated_pos)
-            return False
-
-        if road_dist > self.ROADSIDE_CAR_MAX_ROAD_DISTANCE:
-            print(
-                f"[Running] 发现车辆但不在路边，估算车位 {estimated_pos}, "
-                f"最近道路点 {road_node}, road_dist={road_dist:.2f}, "
-                f"car_dist={estimated_distance:.2f}, car_dir={estimated_direction:.1f}，放弃追车"
-            )
-            self._log_running_state(
-                "路边车辆过滤",
-                location,
-                direction,
-                f"车辆离道路点 {road_dist:.2f} > {self.ROADSIDE_CAR_MAX_ROAD_DISTANCE:.2f}，忽略该车辆",
-                estimated_pos,
-                road_dist,
-            )
-            return False
-
         print(
-            f"[Running] 发现路边车辆，估算车位 {estimated_pos}, "
-            f"最近道路点 {road_node}, road_dist={road_dist:.2f}, "
-            f"car_dist={estimated_distance:.2f}, car_dir={estimated_direction:.1f}"
+            f"[Running] 发现车辆但人物不在路上，当前位置 {location}, "
+            f"最近道路点 {player_road_node}, player_road_dist={player_road_dist:.2f}，先停车不追车"
         )
         self._log_running_state(
-            "路边车辆确认",
+            "路边车辆过滤",
             location,
             direction,
-            f"车辆靠近道路点 {road_dist:.2f}，开始追车",
-            estimated_pos,
-            road_dist,
+            (
+                f"人物离最近道路点 {player_road_dist:.2f} > "
+                f"{self.ROADSIDE_CAR_MAX_PLAYER_ROAD_DISTANCE:.2f}，暂不追车"
+            ),
+            player_road_node,
+            player_road_dist,
         )
-        return True
+        return False
 
     def _get_dynamic_car_forward_wait(self) -> int:
         ratio = self.roadside_car_last_area_ratio

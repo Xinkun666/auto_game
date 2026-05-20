@@ -301,16 +301,6 @@ class LauncherWindow(QWidget):
         self.mode_direct = QRadioButton("直接指定 project_case / target_case")
         self.mode_testcase.setChecked(True)
 
-        self.backend_local = QRadioButton("本地")
-        self.backend_remote = QRadioButton("服务端")
-        self.backend_local.setChecked(True)
-
-        self.remote_brain_url_edit = QLineEdit()
-        self.remote_brain_url_edit.setPlaceholderText("http://服务器IP:8765")
-        self.remote_brain_url_edit.setText(
-            os.environ.get("AUTOGAME_REMOTE_BRAIN_URL", "http://127.0.0.1:8765")
-        )
-
         self.testcase_path_edit = QLineEdit()
         self.testcase_path_edit.setReadOnly(True)
         self.testcase_path_edit.setPlaceholderText("未选择 testcases 用例文件")
@@ -392,7 +382,6 @@ class LauncherWindow(QWidget):
         self._bind_signals()
         self._load_project_cases()
         self._sync_mode_ui()
-        self._sync_backend_ui()
         self._log_message(
             f"[Launcher] 启动器已初始化，日志文件：{LAUNCHER_LOG_FILE}\n",
             level=logging.INFO,
@@ -407,14 +396,6 @@ class LauncherWindow(QWidget):
         mode_layout.addWidget(self.mode_testcase)
         mode_layout.addWidget(self.mode_direct)
         main_layout.addWidget(mode_group)
-
-        backend_group = QGroupBox("运行后端")
-        backend_layout = QHBoxLayout(backend_group)
-        backend_layout.addWidget(self.backend_local)
-        backend_layout.addWidget(self.backend_remote)
-        backend_layout.addWidget(QLabel("服务端地址"))
-        backend_layout.addWidget(self.remote_brain_url_edit, 1)
-        main_layout.addWidget(backend_group)
 
         testcase_group = QGroupBox("testcases 用例")
         testcase_layout = QHBoxLayout(testcase_group)
@@ -474,8 +455,6 @@ class LauncherWindow(QWidget):
 
     def _bind_signals(self):
         self.mode_testcase.toggled.connect(self._sync_mode_ui)
-        self.backend_local.toggled.connect(self._sync_backend_ui)
-        self.backend_remote.toggled.connect(self._sync_backend_ui)
         self.browse_button.clicked.connect(self._choose_testcase_file)
         self.clear_button.clicked.connect(self._clear_testcase_file)
         self.refresh_button.clicked.connect(self._refresh_config_choices)
@@ -548,11 +527,6 @@ class LauncherWindow(QWidget):
         self.testcase_path_edit.setEnabled(testcase_mode)
         self.browse_button.setEnabled(testcase_mode)
         self.clear_button.setEnabled(testcase_mode)
-
-    def _sync_backend_ui(self):
-        remote_backend = self.backend_remote.isChecked()
-        LOGGER.debug("sync_backend_ui: remote_backend=%s", remote_backend)
-        self.remote_brain_url_edit.setEnabled(remote_backend)
 
     def _set_combo_value(self, combo: QComboBox, value: str):
         if not value:
@@ -694,32 +668,20 @@ class LauncherWindow(QWidget):
                 "AUTOGAME_LAUNCHER_INACTIVITY_TIMEOUT_MINUTES",
                 str(float(self.current_plan.get("inactivity_timeout_minutes", 5.0))),
             )
-            run_backend = str(self.current_plan.get("run_backend") or "local").strip().lower()
-            env.insert("AUTOGAME_RUN_BACKEND", run_backend)
-            if run_backend == "remote":
-                env.insert(
-                    "AUTOGAME_REMOTE_BRAIN_URL",
-                    str(self.current_plan.get("remote_brain_url") or "").strip(),
-                )
         LOGGER.debug(
-            "build_process_environment: project_case=%s target_case=%s run_no=%s batch_start=%s run_start=%s inactivity_timeout=%s run_backend=%s remote_url=%s",
+            "build_process_environment: project_case=%s target_case=%s run_no=%s batch_start=%s run_start=%s inactivity_timeout=%s",
             project_case,
             target_case,
             run_no,
             self.current_batch_start_timestamp,
             self.current_run_start_timestamp,
             self.current_plan.get("inactivity_timeout_minutes") if self.current_plan else None,
-            self.current_plan.get("run_backend") if self.current_plan else None,
-            self.current_plan.get("remote_brain_url") if self.current_plan else None,
         )
         return env
 
     def _set_inputs_enabled(self, enabled: bool):
         self.mode_testcase.setEnabled(enabled)
         self.mode_direct.setEnabled(enabled)
-        self.backend_local.setEnabled(enabled)
-        self.backend_remote.setEnabled(enabled)
-        self.remote_brain_url_edit.setEnabled(enabled and self.backend_remote.isChecked())
         self.testcase_path_edit.setEnabled(enabled and self.mode_testcase.isChecked())
         self.browse_button.setEnabled(enabled and self.mode_testcase.isChecked())
         self.clear_button.setEnabled(enabled and self.mode_testcase.isChecked())
@@ -1021,9 +983,8 @@ class LauncherWindow(QWidget):
         project_case = self.project_combo.currentText().strip()
         target_case = self.target_combo.currentText().strip()
         LOGGER.info(
-            "validate_selection: mode=%s backend=%s project_case=%s target_case=%s testcase=%s",
+            "validate_selection: mode=%s project_case=%s target_case=%s testcase=%s",
             "testcase" if self.mode_testcase.isChecked() else "direct",
-            "remote" if self.backend_remote.isChecked() else "local",
             project_case,
             target_case,
             self.selected_testcase_file,
@@ -1035,10 +996,6 @@ class LauncherWindow(QWidget):
 
         if not target_case:
             QMessageBox.warning(self, "缺少配置", "请选择 target_case。")
-            return None
-
-        if self.backend_remote.isChecked() and not self.remote_brain_url_edit.text().strip():
-            QMessageBox.warning(self, "缺少服务端地址", "服务端模式下请填写服务端地址。")
             return None
 
         return project_case, target_case
@@ -1070,8 +1027,6 @@ class LauncherWindow(QWidget):
 
         plan = {
             "mode": mode,
-            "run_backend": "remote" if self.backend_remote.isChecked() else "local",
-            "remote_brain_url": self.remote_brain_url_edit.text().strip(),
             "project_case": project_case,
             "target_case": target_case,
             "testcase_label": testcase_label,
@@ -1114,7 +1069,7 @@ class LauncherWindow(QWidget):
         self._set_status("已开始批量执行，准备进行安全检查。")
         self._set_runtime(f"运行信息：共 {plan['run_count']} 次，等待第 1 次启动。")
         self._log_message(
-            f"[Launcher] 批量运行开始，mode={plan['mode']}, backend={plan['run_backend']}, runs={plan['run_count']}, "
+            f"[Launcher] 批量运行开始，mode={plan['mode']}, runs={plan['run_count']}, "
             f"safe_temp={plan['safe_temp']}°C, safe_battery={plan['safe_battery']}%, "
             f"safe_time={plan['safe_minutes']}分钟, inactivity_timeout={plan['inactivity_timeout_minutes']}分钟, "
             f"cleanup_apps={plan['cleanup_apps']}\n"
@@ -1270,13 +1225,6 @@ class LauncherWindow(QWidget):
                 f"\n[Launcher] 第 {run_no}/{self.current_plan['run_count']} 次：直接启动 "
                 f"project_case={project_case}, target_case={target_case}\n"
             )
-
-        if self.current_plan.get("run_backend") == "remote":
-            self._log_message(
-                f"[Launcher] 本次使用服务端后端：{self.current_plan.get('remote_brain_url')}\n"
-            )
-        else:
-            self._log_message("[Launcher] 本次使用本地后端。\n")
 
         self._set_runtime(
             self._format_runtime_text(

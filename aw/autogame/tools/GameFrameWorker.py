@@ -1777,6 +1777,7 @@ class FrameWorker(threading.Thread):
         self.stage_info = {}
         self.current_stage = None
         self.frame = None
+        self.remote_brain = self._build_remote_brain_client(project_case, case_name)
         self.last_gc_time = time.time()
 
         self.click = self._wrap_control_action("click", self.controller.click)
@@ -1801,6 +1802,43 @@ class FrameWorker(threading.Thread):
         except ValueError:
             return float(self.LAUNCHER_INACTIVITY_TIMEOUT_SECONDS)
         return max(0.0, minutes * 60.0)
+
+    def _build_remote_brain_client(self, project_case, case_name):
+        run_backend = os.environ.get("AUTOGAME_RUN_BACKEND", "local").strip().lower()
+        if run_backend not in {"remote", "server", "service"}:
+            return None
+
+        server_url = os.environ.get("AUTOGAME_REMOTE_BRAIN_URL", "").strip()
+        if not server_url:
+            raise ValueError("AUTOGAME_RUN_BACKEND=remote 时必须设置 AUTOGAME_REMOTE_BRAIN_URL")
+
+        image_format = os.environ.get("AUTOGAME_REMOTE_BRAIN_IMAGE_FORMAT", "jpg").strip().lower() or "jpg"
+        try:
+            jpeg_quality = int(os.environ.get("AUTOGAME_REMOTE_BRAIN_JPEG_QUALITY", "85"))
+        except ValueError:
+            jpeg_quality = 85
+        jpeg_quality = min(100, max(1, jpeg_quality))
+
+        try:
+            timeout = float(os.environ.get("AUTOGAME_REMOTE_BRAIN_TIMEOUT", "8"))
+        except ValueError:
+            timeout = 8.0
+
+        from remote_brain.client import RemoteBrainClient
+
+        print(
+            f"[FrameWorker] 启用服务端后端: url={server_url}, "
+            f"project_case={project_case}, target_case={case_name}, "
+            f"image_format={image_format}, jpeg_quality={jpeg_quality}, timeout={timeout}"
+        )
+        return RemoteBrainClient(
+            server_url,
+            project_case=project_case,
+            game_case=case_name,
+            image_format=image_format,
+            jpeg_quality=jpeg_quality,
+            timeout=timeout,
+        )
 
     def _wrap_control_action(self, action_name, action):
         def _wrapped(*args, **kwargs):
@@ -1947,13 +1985,20 @@ class FrameWorker(threading.Thread):
             try:
                 self.frame = np.array(frame, copy=True)
                 self.current_stage = self.get_stage()
-                self.stage_info = self.stage_resolver.process_frame(self.frame, self.current_stage)
+                if self.remote_brain is None:
+                    self.stage_info = self.stage_resolver.process_frame(self.frame, self.current_stage)
+                else:
+                    response = self.remote_brain.tick_worker(self, execute=True)
+                    self.stage_info = response.get("stage_info") or {}
+                    if response.get("current_stage"):
+                        self.current_stage = response["current_stage"]
 
                 if not self.viz_queue.full() and self.viz_proc:
                     self.viz_queue.put((self.frame.copy(), self.current_stage, self.stage_info, self.frame_index))
                     self.frame_index += 1
 
-                self.on_stage_logic(self)
+                if self.remote_brain is None:
+                    self.on_stage_logic(self)
                 time.sleep(0.05)
             except Exception as exc:
                 print(f"[Loop Error] 运行时异常: {exc}")
@@ -1967,6 +2012,20 @@ class FrameWorker(threading.Thread):
         self.failure_reason = None
         self.failure_details = {}
         self.last_control_action_time = time.monotonic()
+        if self.remote_brain is not None:
+            try:
+                screen = None
+                try:
+                    width, height = get_resolution()
+                    if width and height:
+                        screen = (int(width), int(height))
+                except Exception as exc:
+                    print(f"[FrameWorker] 获取本地分辨率失败，服务端将等待首帧分辨率: {exc}")
+                self.remote_brain.start_session(screen=screen, current_stage=self.get_stage())
+            except Exception as exc:
+                self.running = False
+                print(f"[FrameWorker] 服务端会话启动失败: {exc}")
+                raise
         self.thread = threading.Thread(target=self.loop, daemon=True)
         self.thread.start()
 
@@ -2006,6 +2065,12 @@ class FrameWorker(threading.Thread):
                 self.viz_proc.join(timeout=0.5)
 
             self.viz_queue.cancel_join_thread()
+
+        if self.remote_brain is not None and getattr(self.remote_brain, "_started", False):
+            try:
+                self.remote_brain.stop_session()
+            except Exception as exc:
+                print(f"[FrameWorker] 关闭服务端会话失败: {exc}")
 
         try:
             self.controller.close()

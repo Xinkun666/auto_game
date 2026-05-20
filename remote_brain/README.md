@@ -44,6 +44,45 @@ curl http://服务器IP:8765/health
 
 ## 本地客户端用法
 
+### 通过 launcher 启动
+
+本地启动器现在有两种后端：
+
+- `本地`：默认模式，保持原来的本机识别和决策。
+- `服务端`：本地只抓图和执行动作，识别与逻辑在服务器运行。
+
+使用服务端模式：
+
+1. 先在服务器启动服务：
+
+```bash
+cd /path/to/auto_game
+python3 -m remote_brain.server --host 0.0.0.0 --port 8765
+```
+
+2. 本地启动 launcher：
+
+```bash
+python3 launcher.py
+```
+
+3. 在 `运行后端` 里选择 `服务端`，填写：
+
+```text
+http://服务器IP:8765
+```
+
+4. 其他 project_case / target_case / testcases 选择方式不变，点击启动即可。
+
+launcher 会把下面两个环境变量传给子进程：
+
+```bash
+AUTOGAME_RUN_BACKEND=remote
+AUTOGAME_REMOTE_BRAIN_URL=http://服务器IP:8765
+```
+
+如果选择 `本地`，则不会走上传帧逻辑。
+
 先单独验证能否创建会话：
 
 ```python
@@ -73,42 +112,33 @@ from remote_brain.client import execute_actions
 execute_actions(worker, response["actions"])
 ```
 
-## 接入 FrameWorker 的位置
+## FrameWorker 接入
 
-当前本地核心循环在：
+远程大脑已经接入到本地核心循环：
 
 ```text
 aw/autogame/tools/GameFrameWorker.py
 ```
 
-本地旧逻辑：
+本地模式仍然执行：
 
 ```python
 self.stage_info = self.stage_resolver.process_frame(self.frame, self.current_stage)
 self.on_stage_logic(self)
 ```
 
-远程逻辑应该替换成：
+服务端模式执行：
 
 ```python
-response = self.remote_brain.tick(
-    frame_rgb=self.frame,
-    current_stage=self.current_stage,
-    frame_id=self.frame_index,
-    screen=(self.screen_w, self.screen_h),
-)
-self.stage_info = response.get("stage_info") or {}
-for action in response.get("actions") or []:
-    execute_actions(self, [action])
+response = self.remote_brain.tick_worker(self, execute=True)
 ```
 
-第一版建议不要急着删本地逻辑，可以通过环境变量开关，例如：
+也可以不经过 launcher，直接用环境变量切到服务端：
 
 ```bash
+export AUTOGAME_RUN_BACKEND=remote
 export AUTOGAME_REMOTE_BRAIN_URL=http://服务器IP:8765
 ```
-
-只有设置了这个变量，才走远程大脑。
 
 ## 注意
 
@@ -117,4 +147,3 @@ export AUTOGAME_REMOTE_BRAIN_URL=http://服务器IP:8765
 3. `refresh_frame` 在远程模式里是 no-op。服务器无法直接抓下一帧，所以本地会等下一次 tick 再上传新帧。
 4. 如果服务器没有 HDC，没关系。服务端会用客户端传入的 `screen.width/screen.height` patch 掉分辨率读取。
 5. 图片默认用 JPG 85 压缩。若模板匹配不稳定，可把客户端 `image_format="png"`。
-

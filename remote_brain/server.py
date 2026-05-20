@@ -168,6 +168,7 @@ class RemoteBrainCore:
         screen = self._parse_screen(payload.get("screen"))
 
         with self.lock:
+            self._ensure_loaded(project_case, game_case, screen)
             if session_id not in self.sessions:
                 self.start_session(
                     {
@@ -204,6 +205,10 @@ class RemoteBrainCore:
     def _ensure_loaded(self, project_case: str, game_case: str, screen: Optional[Tuple[int, int]]):
         key = (project_case, game_case)
         if self.loaded_key == key:
+            if screen:
+                os.environ["AUTOGAME_SCREEN_WIDTH"] = str(int(screen[0]))
+                os.environ["AUTOGAME_SCREEN_HEIGHT"] = str(int(screen[1]))
+                self._patch_resolution_helpers(screen)
             return
 
         os.environ["TARGET_PROJECT_CASE"] = project_case
@@ -320,4 +325,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

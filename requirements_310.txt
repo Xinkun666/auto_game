@@ -12,24 +12,35 @@ PyQt6
 # 模型推理与识别
 scikit-learn
 ultralytics
+timm
+tqdm
+ftfy
+regex
+iopath
+huggingface-hub
+typing_extensions
 
 # 搜房 pubg_room_search 适配层
 # 代码位置: aw/autogame/customs_examples/Auto_PUBG_ALL/resource/pubg_room_search/
-# 本仓库内适配层依赖的 pip 包已由上面的 numpy/opencv-python/torch/torchvision/Pillow/ultralytics 覆盖。
+# 内嵌感知模块位置:
+# aw/autogame/customs_examples/Auto_PUBG_ALL/resource/pubg_room_search/perception/
+# YOLO/SAM3 感知模块已放在 auto_game 内，不需要启动 pubg_test 的 YOLO/SAM3 server。
 #
 # 额外环境配置:
-# 1. 需要准备 pubg_test 工程，并确保存在:
-#    pubg_test/control_proxy/src/gametest_proxy/
-# 2. 默认自动查找位置是 auto_game 同级目录下的 pubg_test；也可以设置:
-#    export PUBG_TEST_PATH=/path/to/pubg_test
-# 3. 开启搜房:
+# 1. 开启搜房:
 #    export AUTOGAME_PUBG_ROOM_SEARCH=1
 #    或在 aw/autogame/config/config.json 的 pubg_room_search.enabled 配置为 true
-# 4. mixed_yolo 模式需要可访问 YOLO 服务，默认:
-#    yolo_host=localhost, yolo_port=6666
-# 5. replay/dsl_replay 或门校准使用 sam3 时，需要可访问 SAM3 服务，默认:
-#    sam3_host=localhost, sam3_port=12345
-# 6. gametest_proxy 来自 pubg_test/control_proxy/src，不是 PyPI 包，不能通过 pip install 安装。
+# 2. 内嵌 YOLO 默认读取:
+#    aw/autogame/customs_examples/Auto_PUBG_ALL/resource/pubg_room_search/perception/models/yolo/26x_det.pt
+#    aw/autogame/customs_examples/Auto_PUBG_ALL/resource/pubg_room_search/perception/models/yolo/26x_cls.pt
+#    可用 AUTOGAME_PUBG_YOLO_DETECT_MODEL / AUTOGAME_PUBG_YOLO_CLASSIFY_MODEL 覆盖。
+# 3. 内嵌 SAM3 默认读取:
+#    aw/autogame/customs_examples/Auto_PUBG_ALL/resource/pubg_room_search/perception/models/sam3/sam3.pt
+#    可用 AUTOGAME_PUBG_SAM3_CHECKPOINT / AUTOGAME_PUBG_SAM3_BPE / AUTOGAME_PUBG_SAM3_DEVICE 覆盖。
+# 4. 如果临时允许从 Hugging Face 拉取 SAM3 权重，可设置:
+#    export AUTOGAME_PUBG_SAM3_LOAD_FROM_HF=1
+# 5. 旧版 pubg_test 适配路径暂时仍保留在代码中，但默认不启用；
+#    如需临时回退外部 pubg_test，可配置 pubg_room_search.external_pubg_test_enabled=true。
 #
 # 远程大脑服务器 remote_brain
 # 代码位置: remote_brain/
@@ -54,7 +65,7 @@ ultralytics
 #    remote_brain 会按请求自动设置；手动调试时也可自行 export。
 # 4. 分辨率由本地 client 每帧通过 screen.width/screen.height 传给服务器；
 #    无 hdc 的服务器不需要连接设备。
-# 5. 如果启用搜房，服务器同样需要上方 pubg_test、YOLO 服务、SAM3 服务配置。
+# 5. 如果启用搜房，服务器同样需要上方内嵌 YOLO/SAM3 权重和依赖。
 #
 # 拉流相关
 grpcio

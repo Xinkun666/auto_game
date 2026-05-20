@@ -46,6 +46,8 @@ class HouseSearchAdapter:
         config = get_pubg_room_search_config()
         if not config.get("enabled", False):
             return None
+        if not config.get("external_pubg_test_enabled", False):
+            return None
         return cls(worker, config)
 
     def search_current_house(self) -> HouseSearchRunResult:

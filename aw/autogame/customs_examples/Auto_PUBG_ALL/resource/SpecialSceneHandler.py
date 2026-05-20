@@ -6,6 +6,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.yolov5 import YOLOv5Tor
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.angle_tracker import AngleTracker
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.speed_classifier import SpeedClassifier
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.scene_predictor import GameSceneClassifier
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.perception import special_ports as pubg_perception_ports
 
 from aw.autogame.tools.Utils import *
 
@@ -147,3 +148,35 @@ def speed(img):
 
 def house_scene(img):
     return scene_cls.predict(img)
+
+
+def pubg_yolo_detect(img):
+    return pubg_perception_ports.pubg_yolo_detect(img)
+
+
+def pubg_yolo_detect_detail(img):
+    return pubg_perception_ports.pubg_yolo_detect_detail(img)
+
+
+def pubg_yolo_classify(img):
+    return pubg_perception_ports.pubg_yolo_classify(img)
+
+
+def pubg_yolo_detect_and_classify(img):
+    return pubg_perception_ports.pubg_yolo_detect_and_classify(img)
+
+
+def pubg_yolo_reset_tracker(img=None):
+    return pubg_perception_ports.pubg_yolo_reset_tracker(img)
+
+
+def pubg_sam3_segment_house(img):
+    return pubg_perception_ports.pubg_sam3_segment_house(img)
+
+
+def pubg_sam3_segment_door(img):
+    return pubg_perception_ports.pubg_sam3_segment_door(img)
+
+
+def pubg_sam3_segment_door_all(img):
+    return pubg_perception_ports.pubg_sam3_segment_door_all(img)

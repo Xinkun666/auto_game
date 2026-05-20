@@ -1,0 +1,10 @@
+*.pt
+*.pth
+*.onnx
+*.engine
+*.safetensors
+*.bin
+
+!.gitignore
+!.gitkeep
+

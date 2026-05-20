@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gametest-sam3-server"
+version = "0.1.0"
+description = "Standalone SAM3 segmentation server for game_test."
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "einops>=0.7",
+    "numpy>=1.26",
+    "opencv-python>=4.10",
+    "Pillow>=11.0",
+    "psutil>=5.9",
+    "pycocotools>=2.0.10",
+    "pyzmq>=27.0",
+    "torch>=2.7",
+    "torchvision>=0.22",
+]
+
+[project.scripts]
+gametest-sam3-server = "server:main"
+
+[tool.setuptools]
+py-modules = ["client", "config", "segmenter", "server"]

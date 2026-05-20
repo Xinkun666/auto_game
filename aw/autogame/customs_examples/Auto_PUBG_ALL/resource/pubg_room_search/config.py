@@ -8,6 +8,9 @@ from aw.autogame.tools.Utils import _read_autogame_config
 
 DEFAULT_CONFIG = {
     "enabled": False,
+    "embedded_enabled": True,
+    "embedded_first": True,
+    "external_pubg_test_enabled": False,
     "mode": "mixed_yolo",
     "pubg_test_path": "",
     "yolo_host": "localhost",
@@ -21,6 +24,13 @@ DEFAULT_CONFIG = {
     "frame_color": "rgb",
     "frame_refresh_interval_sec": 0.12,
     "frame_refresh_mode": "worker_refresh",
+    "embedded_door_refine_attempts": 3,
+    "embedded_door_center_tolerance_px": 80,
+    "embedded_door_view_scale": 0.33,
+    "embedded_enter_after_refine": False,
+    "embedded_enter_move_duration_ms": 360,
+    "embedded_enter_wait_ms": 900,
+    "embedded_allow_legacy_fallback": True,
     "move_finger_id": 0,
     "view_finger_id": 1,
     "button_finger_start": 2,

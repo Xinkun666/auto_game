@@ -1,0 +1,41 @@
+# SAM3 Server
+SAM3_HOST = "localhost"
+SAM3_PORT = 12345
+SAM3_TIMEOUT_MS = 30000
+
+# Text prompt used when the SAM3 detector backend is selected.
+SAM3_DOOR_PROMPT: str = "door frame"
+SAM3_HOUSE_PROMPT: str = "building"
+SAM3_WINDOW_PROMPTS: tuple[str, ...] = ("window",)
+
+# Facade structure reranking.
+FACADE_TOP_K: int = 16
+FACADE_STRUCT_SCORE_ALPHA: float = 0.30
+FACADE_LOW_MLP_CONFIDENCE_SCORE: float = 0.05
+# Exploratory no-match thresholds: intentionally loose so weak candidates,
+# wrong matches, and structure rejection reasons are visible in logs. Recalibrate
+# with real replay/debug traces before treating these as production thresholds.
+FACADE_NO_MATCH_MIN_SCORE: float = 0.25
+FACADE_NO_MATCH_MIN_DINO_SCORE: float = 0.55
+FACADE_NO_MATCH_STRICT_DINO_SCORE: float = 0.65
+FACADE_NO_MATCH_STRONG_STRUCTURE_SCORE: float = 0.45
+FACADE_DINO_LEADER_LOCK_SCORE: float = 0.74
+FACADE_NO_MATCH_MIN_MARGIN: float = 0.0
+FACADE_OPENING_MAX_MASKS: int = 12
+FACADE_OPENING_MIN_MASK_AREA_RATIO: float = 0.001
+FACADE_STRUCTURE_CANONICAL_WIDTH: int = 1024
+FACADE_WINDOW_MERGE_Y_OVERLAP: float = 0.55
+FACADE_WINDOW_MERGE_MAX_GAP_PX: int = 12
+FACADE_WINDOW_MERGE_HEIGHT_RATIO: float = 1.6
+FACADE_TINY_NESTED_DOOR_COVER_RATIO: float = 0.90
+FACADE_TINY_NESTED_DOOR_MAX_AREA_RATIO: float = 0.16
+FACADE_NESTED_DOOR_BOTTOM_BAND_RATIO: float = 0.08
+FACADE_NESTED_DOOR_PROTRUSION_RATIO: float = 0.04
+FACADE_WINDOW_DOOR_SUBTRACT_COVER_RATIO: float = 0.90
+FACADE_WINDOW_REMAINDER_MIN_COMPONENT_RATIO: float = 0.08
+FACADE_DOOR_UNCERTAIN_SCORE_BELOW: float = 0.6
+FACADE_WINDOW_UNCERTAIN_SCORE_BELOW: float = 0.6
+FACADE_CONFLICT_SCORE_GAP: float = 0.20
+FACADE_SLENDER_DOOR_HEIGHT_WIDTH_RATIO: float = 4.0
+FACADE_UNCERTAIN_DOOR_WEIGHT: float = 0.50
+FACADE_UNCERTAIN_WINDOW_WEIGHT: float = 0.25

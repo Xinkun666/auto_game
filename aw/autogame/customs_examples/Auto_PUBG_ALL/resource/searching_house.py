@@ -6,7 +6,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import cv2
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigator import MapNavigator
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search import HouseSearchAdapter
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search import (
+    EmbeddedHouseSearchAdapter,
+    HouseSearchAdapter,
+)
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.toolkit import *
 from aw.autogame.tools.Utils import *
 
@@ -77,6 +80,7 @@ class Searching_House:
         self.doors = []  # [(绝对角度, 框高)]
         self.player_yaw = 0.0  # 累计旋转角度（0° = 进入房间时的朝向）
         self.pubg_room_search_adapter: Optional[HouseSearchAdapter] = None
+        self.embedded_room_search_adapter: Optional[EmbeddedHouseSearchAdapter] = None
         self.pubg_room_search_attempted = False
 
         self.reset()
@@ -106,6 +110,7 @@ class Searching_House:
         self.doors = []
         self.player_yaw = 0.0
         self.pubg_room_search_adapter = None
+        self.embedded_room_search_adapter = None
         self.pubg_room_search_attempted = False
 
     def process(self, w: 'FrameWorker'):
@@ -780,6 +785,14 @@ class Searching_House:
             ideal_angle = self.active_entry['direction']
             self.align_direction_blocking(w, w.get_info('direction'), ideal_angle)
 
+            if self._try_pubg_room_search(
+                w,
+                source="door_front",
+                enter_after_refine=False,
+                finish_to_next_target=True,
+            ):
+                return
+
             if self.check_and_lock_door(w):
                 self.status = "VISUAL_APPROACH"
                 return
@@ -889,7 +902,12 @@ class Searching_House:
             #     # 左移后重新进入房屋
             #     w.tap_single('摇杆', y_bias=-300, dura=300, wait=100)
 
-            if self._try_pubg_room_search(w, source="final_entry"):
+            if self._try_pubg_room_search(
+                w,
+                source="final_entry",
+                enter_after_refine=False,
+                finish_to_next_target=True,
+            ):
                 return
             self.start_searching(w)
             self.completed_houses.add(self.current_house_id)
@@ -900,18 +918,47 @@ class Searching_House:
             self.current_house_id = None
             self.status = "IDLE"
 
-    def _try_pubg_room_search(self, w: 'FrameWorker', source: str) -> bool:
+    def _try_pubg_room_search(
+        self,
+        w: 'FrameWorker',
+        source: str,
+        *,
+        enter_after_refine: Optional[bool] = None,
+        finish_to_next_target: bool = False,
+    ) -> bool:
         if self.pubg_room_search_attempted:
             return False
 
+        embedded_result = self._try_embedded_room_search(
+            w,
+            source=source,
+            enter_after_refine=enter_after_refine,
+        )
+        if embedded_result is not None:
+            self.pubg_room_search_attempted = True
+            if embedded_result.ok:
+                self._finish_pubg_room_search_success(
+                    w,
+                    source=source,
+                    finish_to_next_target=finish_to_next_target,
+                )
+                return True
+            if not embedded_result.fallback_to_legacy:
+                self._finish_pubg_room_search_terminal(w, source=source)
+                return True
+            print("[PubgRoomSearch] 内嵌核心回退旧搜房逻辑")
+            self.pubg_room_search_attempted = False
+            return False
+
+        self.pubg_room_search_attempted = True
         adapter = self.pubg_room_search_adapter
         if adapter is None:
             adapter = HouseSearchAdapter.from_config(w)
             self.pubg_room_search_adapter = adapter
         if adapter is None:
+            self.pubg_room_search_attempted = False
             return False
 
-        self.pubg_room_search_attempted = True
         print(f"[PubgRoomSearch] 开始接管搜房: source={source}")
         result = adapter.search_current_house()
         extra = f", reason={result.reason}" if result.reason else ""
@@ -921,19 +968,91 @@ class Searching_House:
         )
 
         if result.ok:
-            self.reset()
-            finish_stage = adapter.config.get("finish_stage") or "跑图阶段"
-            w.change_stage(finish_stage)
+            self._finish_pubg_room_search_success(
+                w,
+                source=source,
+                finish_to_next_target=finish_to_next_target,
+                finish_stage=adapter.config.get("finish_stage") or "跑图阶段",
+            )
             return True
 
         if result.fallback_to_legacy:
             print("[PubgRoomSearch] 切回旧搜房逻辑兜底")
             return False
 
-        self.reset()
-        finish_stage = adapter.config.get("finish_stage") or "跑图阶段"
-        w.change_stage(finish_stage)
+        self._finish_pubg_room_search_terminal(
+            w,
+            source=source,
+            finish_stage=adapter.config.get("finish_stage") or "跑图阶段",
+        )
         return True
+
+    def _try_embedded_room_search(
+        self,
+        w: 'FrameWorker',
+        *,
+        source: str,
+        enter_after_refine: Optional[bool],
+    ):
+        if source != "door_front":
+            return None
+
+        adapter = self.embedded_room_search_adapter
+        if adapter is None:
+            adapter = EmbeddedHouseSearchAdapter.from_config(w)
+            self.embedded_room_search_adapter = adapter
+        if adapter is None:
+            return None
+        if not adapter.config.get("embedded_first", True):
+            return None
+
+        print(f"[EmbeddedRoomSearch] 开始内嵌接管搜房: source={source}")
+        result = adapter.search_from_door_front(
+            source=source,
+            enter_after_refine=enter_after_refine,
+        )
+        extra = f", reason={result.reason}" if result.reason else ""
+        print(
+            f"[EmbeddedRoomSearch] 搜房返回: result={result.result_name}, "
+            f"ok={result.ok}, fallback={result.fallback_to_legacy}{extra}"
+        )
+        return result
+
+    def _finish_pubg_room_search_success(
+        self,
+        w: 'FrameWorker',
+        *,
+        source: str,
+        finish_to_next_target: bool,
+        finish_stage: str = "跑图阶段",
+    ):
+        self.stop_auto_forward(w)
+        if finish_to_next_target and self.current_house_id is not None:
+            house_id = self.current_house_id
+            self.completed_houses.add(house_id)
+            w.refresh_frame()
+            exit_direction = w.get_info('direction')
+            self.prepare_next_target_logic(exit_direction)
+            self.current_house_id = None
+            self.active_entry = None
+            self.reset()
+            self.status = "IDLE"
+            print(f"[EmbeddedRoomSearch] 房屋 {house_id} 已完成，准备寻找下一个入口")
+            return
+
+        self.reset()
+        w.change_stage(finish_stage)
+
+    def _finish_pubg_room_search_terminal(
+        self,
+        w: 'FrameWorker',
+        *,
+        source: str,
+        finish_stage: str = "跑图阶段",
+    ):
+        self.stop_auto_forward(w)
+        self.reset()
+        w.change_stage(finish_stage)
 
     def update_and_check_stuck(self, current_loc):
         self.history_locations.append(current_loc)

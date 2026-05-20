@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.get_direction import Get_Direction
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.get_direction_ctc import Get_Direction as Get_Direction_CTC
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.get_location2 import LocatePoints
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.yolo26 import YOLO26Detector
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.yolov5 import YOLOv5TorchScript
@@ -15,6 +16,7 @@ import cv2
 from datetime import datetime
 
 dire_tool = Get_Direction(model_weight=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/direction.pt')
+dire_tool_ctc = Get_Direction_CTC(model_weight=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/direction_ctc.pt')
 loc_tool = LocatePoints()
 yolo26_detector = YOLO26Detector(model_path=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/best.pt')
 yolo5_detector = YOLOv5TorchScript(ts_model_path=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/yolov5m.torchscript')
@@ -26,7 +28,7 @@ h, w = get_wh()
 
 
 def direction(img):
-    return dire_tool.get_direction(img)
+    return dire_tool_ctc.get_direction(img)
 
 
 def location(img):

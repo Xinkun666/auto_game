@@ -48,11 +48,11 @@ class QwenRoomSearchAgent:
         self.perception_agent = QwenRoomPerceptionAgent(self.config)
         self.control_agent = QwenRoomControlAgent(searcher, self.config, self.state_agent)
         self.memory_agent = QwenRoomMemoryAgent(
-            window_size=int(self.config.get("qwen_memory_window_size") or 5),
-            max_summary_events=int(self.config.get("qwen_memory_summary_events") or 12),
-            max_text_chars=int(self.config.get("qwen_memory_max_text_chars") or 700),
-            max_event_chars=int(self.config.get("qwen_memory_max_event_chars") or 180),
-            max_field_chars=int(self.config.get("qwen_memory_max_field_chars") or 80),
+            window_size=min(3, int(self.config.get("qwen_memory_window_size") or 3)),
+            max_summary_events=min(3, int(self.config.get("qwen_memory_summary_events") or 3)),
+            max_text_chars=min(500, int(self.config.get("qwen_memory_max_text_chars") or 450)),
+            max_event_chars=min(140, int(self.config.get("qwen_memory_max_event_chars") or 120)),
+            max_field_chars=min(70, int(self.config.get("qwen_memory_max_field_chars") or 60)),
         )
 
     @classmethod

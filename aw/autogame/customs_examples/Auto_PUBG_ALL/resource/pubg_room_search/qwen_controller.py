@@ -32,9 +32,17 @@ class QwenRoomControlAgent:
         self.base_url = str(config.get("qwen_base_url") or "http://10.41.182.148:8000/v1").rstrip("/")
         self.model = str(config.get("qwen_model") or "qwen2.5-vl-7b")
         self.api_key = str(config.get("qwen_api_key") or "EMPTY")
-        self.max_tokens = int(config.get("qwen_max_tokens") or 384)
+        self.max_tokens = min(128, int(config.get("qwen_max_tokens") or 128))
         self.timeout_sec = float(config.get("qwen_timeout_sec") or 20.0)
         self.http_error_body_chars = max(120, int(config.get("qwen_http_error_body_chars") or 1200))
+        self.prompt_observation_max_chars = max(
+            800,
+            int(config.get("qwen_prompt_observation_max_chars") or 2200),
+        )
+        self.prompt_summary_max_chars = max(120, int(config.get("qwen_prompt_summary_max_chars") or 420))
+        self.prompt_recent_steps = max(0, int(config.get("qwen_prompt_recent_steps") or 2))
+        self.prompt_visible_object_limit = max(0, int(config.get("qwen_prompt_visible_object_limit") or 5))
+        self.trace_payload_size = bool(config.get("qwen_trace_payload_size", False))
         self.system_prompt = str(config.get("qwen_control_system_prompt") or self.DEFAULT_SYSTEM_PROMPT)
 
     def decide(
@@ -113,10 +121,18 @@ class QwenRoomControlAgent:
         return self._parse_json(content)
 
     def _build_payload(self, snapshot: QwenRoomPerceptionSnapshot, *, trace: bool) -> Dict[str, Any]:
+        compact_observation = self._compact_prompt_observation(snapshot.observation)
+        observation_text = json.dumps(compact_observation, ensure_ascii=False, separators=(",", ":"))
+        if len(observation_text) > self.prompt_observation_max_chars:
+            compact_observation = self._minimal_prompt_observation(compact_observation)
+            observation_text = json.dumps(compact_observation, ensure_ascii=False, separators=(",", ":"))
+        if len(observation_text) > self.prompt_observation_max_chars:
+            compact_observation = self._emergency_prompt_observation(compact_observation)
+            observation_text = json.dumps(compact_observation, ensure_ascii=False, separators=(",", ":"))
+
         text = (
-            "请根据当前画面和结构化观察选择下一步工具。"
-            "只输出 JSON。\n\n"
-            f"观察：{json.dumps(snapshot.observation, ensure_ascii=False)}"
+            "根据画面和紧凑状态选择一个工具，只输出 JSON。"
+            f"观察：{observation_text}"
         )
         if snapshot.frame_data_url:
             content = [
@@ -142,6 +158,11 @@ class QwenRoomControlAgent:
     def _post_chat_completions(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{self.base_url}/chat/completions"
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        if self.trace_payload_size:
+            print(
+                "[QwenRoomControl] "
+                f"request_bytes={len(data)}, max_tokens={self.max_tokens}"
+            )
         request = urllib.request.Request(
             url,
             data=data,
@@ -179,6 +200,249 @@ class QwenRoomControlAgent:
             if not match:
                 raise
             return json.loads(match.group(0))
+
+    def _compact_prompt_observation(self, observation: Dict[str, Any]) -> Dict[str, Any]:
+        observation = observation or {}
+        state = observation.get("state") or {}
+        agent_state = observation.get("agent_state") or {}
+        agent_memory = observation.get("agent_memory") or {}
+        visible_objects = observation.get("visible_objects") or []
+        return {
+            "task": self._truncate(observation.get("task", ""), 80),
+            "state": self._compact_state(state),
+            "visible_objects": self._compact_visible_objects(visible_objects),
+            "agent_state": self._compact_agent_state(agent_state),
+            "agent_memory": self._compact_agent_memory(agent_memory),
+            "available_tools": self._compact_available_tools(observation.get("available_tools") or []),
+        }
+
+    def _minimal_prompt_observation(self, observation: Dict[str, Any]) -> Dict[str, Any]:
+        memory = observation.get("agent_memory") or {}
+        if memory.get("recent_steps"):
+            memory["recent_steps"] = memory["recent_steps"][-1:]
+        if memory.get("summary"):
+            memory["summary"] = self._truncate(memory.get("summary"), 220)
+
+        state = observation.get("state") or {}
+        state["room_memory"] = {
+            "supply_count": state.get("room_memory", {}).get("supply_count"),
+            "door_count": state.get("room_memory", {}).get("door_count"),
+            "room_stack_depth": state.get("room_memory", {}).get("room_stack_depth"),
+        }
+        return {
+            "task": observation.get("task"),
+            "state": state,
+            "visible_objects": {"counts": observation.get("visible_objects", {}).get("counts", {})},
+            "agent_state": observation.get("agent_state"),
+            "agent_memory": memory,
+            "available_tools": observation.get("available_tools"),
+        }
+
+    def _emergency_prompt_observation(self, observation: Dict[str, Any]) -> Dict[str, Any]:
+        state = observation.get("state") or {}
+        agent_state = observation.get("agent_state") or {}
+        return {
+            "task": observation.get("task"),
+            "state": {
+                "location": state.get("location"),
+                "scene": state.get("scene"),
+                "status": state.get("status"),
+                "current_house_id": state.get("current_house_id"),
+                "distance_to_entry": state.get("distance_to_entry"),
+                "completed_house_count": state.get("completed_house_count"),
+                "active_supply_id": state.get("active_supply_id"),
+                "active_door_id": state.get("active_door_id"),
+                "interactions": state.get("interactions"),
+            },
+            "agent_state": {
+                "max_houses": agent_state.get("max_houses"),
+                "entered_current_house": agent_state.get("entered_current_house"),
+                "consecutive_errors": agent_state.get("consecutive_errors"),
+                "completed_house_count": agent_state.get("completed_house_count"),
+                "last_action": agent_state.get("last_action"),
+            },
+            "agent_memory": {
+                "summary": self._truncate(
+                    (observation.get("agent_memory") or {}).get("summary", ""),
+                    120,
+                )
+            },
+            "visible_objects": {"counts": (observation.get("visible_objects") or {}).get("counts", {})},
+            "available_tools": observation.get("available_tools"),
+        }
+
+    def _compact_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "location": state.get("location"),
+            "direction": state.get("direction"),
+            "scene": state.get("house_scene_name"),
+            "status": state.get("status"),
+            "current_room_id": state.get("current_room_id"),
+            "current_house_id": state.get("current_house_id"),
+            "active_entry": self._compact_entry(state.get("active_entry")),
+            "distance_to_entry": state.get("distance_to_entry"),
+            "completed_house_count": state.get("completed_house_count"),
+            "active_supply_id": state.get("active_supply_id"),
+            "active_door_id": state.get("active_door_id"),
+            "interactions": state.get("interactions") or {},
+            "room_memory": self._compact_room_memory(state.get("room_memory") or {}),
+        }
+
+    def _compact_entry(self, entry: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(entry, dict):
+            return None
+        return {
+            "location": entry.get("location"),
+            "direction": entry.get("direction"),
+        }
+
+    def _compact_room_memory(self, room_memory: Dict[str, Any]) -> Dict[str, Any]:
+        supplies = room_memory.get("supplies") or []
+        doors = room_memory.get("doors") or []
+        visited_supply_ids = room_memory.get("visited_supply_ids") or []
+        visited_door_ids = room_memory.get("visited_door_ids") or []
+        return {
+            "room_id": room_memory.get("room_id"),
+            "loot_count": room_memory.get("loot_count"),
+            "supply_count": len(supplies) if isinstance(supplies, list) else 0,
+            "door_count": len(doors) if isinstance(doors, list) else 0,
+            "visited_supply_count": len(visited_supply_ids) if isinstance(visited_supply_ids, list) else 0,
+            "visited_door_count": len(visited_door_ids) if isinstance(visited_door_ids, list) else 0,
+            "room_stack_depth": room_memory.get("room_stack_depth"),
+            "next_supply": self._compact_target(supplies[0]) if isinstance(supplies, list) and supplies else None,
+            "next_door": self._compact_target(doors[0]) if isinstance(doors, list) and doors else None,
+        }
+
+    def _compact_visible_objects(self, objects: Any) -> Dict[str, Any]:
+        if not isinstance(objects, list):
+            return {"counts": {}, "objects": []}
+        counts: Dict[str, int] = {}
+        compact = []
+        for obj in objects:
+            if not isinstance(obj, dict):
+                continue
+            obj_type = str(obj.get("type") or "other")
+            counts[obj_type] = counts.get(obj_type, 0) + 1
+            if len(compact) >= self.prompt_visible_object_limit:
+                continue
+            compact.append({
+                "type": obj_type,
+                "center_offset_px": obj.get("center_offset_px"),
+                "area": obj.get("area"),
+                "box_h": obj.get("box_h"),
+                "abs_angle": obj.get("abs_angle"),
+            })
+        return {"counts": counts, "objects": compact}
+
+    def _compact_agent_state(self, agent_state: Dict[str, Any]) -> Dict[str, Any]:
+        last_tool_result = agent_state.get("last_tool_result") or {}
+        result_observation = last_tool_result.get("observation") or {}
+        last_decision = agent_state.get("last_decision") or {}
+        return {
+            "max_houses": agent_state.get("max_houses"),
+            "entered_current_house": agent_state.get("entered_current_house"),
+            "consecutive_errors": agent_state.get("consecutive_errors"),
+            "completed_house_count": agent_state.get("completed_house_count"),
+            "should_finish": agent_state.get("should_finish"),
+            "last_decision": {
+                "tool_name": last_decision.get("tool_name"),
+                "reason": self._truncate(last_decision.get("reason", ""), 60),
+            },
+            "last_action": {
+                "tool_name": last_tool_result.get("tool_name"),
+                "ok": last_tool_result.get("ok"),
+                "error": self._truncate(last_tool_result.get("error", ""), 80),
+                "result_type": result_observation.get("result_type"),
+                "action": result_observation.get("action"),
+                "at_entry": result_observation.get("at_entry"),
+                "after_distance": result_observation.get("after_distance"),
+                "moved_distance": result_observation.get("moved_distance"),
+                "distance_delta": result_observation.get("distance_delta"),
+                "state_after": self._compact_state_after(result_observation.get("state_after") or {}),
+            },
+        }
+
+    def _compact_agent_memory(self, memory: Dict[str, Any]) -> Dict[str, Any]:
+        recent_steps = memory.get("recent_steps") or []
+        if not isinstance(recent_steps, list):
+            recent_steps = []
+        if self.prompt_recent_steps <= 0:
+            compact_steps = []
+        else:
+            compact_steps = [
+                self._compact_memory_step(step)
+                for step in recent_steps[-self.prompt_recent_steps :]
+            ]
+        return {
+            "summary": self._truncate(memory.get("summary", ""), self.prompt_summary_max_chars),
+            "recent_steps": compact_steps,
+        }
+
+    def _compact_memory_step(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(step, dict):
+            return {}
+        result = step.get("result") or {}
+        before = step.get("before") or {}
+        after = step.get("after") or {}
+        decision = step.get("decision") or {}
+        return {
+            "round": step.get("round"),
+            "tool_name": decision.get("tool_name"),
+            "result_type": result.get("result_type"),
+            "ok": result.get("ok"),
+            "error": self._truncate(result.get("error", ""), 60),
+            "before": self._compact_step_state(before),
+            "after": self._compact_step_state(after),
+            "moved_distance": result.get("moved_distance"),
+            "distance_delta": result.get("distance_delta"),
+            "at_entry": result.get("at_entry"),
+        }
+
+    def _compact_state_after(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "scene": state.get("house_scene_name") or state.get("scene"),
+            "status": state.get("status"),
+            "location": state.get("location"),
+            "current_house_id": state.get("current_house_id"),
+            "distance_to_entry": state.get("distance_to_entry"),
+            "completed_house_count": state.get("completed_house_count"),
+        }
+
+    def _compact_step_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "scene": state.get("scene") or state.get("house_scene_name"),
+            "status": state.get("status"),
+            "location": state.get("location"),
+            "completed_house_count": state.get("completed_house_count"),
+        }
+
+    def _compact_available_tools(self, tools: Any):
+        if not isinstance(tools, list):
+            return list(QwenHouseSearchTools.TOOL_NAMES)
+        names = []
+        for tool in tools:
+            if isinstance(tool, dict) and tool.get("name"):
+                names.append(tool["name"])
+            elif isinstance(tool, str):
+                names.append(tool)
+        return names or list(QwenHouseSearchTools.TOOL_NAMES)
+
+    def _compact_target(self, target: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(target, dict):
+            return None
+        return {
+            "id": target.get("id"),
+            "kind": target.get("kind"),
+            "abs_angle": target.get("abs_angle"),
+            "box_h": target.get("box_h"),
+            "area": target.get("area"),
+        }
+
+    def _truncate(self, value: Any, limit: int) -> str:
+        text = str(value or "")
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 3)] + "..."
 
     def _normalize_decision(self, decision: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(decision, dict):

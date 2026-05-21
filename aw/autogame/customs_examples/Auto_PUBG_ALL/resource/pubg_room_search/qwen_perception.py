@@ -23,6 +23,7 @@ class QwenRoomPerceptionAgent:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.jpeg_quality = int(config.get("qwen_jpeg_quality") or 80)
+        self.image_max_side = int(config.get("qwen_image_max_side") or 0)
 
     def observe(
         self,
@@ -47,6 +48,16 @@ class QwenRoomPerceptionAgent:
             return None
         try:
             frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            if self.image_max_side > 0:
+                height, width = frame_bgr.shape[:2]
+                long_side = max(height, width)
+                if long_side > self.image_max_side:
+                    scale = float(self.image_max_side) / float(long_side)
+                    frame_bgr = cv2.resize(
+                        frame_bgr,
+                        (max(1, int(width * scale)), max(1, int(height * scale))),
+                        interpolation=cv2.INTER_AREA,
+                    )
             ok, buffer = cv2.imencode(
                 ".jpg",
                 frame_bgr,

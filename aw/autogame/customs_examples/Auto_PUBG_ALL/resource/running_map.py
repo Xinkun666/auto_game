@@ -2134,41 +2134,40 @@ class RunningManager:
         direction: Optional[float],
         car,
     ) -> bool:
-        player_road_node, player_road_dist = self.road_helper.nearest_node(location, topology_only=False)
-        if (
-            player_road_node is not None
-            and player_road_dist <= self.ROADSIDE_CAR_MAX_PLAYER_ROAD_DISTANCE
-        ):
+        player_road_point, player_road_dist = self.map_tool.nearest_walkable_within_radius(
+            location,
+            self.ROADSIDE_CAR_MAX_PLAYER_ROAD_DISTANCE,
+        )
+        if player_road_point is not None:
             print(
                 f"[Running] 发现车辆且人物已在路边，当前位置 {location}, "
-                f"最近道路点 {player_road_node}, player_road_dist={player_road_dist:.2f}，开始追车"
+                f"附近 mask 道路点 {player_road_point}, player_road_dist={player_road_dist:.2f}，开始追车"
             )
             self._log_running_state(
                 "路边车辆确认",
                 location,
                 direction,
                 (
-                    f"人物靠近道路点 {player_road_dist:.2f} <= "
-                    f"{self.ROADSIDE_CAR_MAX_PLAYER_ROAD_DISTANCE:.2f}，放宽车辆路边判断"
+                    f"人物 {self.ROADSIDE_CAR_MAX_PLAYER_ROAD_DISTANCE:.2f} 距离内存在 mask 道路点，"
+                    "放宽车辆路边判断"
                 ),
-                player_road_node,
+                player_road_point,
                 player_road_dist,
             )
             return True
 
         print(
             f"[Running] 发现车辆但人物不在路上，当前位置 {location}, "
-            f"最近道路点 {player_road_node}, player_road_dist={player_road_dist:.2f}，先停车不追车"
+            f"{self.ROADSIDE_CAR_MAX_PLAYER_ROAD_DISTANCE:.2f} 距离内无 mask 道路点，先停车不追车"
         )
         self._log_running_state(
             "路边车辆过滤",
             location,
             direction,
             (
-                f"人物离最近道路点 {player_road_dist:.2f} > "
-                f"{self.ROADSIDE_CAR_MAX_PLAYER_ROAD_DISTANCE:.2f}，暂不追车"
+                f"人物 {self.ROADSIDE_CAR_MAX_PLAYER_ROAD_DISTANCE:.2f} 距离内无 mask 道路点，暂不追车"
             ),
-            player_road_node,
+            player_road_point,
             player_road_dist,
         )
         return False

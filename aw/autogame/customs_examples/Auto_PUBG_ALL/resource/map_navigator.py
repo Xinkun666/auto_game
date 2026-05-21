@@ -42,6 +42,46 @@ class MapNavigator:
             return False
         return self._is_walkable(int(pos[0]), int(pos[1]))
 
+    def nearest_walkable_within_radius(self, pos, radius):
+        """在当前位置映射到 mask 后，只扫描局部半径内的可通行像素。"""
+        if pos is None or len(pos) < 2:
+            return None, float("inf")
+
+        try:
+            center_x = int(round(float(pos[0])))
+            center_y = int(round(float(pos[1])))
+        except (TypeError, ValueError):
+            return None, float("inf")
+
+        radius = max(0, int(math.ceil(float(radius))))
+        best_point = None
+        best_dist_sq = None
+
+        min_x = max(0, center_x - radius)
+        max_x = min(self.width - 1, center_x + radius)
+        min_y = max(0, center_y - radius)
+        max_y = min(self.height - 1, center_y + radius)
+        radius_sq = radius * radius
+
+        for y in range(min_y, max_y + 1):
+            dy = y - center_y
+            for x in range(min_x, max_x + 1):
+                dx = x - center_x
+                dist_sq = dx * dx + dy * dy
+                if dist_sq > radius_sq:
+                    continue
+                if self.binary_map[y, x] != 255:
+                    continue
+                if best_dist_sq is None or dist_sq < best_dist_sq:
+                    best_dist_sq = dist_sq
+                    best_point = (x, y)
+                    if dist_sq == 0:
+                        return best_point, 0.0
+
+        if best_point is None:
+            return None, float("inf")
+        return best_point, math.sqrt(best_dist_sq)
+
     def check_safety_ahead(self, current_pos, angle, distance=10, step_size=1.0):
         """
         功能1（优化版）：射线检测。

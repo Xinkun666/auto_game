@@ -10,6 +10,9 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.config
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.qwen_controller import (
     QwenRoomControlAgent,
 )
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.qwen_memory import (
+    QwenRoomMemoryAgent,
+)
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.qwen_perception import (
     QwenRoomPerceptionAgent,
 )
@@ -33,6 +36,7 @@ class QwenRoomSearchAgent:
         self.fallback_to_legacy = bool(self.config.get("qwen_fallback_to_legacy", True))
         self.trace_enabled = bool(self.config.get("qwen_trace_enabled", True))
         self.trace_prompt = bool(self.config.get("qwen_trace_prompt", True))
+        self.memory_enabled = bool(self.config.get("qwen_memory_enabled", True))
         self.round_index = 0
 
         max_errors = int(self.config.get("qwen_max_consecutive_errors") or 3)
@@ -43,6 +47,10 @@ class QwenRoomSearchAgent:
         )
         self.perception_agent = QwenRoomPerceptionAgent(self.config)
         self.control_agent = QwenRoomControlAgent(searcher, self.config, self.state_agent)
+        self.memory_agent = QwenRoomMemoryAgent(
+            window_size=int(self.config.get("qwen_memory_window_size") or 5),
+            max_summary_events=int(self.config.get("qwen_memory_summary_events") or 12),
+        )
 
     @classmethod
     def from_config(cls, searcher: Any) -> Optional["QwenRoomSearchAgent"]:
@@ -56,6 +64,7 @@ class QwenRoomSearchAgent:
 
     def reset(self):
         self.state_agent.reset()
+        self.memory_agent.reset()
         self.round_index = 0
 
     def process(self, worker: Any) -> bool:
@@ -69,16 +78,24 @@ class QwenRoomSearchAgent:
             self._trace("Coordinator -> Tools", {"tool_name": "finish_house_search", "args": {}})
             result = tools.dispatch("finish_house_search", {})
             self.state_agent.record_tool_result("finish_house_search", result)
+            self.memory_agent.record_round(
+                round_index=self.round_index,
+                observation={},
+                decision={"tool_name": "finish_house_search", "args": {}},
+                result=result,
+            )
             self._trace("Tools -> State", result)
             return True
 
         try:
             state_before = self.state_agent.snapshot()
+            memory_snapshot = self.memory_agent.snapshot() if self.memory_enabled else None
             self._trace(
                 "Coordinator -> Perception",
                 {
                     "task": f"搜索房屋，搜满 {self.max_houses} 个房子后结束",
                     "agent_state": state_before,
+                    "agent_memory": memory_snapshot,
                 },
             )
             snapshot = self.perception_agent.observe(
@@ -86,6 +103,7 @@ class QwenRoomSearchAgent:
                 tools,
                 task=f"搜索房屋，搜满 {self.max_houses} 个房子后结束",
                 state_snapshot=state_before,
+                memory_snapshot=memory_snapshot,
             )
             self._trace(
                 "Perception -> Coordinator",
@@ -115,6 +133,15 @@ class QwenRoomSearchAgent:
             result = tools.dispatch(decision["tool_name"], decision.get("args") or {})
             self._trace("Tools -> Coordinator result", result)
             self.state_agent.record_tool_result(decision["tool_name"], result)
+            if self.memory_enabled:
+                self.memory_agent.record_round(
+                    round_index=self.round_index,
+                    observation=snapshot.observation,
+                    decision=decision,
+                    result=result,
+                )
+                self._trace("Coordinator -> Memory", {"action": "record_round"})
+                self._trace("Memory -> Coordinator", self.memory_agent.snapshot())
             self._trace("Coordinator -> State", {"action": "record_tool_result"})
             self._trace("State -> Coordinator", self.state_agent.snapshot())
             observation = result.get("observation") or {}
@@ -136,6 +163,8 @@ class QwenRoomSearchAgent:
             return True
         except Exception as exc:
             self.state_agent.record_error()
+            if self.memory_enabled:
+                self.memory_agent.record_error(round_index=self.round_index, error=str(exc))
             self._trace(
                 "Coordinator exception",
                 {
@@ -163,6 +192,14 @@ class QwenRoomSearchAgent:
             self._trace("Tools -> Coordinator result", result)
             self.state_agent.record_decision(decision)
             self.state_agent.record_tool_result(decision["tool_name"], result)
+            if self.memory_enabled:
+                self.memory_agent.record_round(
+                    round_index=self.round_index,
+                    observation={},
+                    decision=decision,
+                    result=result,
+                )
+                self._trace("Memory -> Coordinator", self.memory_agent.snapshot())
             self._trace("State -> Coordinator", self.state_agent.snapshot())
             return True
 

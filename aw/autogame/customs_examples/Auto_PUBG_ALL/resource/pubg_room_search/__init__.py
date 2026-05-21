@@ -16,6 +16,9 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.qwen_a
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.qwen_controller import (
     QwenRoomControlAgent,
 )
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.qwen_memory import (
+    QwenRoomMemoryAgent,
+)
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.qwen_perception import (
     QwenRoomPerceptionAgent,
     QwenRoomPerceptionSnapshot,
@@ -43,6 +46,7 @@ __all__ = [
     "QwenToolResult",
     "QwenRoomSearchAgent",
     "QwenRoomControlAgent",
+    "QwenRoomMemoryAgent",
     "QwenRoomPerceptionAgent",
     "QwenRoomPerceptionSnapshot",
     "QwenRoomAgentState",

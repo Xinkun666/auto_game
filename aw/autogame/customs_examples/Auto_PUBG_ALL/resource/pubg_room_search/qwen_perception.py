@@ -31,9 +31,12 @@ class QwenRoomPerceptionAgent:
         *,
         task: str,
         state_snapshot: Dict[str, Any],
+        memory_snapshot: Optional[Dict[str, Any]] = None,
     ) -> QwenRoomPerceptionSnapshot:
         observation = tools.build_observation(task=task)
         observation["agent_state"] = state_snapshot
+        if memory_snapshot is not None:
+            observation["agent_memory"] = memory_snapshot
         return QwenRoomPerceptionSnapshot(
             observation=observation,
             frame_data_url=self._encode_frame_data_url(getattr(worker, "frame", None)),

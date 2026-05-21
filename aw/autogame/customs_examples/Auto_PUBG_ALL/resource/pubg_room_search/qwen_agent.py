@@ -27,6 +27,7 @@ class QwenRoomSearchAgent:
     def __init__(self, searcher: Any, config: Optional[Dict[str, Any]] = None):
         self.searcher = searcher
         self.config = config or get_pubg_room_search_config()
+        self.searcher.qwen_room_search_config = self.config
         self.enabled = bool(self.config.get("qwen_agent_enabled", False))
         self.max_houses = int(self.config.get("qwen_max_houses") or 5)
         self.fallback_to_legacy = bool(self.config.get("qwen_fallback_to_legacy", True))

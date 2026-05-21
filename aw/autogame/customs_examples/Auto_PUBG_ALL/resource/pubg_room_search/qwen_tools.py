@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.toolkit import (
+    calculate_angle,
+    calculate_move_count,
     get_distance,
     get_time_from_distance,
 )
@@ -69,7 +71,7 @@ class QwenHouseSearchTools:
         },
         {
             "name": "navigate_to_house_entry",
-            "description": "按距离计算摇杆推进时长，向当前房子的入户点移动；到点后进入扫门状态。",
+            "description": "低层闭环导航到当前房子的入户点；内部连续对齐、推进、刷新、避障，直到到达或失败后再返回。",
             "args": {},
         },
         {
@@ -157,6 +159,7 @@ class QwenHouseSearchTools:
     def __init__(self, searcher: Any, worker: Any):
         self.searcher = searcher
         self.worker = worker
+        self.config = getattr(searcher, "qwen_room_search_config", None) or {}
 
     @classmethod
     def tool_specs(cls) -> List[Dict[str, Any]]:
@@ -269,7 +272,6 @@ class QwenHouseSearchTools:
         s = self.searcher
         w = self.worker
         location = s._get_location(w)
-        direction = s._get_scalar(w.get_info("direction"))
         if location is None:
             return self._result(False, "navigate_to_house_entry", error="location unavailable")
         if not s.active_entry:
@@ -278,8 +280,15 @@ class QwenHouseSearchTools:
                 return selected
 
         target_loc = tuple(s.active_entry["location"])
-        before_distance = get_distance(location, target_loc)
-        if before_distance <= 1.0:
+        start_location = location
+        start_distance = get_distance(location, target_loc)
+        arrival_distance = self._config_float("qwen_nav_arrival_distance", 1.0)
+        precise_distance = self._config_float("qwen_nav_precise_distance", 5.0)
+        max_steps = self._config_int("qwen_nav_max_steps", 8)
+        timeout_sec = self._config_float("qwen_nav_timeout_sec", 12.0)
+        no_progress_limit = self._config_int("qwen_nav_no_progress_limit", 2)
+
+        if start_distance <= arrival_distance:
             s.stop_auto_forward(w)
             s.status = "SCANNING"
             return self._result(
@@ -287,60 +296,150 @@ class QwenHouseSearchTools:
                 "navigate_to_house_entry",
                 {
                     "at_entry": True,
-                    "before_distance": before_distance,
-                    "after_distance": before_distance,
+                    "result_type": "arrived",
+                    "start_location": self._json_point(start_location),
+                    "end_location": self._json_point(start_location),
+                    "before_distance": start_distance,
+                    "after_distance": start_distance,
                     "distance_delta": 0.0,
+                    "steps": [],
                     "status": s.status,
                     "action": "arrived",
                 },
             )
 
-        if s.update_and_check_stuck(location):
-            return self.recover_from_stuck()
-
         s.stop_auto_forward(w)
-        s.align_direction(w, target_loc)
-        precise = before_distance <= 5.0
-        duration_ms = self._nav_push_duration_ms(before_distance, precise=precise)
-        y_bias = -240 if precise else -380
-        wait_ms = 240 if precise else 320
-        w.tap_single("摇杆", y_bias=y_bias, dura=duration_ms, wait=wait_ms)
-        w.refresh_frame()
-        s.handle_jump_logic(w)
-        s.status = "PRECISE_NAV" if precise else "FAST_NAV"
+        deadline = time.time() + max(1.0, timeout_sec)
+        steps: List[Dict[str, Any]] = []
+        no_progress_count = 0
+        last_distance = start_distance
+        result_type = "max_steps"
+        ok = False
+        error = ""
 
-        after_location = s._get_location(w)
-        after_distance = None
-        moved_distance = None
-        distance_delta = None
-        if after_location is not None:
-            after_distance = get_distance(after_location, target_loc)
-            distance_delta = before_distance - after_distance
-        if after_location is not None:
-            moved_distance = get_distance(location, after_location)
-        at_entry = after_distance is not None and after_distance <= 1.0
-        if at_entry:
-            s.stop_auto_forward(w)
-            s.status = "SCANNING"
+        for step_index in range(max(1, max_steps)):
+            if time.time() >= deadline:
+                result_type = "timeout"
+                error = "navigation timeout"
+                break
 
-        return self._result(
-            True,
-            "navigate_to_house_entry",
-            {
-                "at_entry": bool(at_entry),
-                "before_location": self._json_point(location),
+            before_location = s._get_location(w)
+            if before_location is None:
+                result_type = "location_unavailable"
+                error = "location unavailable during navigation"
+                break
+
+            house_scene = s._get_house_scene(w)
+            if house_scene == s.HOUSE_INDOOR:
+                s.status = s.STATUS_SCAN_ROOM
+                result_type = "entered_indoor"
+                ok = True
+                break
+
+            before_distance = get_distance(before_location, target_loc)
+            if before_distance <= arrival_distance:
+                s.stop_auto_forward(w)
+                s.status = "SCANNING"
+                result_type = "arrived"
+                ok = True
+                break
+
+            if s.update_and_check_stuck(before_location):
+                recovery = self.recover_from_stuck()
+                steps.append({
+                    "step": step_index + 1,
+                    "action": "recover_from_stuck",
+                    "recovery": recovery.observation,
+                })
+                result_type = "stuck"
+                error = "stuck detected"
+                break
+
+            align_result = self._align_to_location_bounded(w, before_location, target_loc)
+            precise = before_distance <= precise_distance
+            duration_ms = self._nav_push_duration_ms(before_distance, precise=precise)
+            y_bias = -240 if precise else -380
+            wait_ms = 220 if precise else 300
+            s.status = "PRECISE_NAV" if precise else "FAST_NAV"
+
+            w.tap_single("摇杆", y_bias=y_bias, dura=duration_ms, wait=wait_ms)
+            w.refresh_frame()
+            s.handle_jump_logic(w)
+
+            after_location = s._get_location(w)
+            after_distance = None
+            moved_distance = None
+            distance_delta = None
+            if after_location is not None:
+                after_distance = get_distance(after_location, target_loc)
+                moved_distance = get_distance(before_location, after_location)
+                distance_delta = before_distance - after_distance
+
+            steps.append({
+                "step": step_index + 1,
+                "action": "precise_push" if precise else "fast_push",
+                "before_location": self._json_point(before_location),
                 "after_location": self._json_point(after_location),
                 "before_distance": before_distance,
                 "after_distance": after_distance,
                 "distance_delta": distance_delta,
                 "moved_distance": moved_distance,
-                "target_location": self._json_point(target_loc),
-                "status": s.status,
-                "action": "precise_push" if precise else "fast_push",
                 "duration_ms": duration_ms,
                 "y_bias": y_bias,
                 "wait_ms": wait_ms,
+                "align": align_result,
+            })
+
+            if after_distance is not None and after_distance <= arrival_distance:
+                s.stop_auto_forward(w)
+                s.status = "SCANNING"
+                result_type = "arrived"
+                ok = True
+                break
+
+            if moved_distance is None or moved_distance < 0.2 or (distance_delta is not None and distance_delta <= 0.05):
+                no_progress_count += 1
+            else:
+                no_progress_count = 0
+            if no_progress_count >= no_progress_limit:
+                result_type = "no_progress"
+                error = "navigation made no progress"
+                break
+            if after_distance is not None:
+                last_distance = after_distance
+        else:
+            result_type = "max_steps"
+            error = "navigation step limit reached"
+
+        end_location = s._get_location(w)
+        end_distance = get_distance(end_location, target_loc) if end_location is not None else None
+        if end_distance is not None and end_distance <= arrival_distance:
+            s.stop_auto_forward(w)
+            s.status = "SCANNING"
+            result_type = "arrived"
+            ok = True
+            error = ""
+
+        return self._result(
+            ok,
+            "navigate_to_house_entry",
+            {
+                "at_entry": bool(ok and result_type == "arrived"),
+                "result_type": result_type,
+                "start_location": self._json_point(start_location),
+                "end_location": self._json_point(end_location),
+                "before_distance": start_distance,
+                "after_distance": end_distance,
+                "distance_delta": start_distance - end_distance if end_distance is not None else None,
+                "moved_distance": get_distance(start_location, end_location) if end_location is not None else None,
+                "target_location": self._json_point(target_loc),
+                "status": s.status,
+                "action": "closed_loop_navigation",
+                "steps": steps,
+                "step_count": len(steps),
+                "last_distance": last_distance,
             },
+            error=error,
         )
 
     def scan_entry_door(self) -> QwenToolResult:
@@ -878,12 +977,56 @@ class QwenHouseSearchTools:
         estimated = get_time_from_distance(step_distance)
         return self._bounded_int(estimated, 520, 1800)
 
+    def _align_to_location_bounded(
+        self,
+        worker: Any,
+        current_location: Tuple[int, int],
+        target_location: Tuple[int, int],
+        *,
+        tolerance: float = 6.0,
+        max_turns: int = 3,
+    ) -> Dict[str, Any]:
+        turns = []
+        aligned = False
+        for turn_index in range(max(1, int(max_turns))):
+            current_direction = self.searcher._get_scalar(worker.get_info("direction"))
+            if current_direction is None:
+                return {"aligned": False, "reason": "direction_unavailable", "turns": turns}
+            target_angle = calculate_angle(current_location, target_location)
+            turn_dir, px, diff = calculate_move_count(current_direction, target_angle)
+            turns.append({
+                "turn": turn_index + 1,
+                "current_direction": current_direction,
+                "target_angle": target_angle,
+                "diff": diff,
+                "x_bias": px if turn_dir == "right" else -px,
+            })
+            if abs(diff) <= tolerance:
+                aligned = True
+                break
+            x_bias = px if turn_dir == "right" else -px
+            worker.tap_single("视角", x_bias=int(x_bias), dura=520, wait=180)
+            worker.refresh_frame()
+        return {"aligned": aligned, "turns": turns}
+
     def _bounded_int(self, value: Any, min_value: int, max_value: int) -> int:
         try:
             number = int(value)
         except (TypeError, ValueError):
             number = min_value
         return max(min_value, min(max_value, number))
+
+    def _config_float(self, key: str, default: float) -> float:
+        try:
+            return float(self.config.get(key, default))
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _config_int(self, key: str, default: int) -> int:
+        try:
+            return int(self.config.get(key, default))
+        except (TypeError, ValueError):
+            return int(default)
 
     def _with_feedback(self, result: QwenToolResult) -> QwenToolResult:
         observation = dict(result.observation or {})

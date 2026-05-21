@@ -28,6 +28,11 @@ class QwenHouseSearchTools:
     TOOL_NAMES = (
         "get_game_state",
         "get_visible_objects",
+        "select_next_house",
+        "navigate_to_house_entry",
+        "scan_entry_door",
+        "approach_entry_door",
+        "enter_house",
         "scan_room",
         "select_next_supply",
         "align_to_object",
@@ -38,6 +43,7 @@ class QwenHouseSearchTools:
         "enter_door",
         "check_stuck",
         "recover_from_stuck",
+        "mark_house_done",
         "finish_house_search",
         "wait_and_refresh",
     )
@@ -51,6 +57,31 @@ class QwenHouseSearchTools:
         {
             "name": "get_visible_objects",
             "description": "读取 forward_scene 目标检测结果，归一成门、物资、拾取菜单等对象。",
+            "args": {},
+        },
+        {
+            "name": "select_next_house",
+            "description": "从房屋入口数据里选择下一个未搜索房子。",
+            "args": {},
+        },
+        {
+            "name": "navigate_to_house_entry",
+            "description": "向当前房子的入户点移动；到点后进入扫门状态。",
+            "args": {},
+        },
+        {
+            "name": "scan_entry_door",
+            "description": "在房屋入户点按预设角度扫描并锁定可进入的门。",
+            "args": {},
+        },
+        {
+            "name": "approach_entry_door",
+            "description": "视觉对齐入户门；对齐后可调用 enter_house。",
+            "args": {},
+        },
+        {
+            "name": "enter_house",
+            "description": "执行开门/靠近/前推，直到进入室内或需要下一轮继续。",
             "args": {},
         },
         {
@@ -102,6 +133,11 @@ class QwenHouseSearchTools:
             "name": "recover_from_stuck",
             "description": "执行一次有界脱困动作：停止、跳跃/后退、侧移、刷新。",
             "args": {},
+        },
+        {
+            "name": "mark_house_done",
+            "description": "标记当前房子已完成，准备选择下一个房子。",
+            "args": {"force": "optional bool"},
         },
         {
             "name": "finish_house_search",
@@ -165,6 +201,10 @@ class QwenHouseSearchTools:
             "max_rooms_per_floor": s.MAX_ROOMS_PER_FLOOR,
             "active_supply_id": self._target_id(s.active_supply),
             "active_door_id": self._target_id(s.active_door),
+            "current_house_id": s.current_house_id,
+            "active_entry": self._serialize_entry(s.active_entry),
+            "completed_house_count": getattr(s, "searching_number", 0),
+            "completed_house_ids": sorted(str(item) for item in s.completed_houses),
             "room_memory": self._room_memory(room_id),
             "interactions": self._interaction_state(),
         }
@@ -188,6 +228,180 @@ class QwenHouseSearchTools:
             },
         }
         return self._result(True, "get_visible_objects", observation)
+
+    def select_next_house(self) -> QwenToolResult:
+        s = self.searcher
+        w = self.worker
+        location = s._get_location(w)
+        direction = s._get_scalar(w.get_info("direction"))
+        if location is None:
+            return self._result(False, "select_next_house", error="location unavailable")
+
+        s.select_smart_target(location, direction)
+        if not s.current_house_id or not s.active_entry:
+            return self._result(
+                False,
+                "select_next_house",
+                {"selected": None},
+                error="no available house target",
+            )
+
+        s.status = "FAST_NAV"
+        s.history_locations = []
+        return self._result(
+            True,
+            "select_next_house",
+            {
+                "selected_house_id": s.current_house_id,
+                "active_entry": self._serialize_entry(s.active_entry),
+            },
+        )
+
+    def navigate_to_house_entry(self) -> QwenToolResult:
+        s = self.searcher
+        w = self.worker
+        location = s._get_location(w)
+        direction = s._get_scalar(w.get_info("direction"))
+        if location is None:
+            return self._result(False, "navigate_to_house_entry", error="location unavailable")
+        if not s.active_entry:
+            selected = self.select_next_house()
+            if not selected.ok:
+                return selected
+
+        target_loc = tuple(s.active_entry["location"])
+        dist = get_distance(location, target_loc)
+        if dist <= 1.0:
+            s.stop_auto_forward(w)
+            s.status = "SCANNING"
+            return self._result(
+                True,
+                "navigate_to_house_entry",
+                {"at_entry": True, "distance": dist, "status": s.status},
+            )
+
+        if s.update_and_check_stuck(location):
+            return self.recover_from_stuck()
+
+        if dist <= 5.0:
+            s.stop_auto_forward(w)
+            s.align_direction(w, target_loc)
+            w.tap_single("摇杆", y_bias=-300, dura=300, wait=500)
+            w.refresh_frame()
+            s.handle_jump_logic(w)
+            s.status = "PRECISE_NAV"
+        else:
+            s.align_direction(w, target_loc)
+            if not s.auto_forward:
+                w.click("自动前进")
+                s.auto_forward = True
+            s.handle_jump_logic(w)
+            s.status = "FAST_NAV"
+
+        return self._result(
+            True,
+            "navigate_to_house_entry",
+            {
+                "at_entry": False,
+                "distance": dist,
+                "target_location": self._json_point(target_loc),
+                "status": s.status,
+            },
+        )
+
+    def scan_entry_door(self) -> QwenToolResult:
+        s = self.searcher
+        w = self.worker
+        if not s.active_entry:
+            return self._result(False, "scan_entry_door", error="active_entry unavailable")
+
+        ideal_angle = s.active_entry["direction"]
+        s.stop_auto_forward(w)
+        s.align_direction_blocking(w, w.get_info("direction"), ideal_angle)
+        w.refresh_frame()
+        if s.check_and_lock_door(w):
+            s.status = "VISUAL_APPROACH"
+            return self._result(True, "scan_entry_door", {"found": True, "angle": ideal_angle})
+
+        for offset in (30, -30):
+            target_angle = (ideal_angle + offset) % 360
+            s.align_direction_blocking(w, w.get_info("direction"), target_angle)
+            w.refresh_frame()
+            if s.check_and_lock_door(w):
+                s.status = "VISUAL_APPROACH"
+                return self._result(
+                    True,
+                    "scan_entry_door",
+                    {"found": True, "angle": target_angle, "offset": offset},
+                )
+
+        s.handle_failed_entry_logic(ideal_angle)
+        s.status = "IDLE"
+        return self._result(True, "scan_entry_door", {"found": False, "angle": ideal_angle})
+
+    def approach_entry_door(self) -> QwenToolResult:
+        s = self.searcher
+        w = self.worker
+        door = s.find_largest_door(w)
+        if not door:
+            s.status = "SCANNING"
+            return self._result(False, "approach_entry_door", error="door not visible")
+
+        aligned = s._align_to_target(w, door, tolerance_px=s.CENTER_TOLERANCE_PX)
+        if not aligned:
+            w.refresh_frame()
+        else:
+            s.status = "INTERACT"
+        return self._result(
+            True,
+            "approach_entry_door",
+            {
+                "aligned": bool(aligned),
+                "door": self._serialize_detection(door, s._get_scalar(w.get_info("direction"))),
+                "status": s.status,
+            },
+        )
+
+    def enter_house(self) -> QwenToolResult:
+        s = self.searcher
+        w = self.worker
+        house_scene = s._get_house_scene(w)
+        if house_scene == s.HOUSE_INDOOR:
+            s.stop_auto_forward(w)
+            s.status = s.STATUS_SCAN_ROOM
+            return self._result(True, "enter_house", {"entered": True, "house_scene": "indoor"})
+
+        if w.get_info("跳跃"):
+            s.handle_jump_logic(w)
+            return self._result(True, "enter_house", {"entered": False, "action": "jump"})
+
+        if w.get_info("开门"):
+            w.click("开门")
+            time.sleep(0.8)
+            w.refresh_frame()
+        elif w.get_info("关门"):
+            pass
+        else:
+            door = s.find_largest_door(w)
+            if door is not None:
+                aligned = s._align_to_target(w, door, tolerance_px=s.CENTER_TOLERANCE_PX)
+                if not aligned:
+                    w.refresh_frame()
+                    return self._result(True, "enter_house", {"entered": False, "action": "align_door"})
+
+        s.stop_auto_forward(w)
+        w.tap_single("摇杆", y_bias=-300, dura=320, wait=900)
+        w.refresh_frame()
+        house_scene = s._get_house_scene(w)
+        entered = house_scene == s.HOUSE_INDOOR
+        if entered:
+            s.status = s.STATUS_SCAN_ROOM
+            s.pubg_room_search_attempted = False
+        return self._result(
+            True,
+            "enter_house",
+            {"entered": bool(entered), "house_scene": self._house_scene_name(house_scene), "status": s.status},
+        )
 
     def scan_room(self) -> QwenToolResult:
         s = self.searcher
@@ -403,6 +617,38 @@ class QwenHouseSearchTools:
             },
         )
 
+    def mark_house_done(self, force: bool = False) -> QwenToolResult:
+        s = self.searcher
+        w = self.worker
+        house_scene = s._get_house_scene(w)
+        if house_scene != s.HOUSE_OUTDOOR and not force:
+            return self._result(
+                False,
+                "mark_house_done",
+                {"house_scene": self._house_scene_name(house_scene)},
+                error="not outdoors; pass force=true to mark anyway",
+            )
+
+        house_id = s.current_house_id
+        if house_id is not None:
+            s.completed_houses.add(house_id)
+        s.searching_number = int(getattr(s, "searching_number", 0)) + 1
+        exit_direction = w.get_info("direction")
+        s.prepare_next_target_logic(exit_direction)
+        s.current_house_id = None
+        s.active_entry = None
+        s.reset()
+        s.status = "IDLE"
+        return self._result(
+            True,
+            "mark_house_done",
+            {
+                "marked_house_id": house_id,
+                "completed_house_count": s.searching_number,
+                "status": s.status,
+            },
+        )
+
     def finish_house_search(self) -> QwenToolResult:
         self.searcher._finish_house_search(self.worker)
         return self._result(True, "finish_house_search", {"current_stage": self.worker.get_stage()})
@@ -514,6 +760,14 @@ class QwenHouseSearchTools:
             "target_room_id",
         )
         return {key: self._json_key(target.get(key)) for key in keys if key in target}
+
+    def _serialize_entry(self, entry: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not entry:
+            return None
+        return {
+            "location": self._json_point(tuple(entry["location"])) if entry.get("location") else None,
+            "direction": entry.get("direction"),
+        }
 
     def _room_memory(self, room_id) -> Dict[str, Any]:
         s = self.searcher

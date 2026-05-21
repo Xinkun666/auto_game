@@ -9,6 +9,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigator import Ma
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search import (
     EmbeddedHouseSearchAdapter,
     HouseSearchAdapter,
+    QwenRoomSearchAgent,
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.toolkit import *
 from aw.autogame.tools.Utils import *
@@ -82,6 +83,7 @@ class Searching_House:
         self.pubg_room_search_adapter: Optional[HouseSearchAdapter] = None
         self.embedded_room_search_adapter: Optional[EmbeddedHouseSearchAdapter] = None
         self.pubg_room_search_attempted = False
+        self.qwen_room_search_agent: Optional[QwenRoomSearchAgent] = None
 
         self.reset()
 
@@ -112,6 +114,8 @@ class Searching_House:
         self.pubg_room_search_adapter = None
         self.embedded_room_search_adapter = None
         self.pubg_room_search_attempted = False
+        if self.qwen_room_search_agent is not None:
+            self.qwen_room_search_agent.reset()
 
     def process(self, w: 'FrameWorker'):
         location = self._get_location(w)
@@ -122,6 +126,9 @@ class Searching_House:
             print("[HouseLoot] 当前位置无效，小步移动刷新坐标")
             w.tap_single("摇杆", y_bias=-180, dura=180, wait=350)
             w.refresh_frame()
+            return
+
+        if self._try_qwen_room_search(w):
             return
 
         if house_scene == self.HOUSE_ROOFTOP:
@@ -177,6 +184,15 @@ class Searching_House:
         if self.status == self.STATUS_FINISHED:
             self._finish_house_search(w)
             return
+
+    def _try_qwen_room_search(self, w: 'FrameWorker') -> bool:
+        agent = self.qwen_room_search_agent
+        if agent is None:
+            agent = QwenRoomSearchAgent.from_config(self)
+            self.qwen_room_search_agent = agent
+        if agent is None:
+            return False
+        return agent.process(w)
 
     def _enter_room(self, location: Tuple[int, int]):
         room_id = self._make_room_id(location)

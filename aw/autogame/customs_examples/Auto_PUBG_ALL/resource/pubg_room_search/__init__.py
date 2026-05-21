@@ -10,6 +10,29 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.qwen_t
     QwenHouseSearchTools,
     QwenToolResult,
 )
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.qwen_agent import (
+    QwenRoomSearchAgent,
+)
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.qwen_controller import (
+    QwenRoomControlAgent,
+)
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.qwen_perception import (
+    QwenRoomPerceptionAgent,
+    QwenRoomPerceptionSnapshot,
+)
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.qwen_prompts import (
+    CONTROL_SYSTEM_PROMPT,
+    COORDINATOR_SYSTEM_PROMPT,
+    PERCEPTION_SYSTEM_PROMPT,
+    QWEN_AGENT_ROLE_PROMPTS,
+    QwenAgentRolePrompt,
+    STATE_SYSTEM_PROMPT,
+    get_qwen_agent_role_prompts,
+)
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.qwen_state import (
+    QwenRoomAgentState,
+    QwenRoomStateAgent,
+)
 
 __all__ = [
     "HouseSearchAdapter",
@@ -18,4 +41,17 @@ __all__ = [
     "EmbeddedHouseSearchRunResult",
     "QwenHouseSearchTools",
     "QwenToolResult",
+    "QwenRoomSearchAgent",
+    "QwenRoomControlAgent",
+    "QwenRoomPerceptionAgent",
+    "QwenRoomPerceptionSnapshot",
+    "QwenRoomAgentState",
+    "QwenRoomStateAgent",
+    "QwenAgentRolePrompt",
+    "QWEN_AGENT_ROLE_PROMPTS",
+    "COORDINATOR_SYSTEM_PROMPT",
+    "STATE_SYSTEM_PROMPT",
+    "PERCEPTION_SYSTEM_PROMPT",
+    "CONTROL_SYSTEM_PROMPT",
+    "get_qwen_agent_role_prompts",
 ]

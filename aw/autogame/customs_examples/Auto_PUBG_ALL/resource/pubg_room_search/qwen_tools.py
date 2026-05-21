@@ -470,7 +470,12 @@ class QwenHouseSearchTools:
 
         s.handle_failed_entry_logic(ideal_angle)
         s.status = "IDLE"
-        return self._result(True, "scan_entry_door", {"found": False, "angle": ideal_angle})
+        return self._result(
+            False,
+            "scan_entry_door",
+            {"found": False, "angle": ideal_angle, "result_type": "door_not_found"},
+            error="entry door not found",
+        )
 
     def approach_entry_door(self) -> QwenToolResult:
         s = self.searcher
@@ -599,6 +604,13 @@ class QwenHouseSearchTools:
     ) -> QwenToolResult:
         s = self.searcher
         align_result = self.align_to_object(target_type=target_type)
+        if not align_result.ok:
+            return self._result(
+                False,
+                "move_to_object",
+                {"aligned": False, "moved": False, "align_error": align_result.error},
+                error=align_result.error or f"cannot align to {target_type}",
+            )
         aligned = bool(align_result.observation.get("aligned"))
         if not aligned:
             return self._result(True, "move_to_object", {"aligned": False, "moved": False})
@@ -627,6 +639,13 @@ class QwenHouseSearchTools:
         picked = s._click_pickup_if_available(self.worker)
         if picked and s.active_supply is not None:
             s._mark_supply_done(room_id, s.active_supply)
+        if not picked:
+            return self._result(
+                False,
+                "pickup_item",
+                {"picked": False, "room_memory": self._room_memory(room_id)},
+                error="pickup action unavailable",
+            )
         return self._result(
             True,
             "pickup_item",
@@ -672,7 +691,12 @@ class QwenHouseSearchTools:
             return self._result(True, "open_door", {"interacted": True, "button": "开门"})
         if w.get_info("关门"):
             return self._result(True, "open_door", {"interacted": False, "button": "关门"})
-        return self._result(True, "open_door", {"interacted": False, "button": None})
+        return self._result(
+            False,
+            "open_door",
+            {"interacted": False, "button": None},
+            error="door button unavailable",
+        )
 
     def enter_door(self, confirm: bool = True) -> QwenToolResult:
         s = self.searcher

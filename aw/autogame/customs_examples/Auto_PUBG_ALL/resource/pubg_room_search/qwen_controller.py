@@ -34,6 +34,7 @@ class QwenRoomControlAgent:
         self.api_key = str(config.get("qwen_api_key") or "EMPTY")
         self.max_tokens = int(config.get("qwen_max_tokens") or 384)
         self.timeout_sec = float(config.get("qwen_timeout_sec") or 20.0)
+        self.http_error_body_chars = max(120, int(config.get("qwen_http_error_body_chars") or 1200))
         self.system_prompt = str(config.get("qwen_control_system_prompt") or self.DEFAULT_SYSTEM_PROMPT)
 
     def decide(
@@ -153,6 +154,16 @@ class QwenRoomControlAgent:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_sec) as resp:
                 return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", "replace")
+            if len(body) > self.http_error_body_chars:
+                body = body[: self.http_error_body_chars - 3] + "..."
+            detail = f"HTTP {exc.code} {exc.reason}"
+            if body:
+                detail = f"{detail}: {body}"
+            raise RuntimeError(
+                f"Qwen request failed: {detail}; request_bytes={len(data)}"
+            ) from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Qwen request failed: {exc}") from exc
 

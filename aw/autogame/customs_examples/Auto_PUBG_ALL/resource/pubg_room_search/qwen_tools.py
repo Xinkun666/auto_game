@@ -173,8 +173,11 @@ class QwenHouseSearchTools:
             method = getattr(self, tool_name)
             if not isinstance(args, dict):
                 raise ValueError("tool args must be a dict")
-            return self._with_feedback(method(**args)).to_dict()
+            result = method(**args)
+            self._refresh_after_tool(tool_name)
+            return self._with_feedback(result).to_dict()
         except Exception as exc:
+            self._refresh_after_tool(tool_name)
             return self._with_feedback(self._result(False, tool_name, error=str(exc))).to_dict()
 
     def build_observation(self, task: str = "搜索当前房屋") -> Dict[str, Any]:
@@ -887,6 +890,14 @@ class QwenHouseSearchTools:
         observation.setdefault("state_after", self._feedback_state())
         result.observation = observation
         return result
+
+    def _refresh_after_tool(self, tool_name: str):
+        if tool_name in {"get_game_state", "get_visible_objects"}:
+            return
+        try:
+            self.worker.refresh_frame()
+        except Exception:
+            pass
 
     def _feedback_state(self) -> Dict[str, Any]:
         s = self.searcher

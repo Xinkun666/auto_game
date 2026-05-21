@@ -47,6 +47,9 @@ class QwenRoomControlAgent:
         decision = self._normalize_decision(decision)
         return self._guard_decision(decision, tools)
 
+    def prompt_for_trace(self, snapshot: QwenRoomPerceptionSnapshot) -> Dict[str, Any]:
+        return self._build_payload(snapshot, trace=True)
+
     def fallback_decision(self, tools: QwenHouseSearchTools) -> Dict[str, Any]:
         state = tools.get_game_state().observation
         interactions = state.get("interactions") or {}
@@ -97,28 +100,7 @@ class QwenRoomControlAgent:
         return {"tool_name": "wait_and_refresh", "args": {"wait_sec": 0.2}}
 
     def _model_decision(self, snapshot: QwenRoomPerceptionSnapshot) -> Optional[Dict[str, Any]]:
-        text = (
-            "请根据当前画面和结构化观察选择下一步工具。"
-            "只输出 JSON。\n\n"
-            f"观察：{json.dumps(snapshot.observation, ensure_ascii=False)}"
-        )
-        if snapshot.frame_data_url:
-            content = [
-                {"type": "text", "text": text},
-                {"type": "image_url", "image_url": {"url": snapshot.frame_data_url}},
-            ]
-        else:
-            content = text
-
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": content},
-            ],
-            "max_tokens": self.max_tokens,
-            "temperature": 0.1,
-        }
+        payload = self._build_payload(snapshot, trace=False)
         response = self._post_chat_completions(payload)
         content = (
             response.get("choices", [{}])[0]
@@ -128,6 +110,33 @@ class QwenRoomControlAgent:
         if not content:
             return None
         return self._parse_json(content)
+
+    def _build_payload(self, snapshot: QwenRoomPerceptionSnapshot, *, trace: bool) -> Dict[str, Any]:
+        text = (
+            "请根据当前画面和结构化观察选择下一步工具。"
+            "只输出 JSON。\n\n"
+            f"观察：{json.dumps(snapshot.observation, ensure_ascii=False)}"
+        )
+        if snapshot.frame_data_url:
+            content = [
+                {"type": "text", "text": text},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "frame" if trace else snapshot.frame_data_url},
+                },
+            ]
+        else:
+            content = text
+
+        return {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": content},
+            ],
+            "max_tokens": self.max_tokens,
+            "temperature": 0.1,
+        }
 
     def _post_chat_completions(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{self.base_url}/chat/completions"

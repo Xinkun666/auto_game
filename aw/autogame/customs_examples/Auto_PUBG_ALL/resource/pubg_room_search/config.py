@@ -47,6 +47,8 @@ DEFAULT_CONFIG = {
     "qwen_max_consecutive_errors": 3,
     "qwen_jpeg_quality": 80,
     "qwen_control_system_prompt": "",
+    "qwen_trace_enabled": True,
+    "qwen_trace_prompt": True,
     "move_finger_id": 0,
     "view_finger_id": 1,
     "button_finger_start": 2,

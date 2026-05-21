@@ -181,10 +181,19 @@ class QwenRoomControlAgent:
         decision: Dict[str, Any],
         tools: QwenHouseSearchTools,
     ) -> Dict[str, Any]:
+        state = tools.get_game_state().observation
+        if decision["tool_name"] == "select_next_house":
+            if state.get("current_house_id") is not None and state.get("active_entry") is not None:
+                return {
+                    "tool_name": "navigate_to_house_entry",
+                    "args": {},
+                    "reason": "已存在当前房子和入户点，继续向入户点移动",
+                    "confidence": 1.0,
+                }
+
         if decision["tool_name"] != "mark_house_done" or self.state_agent.entered_current_house:
             return decision
 
-        state = tools.get_game_state().observation
         if state.get("active_entry") is None:
             return {
                 "tool_name": "select_next_house",

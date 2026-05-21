@@ -75,9 +75,16 @@ class QwenRoomSearchAgent:
 
             result = tools.dispatch(decision["tool_name"], decision.get("args") or {})
             self.state_agent.record_tool_result(decision["tool_name"], result)
+            state = tools.get_game_state().observation
             print(
                 f"[QwenRoomAgent] tool={decision['tool_name']}, "
-                f"ok={result.get('ok')}, reason={decision.get('reason', '')}"
+                f"ok={result.get('ok')}, "
+                f"scene={state.get('house_scene_name')}, "
+                f"house={state.get('current_house_id')}, "
+                f"entry={bool(state.get('active_entry'))}, "
+                f"status={state.get('status')}, "
+                f"reason={decision.get('reason', '')}, "
+                f"error={result.get('error', '')}"
             )
             return True
         except Exception as exc:

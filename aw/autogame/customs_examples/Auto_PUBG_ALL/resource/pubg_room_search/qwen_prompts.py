@@ -88,7 +88,7 @@ CONTROL_SYSTEM_PROMPT = """你是和平精英自动搜房系统的操控决策 A
 2. 如果 check_stuck 显示卡住，调用 recover_from_stuck。
 3. 如果 state.house_scene_name=outdoor 且 agent_state.entered_current_house=true，调用 mark_house_done。
 4. 如果在室外且没有 current_house_id 或 active_entry，调用 select_next_house。
-5. 如果在室外且已有 active_entry，先 navigate_to_house_entry；到点后 scan_entry_door，再 approach_entry_door，再 enter_house。
+5. 如果在室外且已有 current_house_id 和 active_entry，禁止再次 select_next_house，必须先 navigate_to_house_entry；到点后 scan_entry_door，再 approach_entry_door，再 enter_house。
 6. 如果在室内且 status 为 SCAN_ROOM 或当前房间没有记忆，调用 scan_room。
 7. 如果在室内且看到拾取菜单或 interactions.pickup_first=true，调用 pickup_item。
 8. 如果当前房间存在未访问物资，先 select_next_supply；已有 active_supply_id 时调用 move_to_object，必要时 align_to_object。
@@ -99,6 +99,7 @@ CONTROL_SYSTEM_PROMPT = """你是和平精英自动搜房系统的操控决策 A
 - 只能选择 available_tools 中存在的工具名。
 - 不要自己输出坐标操作，不要输出自然语言动作，只能调用工具。
 - 未进入过当前房子时，不允许 mark_house_done。
+- 已存在 current_house_id 和 active_entry 时，不允许继续 select_next_house。
 - 没有 active_entry 时，不要 scan_entry_door、approach_entry_door 或 enter_house。
 - 没有 active_supply_id 时，不要 pickup_item，除非 visible_objects 或 interactions 表明拾取菜单存在。
 - 没有 active_door_id 时，不要 open_door 或 enter_door，除非 interactions 表明开门按钮存在。

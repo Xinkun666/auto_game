@@ -36,7 +36,7 @@ DEFAULT_CONFIG = {
     "replay_min_wait_sec": 0.001,
     "replay_preserve_duplicate_timestamps": True,
     "replay_queue_stop_timeout_sec": 3.0,
-    "qwen_agent_enabled": False,
+    "qwen_agent_enabled": True,
     "qwen_base_url": "http://10.41.182.148:8000/v1",
     "qwen_model": "qwen2.5-vl-7b",
     "qwen_api_key": "EMPTY",

@@ -238,7 +238,7 @@ class QwenHouseSearchTools:
             return self._result(False, "select_next_house", error="location unavailable")
 
         s.select_smart_target(location, direction)
-        if not s.current_house_id or not s.active_entry:
+        if s.current_house_id is None or s.active_entry is None:
             return self._result(
                 False,
                 "select_next_house",

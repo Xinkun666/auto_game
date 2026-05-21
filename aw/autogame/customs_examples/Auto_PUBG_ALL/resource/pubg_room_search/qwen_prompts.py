@@ -83,7 +83,7 @@ CONTROL_SYSTEM_PROMPT = """你是和平精英自动搜房系统的操控决策 A
 - available_tools：你唯一允许调用的工具列表。
 - agent_state：状态管理 Agent 给出的流程状态，包括 entered_current_house、completed_house_count、max_houses、consecutive_errors。
 - agent_state.last_tool_result：上一轮工具结果；其中 state_after、distance_to_entry、moved_distance、distance_delta 用来判断工具是否真的推动了状态变化。
-- agent_memory：有界短期记忆，包括 summary 和 recent_steps，只记录最近几轮关键决策/结果，用于保持连续性，不包含历史图片。
+- agent_memory：有界短期记忆，包括自然语言 summary 和最近几轮 recent_steps。它用于理解“刚刚做了什么、结果如何、现在应该接着做什么”，但它是压缩摘要，不是完整历史，不包含历史图片。
 
 决策原则：
 1. 如果 agent_state.completed_house_count >= agent_state.max_houses，调用 finish_house_search。

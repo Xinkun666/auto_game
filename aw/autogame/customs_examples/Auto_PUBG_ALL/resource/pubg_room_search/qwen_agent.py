@@ -50,6 +50,9 @@ class QwenRoomSearchAgent:
         self.memory_agent = QwenRoomMemoryAgent(
             window_size=int(self.config.get("qwen_memory_window_size") or 5),
             max_summary_events=int(self.config.get("qwen_memory_summary_events") or 12),
+            max_text_chars=int(self.config.get("qwen_memory_max_text_chars") or 700),
+            max_event_chars=int(self.config.get("qwen_memory_max_event_chars") or 180),
+            max_field_chars=int(self.config.get("qwen_memory_max_field_chars") or 80),
         )
 
     @classmethod
@@ -74,6 +77,8 @@ class QwenRoomSearchAgent:
         tools = QwenHouseSearchTools(self.searcher, worker)
         self.round_index += 1
         self._trace("Coordinator", "开始新一轮 Qwen 搜房闭环")
+        if self.memory_enabled:
+            print(f"[QwenRoomMemory][round={self.round_index}] 上下文摘要：{self.memory_agent.snapshot()['summary']}")
         if self.state_agent.should_finish():
             self._trace("Coordinator -> Tools", {"tool_name": "finish_house_search", "args": {}})
             result = tools.dispatch("finish_house_search", {})
@@ -141,24 +146,33 @@ class QwenRoomSearchAgent:
                     result=result,
                 )
                 self._trace("Coordinator -> Memory", {"action": "record_round"})
-                self._trace("Memory -> Coordinator", self.memory_agent.snapshot())
+                print(
+                    f"[QwenRoomMemory][round={self.round_index}] "
+                    f"本轮记忆：{self.memory_agent.last_event_text()}"
+                )
+                self._trace(
+                    "Memory -> Coordinator",
+                    {
+                        "summary": self.memory_agent.snapshot()["summary"],
+                        "recent_step_count": len(self.memory_agent.snapshot()["recent_steps"]),
+                    },
+                )
             self._trace("Coordinator -> State", {"action": "record_tool_result"})
             self._trace("State -> Coordinator", self.state_agent.snapshot())
             observation = result.get("observation") or {}
             state = observation.get("state_after") or tools.get_game_state().observation
             print(
-                f"[QwenRoomAgent] tool={decision['tool_name']}, "
-                f"ok={result.get('ok')}, "
-                f"scene={state.get('house_scene_name')}, "
-                f"house={state.get('current_house_id')}, "
-                f"entry={bool(state.get('has_active_entry', state.get('active_entry')))}, "
-                f"dist={state.get('distance_to_entry')}, "
-                f"status={state.get('status')}, "
-                f"action={observation.get('action', '')}, "
-                f"moved={observation.get('moved_distance', '')}, "
-                f"delta={observation.get('distance_delta', '')}, "
-                f"reason={decision.get('reason', '')}, "
-                f"error={result.get('error', '')}"
+                f"[QwenRoomAgent][round={self.round_index}] "
+                f"观察后决定调用 {decision['tool_name']}，原因：{decision.get('reason', '')}。"
+                f"工具执行 {'成功' if result.get('ok') else '失败'}，"
+                f"当前场景={state.get('house_scene_name')}，状态={state.get('status')}，"
+                f"房子={state.get('current_house_id')}，"
+                f"入口={'有' if bool(state.get('has_active_entry', state.get('active_entry'))) else '无'}，"
+                f"距入口={state.get('distance_to_entry')}，"
+                f"动作={observation.get('action', '')}，"
+                f"移动={observation.get('moved_distance', '')}，"
+                f"距离变化={observation.get('distance_delta', '')}，"
+                f"错误={result.get('error', '')}"
             )
             return True
         except Exception as exc:
@@ -199,7 +213,17 @@ class QwenRoomSearchAgent:
                     decision=decision,
                     result=result,
                 )
-                self._trace("Memory -> Coordinator", self.memory_agent.snapshot())
+                print(
+                    f"[QwenRoomMemory][round={self.round_index}] "
+                    f"本轮记忆：{self.memory_agent.last_event_text()}"
+                )
+                self._trace(
+                    "Memory -> Coordinator",
+                    {
+                        "summary": self.memory_agent.snapshot()["summary"],
+                        "recent_step_count": len(self.memory_agent.snapshot()["recent_steps"]),
+                    },
+                )
             self._trace("State -> Coordinator", self.state_agent.snapshot())
             return True
 

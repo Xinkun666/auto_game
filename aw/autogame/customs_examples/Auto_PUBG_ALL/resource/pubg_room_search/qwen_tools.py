@@ -200,6 +200,12 @@ class QwenHouseSearchTools:
         direction = s._get_scalar(w.get_info("direction"))
         house_scene = s._get_house_scene(w)
         room_id = s.current_room_id
+        distance_to_entry = None
+        if location is not None and s.active_entry:
+            try:
+                distance_to_entry = get_distance(location, tuple(s.active_entry["location"]))
+            except Exception:
+                distance_to_entry = None
 
         observation = {
             "location": self._json_point(location),
@@ -214,6 +220,7 @@ class QwenHouseSearchTools:
             "active_door_id": self._target_id(s.active_door),
             "current_house_id": s.current_house_id,
             "active_entry": self._serialize_entry(s.active_entry),
+            "distance_to_entry": distance_to_entry,
             "completed_house_count": getattr(s, "searching_number", 0),
             "completed_house_ids": sorted(str(item) for item in s.completed_houses),
             "room_memory": self._room_memory(room_id),

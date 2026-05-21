@@ -15,6 +15,9 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.qwen_p
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.qwen_state import (
     QwenRoomStateAgent,
 )
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.qwen_tool_policy import (
+    QwenRoomToolPolicyAgent,
+)
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.qwen_tools import (
     QwenHouseSearchTools,
 )
@@ -43,6 +46,7 @@ class QwenRoomControlAgent:
         self.prompt_recent_steps = max(0, int(config.get("qwen_prompt_recent_steps") or 2))
         self.prompt_visible_object_limit = max(0, int(config.get("qwen_prompt_visible_object_limit") or 5))
         self.trace_payload_size = bool(config.get("qwen_trace_payload_size", False))
+        self.tool_policy_agent = QwenRoomToolPolicyAgent(config, state_agent)
         self.system_prompt = str(config.get("qwen_control_system_prompt") or self.DEFAULT_SYSTEM_PROMPT)
 
     def decide(
@@ -54,7 +58,7 @@ class QwenRoomControlAgent:
         if decision is None:
             decision = self.fallback_decision(tools)
         decision = self._normalize_decision(decision)
-        return self._guard_decision(decision, tools)
+        return self._validate_or_override_decision(decision, snapshot, tools)
 
     def prompt_for_trace(self, snapshot: QwenRoomPerceptionSnapshot) -> Dict[str, Any]:
         return self._build_payload(snapshot, trace=True)
@@ -472,32 +476,23 @@ class QwenRoomControlAgent:
         decision: Dict[str, Any],
         tools: QwenHouseSearchTools,
     ) -> Dict[str, Any]:
-        state = tools.get_game_state().observation
-        if decision["tool_name"] == "select_next_house":
-            if state.get("current_house_id") is not None and state.get("active_entry") is not None:
-                return {
-                    "tool_name": "navigate_to_house_entry",
-                    "args": {},
-                    "reason": "已存在当前房子和入户点，继续向入户点移动",
-                    "confidence": 1.0,
-                }
+        return self.tool_policy_agent.validate_or_override_decision(
+            decision,
+            observation={},
+            runtime_state=tools.get_game_state().observation,
+        )
 
-        if decision["tool_name"] != "mark_house_done" or self.state_agent.entered_current_house:
-            return decision
-
-        if state.get("active_entry") is None:
-            return {
-                "tool_name": "select_next_house",
-                "args": {},
-                "reason": "尚未进入当前房子，不能标记完成，先选择房子",
-                "confidence": 1.0,
-            }
-        return {
-            "tool_name": "navigate_to_house_entry",
-            "args": {},
-            "reason": "尚未进入当前房子，不能标记完成，继续靠近入户点",
-            "confidence": 1.0,
-        }
+    def _validate_or_override_decision(
+        self,
+        decision: Dict[str, Any],
+        snapshot: QwenRoomPerceptionSnapshot,
+        tools: QwenHouseSearchTools,
+    ) -> Dict[str, Any]:
+        return self.tool_policy_agent.validate_or_override_decision(
+            decision,
+            observation=snapshot.observation,
+            runtime_state=tools.get_game_state().observation,
+        )
 
     def _is_stuck(self, tools: QwenHouseSearchTools) -> bool:
         result = tools.check_stuck().to_dict()

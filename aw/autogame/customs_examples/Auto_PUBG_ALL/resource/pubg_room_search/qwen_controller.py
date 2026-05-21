@@ -164,6 +164,13 @@ class QwenRoomControlAgent:
         if not isinstance(decision, dict):
             raise ValueError("Qwen decision must be a dict")
         tool_name = str(decision.get("tool_name") or "").strip()
+        tool_name = {
+            "navigate_to_house_try": "navigate_to_house_entry",
+            "navigate_to_entry": "navigate_to_house_entry",
+            "go_to_house_entry": "navigate_to_house_entry",
+            "precise_nav": "navigate_to_house_entry",
+            "fast_nav": "navigate_to_house_entry",
+        }.get(tool_name, tool_name)
         if tool_name not in QwenHouseSearchTools.TOOL_NAMES:
             raise ValueError(f"invalid tool_name from Qwen: {tool_name}")
         args = decision.get("args") or {}

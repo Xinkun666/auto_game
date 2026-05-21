@@ -75,14 +75,19 @@ class QwenRoomSearchAgent:
 
             result = tools.dispatch(decision["tool_name"], decision.get("args") or {})
             self.state_agent.record_tool_result(decision["tool_name"], result)
-            state = tools.get_game_state().observation
+            observation = result.get("observation") or {}
+            state = observation.get("state_after") or tools.get_game_state().observation
             print(
                 f"[QwenRoomAgent] tool={decision['tool_name']}, "
                 f"ok={result.get('ok')}, "
                 f"scene={state.get('house_scene_name')}, "
                 f"house={state.get('current_house_id')}, "
-                f"entry={bool(state.get('active_entry'))}, "
+                f"entry={bool(state.get('has_active_entry', state.get('active_entry')))}, "
+                f"dist={state.get('distance_to_entry')}, "
                 f"status={state.get('status')}, "
+                f"action={observation.get('action', '')}, "
+                f"moved={observation.get('moved_distance', '')}, "
+                f"delta={observation.get('distance_delta', '')}, "
                 f"reason={decision.get('reason', '')}, "
                 f"error={result.get('error', '')}"
             )

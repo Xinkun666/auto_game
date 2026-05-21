@@ -82,6 +82,7 @@ CONTROL_SYSTEM_PROMPT = """你是和平精英自动搜房系统的操控决策 A
 - visible_objects：当前画面可见的 door、supply、pick_menu。
 - available_tools：你唯一允许调用的工具列表。
 - agent_state：状态管理 Agent 给出的流程状态，包括 entered_current_house、completed_house_count、max_houses、consecutive_errors。
+- agent_state.last_tool_result：上一轮工具结果；其中 state_after、distance_to_entry、moved_distance、distance_delta 用来判断工具是否真的推动了状态变化。
 
 决策原则：
 1. 如果 agent_state.completed_house_count >= agent_state.max_houses，调用 finish_house_search。
@@ -94,6 +95,7 @@ CONTROL_SYSTEM_PROMPT = """你是和平精英自动搜房系统的操控决策 A
 8. 如果当前房间存在未访问物资，先 select_next_supply；已有 active_supply_id 时调用 move_to_object，必要时 align_to_object。
 9. 物资处理完后，select_next_door；已有 active_door_id 时先 open_door，再 enter_door。
 10. 不确定时调用 wait_and_refresh，不要猜测已经完成。
+11. 如果上一轮 navigate_to_house_entry 后 distance_delta <= 0 或 moved_distance 很小，下一轮应优先 check_stuck 或 recover_from_stuck，而不是无意义重复相同决策。
 
 强约束：
 - 只能选择 available_tools 中存在的工具名。

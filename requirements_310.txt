@@ -24,7 +24,7 @@ typing_extensions
 # 代码位置: aw/autogame/customs_examples/Auto_PUBG_ALL/resource/pubg_room_search/
 # 内嵌感知模块位置:
 # aw/autogame/customs_examples/Auto_PUBG_ALL/resource/pubg_room_search/perception/
-# YOLO/SAM3 感知模块已放在 auto_game 内，不需要启动 pubg_test 的 YOLO/SAM3 server。
+# YOLO 感知模块放在 auto_game 内；SAM3 通过远端 HTTP 算法服务调用。
 #
 # 额外环境配置:
 # 1. 开启搜房:

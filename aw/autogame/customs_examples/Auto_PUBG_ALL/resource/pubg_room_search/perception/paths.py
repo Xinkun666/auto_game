@@ -8,8 +8,6 @@ PERCEPTION_DIR = Path(__file__).resolve().parent
 RESOURCE_DIR = PERCEPTION_DIR.parents[1]
 MODELS_DIR = PERCEPTION_DIR / "models"
 YOLO_WEIGHTS_DIR = MODELS_DIR / "yolo"
-SAM3_MODELS_DIR = MODELS_DIR / "sam3"
-VENDORED_SAM3_DIR = PERCEPTION_DIR / "sam3_mps_cpu"
 
 
 def _env_path(name: str, default: Path) -> Path:
@@ -25,17 +23,6 @@ def yolo_detect_model_path() -> Path:
 
 def yolo_classify_model_path() -> Path:
     return _env_path("AUTOGAME_PUBG_YOLO_CLASSIFY_MODEL", YOLO_WEIGHTS_DIR / "26x_cls.pt")
-
-
-def sam3_checkpoint_path() -> Path:
-    return _env_path("AUTOGAME_PUBG_SAM3_CHECKPOINT", SAM3_MODELS_DIR / "sam3.pt")
-
-
-def sam3_bpe_path() -> Path | None:
-    raw = os.environ.get("AUTOGAME_PUBG_SAM3_BPE")
-    if not raw:
-        return None
-    return Path(raw).expanduser().resolve()
 
 
 def looks_like_lfs_pointer(path: Path) -> bool:
@@ -57,4 +44,3 @@ def require_real_model_file(path: Path, label: str) -> Path:
             f"{label} 模型仍是 Git LFS 指针，不是真实权重文件: {path}"
         )
     return path
-

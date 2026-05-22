@@ -761,6 +761,84 @@ def visualizer_process(queue, visual=True):
             )
         return frame
 
+    def collect_visualizations(value):
+        visuals = []
+        if isinstance(value, dict):
+            own_visuals = value.get("__visualizations__")
+            if isinstance(own_visuals, list):
+                visuals.extend(item for item in own_visuals if isinstance(item, dict))
+            for key, child in value.items():
+                if key == "__visualizations__":
+                    continue
+                visuals.extend(collect_visualizations(child))
+        elif isinstance(value, list):
+            for child in value:
+                visuals.extend(collect_visualizations(child))
+        return visuals
+
+    def _as_bgr_color(value, fallback):
+        if not isinstance(value, (list, tuple)) or len(value) < 3:
+            return fallback
+        try:
+            return tuple(int(max(0, min(255, v))) for v in value[:3])
+        except (TypeError, ValueError):
+            return fallback
+
+    def draw_algorithm_visualizations(frame, visuals, font_size_getter, font_size):
+        for visual_item in visuals:
+            visual_type = str(visual_item.get("type") or "").lower()
+            bbox = visual_item.get("bbox_xyxy")
+            label = str(visual_item.get("label") or visual_type or "visual")
+            score = visual_item.get("score")
+            mask_color = _as_bgr_color(visual_item.get("color_bgr"), (0, 255, 255))
+            bbox_color = _as_bgr_color(visual_item.get("bbox_color_bgr"), (0, 255, 0))
+
+            contours = visual_item.get("contours")
+            if isinstance(contours, list) and contours:
+                overlay = frame.copy()
+                contour_arrays = []
+                for contour in contours:
+                    if not isinstance(contour, list) or len(contour) < 3:
+                        continue
+                    arr = np.array(contour, dtype=np.int32).reshape(-1, 1, 2)
+                    contour_arrays.append(arr)
+                if contour_arrays:
+                    alpha = float(visual_item.get("alpha", 0.45) or 0.45)
+                    cv2.fillPoly(overlay, contour_arrays, mask_color)
+                    frame = cv2.addWeighted(overlay, alpha, frame, 1.0 - alpha, 0)
+                    cv2.polylines(frame, contour_arrays, True, bbox_color, 2)
+
+            if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                x1, y1, x2, y2 = [int(v) for v in bbox]
+                cv2.rectangle(frame, (x1, y1), (x2, y2), bbox_color, 2)
+                if score is not None:
+                    try:
+                        label = f"{label} {float(score):.2f}"
+                    except (TypeError, ValueError):
+                        pass
+                frame = draw_chinese_text(
+                    frame,
+                    label,
+                    (x1, max(font_size_getter(25), y1 - font_size_getter(10))),
+                    "simhei.ttf",
+                    font_size,
+                    bbox_color,
+                )
+        return frame
+
+    def sanitize_info_for_log(value):
+        if isinstance(value, dict):
+            sanitized = {}
+            for key, child in value.items():
+                if key == "__visualizations__":
+                    sanitized[key] = f"{len(child) if isinstance(child, list) else 0} visualizations"
+                else:
+                    sanitized[key] = sanitize_info_for_log(child)
+            return sanitized
+        if isinstance(value, list):
+            return [sanitize_info_for_log(child) for child in value]
+        return value
+
     while True:
         try:
             data = queue.get()
@@ -805,6 +883,14 @@ def visualizer_process(queue, visual=True):
                     if is_detection_list(v):
                         detection_keys.add(k)
                         frame_rotated = draw_detection_list(frame_rotated, v, get_scaled_size, font_info)
+                visual_items = collect_visualizations(info)
+                if visual_items:
+                    frame_rotated = draw_algorithm_visualizations(
+                        frame_rotated,
+                        visual_items,
+                        get_scaled_size,
+                        font_info,
+                    )
 
             safe_info = {}
             if visual:
@@ -815,7 +901,8 @@ def visualizer_process(queue, visual=True):
 
             if isinstance(info, dict):
                 for k, v in sorted_info_items:
-                    raw_str = str(v)
+                    display_value = sanitize_info_for_log(v)
+                    raw_str = str(display_value)
                     safe_info[k] = raw_str
 
                     if visual:

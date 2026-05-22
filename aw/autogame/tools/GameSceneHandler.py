@@ -55,6 +55,59 @@ class GameImageProcessor:
                     cache[os.path.normpath(abs_path)] = img
         return cache
 
+    @staticmethod
+    def _offset_bbox(bbox, offset_x, offset_y):
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            return bbox
+        return [
+            int(bbox[0]) + offset_x,
+            int(bbox[1]) + offset_y,
+            int(bbox[2]) + offset_x,
+            int(bbox[3]) + offset_y,
+        ]
+
+    @staticmethod
+    def _offset_contours(contours, offset_x, offset_y):
+        if not isinstance(contours, list):
+            return contours
+        shifted = []
+        for contour in contours:
+            if not isinstance(contour, list):
+                continue
+            points = []
+            for point in contour:
+                if not isinstance(point, (list, tuple)) or len(point) < 2:
+                    continue
+                points.append([int(point[0]) + offset_x, int(point[1]) + offset_y])
+            if len(points) >= 2:
+                shifted.append(points)
+        return shifted
+
+    def _map_special_visualizations(self, result, crop_xyxy):
+        if not isinstance(result, dict):
+            return result
+
+        visuals = result.get("__visualizations__")
+        if not isinstance(visuals, list):
+            return result
+
+        x1, y1, x2, y2 = crop_xyxy
+        mapped_visuals = []
+        for visual in visuals:
+            if not isinstance(visual, dict):
+                continue
+            item = dict(visual)
+            if item.get("coord", "local") == "local":
+                item["bbox_xyxy"] = self._offset_bbox(item.get("bbox_xyxy"), x1, y1)
+                item["contours"] = self._offset_contours(item.get("contours"), x1, y1)
+                item["coord"] = "frame"
+                item["source_crop_xyxy"] = [int(x1), int(y1), int(x2), int(y2)]
+            mapped_visuals.append(item)
+
+        mapped_result = dict(result)
+        mapped_result["__visualizations__"] = mapped_visuals
+        return mapped_result
+
     def process(self, raw_frame, tasks_config, buffer_ratio=0.1):
         self.task_config = tasks_config
         curr_h, curr_w = raw_frame.shape[:2]
@@ -90,11 +143,17 @@ class GameImageProcessor:
                         y2 = max(0, min(curr_h, y2))
                         target_img = np.ascontiguousarray(raw_frame[y1:y2, x1:x2]).copy()
                     else:
+                        x1, y1, x2, y2 = 0, 0, curr_w, curr_h
                         target_img = np.ascontiguousarray(raw_frame).copy()
 
                     handler_name = config.get('handler_name', task_id)
                     method = getattr(self.special_handler, handler_name, None)
-                    return task_id, method(target_img) if method else f"Error: {handler_name} not found"
+                    if not method:
+                        return task_id, f"Error: {handler_name} not found"
+                    return task_id, self._map_special_visualizations(
+                        method(target_img),
+                        (x1, y1, x2, y2),
+                    )
 
                 # Case 2: 模板匹配
                 elif task_type == 'template':

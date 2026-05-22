@@ -14,10 +14,8 @@ from PIL import Image
 
 try:
     from . import config as sam3_config
-    from .client import Sam3Client
 except ImportError:  # Allow running from the standalone sam3/ directory.
     import config as sam3_config
-    from client import Sam3Client
 
 logger = logging.getLogger("SAM3-Segmenter")
 
@@ -286,114 +284,6 @@ class FakeBackend(SegmentBackend):
         return [result] if result is not None and max_masks > 0 else []
 
 
-class RemoteBackend(SegmentBackend):
-    def __init__(
-        self,
-        *,
-        host: str,
-        port: int,
-        timeout_ms: int,
-        mask_fill_strategy: str,
-    ):
-        self.host = host
-        self.port = int(port)
-        self.timeout_ms = int(timeout_ms)
-        self.mask_fill_strategy = mask_fill_strategy
-        self._client: Optional[Sam3Client] = None
-
-    def _ensure_client(self) -> Sam3Client:
-        if self._client is None:
-            _client = Sam3Client(
-                host=self.host,
-                port=self.port,
-                timeout_ms=self.timeout_ms,
-            )
-            self._client = _client
-        else:
-            _client = self._client
-        return _client
-
-    def load_model(self) -> None:
-        health = self._ensure_client().health()
-        if health is None:
-            logger.warning(
-                "SAM3 remote server is unavailable at %s:%s",
-                self.host,
-                self.port,
-            )
-
-    def release_accelerator_cache(self) -> None:
-        if not self._ensure_client().release_cache():
-            logger.warning(
-                "Failed to release remote SAM3 cache at %s:%s",
-                self.host,
-                self.port,
-            )
-
-    def segment_prompt(
-        self,
-        image_bgr: np.ndarray,
-        *,
-        prompt: str,
-        min_mask_area_ratio: float,
-    ) -> Optional[SegmentationResult]:
-        response = self._ensure_client().segment_prompt(
-            image_bgr,
-            prompt=prompt,
-            min_mask_area_ratio=min_mask_area_ratio,
-            mask_fill_strategy=self.mask_fill_strategy,
-        )
-        if response is None:
-            return None
-        return SegmentationResult(
-            segmented_bgr=response["segmented_bgr"],
-            mask=(response["mask"] > 0).astype(np.uint8),
-            bbox_xyxy=tuple(int(x) for x in response["bbox_xyxy"]),
-            score=float(response["score"]),
-            cropped_bgr=response.get("cropped_bgr"),
-            cropped_mask=(
-                (response["cropped_mask"] > 0).astype(np.uint8)
-                if response.get("cropped_mask") is not None
-                else None
-            ),
-            sam3_inference_ms=response.get("sam3_inference_ms"),
-        )
-
-    def segment_prompt_all(
-        self,
-        image_bgr: np.ndarray,
-        *,
-        prompt: str,
-        max_masks: int,
-        min_mask_area_ratio: float,
-    ) -> list[SegmentationResult]:
-        responses = self._ensure_client().segment_prompt_all(
-            image_bgr,
-            prompt=prompt,
-            max_masks=max_masks,
-            min_mask_area_ratio=min_mask_area_ratio,
-            mask_fill_strategy=self.mask_fill_strategy,
-        )
-        results: list[SegmentationResult] = []
-        for response in responses:
-            results.append(
-                SegmentationResult(
-                    segmented_bgr=response.get("segmented_bgr", image_bgr),
-                    mask=(response["mask"] > 0).astype(np.uint8),
-                    bbox_xyxy=tuple(int(x) for x in response["bbox_xyxy"]),
-                    score=float(response["score"]),
-                    cropped_bgr=response.get("cropped_bgr"),
-                    cropped_mask=(
-                        (response["cropped_mask"] > 0).astype(np.uint8)
-                        if response.get("cropped_mask") is not None
-                        else None
-                    ),
-                    sam3_inference_ms=response.get("sam3_inference_ms"),
-                )
-            )
-        return results
-
-
 class LocalBackend(SegmentBackend):
     def __init__(
         self,
@@ -659,15 +549,14 @@ class Sam3Segmenter:
     MASK_FILL_MEDIAN = SegmentationUtils.MASK_FILL_MEDIAN
     MASK_FILL_STRATEGIES = SegmentationUtils.MASK_FILL_STRATEGIES
     BACKEND_FAKE = "fake"
-    BACKEND_REMOTE = "sam3"
     BACKEND_LOCAL = "sam3_local"
-    BACKENDS = {BACKEND_FAKE, BACKEND_REMOTE, BACKEND_LOCAL}
+    BACKENDS = {BACKEND_FAKE, BACKEND_LOCAL}
 
     def __init__(
         self,
         device: str = "auto",
         confidence_threshold: float = 0.4,
-        backend: str = "sam3",
+        backend: str = BACKEND_LOCAL,
         checkpoint_path: str | Path | None = None,
         bpe_path: str | Path | None = None,
         load_from_hf: Optional[bool] = None,
@@ -693,9 +582,6 @@ class Sam3Segmenter:
         self.confidence_threshold = confidence_threshold
         self.backend = backend
         self.mask_fill_strategy = mask_fill_strategy
-        self.sam3_host = sam3_host or sam3_config.SAM3_HOST
-        self.sam3_port = int(sam3_port or sam3_config.SAM3_PORT)
-        self.sam3_timeout_ms = int(sam3_timeout_ms or sam3_config.SAM3_TIMEOUT_MS)
         self.checkpoint_path = checkpoint_path
         self.bpe_path = bpe_path
         self.load_from_hf = load_from_hf
@@ -704,13 +590,6 @@ class Sam3Segmenter:
     def _build_backend(self) -> SegmentBackend:
         if self.backend == self.BACKEND_FAKE:
             return FakeBackend()
-        if self.backend == self.BACKEND_REMOTE:
-            return RemoteBackend(
-                host=self.sam3_host,
-                port=self.sam3_port,
-                timeout_ms=self.sam3_timeout_ms,
-                mask_fill_strategy=self.mask_fill_strategy,
-            )
         return LocalBackend(
             device=self.device,
             confidence_threshold=self.confidence_threshold,

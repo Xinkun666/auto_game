@@ -1,9 +1,0 @@
-# Install from this directory:
-#   python -m pip install -r requirements-server.txt
-#
-# The server package itself.
--e .
-
-# Patched local SAM3 implementation. Keep this path relative to sam3/.
--e ../sam3_mps_cpu
-

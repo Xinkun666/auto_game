@@ -34,38 +34,11 @@ typing_extensions
 #    aw/autogame/customs_examples/Auto_PUBG_ALL/resource/pubg_room_search/perception/models/yolo/26x_det.pt
 #    aw/autogame/customs_examples/Auto_PUBG_ALL/resource/pubg_room_search/perception/models/yolo/26x_cls.pt
 #    可用 AUTOGAME_PUBG_YOLO_DETECT_MODEL / AUTOGAME_PUBG_YOLO_CLASSIFY_MODEL 覆盖。
-# 3. 内嵌 SAM3 默认读取:
-#    aw/autogame/customs_examples/Auto_PUBG_ALL/resource/pubg_room_search/perception/models/sam3/sam3.pt
-#    可用 AUTOGAME_PUBG_SAM3_CHECKPOINT / AUTOGAME_PUBG_SAM3_BPE / AUTOGAME_PUBG_SAM3_DEVICE 覆盖。
-# 4. 如果临时允许从 Hugging Face 拉取 SAM3 权重，可设置:
-#    export AUTOGAME_PUBG_SAM3_LOAD_FROM_HF=1
-# 5. 旧版 pubg_test 适配路径暂时仍保留在代码中，但默认不启用；
+# 3. SAM3 分割默认调用远端 HTTP 服务:
+#    http://10.41.182.148:8001
+#    可用 AUTOGAME_PUBG_SAM3_HTTP_URL 覆盖。
+# 4. 旧版 pubg_test 适配路径暂时仍保留在代码中，但默认不启用；
 #    如需临时回退外部 pubg_test，可配置 pubg_room_search.external_pubg_test_enabled=true。
-#
-# 远程大脑服务器 remote_brain
-# 代码位置: remote_brain/
-# 启动命令:
-#    cd /path/to/auto_game
-#    python3 -m remote_brain.server --host 0.0.0.0 --port 8765
-# 健康检查:
-#    curl http://服务器IP:8765/health
-#
-# 服务器 pip 依赖:
-# 1. remote_brain/server.py 使用 Python 标准库 http.server，不需要 fastapi/flask/uvicorn/requests。
-# 2. 图像编解码和算法推理依赖已由上面的 numpy/opencv-python/torch/torchvision/Pillow/scikit-learn/ultralytics 覆盖。
-# 3. 如果服务器没有桌面环境，可以把 opencv-python 改成 opencv-python-headless，二者二选一，不要同时安装。
-#
-# 服务器运行前必须准备:
-# 1. 上传完整 auto_game 仓库，而不是只上传 remote_brain 目录。
-# 2. 确认模型权重文件存在:
-#    aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/
-# 3. 默认项目/用例:
-#    TARGET_PROJECT_CASE=Auto_PUBG_ALL
-#    TARGET_GAME_CASE=auto_pubg
-#    remote_brain 会按请求自动设置；手动调试时也可自行 export。
-# 4. 分辨率由本地 client 每帧通过 screen.width/screen.height 传给服务器；
-#    无 hdc 的服务器不需要连接设备。
-# 5. 如果启用搜房，服务器同样需要上方内嵌 YOLO/SAM3 权重和依赖。
 #
 # 拉流相关
 grpcio

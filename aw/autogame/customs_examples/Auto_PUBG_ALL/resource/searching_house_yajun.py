@@ -377,23 +377,31 @@ class Searching_House:
             self.handle_jump_logic(w)
             w.tap_single('摇杆', y_bias=-300, dura=500, wait=1000)
             w.refresh_frame()
-            new_loc = check_location(w.get_info('location')[0])
-            if new_loc and get_distance(current_loc, new_loc) > self.stuck_threshold:
-                print("[Unstuck] 跳跃脱困成功")
-                return
+            loc_raw = w.get_info('location')
+            if loc_raw is not None:
+                new_loc = check_location(loc_raw[0])
+                if new_loc and get_distance(current_loc, new_loc) > self.stuck_threshold:
+                    print("[Unstuck] 跳跃脱困成功")
+                    return
+
+        def _safe_get_loc():
+            raw = w.get_info('location')
+            if raw is None:
+                return None
+            return check_location(raw[0])
 
         print("[Unstuck] 跳跃无效，进入 U 型避障移动...")
         while True:
             print("[Unstuck] 后退...")
             w.tap_single('摇杆', y_bias=300, dura=300, wait=1500)
             w.refresh_frame()
-            loc_after_back = check_location(w.get_info('location')[0])
+            loc_after_back = _safe_get_loc()
             if not loc_after_back: continue
 
             print("[Unstuck] 右移试探...")
             w.tap_single('摇杆', x_bias=300, dura=300, wait=1500)
             w.refresh_frame()
-            loc_after_right = check_location(w.get_info('location')[0])
+            loc_after_right = _safe_get_loc()
 
             side_way_clear = False
             last_valid_loc = loc_after_back
@@ -406,7 +414,7 @@ class Searching_House:
                 print("[Unstuck] 右侧受阻，左移试探...")
                 w.tap_single('摇杆', x_bias=-300, dura=300, wait=1500)
                 w.refresh_frame()
-                loc_after_left = check_location(w.get_info('location')[0])
+                loc_after_left = _safe_get_loc()
 
                 if loc_after_left and get_distance(loc_after_right, loc_after_left) > 0.5:
                     print("[Unstuck] 左侧可通行")
@@ -421,7 +429,7 @@ class Searching_House:
             while True:
                 w.tap_single('摇杆', y_bias=-300, dura=300, wait=2000)
                 w.refresh_frame()
-                loc_after_forward = check_location(w.get_info('location')[0])
+                loc_after_forward = _safe_get_loc()
 
                 if loc_after_forward and get_distance(last_valid_loc, loc_after_forward) > 0.5:
                     print("[Unstuck] 脱困成功！")
@@ -432,7 +440,7 @@ class Searching_House:
                     for bias in [300, -300]:
                         w.tap_single('摇杆', x_bias=bias, dura=300, wait=1500)
                         w.refresh_frame()
-                        temp_loc = check_location(w.get_info('location')[0])
+                        temp_loc = _safe_get_loc()
                         if temp_loc and get_distance(loc_after_forward, temp_loc) > 0.5:
                             last_valid_loc = temp_loc
                             moved_side = True
@@ -524,10 +532,17 @@ class Searching_House:
         return False
 
     def align_direction(self, w, tar_loc, threshold=5):
-        while True:
-            cur_loc = w.get_info('location')[0]
+        for _ in range(15):
+            location_raw = w.get_info('location')
+            if location_raw is None:
+                break
+            cur_loc = check_location(location_raw[0])
             cur_dir = w.get_info('direction')
+            if cur_loc is None or cur_dir is None:
+                break
             target_angle = calculate_angle(cur_loc, tar_loc)
+            if target_angle is None:
+                break
             turn_dir, px, diff = calculate_move_count(cur_dir, target_angle)
             if abs(diff) <= threshold: break
             move_px = px if turn_dir == 'right' else -px
@@ -538,15 +553,15 @@ class Searching_House:
 
     def find_largest_door(self, w):
         """
-          0: house
-          1: door
+          0: door
+          1: object
           2: window
-          3: open_door
-          4: door_frame
+          3: pick_menu
+          4: open_door
         """
         scene = w.get_info('forward_scene')
         if not scene: return None
-        doors = [obj for obj in scene if int(obj[5]) in [0]]
+        doors = [obj for obj in scene if int(obj[5]) in [0, 4]]
         if not doors: return None
         return max(doors, key=lambda x: (x[2] - x[0]) * (x[3] - x[1]))
 
@@ -579,8 +594,6 @@ class Searching_House:
 
         # 4. 退出房屋
         self._exit_house(w)
-
-        time.sleep(10)
 
     def _find_closed_door_in_view(self, w):
         doors = self.new_targets_of_class(w, [0])
@@ -1430,6 +1443,7 @@ class Searching_House:
         collected = []
         # supplies = self.targets_of_class(w, target_class=[4])
         supplies = self.new_targets_of_class(w, target_class=[4])
+        print("子房间查找物资的信息{}".format(supplies))
         print("子房间查找物资的信息{}".format(supplies))
         # 过滤当前在子房间内发现的入口房间的物资
         # if supplies:

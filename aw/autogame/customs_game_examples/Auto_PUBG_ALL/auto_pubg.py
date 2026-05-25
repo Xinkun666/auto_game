@@ -54,6 +54,7 @@ start_game_click_time = None
 final_shutdown_pending = False
 next_phase_report_time = 0.0
 all_done_reported = False
+searching_view_synced = False
 parachute_manager = ParachuteManager()
 running_manager = RunningManager()
 driving_manager = DrivingManager()
@@ -73,9 +74,10 @@ driving_manager.pause_sp_callback = pause_sp_after_death
 
 
 def prepare_round():
-    global next_phase_report_time, all_done_reported
+    global next_phase_report_time, all_done_reported, searching_view_synced
 
     phase_timer.start_new_round()
+    searching_view_synced = False
     next_phase_report_time = 0.0
     all_done_reported = False
 
@@ -178,7 +180,7 @@ def maybe_report_phase_remaining():
 
 
 def on_stage(w: "FrameWorker"):
-    global start_game, start_game_click_time, final_shutdown_pending
+    global start_game, start_game_click_time, final_shutdown_pending, searching_view_synced
 
     previous_stage = phase_timer.last_stage
     stage_events = phase_timer.sync_stage(w.current_stage)
@@ -305,6 +307,7 @@ def on_stage(w: "FrameWorker"):
         return
 
     if w.current_stage == "搜房阶段":
+        searching_view_synced = True
         searching_house_manager.process(w)
         return
         # house_scene = w.get_info("house_scene")
@@ -316,6 +319,10 @@ def on_stage(w: "FrameWorker"):
         # return
 
     if w.current_stage == "跑图阶段":
+        if searching_view_synced:
+            running_manager.set_view_mode(RunningManager.VIEW_MODE_FIRST)
+            searching_view_synced = False
+
         handle_sp_start(w)
 
         if phase_timer.all_done():

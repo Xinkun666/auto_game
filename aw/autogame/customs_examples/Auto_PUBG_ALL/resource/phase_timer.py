@@ -5,6 +5,7 @@ from typing import Dict, Optional, Set
 
 PHASE_RUNNING = "跑图"
 PHASE_DRIVING = "开车"
+PHASE_SEARCHING = "搜房"
 
 
 @dataclass

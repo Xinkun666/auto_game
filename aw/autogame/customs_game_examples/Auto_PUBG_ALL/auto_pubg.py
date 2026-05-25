@@ -14,6 +14,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.house_exit import (
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.phase_timer import (
     PHASE_DRIVING,
     PHASE_RUNNING,
+    PHASE_SEARCHING,
     PhaseTimeManager,
 )
 
@@ -34,12 +35,14 @@ if TYPE_CHECKING:
     from aw.autogame.tools.GameFrameWorker import FrameWorker
 
 PHASE_STAGE_MAP = {
+    "搜房阶段": PHASE_SEARCHING,
     "跑图阶段": PHASE_RUNNING,
     "开车阶段": PHASE_DRIVING,
 }
 
 # 单位：分钟
 PHASE_DURATIONS = {
+    PHASE_SEARCHING: 10,
     PHASE_RUNNING: 10,
     PHASE_DRIVING: 10,
 }
@@ -159,20 +162,24 @@ def maybe_report_phase_remaining():
         next_phase_report_time = now + 5.0
 
     if now >= next_phase_report_time:
+        searching_remaining = phase_timer.get_remaining(PHASE_SEARCHING)
         running_remaining = phase_timer.get_remaining(PHASE_RUNNING)
         driving_remaining = phase_timer.get_remaining(PHASE_DRIVING)
         print(
             "[Timer] 阶段剩余时间 | "
+            f"搜房={_format_phase_seconds(searching_remaining)} | "
             f"跑图={_format_phase_seconds(running_remaining)} | "
             f"开车={_format_phase_seconds(driving_remaining)}"
         )
         next_phase_report_time = now + 5.0
 
     if phase_timer.all_done() and not all_done_reported:
+        searching_remaining = phase_timer.get_remaining(PHASE_SEARCHING)
         running_remaining = phase_timer.get_remaining(PHASE_RUNNING)
         driving_remaining = phase_timer.get_remaining(PHASE_DRIVING)
         print(
             "[Timer] 跑图和开车阶段均已圆满结束 | "
+            f"搜房剩余={_format_phase_seconds(searching_remaining)} | "
             f"跑图剩余={_format_phase_seconds(running_remaining)} | "
             f"开车剩余={_format_phase_seconds(driving_remaining)}"
         )
@@ -197,7 +204,7 @@ def on_stage(w: "FrameWorker"):
             running_manager.set_game_time(phase_timer.start_game_time)
             driving_manager.set_game_time(phase_timer.start_game_time)
 
-    if w.current_stage in {"跑图阶段", "开车阶段"}:
+    if w.current_stage in {"搜房阶段", "跑图阶段", "开车阶段"}:
         maybe_report_phase_remaining()
 
     if w.current_stage == "关闭弹窗阶段":
@@ -309,6 +316,12 @@ def on_stage(w: "FrameWorker"):
         return
 
     if w.current_stage == "搜房阶段":
+        if phase_timer.is_completed(PHASE_SEARCHING):
+            print("[Timer] 搜房阶段 600s 已用完，强制切换到跑图阶段")
+            searching_house_manager.stop_auto_forward(w)
+            w.change_stage("跑图阶段")
+            return
+
         searching_view_synced = True
         searching_house_manager.process(w)
         return

@@ -27,6 +27,7 @@ class Searching_House:
     HOUSE_BLOCK_AREA_RATIO = 0.015
     HOUSE_BYPASS_SIDE_STEPS = 4
     HOUSE_BYPASS_FORWARD_STEPS = 3
+    HOUSE_SEARCH_TIMEOUT_SECONDS = 60
 
     def __init__(self):
         self.map_tool = MapNavigator()
@@ -80,6 +81,8 @@ class Searching_House:
 
         self.house_exit_manager = HouseExitManager()
         self.indoor_stuck_frames = 0
+        self.house_search_started_at = None
+        self.house_search_timeout_reported = False
         self.abort_callback = None
         self.can_finish_callback = None
 
@@ -114,6 +117,8 @@ class Searching_House:
 
         self.house_exit_manager.reset()
         self.indoor_stuck_frames = 0
+        self.house_search_started_at = None
+        self.house_search_timeout_reported = False
 
     def process(self, w: 'FrameWorker'):
         # self.start_searching(w)
@@ -198,6 +203,50 @@ class Searching_House:
             return int(value)
         except (TypeError, ValueError):
             return None
+
+    def _start_house_search_timer(self):
+        self.house_search_started_at = time.monotonic()
+        self.house_search_timeout_reported = False
+
+    def _clear_house_search_timer(self):
+        self.house_search_started_at = None
+        self.house_search_timeout_reported = False
+
+    def _house_search_timed_out(self):
+        if self.house_search_started_at is None:
+            return False
+        elapsed = time.monotonic() - self.house_search_started_at
+        if elapsed <= self.HOUSE_SEARCH_TIMEOUT_SECONDS:
+            return False
+        if not self.house_search_timeout_reported:
+            print(f"[搜房] 入屋搜房已超过{self.HOUSE_SEARCH_TIMEOUT_SECONDS}s，停止搜房并执行出房策略")
+            self.house_search_timeout_reported = True
+        return True
+
+    def _should_stop_house_search(self, w: 'FrameWorker'):
+        return self._should_abort(w) or self._house_search_timed_out()
+
+    def _force_exit_after_search_timeout(self, w: 'FrameWorker'):
+        self.stop_auto_forward(w)
+        self._clear_house_search_timer()
+        w.refresh_frame()
+
+        if self._get_house_scene(w) != 0:
+            print("[搜房] 超时时已不在屋内，视为出房完成")
+            return True
+
+        print("[搜房] 超时兜底：启动 HouseExitManager 直接出房")
+        self.house_exit_manager.reset()
+        for _ in range(30):
+            if self._should_abort(w):
+                return False
+            if self.house_exit_manager.process(w):
+                print("[搜房] 超时兜底出房成功")
+                return True
+
+        print("[搜房] HouseExitManager 未出房，回退到原出房策略")
+        self._exit_house(w)
+        return not self._should_abort(w) and self._get_house_scene(w) != 0
 
     def _get_frame_size(self):
         inf_w, inf_h = get_wh()
@@ -816,6 +865,7 @@ class Searching_House:
         if self._should_abort(w):
             return False
 
+        self._start_house_search_timer()
         self.room_yaw = 0.0
         self.global_yaw = 0.0
         self.sub_rooms_entered = 0
@@ -823,7 +873,10 @@ class Searching_House:
 
         print("[搜房]入口房间搜集物资。。。")
         self.collect_supplies_in_room(w)
+        if self._house_search_timed_out():
+            return self._force_exit_after_search_timeout(w)
         if self._should_abort(w):
+            self._clear_house_search_timer()
             return False
 
         self.house_entry_yaw = self.global_yaw
@@ -833,19 +886,29 @@ class Searching_House:
 
         door_info = self._find_open_door_in_view(w)
         if not door_info: door_info = self._scan_for_open_door(w, 360)
+        if self._house_search_timed_out():
+            return self._force_exit_after_search_timeout(w)
 
         while door_info and self.sub_rooms_entered < 2:
+            if self._house_search_timed_out():
+                return self._force_exit_after_search_timeout(w)
             if self._should_abort(w):
+                self._clear_house_search_timer()
                 return False
             rel_ang, bh = door_info
             if self._enter_sub_room_and_collect(w, rel_ang, bh):
+                if self._house_search_timed_out():
+                    return self._force_exit_after_search_timeout(w)
                 self.sub_rooms_entered += 1
                 door_info = self._find_open_door_in_view(w)
                 if not door_info: door_info = self._scan_for_open_door(w, 360)
             else:
+                if self._house_search_timed_out():
+                    return self._force_exit_after_search_timeout(w)
                 break
 
         # 4. 退出房屋
+        self._clear_house_search_timer()
         self._exit_house(w)
         return not self._should_abort(w)
 
@@ -858,7 +921,7 @@ class Searching_House:
     def _scan_for_closed_door(self, w, max_rotate=360):
         total = 0
         while total < max_rotate:
-            if self._should_abort(w):
+            if self._should_stop_house_search(w):
                 return None
             self._turn(w, 30)
             total += 30
@@ -976,7 +1039,7 @@ class Searching_House:
         center_x = frame_w / 2
 
         for _ in range(30):
-            if self._should_abort(w):
+            if self._should_stop_house_search(w):
                 return False
             doors = self.new_targets_of_class(w, target_classes)
             if not doors:
@@ -1021,6 +1084,8 @@ class Searching_House:
     def _enter_sub_room_and_collect(self, w, rel_angle, box_h):
         """子房间完整交互流程：记录特征 -> 鲁棒穿门 -> 战术搜物资 -> 扇区回搜退门"""
         print("\n[子房间] 进入...")
+        if self._should_stop_house_search(w):
+            return False
         # 1. 记录进门绝对特征并去重
         abs_ang_enter = self._calc_abs_angle(rel_angle)
         self.visited_sub_doors.append((abs_ang_enter, box_h))
@@ -1036,6 +1101,8 @@ class Searching_House:
         self.room_yaw = 0.0  # 重置局部坐标系
         # 4. 搜集物资（内部自带战术复位）
         self._search_supplies(w)
+        if self._should_stop_house_search(w):
+            return False
 
         # 5. 扇区快搜退出门
         print("[子房间] 搜集完毕，扇区快搜退出门...")
@@ -1069,6 +1136,8 @@ class Searching_House:
     def _sector_scan_for_open_door(self, w, center_yaw, sector_angle=120, ignore_visited=True):
 
         print(f"  [搜房] 中心朝向:{center_yaw:.0f}°, 扫描范围:{sector_angle}°")
+        if self._should_stop_house_search(w):
+            return None
 
         # 计算并转向目标中心朝向（处理最短路径旋转）
         delta = center_yaw - self.global_yaw
@@ -1086,6 +1155,8 @@ class Searching_House:
         steps = half_sector // 30
 
         for i in range(1, steps + 1):  # 向左扫
+            if self._should_stop_house_search(w):
+                return None
             self._turn(w, 30)
             time.sleep(0.1)
             res = self._find_open_door_in_view(w, ignore_visited)
@@ -1094,6 +1165,8 @@ class Searching_House:
         self._turn(w, - (half_sector))  # 瞬间归位中心
         time.sleep(0.2)
         for i in range(1, steps + 1):  # 向右扫
+            if self._should_stop_house_search(w):
+                return None
             self._turn(w, -30)
             time.sleep(0.1)
             res = self._find_open_door_in_view(w, ignore_visited)
@@ -1105,7 +1178,7 @@ class Searching_House:
 
         total = 0
         while total < max_rotate:
-            if self._should_abort(w):
+            if self._should_stop_house_search(w):
                 return None
             self._turn(w, 30)
             total += 30
@@ -1152,6 +1225,8 @@ class Searching_House:
 
         def pickup_one_in_current_view(w):
             """在当前画面拾取一个未拾取过的物资，成功返回 True，否则 False"""
+            if self._should_stop_house_search(w):
+                return False
             # 获取当前画面所有物资，按面积取最近（最大）的一个
             scene = self._get_forward_scene(w)
             supplies = [obj for obj in scene if int(obj[5]) in [1]]
@@ -1179,18 +1254,22 @@ class Searching_House:
         # ---------- 方向序列 ----------
         print("======[搜资] 检查初始方向 (0°)，在刚进入房屋的视角下检查是否有物资，有则搜集======")
         for _ in range(self.PICKUP_MAX_PER_DIRECTION):
-            if self._should_abort(w) or not pickup_one_in_current_view(w):
+            if self._should_stop_house_search(w) or not pickup_one_in_current_view(w):
                 break
             time.sleep(0.2)
+        if self._should_stop_house_search(w):
+            return len(collected)
 
         print("======[搜资] 左转45°检查是否有物资，有则收集======")
         self.turn_by_angle(w, -45, 300)
         player_yaw = (player_yaw - 45) % 360
         time.sleep(0.3)
         for _ in range(self.PICKUP_MAX_PER_DIRECTION):
-            if self._should_abort(w) or not pickup_one_in_current_view(w):
+            if self._should_stop_house_search(w) or not pickup_one_in_current_view(w):
                 break
             time.sleep(0.2)
+        if self._should_stop_house_search(w):
+            return len(collected)
 
         print("======[搜资] 左转45°后回正，右转45度检查是否有物资，有则收集======")
         self.turn_by_angle(w, 45, 300)  # 回到 0°
@@ -1200,7 +1279,7 @@ class Searching_House:
         player_yaw = (player_yaw + 45) % 360
         time.sleep(0.3)
         for _ in range(self.PICKUP_MAX_PER_DIRECTION):
-            if self._should_abort(w) or not pickup_one_in_current_view(w):
+            if self._should_stop_house_search(w) or not pickup_one_in_current_view(w):
                 break
             time.sleep(0.2)
 
@@ -1510,6 +1589,8 @@ class Searching_House:
         小步靠近物资，并拾取
         返回是否成功拾取。
         """
+        if self._should_stop_house_search(w):
+            return False
         # last_bbox = initial_bbox[:4]
         # pickup_finish = False
 
@@ -1518,7 +1599,7 @@ class Searching_House:
             time.sleep(1)
 
         for i in range(30):
-            if self._should_abort(w):
+            if self._should_stop_house_search(w):
                 return False
             w.refresh_frame()
             scene = self._get_forward_scene(w)
@@ -1720,6 +1801,8 @@ class Searching_House:
 
     def _collect_in_direction(self, w, avoid_door_abs=None):
         collected = []
+        if self._should_stop_house_search(w):
+            return
         supplies = self.new_targets_of_class(w, target_class=[1])
         print("子房间查找物资的信息{}".format(supplies))
         print("子房间查找物资的信息{}".format(supplies))
@@ -1760,19 +1843,27 @@ class Searching_House:
 
     def _search_supplies(self, w, avoid_door_abs=None):
         print("[物资] 方向扫描...")
-        if self._should_abort(w):
+        if self._should_stop_house_search(w):
             return
         self._collect_in_direction(w, avoid_door_abs)  # 正前
+        if self._should_stop_house_search(w):
+            return
         self._turn(w, -45)
-        if self._should_abort(w):
+        if self._should_stop_house_search(w):
             return
         self._collect_in_direction(w, avoid_door_abs)  # 左45°
+        if self._should_stop_house_search(w):
+            return
         self._turn(w, 45)
         time.sleep(5)
+        if self._should_stop_house_search(w):
+            return
         self._turn(w, 45)
-        if self._should_abort(w):
+        if self._should_stop_house_search(w):
             return
         self._collect_in_direction(w, avoid_door_abs)  # 右45°
+        if self._should_stop_house_search(w):
+            return
         self._turn(w, -45)  # 回正
 
     # def _explore_sub_rooms(self, w):
@@ -1918,7 +2009,7 @@ class Searching_House:
     def _visual_align(self, w, target_angle, target_class=None):
         print("开始调整。。。{}".format(target_angle))
         for _ in range(6):
-            if self._should_abort(w):
+            if self._should_stop_house_search(w):
                 return
             if abs(target_angle) <= 1.5:
                 return

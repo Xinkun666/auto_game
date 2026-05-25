@@ -105,6 +105,35 @@ class RoadRouteHelper:
         node = min(candidates, key=lambda item: get_distance(point, item))
         return node, get_distance(point, node)
 
+    def center_biased_node(
+        self,
+        point: Tuple[int, int],
+        center: Tuple[int, int],
+        exclude: Optional[Set[Tuple[int, int]]] = None,
+        min_distance: float = 0.0,
+        topology_only: bool = False,
+    ) -> Tuple[Optional[Tuple[int, int]], float]:
+        nodes = self.get_intersection_nodes() if topology_only else self.get_nodes()
+        if not nodes:
+            return None, float("inf")
+
+        exclude = exclude or set()
+        candidates = [
+            node for node in nodes
+            if node not in exclude and get_distance(point, node) >= min_distance
+        ]
+        if not candidates:
+            return None, float("inf")
+
+        node = min(
+            candidates,
+            key=lambda item: (
+                get_distance(item, center),
+                get_distance(point, item),
+            ),
+        )
+        return node, get_distance(point, node)
+
     def plan_to_node(self, start: Tuple[int, int], node: Tuple[int, int]) -> List[Tuple[int, int]]:
         topo_path = self._try_topo_path(start, node)
         if topo_path:
@@ -252,6 +281,8 @@ class RunningManager:
 
     # R 城寻车的大致目标点
     R_CITY = (1136, 783)
+    # 海岛地图中心附近。无进圈压力时，道路巡游优先往这里靠。
+    MAP_CENTER = (1024, 1024)
     # 车库附近的精确上车点
     CAR_ENTRY_POINT = (1131, 763)
     # 距离车库上车点太远时，不再绕路去车库，直接切换沿路找车。
@@ -1032,35 +1063,62 @@ class RunningManager:
         return merged
 
     def _load_road_patrol_path(self, location: Tuple[int, int], reason: str):
-        print(f"[Running] {reason}，规划最近道路点")
+        print(f"[Running] {reason}，规划道路点")
         self._log_running_state(reason, location, None, "规划到下一个道路点")
         use_topology_nodes = self.road_helper.topology_available()
 
-        node, node_dist = self.road_helper.nearest_node(
-            location,
-            exclude=self.visited_road_nodes,
-            min_distance=0.0,
-            topology_only=use_topology_nodes,
-        )
-
-        if node is not None and node_dist <= self.ROAD_NODE_REACHED_TOLERANCE:
-            self.visited_road_nodes.add(node)
+        prefer_center = not self._need_circle_now()
+        if prefer_center:
+            node, node_dist = self.road_helper.center_biased_node(
+                location,
+                self.MAP_CENTER,
+                exclude=self.visited_road_nodes,
+                min_distance=0.0,
+                topology_only=use_topology_nodes,
+            )
+        else:
             node, node_dist = self.road_helper.nearest_node(
                 location,
                 exclude=self.visited_road_nodes,
-                min_distance=self.ROAD_PATROL_MIN_NODE_DISTANCE,
+                min_distance=0.0,
                 topology_only=use_topology_nodes,
             )
+
+        if node is not None and node_dist <= self.ROAD_NODE_REACHED_TOLERANCE:
+            self.visited_road_nodes.add(node)
+            if prefer_center:
+                node, node_dist = self.road_helper.center_biased_node(
+                    location,
+                    self.MAP_CENTER,
+                    exclude=self.visited_road_nodes,
+                    min_distance=self.ROAD_PATROL_MIN_NODE_DISTANCE,
+                    topology_only=use_topology_nodes,
+                )
+            else:
+                node, node_dist = self.road_helper.nearest_node(
+                    location,
+                    exclude=self.visited_road_nodes,
+                    min_distance=self.ROAD_PATROL_MIN_NODE_DISTANCE,
+                    topology_only=use_topology_nodes,
+                )
 
         if node is None:
             if self.visited_road_nodes:
                 print("[Running] 可巡游道路点已用完，清空已访问集合后重新选择")
                 self.visited_road_nodes.clear()
-                node, node_dist = self.road_helper.nearest_node(
-                    location,
-                    min_distance=self.ROAD_PATROL_MIN_NODE_DISTANCE,
-                    topology_only=use_topology_nodes,
-                )
+                if prefer_center:
+                    node, node_dist = self.road_helper.center_biased_node(
+                        location,
+                        self.MAP_CENTER,
+                        min_distance=self.ROAD_PATROL_MIN_NODE_DISTANCE,
+                        topology_only=use_topology_nodes,
+                    )
+                else:
+                    node, node_dist = self.road_helper.nearest_node(
+                        location,
+                        min_distance=self.ROAD_PATROL_MIN_NODE_DISTANCE,
+                        topology_only=use_topology_nodes,
+                    )
 
         if node is None:
             print("[Running] 没有可用道路点，回退随机可视点巡逻")
@@ -1072,7 +1130,11 @@ class RunningManager:
         self.current_road_node = node
         self.road_list = self.road_helper.plan_to_node(location, node)
         self.current_running_route_kind = self.RUNNING_ROUTE_PATROL if not self.finding_car else None
-        print(f"[Running] 道路巡游目标 node={node}, dist={node_dist:.2f}")
+        center_dist = get_distance(node, self.MAP_CENTER)
+        print(
+            f"[Running] 道路巡游目标 node={node}, dist={node_dist:.2f}, "
+            f"center_dist={center_dist:.2f}, prefer_center={prefer_center}"
+        )
 
     def _load_running_path(self, location: Tuple[int, int]):
         if self.stable_circle_angle is None:

@@ -27,6 +27,9 @@ class PhaseTimeManager:
         self.last_stage: Optional[str] = None
         self.active_phase: Optional[str] = None
         self.active_since: Optional[float] = None
+        self.total_duration = sum(state.duration for state in self.phase_states.values())
+        self.total_elapsed = 0.0
+        self.total_active_since: Optional[float] = None
 
         self.round_index = 0
         self.landed = False
@@ -58,9 +61,23 @@ class PhaseTimeManager:
     def _pause_active_phase(self, now: Optional[float] = None) -> Set[str]:
         events: Set[str] = set()
         if self.active_phase is None or self.active_since is None:
+            if self.total_active_since is not None:
+                now = time.time() if now is None else now
+                self.total_elapsed = min(
+                    self.total_duration,
+                    self.total_elapsed + max(0.0, now - self.total_active_since),
+                )
+                self.total_active_since = None
             return events
 
         now = time.time() if now is None else now
+        if self.total_active_since is not None:
+            self.total_elapsed = min(
+                self.total_duration,
+                self.total_elapsed + max(0.0, now - self.total_active_since),
+            )
+            self.total_active_since = None
+
         state = self.phase_states[self.active_phase]
         if not state.completed:
             state.elapsed = min(state.duration, state.elapsed + max(0.0, now - self.active_since))
@@ -93,6 +110,12 @@ class PhaseTimeManager:
             self.active_phase = new_phase
             self.active_since = now
             events.add(f"enter_{new_phase}")
+        elif new_phase:
+            self.active_phase = None
+            self.active_since = None
+
+        if new_phase and self.total_elapsed < self.total_duration:
+            self.total_active_since = now
 
         return events
 
@@ -116,12 +139,21 @@ class PhaseTimeManager:
         state = self.phase_states[phase_name]
         return max(0.0, state.duration - self._effective_elapsed(phase_name))
 
+    def get_total_elapsed(self) -> float:
+        elapsed = self.total_elapsed
+        if self.total_active_since is not None:
+            elapsed += max(0.0, time.time() - self.total_active_since)
+        return min(self.total_duration, elapsed)
+
+    def get_total_remaining(self) -> float:
+        return max(0.0, self.total_duration - self.get_total_elapsed())
+
     def is_completed(self, phase_name: str) -> bool:
         self._sync_completed_flag(phase_name)
         return self.phase_states[phase_name].completed
 
     def all_done(self) -> bool:
-        return self.is_completed(PHASE_RUNNING) and self.is_completed(PHASE_DRIVING)
+        return self.get_total_elapsed() >= self.total_duration
 
     def need_drive(self) -> bool:
         return not self.is_completed(PHASE_DRIVING)

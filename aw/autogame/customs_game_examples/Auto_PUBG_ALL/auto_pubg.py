@@ -98,6 +98,8 @@ def prepare_round():
 
     print(
         f"[Round] need_drive={need_drive}, "
+        f"total_remaining={phase_timer.get_total_remaining():.2f}s, "
+        f"searching_remaining={phase_timer.get_remaining(PHASE_SEARCHING):.2f}s, "
         f"running_remaining={phase_timer.get_remaining(PHASE_RUNNING):.2f}s, "
         f"driving_remaining={phase_timer.get_remaining(PHASE_DRIVING):.2f}s, "
         f"drop_target={drop_target}"
@@ -192,11 +194,13 @@ def maybe_report_phase_remaining():
         next_phase_report_time = now + 5.0
 
     if now >= next_phase_report_time:
+        total_remaining = phase_timer.get_total_remaining()
         searching_remaining = phase_timer.get_remaining(PHASE_SEARCHING)
         running_remaining = phase_timer.get_remaining(PHASE_RUNNING)
         driving_remaining = phase_timer.get_remaining(PHASE_DRIVING)
         print(
             "[Timer] 阶段剩余时间 | "
+            f"总计={_format_phase_seconds(total_remaining)} | "
             f"搜房={_format_phase_seconds(searching_remaining)} | "
             f"跑图={_format_phase_seconds(running_remaining)} | "
             f"开车={_format_phase_seconds(driving_remaining)}"
@@ -204,11 +208,13 @@ def maybe_report_phase_remaining():
         next_phase_report_time = now + 5.0
 
     if phase_timer.all_done() and not all_done_reported:
+        total_remaining = phase_timer.get_total_remaining()
         searching_remaining = phase_timer.get_remaining(PHASE_SEARCHING)
         running_remaining = phase_timer.get_remaining(PHASE_RUNNING)
         driving_remaining = phase_timer.get_remaining(PHASE_DRIVING)
         print(
-            "[Timer] 跑图和开车阶段均已圆满结束 | "
+            "[Timer] 30 分钟总时长已圆满结束 | "
+            f"总计剩余={_format_phase_seconds(total_remaining)} | "
             f"搜房剩余={_format_phase_seconds(searching_remaining)} | "
             f"跑图剩余={_format_phase_seconds(running_remaining)} | "
             f"开车剩余={_format_phase_seconds(driving_remaining)}"

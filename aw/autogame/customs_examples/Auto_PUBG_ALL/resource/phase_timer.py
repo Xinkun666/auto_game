@@ -82,7 +82,7 @@ class PhaseTimeManager:
         events |= self._pause_active_phase(now=now)
         self.last_stage = stage_name
 
-        if previous_stage == "跳伞阶段" and stage_name == "跑图阶段":
+        if previous_stage == "跳伞阶段" and stage_name in ("跑图阶段", "搜房阶段"):
             self.landed = True
             self.start_game_time = now
             events.add("landed")

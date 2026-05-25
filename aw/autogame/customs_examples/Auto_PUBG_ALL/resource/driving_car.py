@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.house_exit import HouseExitManager
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigator import MapNavigator
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.obstacle_analyzer import (
     ObstacleAvoidanceAnalyzer,
@@ -301,6 +302,7 @@ class DrivingManager:
         self.map_tool = map_tool or MapNavigator()
         self.max_driving_time = max_driving_time
         self.obstacle_analyzer: Optional[ObstacleAvoidanceAnalyzer] = None
+        self.house_exit_manager = HouseExitManager()
         self.turn_calibration = TurnCalibration()
 
         self.game_time: Optional[float] = None
@@ -407,6 +409,7 @@ class DrivingManager:
         self.horn_missing_frames = 0
 
         self._frame_action_executed = False
+        self.house_exit_manager.reset()
         print("[Driving] 状态已重置!")
 
     def set_running_fallback_enabled(self, enabled: bool):
@@ -479,6 +482,9 @@ class DrivingManager:
             return
 
         if self.trapped:
+            if self._try_house_exit_when_indoor(w, "车辆困死"):
+                self._finalize_frame(w)
+                return
             print("[Driving] 车辆长时间在 1~2 距离范围内打转，判定困死")
             if self.allow_running_fallback:
                 self._exit_vehicle_to_running(
@@ -1484,7 +1490,42 @@ class DrivingManager:
             circle_angle = self.latest_circle_angle
         return "None" if circle_angle is None else f"{circle_angle:.1f}"
 
+    def _get_house_scene(self, w: "FrameWorker") -> Optional[int]:
+        value = w.get_info("house_scene")
+        if isinstance(value, (list, tuple)) and len(value) == 1:
+            value = value[0]
+        if isinstance(value, bool):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _try_house_exit_when_indoor(self, w: "FrameWorker", reason: str) -> bool:
+        if self._get_house_scene(w) != HouseExitManager.HOUSE_INDOOR:
+            return False
+
+        print(f"[Driving] {reason}且 house_scene=indoor，优先使用 HouseExitManager 脱困")
+        self._tap_single_control(w, "brake", wait=300, dura=80)
+        self.house_exit_manager.reset()
+        for _ in range(20):
+            if self.house_exit_manager.process(w):
+                print("[Driving] HouseExitManager 出房成功，切回跑图阶段")
+                self.reset(max_driving_time=self.max_driving_time)
+                self.next_running_finding_car = True
+                w.change_stage("跑图阶段")
+                return True
+
+        print("[Driving] HouseExitManager 暂未出房，切回跑图阶段继续脱困")
+        self.reset(max_driving_time=self.max_driving_time)
+        self.next_running_finding_car = True
+        w.change_stage("跑图阶段")
+        return True
+
     def _handle_forward_motion_block(self, w: "FrameWorker", context: DriveContext):
+        if self._try_house_exit_when_indoor(w, "前进卡住"):
+            return
+
         self.forward_block_recovery_active = True
         self.blocked_motion_count = 0
 
@@ -1573,6 +1614,9 @@ class DrivingManager:
         return "left" if steer == "right" else "right"
 
     def _handle_motion_block(self, w: "FrameWorker", context: DriveContext):
+        if self._try_house_exit_when_indoor(w, "连续多帧位置不变"):
+            return
+
         steer = self.last_motion_steer or self._decision_to_steer(context.decision) or "right"
         action = f"backward_turn_{steer}"
 

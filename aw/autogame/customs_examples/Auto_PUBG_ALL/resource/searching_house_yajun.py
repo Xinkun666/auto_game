@@ -75,6 +75,7 @@ class Searching_House:
         self.house_exit_manager = HouseExitManager()
         self.indoor_stuck_frames = 0
         self.abort_callback = None
+        self.can_finish_callback = None
 
     def reset(self):
         self.completed_houses = set()
@@ -143,6 +144,38 @@ class Searching_House:
             print(f"[Searching] 中断检查失败: {exc}")
             return False
 
+    def _can_finish_searching(self, w: 'FrameWorker'):
+        callback = getattr(self, "can_finish_callback", None)
+        if callback is None:
+            return True
+        try:
+            return bool(callback(w))
+        except Exception as exc:
+            print(f"[Searching] 结束条件检查失败: {exc}")
+            return False
+
+    def _continue_searching_until_timer(self, w: 'FrameWorker', reason: str):
+        self.stop_auto_forward(w)
+        if self._can_finish_searching(w):
+            print(f"[Searching] {reason}，搜房计时已满，切换到跑图阶段")
+            self.searching_number = 0
+            self.current_house_id = None
+            self.active_entry = None
+            self.status = "IDLE"
+            w.change_stage('跑图阶段')
+            return True
+
+        print(f"[Searching] {reason}，但搜房未满10分钟，重置本轮目标继续搜房")
+        self.searching_number = 0
+        self.completed_houses.clear()
+        self.temp_skip_houses.clear()
+        self.current_house_id = None
+        self.active_entry = None
+        self.status = "IDLE"
+        self.history_locations = []
+        self.indoor_stuck_frames = 0
+        return False
+
     def _get_forward_scene(self, w: 'FrameWorker'):
         scene = w.get_info('forward_scene')
         if isinstance(scene, (list, tuple)):
@@ -165,10 +198,7 @@ class Searching_House:
             return
 
         if self.searching_number == 5:
-            print('已经搜满5个房间，切换到跑图阶段')
-            self.stop_auto_forward(w)
-            self.searching_number = 0
-            w.change_stage('跑图阶段')
+            self._continue_searching_until_timer(w, '已经搜满5个房间')
             return
 
         # --- 屋内卡死兜底检测 ---
@@ -188,14 +218,14 @@ class Searching_House:
                         self.completed_houses.add(self.current_house_id)
                         self.current_house_id = None
                         self.status = "IDLE"
-                        w.change_stage('跑图阶段')
+                        self._continue_searching_until_timer(w, '兜底出房成功')
                         return
                 print('[Searching] 兜底出房失败，强制重置状态切跑图')
                 self.indoor_stuck_frames = 0
                 self.searching_number = 0
                 self.current_house_id = None
                 self.status = "IDLE"
-                w.change_stage('跑图阶段')
+                self._continue_searching_until_timer(w, '兜底出房失败')
                 return
         else:
             self.indoor_stuck_frames = 0
@@ -204,10 +234,7 @@ class Searching_House:
         if self.current_house_id is None:
             self.select_smart_target(current_loc, current_direction)
             if not self.current_house_id:
-                print("[Searching] 当前区域无合适目标或已搜完，切回跑图阶段")
-                self.stop_auto_forward(w)
-                self.searching_number = 0
-                w.change_stage('跑图阶段')
+                self._continue_searching_until_timer(w, "当前区域无合适目标或已搜完")
                 return
             self.status = "FAST_NAV"
             print(f"[Searching] 锁定目标: {self.current_house_id} | 入口={self.active_entry['location']}")
@@ -415,6 +442,18 @@ class Searching_House:
 
     def execute_unstuck_logic(self, w: 'FrameWorker', current_loc):
         self.stop_auto_forward(w)
+        if self._get_house_scene(w) == 0:
+            print("[Unstuck] house_scene=indoor，优先使用 HouseExitManager 脱困")
+            self.house_exit_manager.reset()
+            for _ in range(20):
+                if self._should_abort(w):
+                    return False
+                if self.house_exit_manager.process(w):
+                    print("[Unstuck] HouseExitManager 出房成功")
+                    return True
+            print("[Unstuck] HouseExitManager 暂未出房")
+            return False
+
         if w.get_info('跳跃'):
             print("[Unstuck] 尝试跳跃脱困")
             self.handle_jump_logic(w)

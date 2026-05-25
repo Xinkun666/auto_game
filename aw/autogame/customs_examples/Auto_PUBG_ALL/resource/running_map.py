@@ -4,6 +4,7 @@ import os
 import time
 from typing import Callable, List, Optional, Set, Tuple, TYPE_CHECKING
 
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.house_exit import HouseExitManager
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigator import MapNavigator
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.toolkit import (
     calculate_angle,
@@ -388,6 +389,7 @@ class RunningManager:
     def __init__(self, map_tool: Optional[MapNavigator] = None):
         self.map_tool = map_tool or MapNavigator()
         self.road_helper = RoadRouteHelper(self.map_tool)
+        self.house_exit_manager = HouseExitManager()
         self.game_time : Optional[float] = None
         self.screen_w, self.screen_h = get_resolution()
 
@@ -474,6 +476,7 @@ class RunningManager:
         self.current_running_route_kind = None
         self.last_circle_target_point = None
         self.circle_route_completed = False
+        self.house_exit_manager.reset()
         print("[Running] 状态已重置!")
 
     def set_game_time(self, game_time: Optional[float] = None):
@@ -579,12 +582,16 @@ class RunningManager:
         self._check_if_trapped(location)
 
         if self.trapped:
+            if self._try_house_exit_when_indoor(w, location, direction, "人物困死"):
+                return
             print("[Running] 人物长时间在局部区域打转，结束当前局")
             self._log_running_state("人物困死", location, direction, "结束当前局")
             self._handle_death(w)
             return
 
         if self.stuck:
+            if self._try_house_exit_when_indoor(w, location, direction, "人物卡住"):
+                return
             print("[Running] 人物卡住，执行脱困")
             self._log_running_state("人物卡死", location, direction, "执行脱困")
             self._perform_unstuck_action(w, location)
@@ -847,6 +854,30 @@ class RunningManager:
             f"后续模式={'继续寻车' if self.finding_car else '纯跑图'}"
         )
 
+    def notify_searching_exit(self, finding_car: bool = True):
+        self.drive_required = bool(finding_car)
+        self.finding_car = bool(finding_car)
+        self.car_search_mode = self.CAR_SEARCH_ROADSIDE
+        self.loading_road = False
+        self.road_list = []
+        self.locations = []
+        self.history_locations = []
+        self.stuck = False
+        self.trapped = False
+        self.current_road_node = None
+        self.current_segment_start = None
+        self.current_running_route_kind = None
+        self.garage_to_roadside_route_active = False
+        self.roadside_car_pursuing = False
+        self.roadside_car_lost_rounds = 0
+        self.roadside_car_lost_after_forward_pushes = 0
+        self.roadside_car_steps = 0
+        self.roadside_car_last_area_ratio = None
+        print(
+            "[Running] 收到搜房结束通知，"
+            f"后续模式={'沿路找车并向地图中心跑' if self.finding_car else '向地图中心跑'}"
+        )
+
     def consume_vehicle_entry_source(self) -> Optional[str]:
         source = self.last_vehicle_entry_source
         self.last_vehicle_entry_source = None
@@ -1064,10 +1095,12 @@ class RunningManager:
 
     def _load_road_patrol_path(self, location: Tuple[int, int], reason: str):
         print(f"[Running] {reason}，规划道路点")
-        self._log_running_state(reason, location, None, "规划到下一个道路点")
         use_topology_nodes = self.road_helper.topology_available()
 
         prefer_center = not self._need_circle_now()
+        target_hint = self.MAP_CENTER if prefer_center else location
+        target_text = "地图中心附近道路点" if prefer_center else "下一个道路点"
+        self._log_running_state(reason, location, None, f"规划到{target_text}", target_hint)
         if prefer_center:
             node, node_dist = self.road_helper.center_biased_node(
                 location,
@@ -1290,7 +1323,53 @@ class RunningManager:
 
         return None
 
+    def _get_house_scene(self, w: "FrameWorker") -> Optional[int]:
+        value = w.get_info("house_scene")
+        if isinstance(value, (list, tuple)) and len(value) == 1:
+            value = value[0]
+        if isinstance(value, bool):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _try_house_exit_when_indoor(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+        reason: str,
+    ) -> bool:
+        if self._get_house_scene(w) != HouseExitManager.HOUSE_INDOOR:
+            return False
+
+        print(f"[Running] {reason}且 house_scene=indoor，优先使用 HouseExitManager 脱困")
+        self._log_running_state(reason, location, direction, "屋内卡住，优先出房")
+        self.stop_auto_forward(w)
+        self.house_exit_manager.reset()
+        for _ in range(20):
+            if self.house_exit_manager.process(w):
+                new_location = self._get_location(w) or location
+                self.locations = [new_location]
+                self.history_locations = [new_location]
+                self.stuck = False
+                self.trapped = False
+                self.loading_road = False
+                self.road_list = []
+                self.current_segment_start = None
+                print("[Running] HouseExitManager 出房成功，重新规划跑图路线")
+                return True
+
+        print("[Running] HouseExitManager 暂未出房，下一帧继续判断")
+        self.stuck = False
+        self.trapped = False
+        return True
+
     def _perform_unstuck_action(self, w: "FrameWorker", current_loc: Tuple[int, int]):
+        if self._try_house_exit_when_indoor(w, current_loc, None, "脱困前检测"):
+            return
+
         self.stop_auto_forward(w)
 
         if w.get_info("跳跃"):

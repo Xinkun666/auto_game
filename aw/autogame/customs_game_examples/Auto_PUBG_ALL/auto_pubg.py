@@ -153,6 +153,7 @@ def should_abort_searching(w: "FrameWorker"):
 
 
 searching_house_manager.abort_callback = should_abort_searching
+searching_house_manager.can_finish_callback = lambda w: phase_timer.is_completed(PHASE_SEARCHING)
 
 
 def finalize_automation(w: "FrameWorker"):
@@ -234,6 +235,9 @@ def on_stage(w: "FrameWorker"):
             default=phase_timer.need_drive()
         )
         running_manager.notify_vehicle_exit(finding_car=finding_car)
+
+    if previous_stage == "搜房阶段" and w.current_stage == "跑图阶段":
+        running_manager.notify_searching_exit(finding_car=phase_timer.need_drive())
 
     if "landed" in stage_events and not phase_timer.all_done():
         if phase_timer.start_game_time is not None:

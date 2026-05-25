@@ -44,8 +44,8 @@ PHASE_DURATIONS = {
     PHASE_DRIVING: 10,
 }
 
-DROP_TARGET_GARAGE = RunningManager.R_CITY
-DROP_TARGET_CENTER = RunningManager.R_CITY
+DROP_TARGET_GARAGE = (990, 757)
+DROP_TARGET_CENTER = (990, 757)
 SP_SAVE_LONG_PRESS_MS = 3000
 START_GAME_VERIFY_DELAY = 5.0
 
@@ -193,7 +193,9 @@ def on_stage(w: "FrameWorker"):
         running_manager.notify_vehicle_exit(finding_car=finding_car)
 
     if "landed" in stage_events and not phase_timer.all_done():
-        handle_sp_start(w)
+        if phase_timer.start_game_time is not None:
+            running_manager.set_game_time(phase_timer.start_game_time)
+            driving_manager.set_game_time(phase_timer.start_game_time)
 
     if w.current_stage in {"跑图阶段", "开车阶段"}:
         maybe_report_phase_remaining()

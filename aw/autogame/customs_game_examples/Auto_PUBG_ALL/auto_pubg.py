@@ -123,6 +123,36 @@ def handle_sp_stop(w: "FrameWorker"):
     phase_timer.mark_sp_stopped()
 
 
+def should_abort_searching(w: "FrameWorker"):
+    if w.current_stage != "搜房阶段":
+        return True
+
+    if phase_timer.is_completed(PHASE_SEARCHING):
+        print("[Timer] 搜房阶段 600s 已用完，强制切换到跑图阶段")
+        searching_house_manager.stop_auto_forward(w)
+        w.change_stage("跑图阶段")
+        return True
+
+    if w.get_info("变身") or w.get_info("红色血条"):
+        print("[Searching] 检测到死亡，进入结束阶段")
+        searching_house_manager.stop_auto_forward(w)
+        handle_sp_stop(w)
+        w.change_stage("结束阶段")
+        return True
+
+    if w.get_info("个人排名") or w.get_info("队伍排名"):
+        print("[Searching] 检测到排名界面，进入结束阶段")
+        searching_house_manager.stop_auto_forward(w)
+        handle_sp_stop(w)
+        w.change_stage("结束阶段")
+        return True
+
+    return False
+
+
+searching_house_manager.abort_callback = should_abort_searching
+
+
 def finalize_automation(w: "FrameWorker"):
     global final_shutdown_pending
 
@@ -316,24 +346,8 @@ def on_stage(w: "FrameWorker"):
         return
 
     if w.current_stage == "搜房阶段":
-        if phase_timer.is_completed(PHASE_SEARCHING):
-            print("[Timer] 搜房阶段 600s 已用完，强制切换到跑图阶段")
-            searching_house_manager.stop_auto_forward(w)
-            w.change_stage("跑图阶段")
-            return
-
-        # 死亡检测：出现变身/观战/排名等，进入结束阶段兜底
-        if w.get_info("变身") or w.get_info("红色血条"):
-            print("[Searching] 检测到死亡，进入结束阶段")
-            searching_house_manager.stop_auto_forward(w)
-            handle_sp_stop(w)
-            w.change_stage("结束阶段")
-            return
-        if w.get_info("个人排名") or w.get_info("队伍排名"):
-            print("[Searching] 检测到排名界面，进入结束阶段")
-            searching_house_manager.stop_auto_forward(w)
-            handle_sp_stop(w)
-            w.change_stage("结束阶段")
+        handle_sp_start(w)
+        if should_abort_searching(w):
             return
 
         searching_view_synced = True

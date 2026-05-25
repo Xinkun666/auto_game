@@ -17,6 +17,11 @@ if TYPE_CHECKING:
 
 
 class Searching_House:
+    VISUAL_APPROACH_MAX_ATTEMPTS = 12
+    UNSTUCK_MAX_CYCLES = 6
+    UNSTUCK_FORWARD_STEPS = 5
+    PICKUP_MAX_PER_DIRECTION = 3
+
     def __init__(self):
         self.map_tool = MapNavigator()
         self.house_data = load_json(
@@ -69,6 +74,7 @@ class Searching_House:
 
         self.house_exit_manager = HouseExitManager()
         self.indoor_stuck_frames = 0
+        self.abort_callback = None
 
     def reset(self):
         self.completed_houses = set()
@@ -104,6 +110,8 @@ class Searching_House:
 
     def process(self, w: 'FrameWorker'):
         # self.start_searching(w)
+        if self._should_abort(w):
+            return
 
         location_raw = w.get_info('location')
         if location_raw is None:
@@ -125,6 +133,22 @@ class Searching_House:
 
         self.searching_logic(w, location, direction)
 
+    def _should_abort(self, w: 'FrameWorker'):
+        callback = getattr(self, "abort_callback", None)
+        if callback is None:
+            return False
+        try:
+            return bool(callback(w))
+        except Exception as exc:
+            print(f"[Searching] 中断检查失败: {exc}")
+            return False
+
+    def _get_forward_scene(self, w: 'FrameWorker'):
+        scene = w.get_info('forward_scene')
+        if isinstance(scene, (list, tuple)):
+            return scene
+        return []
+
     def _get_house_scene(self, w: 'FrameWorker'):
         value = w.get_info('house_scene')
         if isinstance(value, (list, tuple)) and len(value) == 1:
@@ -137,9 +161,12 @@ class Searching_House:
             return None
 
     def searching_logic(self, w: 'FrameWorker', current_loc, current_direction):
+        if self._should_abort(w):
+            return
 
         if self.searching_number == 5:
             print('已经搜满5个房间，切换到跑图阶段')
+            self.stop_auto_forward(w)
             self.searching_number = 0
             w.change_stage('跑图阶段')
             return
@@ -152,6 +179,8 @@ class Searching_House:
                 print('[Searching] 检测到长时间困在屋内 (house_scene=0)，启动兜底出房策略')
                 self.house_exit_manager.reset()
                 for _ in range(20):
+                    if self._should_abort(w):
+                        return
                     if self.house_exit_manager.process(w):
                         print('[Searching] 兜底出房成功，切换到跑图阶段')
                         self.indoor_stuck_frames = 0
@@ -173,9 +202,10 @@ class Searching_House:
 
         # --- 智能选点 ---
         if self.current_house_id is None:
-            self.select_nearest_entry(current_loc)
+            self.select_smart_target(current_loc, current_direction)
             if not self.current_house_id:
                 print("[Searching] 当前区域无合适目标或已搜完，切回跑图阶段")
+                self.stop_auto_forward(w)
                 self.searching_number = 0
                 w.change_stage('跑图阶段')
                 return
@@ -191,7 +221,9 @@ class Searching_House:
             # 卡顿检测逻辑
             if self.update_and_check_stuck(current_loc):
                 print("[Nav] 检测到人物卡死，启动避障程序...")
-                self.execute_unstuck_logic(w, current_loc)
+                if not self.execute_unstuck_logic(w, current_loc):
+                    self.handle_failed_entry_logic(self.active_entry['direction'])
+                    self.status = "IDLE"
                 self.history_locations = []
                 return
 
@@ -215,7 +247,9 @@ class Searching_House:
             # 原因：即使在慢速移动时，也可能卡在树根或小障碍物上
             if self.update_and_check_stuck(current_loc):
                 print("[Nav] (Precise) 检测到人物卡死，启动避障程序...")
-                self.execute_unstuck_logic(w, current_loc)
+                if not self.execute_unstuck_logic(w, current_loc):
+                    self.handle_failed_entry_logic(self.active_entry['direction'])
+                    self.status = "IDLE"
                 self.history_locations = []  # 清空历史，防止重复触发
                 return
             # ----------------------------------------
@@ -266,12 +300,14 @@ class Searching_House:
 
         # --- 视觉对齐与推进 ---
         elif self.status == "VISUAL_APPROACH":
-            while True:
+            for _ in range(self.VISUAL_APPROACH_MAX_ATTEMPTS):
+                if self._should_abort(w):
+                    return
                 door = self.find_largest_door(w)
                 if not door:
-                    print("[Visual] 丢失目标，重新扫描")
-                    self.status = "INTERACT"
-                    break
+                    print("[Visual] 丢失目标，回到扫描")
+                    self.status = "SCANNING"
+                    return
 
                 inf_w, inf_h = get_wh()
                 frame_w = max(inf_w, inf_h)
@@ -288,12 +324,19 @@ class Searching_House:
                 adjust_val = max(-400, min(400, adjust_val))
                 w.tap_single('视角', x_bias=adjust_val, dura=500, wait=500)
                 w.refresh_frame()
+            else:
+                print("[Visual] 多次视觉对齐失败，舍弃当前进门点")
+                self.handle_failed_entry_logic(self.active_entry['direction'])
+                self.status = "IDLE"
+                return
 
         # --- 交互逻辑 ---
         elif self.status == "INTERACT":
             print(f"[Interact] 尝试在 {self.current_house_id} 寻找交互按钮...")
             success = False
             for i in range(10):
+                if self._should_abort(w):
+                    return
                 w.refresh_frame()
 
                 # --- [修改 2] 交互前移时加入跳跃检测 ---
@@ -342,7 +385,12 @@ class Searching_House:
             print("[Entry] 进门")
             w.tap_single('摇杆', y_bias=-300, dura=300, wait=1000)
 
-            self.start_searching(w)
+            if self._should_abort(w):
+                return
+            if not self.start_searching(w):
+                return
+            if w.current_stage != '搜房阶段':
+                return
             self.completed_houses.add(self.current_house_id)
             self.searching_number += 1
             print(f"[Finish] 房屋 {self.current_house_id} 完成，已搜 {self.searching_number}/5")
@@ -377,7 +425,7 @@ class Searching_House:
                 new_loc = check_location(loc_raw[0])
                 if new_loc and get_distance(current_loc, new_loc) > self.stuck_threshold:
                     print("[Unstuck] 跳跃脱困成功")
-                    return
+                    return True
 
         def _safe_get_loc():
             raw = w.get_info('location')
@@ -386,12 +434,15 @@ class Searching_House:
             return check_location(raw[0])
 
         print("[Unstuck] 跳跃无效，进入 U 型避障移动...")
-        while True:
+        for _ in range(self.UNSTUCK_MAX_CYCLES):
+            if self._should_abort(w):
+                return False
             print("[Unstuck] 后退...")
             w.tap_single('摇杆', y_bias=300, dura=300, wait=1500)
             w.refresh_frame()
             loc_after_back = _safe_get_loc()
-            if not loc_after_back: continue
+            if not loc_after_back:
+                continue
 
             print("[Unstuck] 右移试探...")
             w.tap_single('摇杆', x_bias=300, dura=300, wait=1500)
@@ -411,7 +462,8 @@ class Searching_House:
                 w.refresh_frame()
                 loc_after_left = _safe_get_loc()
 
-                if loc_after_left and get_distance(loc_after_right, loc_after_left) > 0.5:
+                side_base_loc = loc_after_right or loc_after_back
+                if loc_after_left and get_distance(side_base_loc, loc_after_left) > 0.5:
                     print("[Unstuck] 左侧可通行")
                     side_way_clear = True
                     last_valid_loc = loc_after_left
@@ -421,22 +473,27 @@ class Searching_House:
                 continue
 
             print("[Unstuck] 尝试向前突破...")
-            while True:
+            for _ in range(self.UNSTUCK_FORWARD_STEPS):
+                if self._should_abort(w):
+                    return False
                 w.tap_single('摇杆', y_bias=-300, dura=300, wait=2000)
                 w.refresh_frame()
                 loc_after_forward = _safe_get_loc()
 
                 if loc_after_forward and get_distance(last_valid_loc, loc_after_forward) > 0.5:
                     print("[Unstuck] 脱困成功！")
-                    return
+                    return True
                 else:
                     print("[Unstuck] 前方依然受阻，继续侧向移动...")
                     moved_side = False
                     for bias in [300, -300]:
+                        if self._should_abort(w):
+                            return False
                         w.tap_single('摇杆', x_bias=bias, dura=300, wait=1500)
                         w.refresh_frame()
                         temp_loc = _safe_get_loc()
-                        if temp_loc and get_distance(loc_after_forward, temp_loc) > 0.5:
+                        move_base_loc = loc_after_forward or last_valid_loc
+                        if temp_loc and get_distance(move_base_loc, temp_loc) > 0.5:
                             last_valid_loc = temp_loc
                             moved_side = True
                             break
@@ -444,6 +501,8 @@ class Searching_House:
                     if not moved_side:
                         print("[Unstuck] 前方死路，重新执行后退逻辑")
                         break
+        print("[Unstuck] 脱困超过最大尝试次数，放弃当前进门点")
+        return False
 
     def handle_jump_logic(self, w: 'FrameWorker'):
         if w.get_info('跳跃'):
@@ -490,6 +549,8 @@ class Searching_House:
                 dist = get_distance(current_loc, entry['location'])
                 if avoid_angle is not None:
                     angle_to_target = calculate_angle(current_loc, entry['location'])
+                    if angle_to_target is None:
+                        continue
                     diff = abs(angle_to_target - avoid_angle)
                     if diff > 180: diff = 360 - diff
                     if avoid_mode == 'SAME' and diff < 45: continue
@@ -575,13 +636,15 @@ class Searching_House:
           3: pick_menu
           4: open_door
         """
-        scene = w.get_info('forward_scene')
+        scene = self._get_forward_scene(w)
         if not scene: return None
         doors = [obj for obj in scene if int(obj[5]) in [0, 4]]
         if not doors: return None
         return max(doors, key=lambda x: (x[2] - x[0]) * (x[3] - x[1]))
 
     def start_searching(self, w):
+        if self._should_abort(w):
+            return False
 
         self.room_yaw = 0.0
         self.global_yaw = 0.0
@@ -590,6 +653,8 @@ class Searching_House:
 
         print("[搜房]入口房间搜集物资。。。")
         self.collect_supplies_in_room(w)
+        if self._should_abort(w):
+            return False
 
         self.house_entry_yaw = self.global_yaw
         a_door_abs_yaw = (self.house_entry_yaw + 180) % 360
@@ -600,6 +665,8 @@ class Searching_House:
         if not door_info: door_info = self._scan_for_open_door(w, 360)
 
         while door_info and self.sub_rooms_entered < 2:
+            if self._should_abort(w):
+                return False
             rel_ang, bh = door_info
             if self._enter_sub_room_and_collect(w, rel_ang, bh):
                 self.sub_rooms_entered += 1
@@ -610,6 +677,7 @@ class Searching_House:
 
         # 4. 退出房屋
         self._exit_house(w)
+        return not self._should_abort(w)
 
     def _find_closed_door_in_view(self, w):
         doors = self.new_targets_of_class(w, [0])
@@ -620,6 +688,8 @@ class Searching_House:
     def _scan_for_closed_door(self, w, max_rotate=360):
         total = 0
         while total < max_rotate:
+            if self._should_abort(w):
+                return None
             self._turn(w, 30)
             total += 30
             time.sleep(0.2)
@@ -652,11 +722,15 @@ class Searching_House:
         if closed:
             rel_ang, _ = closed
             print(f"[出口] 发现入口房间关闭门，推开离开！")
-            self._enter_closed_door(w, rel_ang, rush_time=1.2)
-            return
+            if self._enter_closed_door(w, rel_ang, rush_time=1.2):
+                w.refresh_frame()
+                if self._get_house_scene(w) != 0:
+                    return
 
         # 策略2：进子房间找关闭门
         print("[出口] 策略2：入口无关闭门，进入子房间寻找")
+        if self._should_abort(w):
+            return
         open_door = self._find_open_door_in_view(w)
         if not open_door: open_door = self._scan_for_open_door(w, 360)
 
@@ -672,8 +746,10 @@ class Searching_House:
             if closed_in_sub:
                 c_rel_ang, _ = closed_in_sub
                 print(f"[出口] 发现子房间关闭门，推开离开！")
-                self._enter_closed_door(w, c_rel_ang, rush_time=1.2)
-                return
+                if self._enter_closed_door(w, c_rel_ang, rush_time=1.2):
+                    w.refresh_frame()
+                    if self._get_house_scene(w) != 0:
+                        return
 
             # 子房间没找到出口，退回入口房间
             print("[出口] 子房间无关闭门，扇区快搜退回入口房间")
@@ -683,6 +759,8 @@ class Searching_House:
 
         # 策略3：从入口A门原路返回
         print("[出口] 从入口A门原路返回")
+        if self._should_abort(w):
+            return
         a_door = self._find_open_door_in_view(w, ignore_visited=True)
         if not a_door: a_door = self._scan_for_open_door(w, 360, ignore_visited=True)
 
@@ -703,6 +781,8 @@ class Searching_House:
             print("[出口] 策略3后仍在屋内，启动HouseExitManager兜底出房")
             self.house_exit_manager.reset()
             for _ in range(30):
+                if self._should_abort(w):
+                    return
                 if self.house_exit_manager.process(w):
                     print("[出口] 兜底出房成功")
                     return
@@ -726,6 +806,8 @@ class Searching_House:
         center_x = frame_w / 2
 
         for _ in range(30):
+            if self._should_abort(w):
+                return False
             doors = self.new_targets_of_class(w, target_classes)
             if not doors:
                 print("  [搜房] 警告：未检测到门，尝试盲冲补救")
@@ -756,10 +838,11 @@ class Searching_House:
             time.sleep(0.2)
 
         print(f"  [鲁棒穿门] 执行盲冲，时间: {rush_time}s")
-        # self.adb.forward(rush_time)
-        w.tap_single('摇杆', y_bias=-500, dura=1000)
-        w.refresh_frame()
-        time.sleep(0.2)
+        move_ms = max(0, int(float(rush_time) * 1000))
+        if move_ms > 0:
+            w.tap_single('摇杆', y_bias=-500, dura=move_ms)
+            w.refresh_frame()
+            time.sleep(0.2)
         return True
 
     def _pass_through_open_door(self, w, rel_angle, rush_time=1.0):
@@ -852,6 +935,8 @@ class Searching_House:
 
         total = 0
         while total < max_rotate:
+            if self._should_abort(w):
+                return None
             self._turn(w, 30)
             total += 30
             time.sleep(0.2)
@@ -898,7 +983,7 @@ class Searching_House:
         def pickup_one_in_current_view(w):
             """在当前画面拾取一个未拾取过的物资，成功返回 True，否则 False"""
             # 获取当前画面所有物资，按面积取最近（最大）的一个
-            scene = w.get_info('forward_scene')
+            scene = self._get_forward_scene(w)
             supplies = [obj for obj in scene if int(obj[5]) in [1]]
 
             if not supplies:
@@ -923,14 +1008,18 @@ class Searching_House:
 
         # ---------- 方向序列 ----------
         print("======[搜资] 检查初始方向 (0°)，在刚进入房屋的视角下检查是否有物资，有则搜集======")
-        while pickup_one_in_current_view(w):
+        for _ in range(self.PICKUP_MAX_PER_DIRECTION):
+            if self._should_abort(w) or not pickup_one_in_current_view(w):
+                break
             time.sleep(0.2)
 
         print("======[搜资] 左转45°检查是否有物资，有则收集======")
         self.turn_by_angle(w, -45, 300)
         player_yaw = (player_yaw - 45) % 360
         time.sleep(0.3)
-        while pickup_one_in_current_view(w):
+        for _ in range(self.PICKUP_MAX_PER_DIRECTION):
+            if self._should_abort(w) or not pickup_one_in_current_view(w):
+                break
             time.sleep(0.2)
 
         print("======[搜资] 左转45°后回正，右转45度检查是否有物资，有则收集======")
@@ -940,7 +1029,9 @@ class Searching_House:
         self.turn_by_angle(w, 45, 300)  # 右转 45°
         player_yaw = (player_yaw + 45) % 360
         time.sleep(0.3)
-        while pickup_one_in_current_view(w):
+        for _ in range(self.PICKUP_MAX_PER_DIRECTION):
+            if self._should_abort(w) or not pickup_one_in_current_view(w):
+                break
             time.sleep(0.2)
 
         print(f"[搜资] 结束，共拾取 {len(collected)} 个物资")
@@ -1257,11 +1348,10 @@ class Searching_House:
             time.sleep(1)
 
         for i in range(30):
-            if i == 30:
-                print("当前已移动完成30步或者已经拾取完物资")
+            if self._should_abort(w):
                 return False
             w.refresh_frame()
-            scene = w.get_info('forward_scene')
+            scene = self._get_forward_scene(w)
             pick_menu = [obj for obj in scene if int(obj[5]) in [3]]
 
             print("当前是否有物资提示信息{}".format(pick_menu))
@@ -1308,6 +1398,8 @@ class Searching_House:
                 i += 1
 
             time.sleep(1)
+        print("当前已移动完成30步或者已经拾取完物资")
+        return False
 
     def pixel_to_angle(self, cx):
         inf_w, inf_h = get_wh()
@@ -1331,7 +1423,7 @@ class Searching_House:
     def targets_of_class(self, w, target_class=None):
         if target_class is None:
             target_class = [4]
-        scene = w.get_info('forward_scene')
+        scene = self._get_forward_scene(w)
         dets = [obj for obj in scene if int(obj[5]) in target_class]
         # print("[进入子房间]，旋转360过程中，检测到当前画面中开着的门的信息{}".format(dets))
         infos = []
@@ -1347,7 +1439,7 @@ class Searching_House:
     def new_targets_of_class(self, w, target_class=None):
         if target_class is None:
             target_class = [4]
-        scene = w.get_info('forward_scene')
+        scene = self._get_forward_scene(w)
         dets = [obj for obj in scene if int(obj[5]) in target_class]
         # print("[进入子房间]，旋转360过程中，检测到当前画面中开着的门的信息{}".format(dets))
         infos = []
@@ -1400,15 +1492,14 @@ class Searching_House:
 
         # 调整角度结束后，往前移动靠近
         for i in range(30):
-            if i == 30:
-                print("当前已移动完成30步")
+            if self._should_abort(w):
                 return False
             w.tap_single('摇杆', y_bias=-20, dura=300)
             i += 1
             w.refresh_frame()
             time.sleep(1)
 
-            scene = w.get_info('forward_scene')
+            scene = self._get_forward_scene(w)
             open_door1 = [obj for obj in scene if int(obj[5]) in [4]]
 
             if open_door1:
@@ -1454,11 +1545,12 @@ class Searching_House:
                 print("靠近门后往前移动俩步结束，不在往前移动")
                 return True
         time.sleep(1)
+        print("当前已移动完成30步")
+        return False
 
     def _collect_in_direction(self, w, avoid_door_abs=None):
         collected = []
-        # supplies = self.targets_of_class(w, target_class=[4])
-        supplies = self.new_targets_of_class(w, target_class=[4])
+        supplies = self.new_targets_of_class(w, target_class=[1])
         print("子房间查找物资的信息{}".format(supplies))
         print("子房间查找物资的信息{}".format(supplies))
         # 过滤当前在子房间内发现的入口房间的物资
@@ -1498,12 +1590,18 @@ class Searching_House:
 
     def _search_supplies(self, w, avoid_door_abs=None):
         print("[物资] 方向扫描...")
+        if self._should_abort(w):
+            return
         self._collect_in_direction(w, avoid_door_abs)  # 正前
         self._turn(w, -45)
+        if self._should_abort(w):
+            return
         self._collect_in_direction(w, avoid_door_abs)  # 左45°
         self._turn(w, 45)
         time.sleep(5)
         self._turn(w, 45)
+        if self._should_abort(w):
+            return
         self._collect_in_direction(w, avoid_door_abs)  # 右45°
         self._turn(w, -45)  # 回正
 
@@ -1650,6 +1748,8 @@ class Searching_House:
     def _visual_align(self, w, target_angle, target_class=None):
         print("开始调整。。。{}".format(target_angle))
         for _ in range(6):
+            if self._should_abort(w):
+                return
             if abs(target_angle) <= 1.5:
                 return
             step = max(-30, min(30, target_angle))
@@ -1665,3 +1765,4 @@ class Searching_House:
     def _turn(self, w, delta):
         self.turn_by_angle(w, delta)
         self.room_yaw = (self.room_yaw + delta) % 360
+        self.global_yaw = (self.global_yaw + delta) % 360

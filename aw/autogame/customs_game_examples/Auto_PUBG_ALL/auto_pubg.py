@@ -322,6 +322,20 @@ def on_stage(w: "FrameWorker"):
             w.change_stage("跑图阶段")
             return
 
+        # 死亡检测：出现变身/观战/排名等，进入结束阶段兜底
+        if w.get_info("变身") or w.get_info("红色血条"):
+            print("[Searching] 检测到死亡，进入结束阶段")
+            searching_house_manager.stop_auto_forward(w)
+            handle_sp_stop(w)
+            w.change_stage("结束阶段")
+            return
+        if w.get_info("个人排名") or w.get_info("队伍排名"):
+            print("[Searching] 检测到排名界面，进入结束阶段")
+            searching_house_manager.stop_auto_forward(w)
+            handle_sp_stop(w)
+            w.change_stage("结束阶段")
+            return
+
         searching_view_synced = True
         searching_house_manager.process(w)
         return

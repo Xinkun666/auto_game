@@ -173,6 +173,17 @@ class Searching_House:
 
         # --- 智能选点 ---
         if self.current_house_id is None:
+            # 优先视觉找门：落地后结合当前位置，扫描周围最近的门
+            nearest_door = self._scan_for_nearest_door(w)
+            if nearest_door is not None:
+                rel_ang, _ = nearest_door
+                print(f"[Searching] 视觉发现附近门 (相对角度 {rel_ang:.1f}°)，直接靠近")
+                self.status = "VISUAL_APPROACH"
+                self.history_locations = []
+                # 设置一个虚拟的 current_house_id 防止重复选点
+                self.current_house_id = f"visual_{int(time.time())}"
+                return
+
             self.select_smart_target(current_loc, current_direction)
             if not self.current_house_id:
                 print("[Searching] 当前区域无合适目标或已搜完，切回跑图阶段")
@@ -183,8 +194,8 @@ class Searching_House:
             print(f"[Searching] 锁定目标: {self.current_house_id} | 状态: 快速导航")
             self.history_locations = []  # 切换目标时清空历史
 
-        target_loc = self.active_entry['location']
-        dist = get_distance(current_loc, target_loc)
+        target_loc = self.active_entry['location'] if self.active_entry else None
+        dist = get_distance(current_loc, target_loc) if target_loc else float('inf')
 
         # --- 快速前进 (距离 > 5.0) ---
         if self.status == "FAST_NAV":
@@ -326,29 +337,25 @@ class Searching_House:
                 self.status = "FINAL_ENTRY"
             else:
                 print(f"[Interact] 警告：交互失败，舍弃进门点")
-                ideal_angle = self.active_entry['direction']
-                self.handle_failed_entry_logic(ideal_angle)
+                if self.active_entry:
+                    self.handle_failed_entry_logic(self.active_entry['direction'])
+                else:
+                    self.current_house_id = None
                 self.status = "IDLE"
                 return
 
         # --- 最终入户 ---
         elif self.status == "FINAL_ENTRY":
-            ideal_angle = self.active_entry['direction']
-            print(f"[Entry] 调整至进门角度: {ideal_angle}")
-            self.align_direction_blocking(w, w.get_info('direction'), ideal_angle)
+            if self.active_entry:
+                ideal_angle = self.active_entry['direction']
+                print(f"[Entry] 调整至进门角度: {ideal_angle}")
+                self.align_direction_blocking(w, w.get_info('direction'), ideal_angle)
             print("[Entry] 进门")
             w.tap_single('摇杆', y_bias=-300, dura=300, wait=1000)
-            # w.tap_single('摇杆', y_bias=-500, dura=300, wait=1000)
-            # time.sleep(2)
-            # if w.get_info('关门') is None:
-            #     # 当前可能没进入房屋成功
-            #     print(f"[Entry] 第一次进门未成功，左移后重新进门")
-            #     w.tap_single('摇杆', x_bias=-45, dura=300, wait=100)
-            #     # 左移后重新进入房屋
-            #     w.tap_single('摇杆', y_bias=-300, dura=300, wait=100)
 
             self.start_searching(w)
-            self.completed_houses.add(self.current_house_id)
+            if self.current_house_id and not str(self.current_house_id).startswith("visual_"):
+                self.completed_houses.add(self.current_house_id)
             self.searching_number += 1
             print(f"[Finish] 房屋 {self.current_house_id} 完成，已搜 {self.searching_number}/5")
             w.refresh_frame()
@@ -500,6 +507,29 @@ class Searching_House:
     def prepare_next_target_logic(self, exit_direction):
         self.avoid_angle_ref = exit_direction
         self.avoid_mode = 'OPPOSITE'
+
+    def _scan_for_nearest_door(self, w):
+        """落地后优先视觉找门：原地转一圈，找最近的 door/open_door。
+        返回 (rel_angle, box_h) 或 None。"""
+        print("[Scan] 落地后视觉扫描附近的门...")
+        best_door = None
+        best_box_h = 0
+        scan_angles = [0, 45, -45, 90, -90, 135, -135, 180]
+
+        for angle in scan_angles:
+            if angle != 0:
+                self._turn(w, angle)
+                time.sleep(0.15)
+                w.refresh_frame()
+            door = self.find_largest_door(w)
+            if door:
+                cx = (door[0] + door[2]) / 2
+                rel_ang = self.pixel_to_angle(cx)
+                box_h = door[3] - door[1]
+                if box_h > best_box_h:
+                    best_box_h = box_h
+                    best_door = (rel_ang, box_h)
+        return best_door
 
     def check_and_lock_door(self, w):
         if self.find_largest_door(w):

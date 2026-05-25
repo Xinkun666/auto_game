@@ -21,6 +21,12 @@ class Searching_House:
     UNSTUCK_MAX_CYCLES = 6
     UNSTUCK_FORWARD_STEPS = 5
     PICKUP_MAX_PER_DIRECTION = 3
+    HOUSE_CLASS_IDS = {8}
+    HOUSE_BLOCK_CENTER_OVERLAP = 0.12
+    HOUSE_BLOCK_LOWER_OVERLAP = 0.18
+    HOUSE_BLOCK_AREA_RATIO = 0.015
+    HOUSE_BYPASS_SIDE_STEPS = 4
+    HOUSE_BYPASS_FORWARD_STEPS = 3
 
     def __init__(self):
         self.map_tool = MapNavigator()
@@ -192,6 +198,127 @@ class Searching_House:
             return int(value)
         except (TypeError, ValueError):
             return None
+
+    def _get_frame_size(self):
+        inf_w, inf_h = get_wh()
+        return max(inf_w, inf_h), min(inf_w, inf_h)
+
+    def _is_house_detection(self, det):
+        try:
+            return len(det) >= 6 and int(det[5]) in self.HOUSE_CLASS_IDS
+        except (TypeError, ValueError):
+            return False
+
+    def _front_house_blocking(self, w: 'FrameWorker'):
+        scene = self._get_forward_scene(w)
+        if not scene:
+            return None
+
+        frame_w, frame_h = self._get_frame_size()
+        center_l = frame_w * 0.38
+        center_r = frame_w * 0.62
+        lower_t = frame_h * 0.35
+        center_band_w = max(center_r - center_l, 1)
+        lower_band_h = max(frame_h - lower_t, 1)
+        candidates = []
+
+        for det in scene:
+            if not self._is_house_detection(det):
+                continue
+            x1, y1, x2, y2 = [float(v) for v in det[:4]]
+            x1, x2 = max(0, min(x1, frame_w)), max(0, min(x2, frame_w))
+            y1, y2 = max(0, min(y1, frame_h)), max(0, min(y2, frame_h))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            center_overlap = max(0, min(x2, center_r) - max(x1, center_l)) / center_band_w
+            lower_overlap = max(0, min(y2, frame_h) - max(y1, lower_t)) / lower_band_h
+            area_ratio = ((x2 - x1) * (y2 - y1)) / max(frame_w * frame_h, 1)
+            if (center_overlap >= self.HOUSE_BLOCK_CENTER_OVERLAP
+                    and lower_overlap >= self.HOUSE_BLOCK_LOWER_OVERLAP
+                    and area_ratio >= self.HOUSE_BLOCK_AREA_RATIO):
+                center_x = (x1 + x2) / 2
+                center_score = 1 - min(abs(center_x - frame_w / 2) / max(frame_w / 2, 1), 1)
+                score = center_overlap * 2 + lower_overlap + area_ratio * 4 + center_score
+                candidates.append((score, det))
+
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item[0])[1]
+
+    def _house_side_block_score(self, scene, lane_left, lane_right, frame_h):
+        lane_w = max(lane_right - lane_left, 1)
+        lower_top = frame_h * 0.35
+        lane_area = lane_w * max(frame_h - lower_top, 1)
+        score = 0.0
+        for det in scene:
+            if not self._is_house_detection(det):
+                continue
+            x1, y1, x2, y2 = [float(v) for v in det[:4]]
+            overlap_w = max(0, min(x2, lane_right) - max(x1, lane_left))
+            overlap_h = max(0, min(y2, frame_h) - max(y1, lower_top))
+            score += (overlap_w * overlap_h) / lane_area
+        return score
+
+    def _choose_house_bypass_side(self, w: 'FrameWorker'):
+        scene = self._get_forward_scene(w)
+        frame_w, frame_h = self._get_frame_size()
+        left_score = self._house_side_block_score(scene, frame_w * 0.16, frame_w * 0.46, frame_h)
+        right_score = self._house_side_block_score(scene, frame_w * 0.54, frame_w * 0.84, frame_h)
+        side = "right" if right_score <= left_score else "left"
+        print(f"[Unstuck] 房体绕行空隙判断：left={left_score:.2f}, right={right_score:.2f}，选择{side}")
+        return side
+
+    def _bypass_front_house_block(self, w: 'FrameWorker', current_loc, safe_get_loc):
+        print("[Unstuck] 室外卡住，先后退确认前方是否为房体阻挡")
+        w.tap_single('摇杆', y_bias=300, dura=450, wait=900)
+        w.refresh_frame()
+
+        if not self._front_house_blocking(w):
+            print("[Unstuck] 后退后前方未确认房体，交给通用避障")
+            return False
+
+        first_side = self._choose_house_bypass_side(w)
+        sides = [first_side, "left" if first_side == "right" else "right"]
+        back_loc = safe_get_loc() or current_loc
+
+        for side in sides:
+            if self._should_abort(w):
+                return False
+            bias = 300 if side == "right" else -300
+            print(f"[Unstuck] 前方房体挡路，尝试向{side}侧滑绕房")
+            side_base_loc = safe_get_loc() or back_loc
+
+            for _ in range(self.HOUSE_BYPASS_SIDE_STEPS):
+                if self._should_abort(w):
+                    return False
+                w.tap_single('摇杆', x_bias=bias, dura=450, wait=700)
+                w.refresh_frame()
+                if not self._front_house_blocking(w):
+                    break
+
+            side_loc = safe_get_loc()
+            if not side_loc or not side_base_loc or get_distance(side_base_loc, side_loc) <= 0.5:
+                print(f"[Unstuck] {side}侧滑位移不足，尝试另一侧")
+                continue
+
+            for _ in range(self.HOUSE_BYPASS_FORWARD_STEPS):
+                if self._should_abort(w):
+                    return False
+                w.tap_single('摇杆', y_bias=-300, dura=400, wait=900)
+                w.refresh_frame()
+                forward_loc = safe_get_loc()
+                if forward_loc and get_distance(current_loc, forward_loc) > self.stuck_threshold:
+                    print("[Unstuck] 绕房通过成功")
+                    return True
+                if self._front_house_blocking(w):
+                    w.tap_single('摇杆', x_bias=bias, dura=350, wait=500)
+                    w.refresh_frame()
+
+            print(f"[Unstuck] {side}侧仍未绕开，尝试另一侧")
+
+        print("[Unstuck] 房体绕行未成功，回退到通用避障")
+        return False
 
     def searching_logic(self, w: 'FrameWorker', current_loc, current_direction):
         if self._should_abort(w):
@@ -442,6 +569,13 @@ class Searching_House:
 
     def execute_unstuck_logic(self, w: 'FrameWorker', current_loc):
         self.stop_auto_forward(w)
+
+        def _safe_get_loc():
+            raw = w.get_info('location')
+            if raw is None:
+                return None
+            return check_location(raw[0])
+
         if self._get_house_scene(w) == 0:
             print("[Unstuck] house_scene=indoor，优先使用 HouseExitManager 脱困")
             self.house_exit_manager.reset()
@@ -454,6 +588,9 @@ class Searching_House:
             print("[Unstuck] HouseExitManager 暂未出房")
             return False
 
+        if self._bypass_front_house_block(w, current_loc, _safe_get_loc):
+            return True
+
         if w.get_info('跳跃'):
             print("[Unstuck] 尝试跳跃脱困")
             self.handle_jump_logic(w)
@@ -465,12 +602,6 @@ class Searching_House:
                 if new_loc and get_distance(current_loc, new_loc) > self.stuck_threshold:
                     print("[Unstuck] 跳跃脱困成功")
                     return True
-
-        def _safe_get_loc():
-            raw = w.get_info('location')
-            if raw is None:
-                return None
-            return check_location(raw[0])
 
         print("[Unstuck] 跳跃无效，进入 U 型避障移动...")
         for _ in range(self.UNSTUCK_MAX_CYCLES):

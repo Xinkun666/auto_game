@@ -8,6 +8,7 @@ import time
 from typing import TYPE_CHECKING
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigator import MapNavigator
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.toolkit import *
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.house_exit import HouseExitManager
 from aw.autogame.tools.Utils import *
 
 if TYPE_CHECKING:
@@ -66,10 +67,50 @@ class Searching_House:
         self.visited_sub_doors = []
         self.sub_rooms_entered = 0
 
+        self.house_exit_manager = HouseExitManager()
+        self.indoor_stuck_frames = 0
+
+    def reset(self):
+        self.completed_houses = set()
+        self.current_house_id = None
+        self.active_entry = None
+        self.status = "IDLE"
+        self.first_view = False
+        self.auto_forward = False
+        self.temp_skip_houses = set()
+        self.history_locations = []
+        self.searching_number = 0
+        self.supplies = []
+        self.doors = []
+        self.player_yaw = 0.0
+        self.last_target_bbox = None
+        self.rooms_searched = 0
+        self.entrance_doors = []
+        self.a_door_sign = None
+        self.sub_rooms_info = []
+        self.visited_doors = set()
+        self.sub_rooms = []
+        self.rooms_done = 0
+        self.room_yaw = 0.0
+        self.global_yaw = 0.0
+        self.visited_abs = []
+        self.visited_doors_info = []
+        self.sub_room_area = None
+        self.visited_sub_doors = []
+        self.sub_rooms_entered = 0
+
+        self.house_exit_manager.reset()
+        self.indoor_stuck_frames = 0
+
     def process(self, w: 'FrameWorker'):
         # self.start_searching(w)
 
-        location = check_location(w.get_info('location')[0])
+        location_raw = w.get_info('location')
+        if location_raw is None:
+            print('位置值是None，尝试向前移动一段距离刷新位置...')
+            w.tap_single('摇杆', y_bias=-300, wait=500)
+            return
+        location = check_location(location_raw[0])
         direction = w.get_info('direction')
 
         if location is None:
@@ -79,10 +120,21 @@ class Searching_House:
 
         # 0. 基础设置
         if not self.first_view:
-            w.click('第一人称')
+            w.click('人称')
             self.first_view = True
 
         self.searching_logic(w, location, direction)
+
+    def _get_house_scene(self, w: 'FrameWorker'):
+        value = w.get_info('house_scene')
+        if isinstance(value, (list, tuple)) and len(value) == 1:
+            value = value[0]
+        if isinstance(value, bool):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     def searching_logic(self, w: 'FrameWorker', current_loc, current_direction):
 
@@ -92,11 +144,40 @@ class Searching_House:
             w.change_stage('跑图阶段')
             return
 
+        # --- 屋内卡死兜底检测 ---
+        house_scene = self._get_house_scene(w)
+        if house_scene == 0:
+            self.indoor_stuck_frames += 1
+            if self.indoor_stuck_frames > 30:
+                print('[Searching] 检测到长时间困在屋内 (house_scene=0)，启动兜底出房策略')
+                self.house_exit_manager.reset()
+                for _ in range(20):
+                    if self.house_exit_manager.process(w):
+                        print('[Searching] 兜底出房成功，切换到跑图阶段')
+                        self.indoor_stuck_frames = 0
+                        self.searching_number = 0
+                        self.completed_houses.add(self.current_house_id)
+                        self.current_house_id = None
+                        self.status = "IDLE"
+                        w.change_stage('跑图阶段')
+                        return
+                print('[Searching] 兜底出房失败，强制重置状态切跑图')
+                self.indoor_stuck_frames = 0
+                self.searching_number = 0
+                self.current_house_id = None
+                self.status = "IDLE"
+                w.change_stage('跑图阶段')
+                return
+        else:
+            self.indoor_stuck_frames = 0
+
         # --- 智能选点 ---
         if self.current_house_id is None:
             self.select_smart_target(current_loc, current_direction)
             if not self.current_house_id:
-                print("[Searching] 当前区域无合适目标或已搜完")
+                print("[Searching] 当前区域无合适目标或已搜完，切回跑图阶段")
+                self.searching_number = 0
+                w.change_stage('跑图阶段')
                 return
             self.status = "FAST_NAV"
             print(f"[Searching] 锁定目标: {self.current_house_id} | 状态: 快速导航")
@@ -268,7 +349,8 @@ class Searching_House:
 
             self.start_searching(w)
             self.completed_houses.add(self.current_house_id)
-            print(f"[Finish] 房屋 {self.current_house_id} 完成")
+            self.searching_number += 1
+            print(f"[Finish] 房屋 {self.current_house_id} 完成，已搜 {self.searching_number}/5")
             w.refresh_frame()
             exit_direction = w.get_info('direction')
             self.prepare_next_target_logic(exit_direction)
@@ -585,6 +667,21 @@ class Searching_House:
                 w.refresh_frame()
                 time.sleep(0.2)
                 self._turn(w, random.choice([-45, 45]))
+
+        # 策略4：所有策略均失败，启动HouseExitManager兜底
+        w.refresh_frame()
+        if self._get_house_scene(w) == 0:
+            print("[出口] 策略3后仍在屋内，启动HouseExitManager兜底出房")
+            self.house_exit_manager.reset()
+            for _ in range(30):
+                if self.house_exit_manager.process(w):
+                    print("[出口] 兜底出房成功")
+                    return
+            print("[出口] 兜底出房也失败，强制前进冲出")
+            for _ in range(5):
+                w.tap_single('摇杆', y_bias=-500, dura=300)
+                w.refresh_frame()
+                time.sleep(0.3)
 
     def _calc_abs_angle(self, rel_ang):
 

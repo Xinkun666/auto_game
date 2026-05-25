@@ -5,7 +5,7 @@ from aw.autogame.tools.Utils import *
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.parachute import ParachuteManager
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.running_map import RunningManager
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.driving_car import DrivingManager
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.searching_house import (
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.searching_house_yajun import (
     Searching_House,
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.house_exit import (
@@ -83,7 +83,7 @@ def prepare_round():
     drop_target = DROP_TARGET_GARAGE if need_drive else DROP_TARGET_CENTER
 
     parachute_manager.reset()
-    parachute_manager.configure(target_pos=drop_target, landing_stage="跑图阶段")
+    parachute_manager.configure(target_pos=drop_target, landing_stage="搜房阶段")
 
     running_manager.reset(finding_car=need_drive)
 

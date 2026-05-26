@@ -125,6 +125,13 @@ class Searching_House:
         if self._should_abort(w):
             return
 
+        # 0. 基础设置：落地后首帧刷新画面 + 切第一人称
+        if not self.first_view:
+            w.refresh_frame()
+            w.refresh_frame()
+            w.click('人称')
+            self.first_view = True
+
         location_raw = w.get_info('location')
         if location_raw is None:
             print('位置值是None，尝试向前移动一段距离刷新位置...')
@@ -137,11 +144,6 @@ class Searching_House:
             print('位置值是None，尝试向前移动一段距离刷新位置...')
             w.tap_single('摇杆', y_bias=-300, wait=500)
             return
-
-        # 0. 基础设置
-        if not self.first_view:
-            w.click('人称')
-            self.first_view = True
 
         self.searching_logic(w, location, direction)
 

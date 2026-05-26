@@ -342,7 +342,7 @@ class RunningManager:
     CAR_VISUAL_DYNAMIC_MID_WAIT = 2600
     CAR_VISUAL_DYNAMIC_FAR_WAIT = 5200
     CAR_VISUAL_DYNAMIC_MAX_WAIT = 7200
-    # 落地后寻车超过该时间仍未上车，则结束当前局；该阶段仍计入跑图时间。
+    # 单轮寻车超过该时间仍未上车，则结束当前局；计时从进入/恢复寻车模式开始。
     CAR_SEARCH_TIMEOUT = 5 * 60
     # 路边发现远车后，允许跨帧追车，避免车辆框短暂丢失后又回头追原道路点。
     ROADSIDE_CAR_LOST_LIMIT = 5
@@ -381,9 +381,11 @@ class RunningManager:
     VEHICLE_ENTRY_UNKNOWN = "unknown"
     CAR_SEARCH_GARAGE = "garage"
     CAR_SEARCH_ROADSIDE = "roadside"
+    PRIORITY_CAR_SEARCH_POINTS = ((1109, 702), (1186, 784), (1325, 960))
     RUNNING_ROUTE_CIRCLE = "circle"
     RUNNING_ROUTE_PATROL = "patrol"
     RUNNING_ROUTE_RANDOM_AROUND_CIRCLE = "random_around_circle"
+    RUNNING_ROUTE_PRIORITY_CAR_SEARCH = "priority_car_search"
     JUMP_CLICK_COOLDOWN = 0.8
 
     def __init__(self, map_tool: Optional[MapNavigator] = None):
@@ -435,6 +437,10 @@ class RunningManager:
         self.current_running_route_kind: Optional[str] = None
         self.last_circle_target_point: Optional[Tuple[int, int]] = None
         self.circle_route_completed = False
+        self.car_search_started_at: Optional[float] = None
+        self.priority_car_search_active = False
+        self.priority_car_search_finished = False
+        self.priority_car_search_next_index = 0
 
     def reset(self, finding_car: bool = True):
         self.road_list = []
@@ -476,6 +482,10 @@ class RunningManager:
         self.current_running_route_kind = None
         self.last_circle_target_point = None
         self.circle_route_completed = False
+        self.car_search_started_at = time.time() if finding_car else None
+        self.priority_car_search_active = bool(finding_car)
+        self.priority_car_search_finished = False
+        self.priority_car_search_next_index = 0
         self.house_exit_manager.reset()
         print("[Running] 状态已重置!")
 
@@ -537,6 +547,9 @@ class RunningManager:
             return
 
         self._click_jump_if_available(w, location, direction)
+
+        if self._handle_priority_car_route_finished(w, location, direction, "指定寻车路线已走完"):
+            return
 
         if self._handle_car_search_timeout(w, location, direction):
             return
@@ -602,12 +615,16 @@ class RunningManager:
 
         if not self.road_list:
             print("[Running] 当前没有可执行路径")
+            if self._handle_priority_car_route_finished(w, location, direction, "指定寻车路线已走完"):
+                return
             return
 
         if not self.garage_to_roadside_route_active:
             self._advance_waypoint_by_projection(location)
         if not self.road_list:
             print("[Running] 当前路径已按投影走完，下一帧重新规划")
+            if self._handle_priority_car_route_finished(w, location, direction, "指定寻车路线投影判定已走完"):
+                return
             self._mark_running_route_completed_if_needed(location, "投影判定路径走完")
             self.loading_road = False
             return
@@ -722,6 +739,10 @@ class RunningManager:
             print("[Running] 开车阶段未完成且当前不需要进圈，恢复沿路找车")
             self._log_running_state("恢复找车", location, direction, "到最近道路点继续找车")
             self.finding_car = True
+            self.car_search_started_at = time.time()
+            self.priority_car_search_active = True
+            self.priority_car_search_finished = False
+            self.priority_car_search_next_index = 0
             self._switch_to_roadside_car_search(
                 "开车未完成且进圈路线已处理",
                 leave_garage_route=False,
@@ -732,6 +753,8 @@ class RunningManager:
         self._log_running_state("暂停找车", location, direction, "优先进圈")
         self.stop_auto_forward(w)
         self.finding_car = False
+        self.car_search_started_at = None
+        self.priority_car_search_active = False
         self.precise_entering_car = False
         self.precise_last_distance = None
         self.precise_idle_rounds = 0
@@ -779,24 +802,61 @@ class RunningManager:
     ) -> bool:
         if not self.finding_car:
             return False
+        if self.priority_car_search_active and not self.priority_car_search_finished:
+            return False
 
-        if self.game_time is None:
-            self.set_game_time()
+        if self.car_search_started_at is None:
+            self.car_search_started_at = time.time()
 
-        elapsed = self.get_elapsed_time()
+        elapsed = max(0.0, time.time() - self.car_search_started_at)
         if elapsed < self.CAR_SEARCH_TIMEOUT:
             return False
 
         print(
-            f"[Running] 落地后寻车已超过 {self.CAR_SEARCH_TIMEOUT:.0f}s 仍未上车，"
+            f"[Running] 本轮寻车已超过 {self.CAR_SEARCH_TIMEOUT:.0f}s 仍未上车，"
             "结束当前局并开始下一局"
         )
         self._log_running_state(
             "寻车超时",
             location,
             direction,
-            f"寻车耗时 {elapsed:.1f}s，计入跑图时间，结束当前局",
+            f"本轮寻车耗时 {elapsed:.1f}s，结束当前局",
         )
+        self._handle_death(w)
+        return True
+
+    def _handle_priority_car_route_finished(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+        reason: str,
+    ) -> bool:
+        if (
+            not self.finding_car
+            or self.car_search_mode != self.CAR_SEARCH_ROADSIDE
+            or self.current_running_route_kind != self.RUNNING_ROUTE_PRIORITY_CAR_SEARCH
+        ):
+            return False
+        if self.road_list:
+            return False
+
+        final_point = tuple(map(int, self.PRIORITY_CAR_SEARCH_POINTS[-1]))
+        final_dist = get_distance(location, final_point)
+        if final_dist > max(self.WAYPOINT_TOLERANCE, self.ROAD_NODE_REACHED_TOLERANCE):
+            return False
+
+        print(f"[Running] {reason}，已到达指定终点 {final_point} 仍未上车，结束当前局并重开")
+        self._log_running_state(
+            "指定寻车路线结束",
+            location,
+            direction,
+            "终点未上车，结束当前局",
+            final_point,
+            final_dist,
+        )
+        self.priority_car_search_finished = True
+        self.priority_car_search_active = False
         self._handle_death(w)
         return True
 
@@ -823,6 +883,10 @@ class RunningManager:
     ):
         self.drive_required = bool(finding_car)
         self.finding_car = bool(finding_car)
+        self.car_search_started_at = time.time() if self.finding_car else None
+        self.priority_car_search_active = bool(self.finding_car)
+        self.priority_car_search_finished = False
+        self.priority_car_search_next_index = 0
         self.loading_road = False
         self.precise_entering_car = False
         self.precise_last_distance = None
@@ -857,6 +921,10 @@ class RunningManager:
     def notify_searching_exit(self, finding_car: bool = True):
         self.drive_required = bool(finding_car)
         self.finding_car = bool(finding_car)
+        self.car_search_started_at = time.time() if self.finding_car else None
+        self.priority_car_search_active = bool(self.finding_car)
+        self.priority_car_search_finished = False
+        self.priority_car_search_next_index = 0
         self.car_search_mode = self.CAR_SEARCH_ROADSIDE
         self.loading_road = False
         self.road_list = []
@@ -1030,11 +1098,13 @@ class RunningManager:
                         "距离车库点过远",
                         leave_garage_route=False,
                     )
-                    self._load_road_patrol_path(location, reason="距离车库点过远，直接沿路找车")
+                    if not self._load_priority_car_search_path(location, reason="距离车库点过远，直接沿指定路线找车"):
+                        self._load_road_patrol_path(location, reason="距离车库点过远，直接沿路找车")
                 else:
                     self._load_garage_find_path(location)
             else:
-                self._load_road_patrol_path(location, reason="车库无车，寻车阶段沿路巡游")
+                if not self._load_priority_car_search_path(location, reason="寻车阶段沿指定路线巡游"):
+                    self._load_road_patrol_path(location, reason="车库无车，寻车阶段沿路巡游")
         else:
             self._load_running_path(location)
 
@@ -1092,6 +1162,78 @@ class RunningManager:
             if not merged or merged[-1] != item:
                 merged.append(item)
         return merged
+
+    def _load_priority_car_search_path(self, location: Tuple[int, int], reason: str) -> bool:
+        if (
+            not self.finding_car
+            or self.car_search_mode != self.CAR_SEARCH_ROADSIDE
+            or not self.priority_car_search_active
+            or self.priority_car_search_finished
+        ):
+            return False
+
+        print(f"[Running] {reason}: {self.PRIORITY_CAR_SEARCH_POINTS}")
+        self._log_running_state(
+            reason,
+            location,
+            None,
+            "沿指定粗路线规划道路找车",
+            self.PRIORITY_CAR_SEARCH_POINTS[-1],
+        )
+
+        self._sync_priority_car_route_progress(location)
+        remaining_points = self.PRIORITY_CAR_SEARCH_POINTS[self.priority_car_search_next_index:]
+        if not remaining_points:
+            self.priority_car_search_finished = True
+            self.current_running_route_kind = self.RUNNING_ROUTE_PRIORITY_CAR_SEARCH
+            self.road_list = []
+            return True
+
+        route: List[Tuple[int, int]] = []
+        segment_start = location
+        for waypoint in remaining_points:
+            waypoint = tuple(map(int, waypoint))
+            if get_distance(segment_start, waypoint) <= self.WAYPOINT_TOLERANCE:
+                self._mark_priority_car_waypoint_reached(waypoint)
+                segment_start = waypoint
+                continue
+
+            segment = self.map_tool.plan_path(segment_start, waypoint) or [waypoint]
+            route = self._merge_paths(route, segment)
+            if not route or route[-1] != waypoint:
+                route = self._merge_paths(route, [waypoint])
+            segment_start = waypoint
+
+        if not route:
+            final_point = tuple(map(int, self.PRIORITY_CAR_SEARCH_POINTS[-1]))
+            if get_distance(location, final_point) <= self.WAYPOINT_TOLERANCE:
+                self.priority_car_search_finished = True
+                self.current_running_route_kind = self.RUNNING_ROUTE_PRIORITY_CAR_SEARCH
+                return False
+            route = [final_point]
+
+        self.current_road_node = None
+        self.road_list = route
+        self.current_running_route_kind = self.RUNNING_ROUTE_PRIORITY_CAR_SEARCH
+        self.garage_to_roadside_route_active = False
+        print(f"[Running] 指定寻车路线已生成: {self.road_list}")
+        return True
+
+    def _sync_priority_car_route_progress(self, location: Tuple[int, int]):
+        while self.priority_car_search_next_index < len(self.PRIORITY_CAR_SEARCH_POINTS):
+            waypoint = tuple(map(int, self.PRIORITY_CAR_SEARCH_POINTS[self.priority_car_search_next_index]))
+            if get_distance(location, waypoint) > self.WAYPOINT_TOLERANCE:
+                break
+            self.priority_car_search_next_index += 1
+            print(f"[Running] 指定寻车粗点已到达: {waypoint}")
+
+    def _mark_priority_car_waypoint_reached(self, point: Tuple[int, int]):
+        while self.priority_car_search_next_index < len(self.PRIORITY_CAR_SEARCH_POINTS):
+            waypoint = tuple(map(int, self.PRIORITY_CAR_SEARCH_POINTS[self.priority_car_search_next_index]))
+            if get_distance(point, waypoint) > self.WAYPOINT_TOLERANCE:
+                break
+            self.priority_car_search_next_index += 1
+            print(f"[Running] 指定寻车粗点已到达: {waypoint}")
 
     def _load_road_patrol_path(self, location: Tuple[int, int], reason: str):
         print(f"[Running] {reason}，规划道路点")
@@ -1550,6 +1692,8 @@ class RunningManager:
         if self.road_list:
             reached = self.road_list.pop(0)
             self.current_segment_start = reached
+            if self.current_running_route_kind == self.RUNNING_ROUTE_PRIORITY_CAR_SEARCH:
+                self._mark_priority_car_waypoint_reached(reached)
             if self.current_road_node is not None and get_distance(reached, self.current_road_node) <= self.ROAD_NODE_REACHED_TOLERANCE:
                 self.visited_road_nodes.add(self.current_road_node)
                 print(f"[Running] 已到达道路 node: {self.current_road_node}")
@@ -1559,6 +1703,8 @@ class RunningManager:
             self.loading_road = False
             self.current_segment_start = None
             print("[Running] 当前路径已走完，准备重新规划")
+            if self._handle_priority_car_route_finished(w, location, direction, "到达指定寻车路线终点"):
+                return
             self._mark_running_route_completed_if_needed(location, "到达路径终点")
 
     def _mark_running_route_completed_if_needed(self, location: Tuple[int, int], reason: str):
@@ -1594,6 +1740,8 @@ class RunningManager:
 
             reached = self.road_list.pop(0)
             self.current_segment_start = reached
+            if self.current_running_route_kind == self.RUNNING_ROUTE_PRIORITY_CAR_SEARCH:
+                self._mark_priority_car_waypoint_reached(reached)
             print(
                 f"[Running] 投影已越过锚点，切换下一个目标: reached={reached}, "
                 f"passed={passed_current:.2f}, next_ratio={next_ratio:.2f}, next_dist={next_dist:.2f}"
@@ -1783,6 +1931,9 @@ class RunningManager:
             print(f"[Running] {reason}，直接切换到沿路找车")
         self.finding_car = True
         self.car_search_mode = self.CAR_SEARCH_ROADSIDE
+        self.priority_car_search_active = True
+        self.priority_car_search_finished = False
+        self.priority_car_search_next_index = 0
         self.precise_entering_car = False
         self.precise_last_distance = None
         self.precise_idle_rounds = 0

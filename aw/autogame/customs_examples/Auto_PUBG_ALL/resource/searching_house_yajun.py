@@ -85,6 +85,10 @@ class Searching_House:
         self.house_search_timeout_reported = False
         self.abort_callback = None
         self.can_finish_callback = None
+        self.avoid_angle_ref = None
+        self.avoid_mode = None
+        self.initial_target_pending = True
+        self.location_missing_frames = 0
 
     def reset(self):
         self.completed_houses = set()
@@ -119,6 +123,10 @@ class Searching_House:
         self.indoor_stuck_frames = 0
         self.house_search_started_at = None
         self.house_search_timeout_reported = False
+        self.avoid_angle_ref = None
+        self.avoid_mode = None
+        self.initial_target_pending = True
+        self.location_missing_frames = 0
 
     def process(self, w: 'FrameWorker'):
         # self.start_searching(w)
@@ -134,17 +142,26 @@ class Searching_House:
 
         location_raw = w.get_info('location')
         if location_raw is None:
-            print('位置值是None，尝试向前移动一段距离刷新位置...')
-            w.tap_single('摇杆', y_bias=-300, wait=500)
+            self.location_missing_frames += 1
+            print('位置值是None，等待位置刷新...')
+            w.refresh_frame()
+            if self.location_missing_frames >= 3:
+                print('位置连续缺失，轻微移动以刷新位置...')
+                w.tap_single('摇杆', y_bias=-120, wait=300)
             return
         location = check_location(location_raw[0])
         direction = w.get_info('direction')
 
         if location is None:
-            print('位置值是None，尝试向前移动一段距离刷新位置...')
-            w.tap_single('摇杆', y_bias=-300, wait=500)
+            self.location_missing_frames += 1
+            print('位置值无效，等待位置刷新...')
+            w.refresh_frame()
+            if self.location_missing_frames >= 3:
+                print('位置连续无效，轻微移动以刷新位置...')
+                w.tap_single('摇杆', y_bias=-120, wait=300)
             return
 
+        self.location_missing_frames = 0
         self.searching_logic(w, location, direction)
 
     def _should_abort(self, w: 'FrameWorker'):
@@ -175,6 +192,10 @@ class Searching_House:
             self.current_house_id = None
             self.active_entry = None
             self.status = "IDLE"
+            self.avoid_angle_ref = None
+            self.avoid_mode = None
+            self.initial_target_pending = True
+            self.location_missing_frames = 0
             w.change_stage('跑图阶段')
             return True
 
@@ -187,6 +208,10 @@ class Searching_House:
         self.status = "IDLE"
         self.history_locations = []
         self.indoor_stuck_frames = 0
+        self.avoid_angle_ref = None
+        self.avoid_mode = None
+        self.initial_target_pending = True
+        self.location_missing_frames = 0
         return False
 
     def _get_forward_scene(self, w: 'FrameWorker'):
@@ -410,12 +435,20 @@ class Searching_House:
 
         # --- 智能选点 ---
         if self.current_house_id is None:
-            self.select_smart_target(current_loc, current_direction)
+            if self.initial_target_pending:
+                self.select_nearest_entry(current_loc)
+                self.initial_target_pending = False
+            else:
+                self.select_smart_target(current_loc, current_direction)
             if not self.current_house_id:
                 self._continue_searching_until_timer(w, "当前区域无合适目标或已搜完")
                 return
             self.status = "FAST_NAV"
-            print(f"[Searching] 锁定目标: {self.current_house_id} | 入口={self.active_entry['location']}")
+            target_dist = get_distance(current_loc, self.active_entry['location'])
+            print(
+                f"[Searching] 锁定目标: {self.current_house_id} | "
+                f"入口={self.active_entry['location']} | 距离={target_dist:.2f}"
+            )
             self.history_locations = []  # 切换目标时清空历史
 
         target_loc = self.active_entry['location']

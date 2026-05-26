@@ -55,6 +55,7 @@ START_GAME_VERIFY_DELAY = 5.0
 start_game = False
 start_game_click_time = None
 final_shutdown_pending = False
+rank_finish_pending = False
 next_phase_report_time = 0.0
 all_done_reported = False
 searching_view_synced = False
@@ -77,10 +78,11 @@ driving_manager.pause_sp_callback = pause_sp_after_death
 
 
 def prepare_round():
-    global next_phase_report_time, all_done_reported, searching_view_synced
+    global next_phase_report_time, all_done_reported, searching_view_synced, rank_finish_pending
 
     phase_timer.start_new_round()
     searching_view_synced = False
+    rank_finish_pending = False
     next_phase_report_time = 0.0
     all_done_reported = False
 
@@ -126,6 +128,8 @@ def handle_sp_stop(w: "FrameWorker"):
 
 
 def should_abort_searching(w: "FrameWorker"):
+    global rank_finish_pending
+
     if w.current_stage != "搜房阶段":
         return True
 
@@ -144,6 +148,7 @@ def should_abort_searching(w: "FrameWorker"):
 
     if w.get_info("个人排名") or w.get_info("队伍排名"):
         print("[Searching] 检测到排名界面，进入结束阶段")
+        rank_finish_pending = True
         searching_house_manager.stop_auto_forward(w)
         handle_sp_stop(w)
         w.change_stage("结束阶段")
@@ -176,6 +181,19 @@ def finalize_after_lobby(w: "FrameWorker"):
     global final_shutdown_pending
     final_shutdown_pending = False
     w.stop()
+
+
+def prepare_rank_finish_for_lobby(w: "FrameWorker"):
+    global rank_finish_pending
+
+    if not rank_finish_pending and not (w.get_info("个人排名") or w.get_info("队伍排名")):
+        return
+
+    print("[End] 检测到排名界面，先点击观战对手再返回大厅")
+    w.click("观战对手")
+    time.sleep(1)
+    w.refresh_frame()
+    rank_finish_pending = False
 
 
 def _format_phase_seconds(seconds: float) -> str:
@@ -404,6 +422,7 @@ def on_stage(w: "FrameWorker"):
     if w.current_stage == "结束阶段":
         if final_shutdown_pending:
             handle_sp_stop(w)
+            prepare_rank_finish_for_lobby(w)
             w.click("设置")
             time.sleep(1)
             w.click("返回大厅")
@@ -414,6 +433,7 @@ def on_stage(w: "FrameWorker"):
             return
 
         handle_sp_stop(w)
+        prepare_rank_finish_for_lobby(w)
 
         w.click("设置")
         time.sleep(1)

@@ -39,6 +39,8 @@ class Searching_House:
     HOUSE_BYPASS_SIDE_STEPS = 4
     HOUSE_BYPASS_FORWARD_STEPS = 3
     HOUSE_SEARCH_TIMEOUT_SECONDS = 60
+    ENTRY_WALL_BACKOFF_DURA = 520
+    ENTRY_WALL_BACKOFF_WAIT = 900
 
     def __init__(self):
         self.map_tool = MapNavigator()
@@ -421,7 +423,7 @@ class Searching_House:
 
         # --- 屋内卡死兜底检测 ---
         house_scene = self._get_house_scene(w)
-        if house_scene == 0:
+        if house_scene == 0 and not self._is_entry_approach_status():
             self.indoor_stuck_frames += 1
             if self.indoor_stuck_frames > 30:
                 print('[Searching] 检测到长时间困在屋内 (house_scene=0)，启动兜底出房策略')
@@ -722,6 +724,20 @@ class Searching_House:
         wait = int(max(450, min(2100, dist * 180)))
         return self.ENTRY_FINE_Y_BIAS, self.ENTRY_FINE_DURA, wait
 
+    def _is_entry_approach_status(self):
+        return self.status in {"FAST_NAV", "PRECISE_NAV", "SCANNING", "VISUAL_APPROACH", "INTERACT"}
+
+    def _backoff_and_recheck_house_scene(self, w: 'FrameWorker'):
+        print("[Unstuck] house_scene=indoor，可能是贴墙误判，先后退复核室内/室外")
+        w.tap_single(
+            '摇杆',
+            y_bias=300,
+            dura=self.ENTRY_WALL_BACKOFF_DURA,
+            wait=self.ENTRY_WALL_BACKOFF_WAIT,
+        )
+        w.refresh_frame()
+        return self._get_house_scene(w)
+
     def execute_unstuck_logic(self, w: 'FrameWorker', current_loc):
         self.stop_auto_forward(w)
 
@@ -732,7 +748,12 @@ class Searching_House:
             return check_location(raw[0])
 
         if self._get_house_scene(w) == 0:
-            print("[Unstuck] house_scene=indoor，优先使用 HouseExitManager 脱困")
+            house_scene_after_backoff = self._backoff_and_recheck_house_scene(w)
+            if house_scene_after_backoff != 0:
+                print("[Unstuck] 后退复核后已不判定为室内，按室外卡住继续导航")
+                return True
+
+            print("[Unstuck] 后退复核后仍为室内，使用 HouseExitManager 脱困")
             self.house_exit_manager.reset()
             for _ in range(20):
                 if self._should_abort(w):

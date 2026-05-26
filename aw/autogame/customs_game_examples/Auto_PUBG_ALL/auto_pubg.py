@@ -361,6 +361,8 @@ def on_stage(w: "FrameWorker"):
             return
 
         searching_view_synced = True
+        if previous_stage != "搜房阶段":
+            w.refresh_frame()
         searching_house_manager.process(w)
         return
         # house_scene = w.get_info("house_scene")

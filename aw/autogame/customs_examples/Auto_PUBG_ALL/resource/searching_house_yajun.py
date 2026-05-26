@@ -29,9 +29,9 @@ class Searching_House:
     ENTRY_COARSE_MOVE_DISTANCE = 10.0
     ENTRY_ARRIVAL_DISTANCE = 1.0
     ENTRY_COARSE_Y_BIAS = -430
-    ENTRY_COARSE_DURA = 480
+    ENTRY_COARSE_DURA = 650
     ENTRY_FINE_Y_BIAS = -220
-    ENTRY_FINE_DURA = 240
+    ENTRY_FINE_DURA = 320
     HOUSE_CLASS_IDS = {8}
     HOUSE_BLOCK_CENTER_OVERLAP = 0.12
     HOUSE_BLOCK_LOWER_OVERLAP = 0.18
@@ -622,7 +622,9 @@ class Searching_House:
                         time.sleep(0.5)
                     success = True
                     break
-                w.tap_single('摇杆', y_bias=-300, dura=300, wait=200)
+                if not self._advance_towards_entry_door(w):
+                    print("[Interact] 门目标丢失且兜底恢复失败")
+                    break
 
             if success:
                 print("[Interact] 交互成功，准备入户")
@@ -714,10 +716,10 @@ class Searching_House:
 
     def _get_entry_move_params(self, dist):
         if dist > self.ENTRY_COARSE_MOVE_DISTANCE:
-            wait = int(max(700, min(3400, dist * 95)))
+            wait = int(max(1100, min(5200, dist * 140)))
             return self.ENTRY_COARSE_Y_BIAS, self.ENTRY_COARSE_DURA, wait
 
-        wait = int(max(220, min(1300, dist * 120)))
+        wait = int(max(450, min(2100, dist * 180)))
         return self.ENTRY_FINE_Y_BIAS, self.ENTRY_FINE_DURA, wait
 
     def execute_unstuck_logic(self, w: 'FrameWorker', current_loc):
@@ -964,6 +966,52 @@ class Searching_House:
         doors = [obj for obj in scene if int(obj[5]) in [0, 4]]
         if not doors: return None
         return max(doors, key=lambda x: (x[2] - x[0]) * (x[3] - x[1]))
+
+    def _align_to_door_detection(self, w, door, tolerance_px=80):
+        for _ in range(4):
+            inf_w, inf_h = get_wh()
+            frame_w = max(inf_w, inf_h)
+            scale = self.screen_w / frame_w
+            door_center_x = (door[0] + door[2]) / 2
+            offset_real = (door_center_x - (frame_w / 2)) * scale
+            if abs(offset_real) <= tolerance_px:
+                return True
+
+            adjust_val = int(offset_real * 0.33)
+            adjust_val = max(-400, min(400, adjust_val))
+            w.tap_single('视角', x_bias=adjust_val, dura=500, wait=500)
+            w.refresh_frame()
+            refreshed = self.find_largest_door(w)
+            if refreshed is None:
+                return False
+            door = refreshed
+        return False
+
+    def _advance_towards_entry_door(self, w):
+        door = self.find_largest_door(w)
+        if door is not None:
+            print("[Interact] 前推前重新定位门并修正视角")
+            self._align_to_door_detection(w, door)
+            w.tap_single('摇杆', y_bias=-320, dura=320, wait=320)
+            w.refresh_frame()
+            return True
+
+        print("[Interact] 前推时门目标丢失，先给一次前推试错")
+        w.tap_single('摇杆', y_bias=-260, dura=260, wait=450)
+        w.refresh_frame()
+        if w.get_info('开门') or w.get_info('关门') or self.find_largest_door(w):
+            return True
+
+        print("[Interact] 试错后仍无门/交互按钮，后退重找门")
+        w.tap_single('摇杆', y_bias=300, dura=380, wait=650)
+        w.refresh_frame()
+        recovered = self.find_largest_door(w)
+        if recovered is None:
+            return False
+
+        self._align_to_door_detection(w, recovered)
+        w.refresh_frame()
+        return True
 
     def start_searching(self, w):
         if self._should_abort(w):

@@ -19,6 +19,10 @@ class HouseExitManager:
     WINDOW_CLASS_IDS = {2}
 
     SCAN_OFFSETS = [0, 45, -45, 90, -90, 135, -135, 180]
+    DOOR_LOST_FORWARD_DURA = 260
+    DOOR_LOST_FORWARD_WAIT = 450
+    DOOR_RECOVER_BACK_DURA = 380
+    DOOR_RECOVER_BACK_WAIT = 650
 
     def __init__(self):
         self.screen_w, self.screen_h = get_resolution()
@@ -30,6 +34,15 @@ class HouseExitManager:
         self.scan_index = 0
 
     def process(self, w: "FrameWorker") -> bool:
+        if self._is_terminal_state(w):
+            print("[HouseExit] 检测到死亡或结算界面，结束出房兜底流程")
+            self.reset()
+            try:
+                w.change_stage("结束阶段")
+            except Exception:
+                pass
+            return True
+
         house_scene = self._get_house_scene(w)
         if house_scene != self.HOUSE_INDOOR:
             if house_scene == self.HOUSE_OUTDOOR:
@@ -69,6 +82,14 @@ class HouseExitManager:
             return []
         return list(scene)
 
+    def _is_terminal_state(self, w: "FrameWorker") -> bool:
+        return bool(
+            w.get_info("变身")
+            or w.get_info("红色血条")
+            or w.get_info("个人排名")
+            or w.get_info("队伍排名")
+        )
+
     def _find_largest_target(
         self,
         detections: Sequence[Sequence[float]],
@@ -92,9 +113,56 @@ class HouseExitManager:
             time.sleep(0.8)
             w.refresh_frame()
 
-        print("[HouseExit] 小步靠近门口")
-        self._move_forward(w, dura=220, wait=380)
+        approached = self._approach_door_with_recovery(w, door)
+        if self._is_terminal_state(w):
+            print("[HouseExit] 靠近门过程中检测到死亡或结算界面，结束出房兜底流程")
+            self.reset()
+            try:
+                w.change_stage("结束阶段")
+            except Exception:
+                pass
+            return True
+        if not approached:
+            return False
         return self._verify_exit_success(w)
+
+    def _approach_door_with_recovery(self, w: "FrameWorker", door: Sequence[float]) -> bool:
+        for step in range(3):
+            if self._is_terminal_state(w):
+                return True
+
+            refreshed = self._find_largest_target(self._get_forward_scene(w), self.DOOR_CLASS_IDS)
+            if refreshed:
+                door = refreshed
+                print(f"[HouseExit] 靠近门口前修正门位置 step={step + 1}")
+                self._align_to_target(w, door)
+                w.refresh_frame()
+                if w.get_info("开门"):
+                    w.click("开门")
+                    time.sleep(0.6)
+                    w.refresh_frame()
+                self._move_forward(w, dura=240, wait=420)
+                w.refresh_frame()
+                continue
+
+            print("[HouseExit] 前推时门丢失，先给一次前推试错")
+            self._move_forward(w, dura=self.DOOR_LOST_FORWARD_DURA, wait=self.DOOR_LOST_FORWARD_WAIT)
+            w.refresh_frame()
+            if w.get_info("开门") or w.get_info("关门"):
+                return True
+            if self._find_largest_target(self._get_forward_scene(w), self.DOOR_CLASS_IDS):
+                continue
+
+            print("[HouseExit] 试错后仍未找到门，后退并重新定位门")
+            self._move_backward(w, dura=self.DOOR_RECOVER_BACK_DURA, wait=self.DOOR_RECOVER_BACK_WAIT)
+            w.refresh_frame()
+            recovered = self._find_largest_target(self._get_forward_scene(w), self.DOOR_CLASS_IDS)
+            if not recovered:
+                return False
+            self._align_to_target(w, recovered)
+            w.refresh_frame()
+
+        return True
 
     def _exit_via_window(self, w: "FrameWorker", window: Sequence[float]) -> bool:
         for _ in range(4):
@@ -172,6 +240,9 @@ class HouseExitManager:
 
     def _move_forward(self, w: "FrameWorker", dura=350, wait=600):
         w.tap_single("摇杆", y_bias=-300, dura=dura, wait=wait)
+
+    def _move_backward(self, w: "FrameWorker", dura=350, wait=600):
+        w.tap_single("摇杆", y_bias=300, dura=dura, wait=wait)
 
     def _align_to_target(self, w: "FrameWorker", target: Sequence[float], tolerance_px=80):
         for _ in range(6):

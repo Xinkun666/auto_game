@@ -358,8 +358,15 @@ class RunningManager:
     # 落水后，上浮和向前划水脱离水面的操作参数
     WATER_FLOAT_DURA = 2000
     WATER_FORWARD_BIAS_Y = -280
-    WATER_FORWARD_DURA = 900
-    WATER_FORWARD_WAIT = 3000
+    WATER_FORWARD_DURA = 1200
+    WATER_FORWARD_WAIT = 5200
+    WATER_EXIT_STUCK_FRAMES = 3
+    WATER_EXIT_STUCK_DISTANCE = 0.6
+    WATER_EXIT_STUCK_WINDOW = 18.0
+    WATER_EXIT_BACK_DURA = 650
+    WATER_EXIT_BACK_WAIT = 900
+    WATER_EXIT_SIDE_DURA = 900
+    WATER_EXIT_SIDE_WAIT = 1500
     # 刚下车后，忽略附近车辆交互的保护时间，避免立刻又上车
     VEHICLE_EXIT_PROTECTION = 5.0
     # 下车后若仍贴着车，先短暂移动离开载具
@@ -441,6 +448,12 @@ class RunningManager:
         self.priority_car_search_active = False
         self.priority_car_search_finished = False
         self.priority_car_search_next_index = 0
+        self.priority_car_search_road_points: List[Tuple[int, int]] = []
+        self.water_exit_last_location: Optional[Tuple[int, int]] = None
+        self.water_exit_stuck_frames = 0
+        self.water_exit_last_time = 0.0
+        self.water_exit_side_sign = 1
+        self.water_escape_target: Optional[Tuple[int, int]] = None
 
     def reset(self, finding_car: bool = True):
         self.road_list = []
@@ -486,6 +499,12 @@ class RunningManager:
         self.priority_car_search_active = bool(finding_car)
         self.priority_car_search_finished = False
         self.priority_car_search_next_index = 0
+        self.priority_car_search_road_points = []
+        self.water_exit_last_location = None
+        self.water_exit_stuck_frames = 0
+        self.water_exit_last_time = 0.0
+        self.water_exit_side_sign = 1
+        self.water_escape_target = None
         self.house_exit_manager.reset()
         print("[Running] 状态已重置!")
 
@@ -541,6 +560,9 @@ class RunningManager:
 
         if self._is_in_water(w):
             self._handle_water_escape(w, location, direction)
+            return
+
+        if self._handle_recent_water_exit_stuck(w, location, direction):
             return
 
         if self._handle_forbidden_escape(w, location, direction):
@@ -743,6 +765,7 @@ class RunningManager:
             self.priority_car_search_active = True
             self.priority_car_search_finished = False
             self.priority_car_search_next_index = 0
+            self.priority_car_search_road_points = []
             self._switch_to_roadside_car_search(
                 "开车未完成且进圈路线已处理",
                 leave_garage_route=False,
@@ -841,7 +864,8 @@ class RunningManager:
         if self.road_list:
             return False
 
-        final_point = tuple(map(int, self.PRIORITY_CAR_SEARCH_POINTS[-1]))
+        route_points = self._get_priority_car_search_road_points()
+        final_point = route_points[-1] if route_points else tuple(map(int, self.PRIORITY_CAR_SEARCH_POINTS[-1]))
         final_dist = get_distance(location, final_point)
         if final_dist > max(self.WAYPOINT_TOLERANCE, self.ROAD_NODE_REACHED_TOLERANCE):
             return False
@@ -887,6 +911,7 @@ class RunningManager:
         self.priority_car_search_active = bool(self.finding_car)
         self.priority_car_search_finished = False
         self.priority_car_search_next_index = 0
+        self.priority_car_search_road_points = []
         self.loading_road = False
         self.precise_entering_car = False
         self.precise_last_distance = None
@@ -925,6 +950,7 @@ class RunningManager:
         self.priority_car_search_active = bool(self.finding_car)
         self.priority_car_search_finished = False
         self.priority_car_search_next_index = 0
+        self.priority_car_search_road_points = []
         self.car_search_mode = self.CAR_SEARCH_ROADSIDE
         self.loading_road = False
         self.road_list = []
@@ -1181,8 +1207,10 @@ class RunningManager:
             self.PRIORITY_CAR_SEARCH_POINTS[-1],
         )
 
+        use_topology_nodes = self.road_helper.topology_available()
         self._sync_priority_car_route_progress(location)
-        remaining_points = self.PRIORITY_CAR_SEARCH_POINTS[self.priority_car_search_next_index:]
+        route_points = self._get_priority_car_search_road_points(use_topology_nodes)
+        remaining_points = route_points[self.priority_car_search_next_index:]
         if not remaining_points:
             self.priority_car_search_finished = True
             self.current_running_route_kind = self.RUNNING_ROUTE_PRIORITY_CAR_SEARCH
@@ -1191,21 +1219,31 @@ class RunningManager:
 
         route: List[Tuple[int, int]] = []
         segment_start = location
-        for waypoint in remaining_points:
-            waypoint = tuple(map(int, waypoint))
-            if get_distance(segment_start, waypoint) <= self.WAYPOINT_TOLERANCE:
-                self._mark_priority_car_waypoint_reached(waypoint)
-                segment_start = waypoint
+
+        start_node, start_node_dist = self.road_helper.nearest_node(
+            location,
+            topology_only=use_topology_nodes,
+        )
+        if start_node is not None and start_node_dist > self.ROAD_NODE_REACHED_TOLERANCE:
+            print(f"[Running] 指定寻车路线先接入最近道路点 {start_node}, dist={start_node_dist:.2f}")
+            route = self._merge_paths(route, self.road_helper.plan_to_node(location, start_node))
+            segment_start = route[-1] if route else start_node
+
+        for road_point in remaining_points:
+            road_point = tuple(map(int, road_point))
+            if get_distance(segment_start, road_point) <= self.WAYPOINT_TOLERANCE:
+                self._mark_priority_car_waypoint_reached(road_point)
+                segment_start = road_point
                 continue
 
-            segment = self.map_tool.plan_path(segment_start, waypoint) or [waypoint]
+            segment = self.road_helper.plan_to_node(segment_start, road_point)
             route = self._merge_paths(route, segment)
-            if not route or route[-1] != waypoint:
-                route = self._merge_paths(route, [waypoint])
-            segment_start = waypoint
+            if not route or route[-1] != road_point:
+                route = self._merge_paths(route, [road_point])
+            segment_start = route[-1] if route else road_point
 
         if not route:
-            final_point = tuple(map(int, self.PRIORITY_CAR_SEARCH_POINTS[-1]))
+            final_point = route_points[-1] if route_points else tuple(map(int, self.PRIORITY_CAR_SEARCH_POINTS[-1]))
             if get_distance(location, final_point) <= self.WAYPOINT_TOLERANCE:
                 self.priority_car_search_finished = True
                 self.current_running_route_kind = self.RUNNING_ROUTE_PRIORITY_CAR_SEARCH
@@ -1219,21 +1257,50 @@ class RunningManager:
         print(f"[Running] 指定寻车路线已生成: {self.road_list}")
         return True
 
+    def _get_priority_car_search_road_points(self, use_topology_nodes: Optional[bool] = None) -> List[Tuple[int, int]]:
+        if self.priority_car_search_road_points:
+            return self.priority_car_search_road_points
+
+        if use_topology_nodes is None:
+            use_topology_nodes = self.road_helper.topology_available()
+
+        mapped_points: List[Tuple[int, int]] = []
+        for anchor in self.PRIORITY_CAR_SEARCH_POINTS:
+            anchor = tuple(map(int, anchor))
+            road_node, road_dist = self.road_helper.nearest_node(
+                anchor,
+                topology_only=use_topology_nodes,
+            )
+            if road_node is None:
+                print(f"[Running] 锚点 {anchor} 未找到附近道路点，暂用原点兜底")
+                road_node = anchor
+                road_dist = 0.0
+
+            road_node = tuple(map(int, road_node))
+            if not mapped_points or mapped_points[-1] != road_node:
+                mapped_points.append(road_node)
+            print(f"[Running] 指定寻车锚点 {anchor} -> 最近道路点 {road_node}, dist={road_dist:.2f}")
+
+        self.priority_car_search_road_points = mapped_points
+        return self.priority_car_search_road_points
+
     def _sync_priority_car_route_progress(self, location: Tuple[int, int]):
-        while self.priority_car_search_next_index < len(self.PRIORITY_CAR_SEARCH_POINTS):
-            waypoint = tuple(map(int, self.PRIORITY_CAR_SEARCH_POINTS[self.priority_car_search_next_index]))
-            if get_distance(location, waypoint) > self.WAYPOINT_TOLERANCE:
+        route_points = self._get_priority_car_search_road_points()
+        while self.priority_car_search_next_index < len(route_points):
+            road_point = tuple(map(int, route_points[self.priority_car_search_next_index]))
+            if get_distance(location, road_point) > self.WAYPOINT_TOLERANCE:
                 break
             self.priority_car_search_next_index += 1
-            print(f"[Running] 指定寻车粗点已到达: {waypoint}")
+            print(f"[Running] 指定寻车道路点已到达: {road_point}")
 
     def _mark_priority_car_waypoint_reached(self, point: Tuple[int, int]):
-        while self.priority_car_search_next_index < len(self.PRIORITY_CAR_SEARCH_POINTS):
-            waypoint = tuple(map(int, self.PRIORITY_CAR_SEARCH_POINTS[self.priority_car_search_next_index]))
-            if get_distance(point, waypoint) > self.WAYPOINT_TOLERANCE:
+        route_points = self._get_priority_car_search_road_points()
+        while self.priority_car_search_next_index < len(route_points):
+            road_point = tuple(map(int, route_points[self.priority_car_search_next_index]))
+            if get_distance(point, road_point) > self.WAYPOINT_TOLERANCE:
                 break
             self.priority_car_search_next_index += 1
-            print(f"[Running] 指定寻车粗点已到达: {waypoint}")
+            print(f"[Running] 指定寻车道路点已到达: {road_point}")
 
     def _load_road_patrol_path(self, location: Tuple[int, int], reason: str):
         print(f"[Running] {reason}，规划道路点")
@@ -1408,10 +1475,14 @@ class RunningManager:
     ):
         self.stop_auto_forward(w)
         target = self._get_running_target(location)
+        self.water_escape_target = target
         self._log_running_state("检测到落水", location, direction, "执行上浮脱困", target)
 
-        print("[Running] 检测到上浮图标，先长按上浮 1s")
-        w.click_down(w.get_info("上浮"), dura=self.WATER_FLOAT_DURA)
+        print("[Running] 检测到上浮图标，先点击上浮再长按保持浮出水面")
+        float_button = w.get_info("上浮")
+        w.click("上浮")
+        time.sleep(0.2)
+        w.click_down(float_button or "上浮", dura=self.WATER_FLOAT_DURA)
         time.sleep(0.3)
         w.refresh_frame()
 
@@ -1423,7 +1494,7 @@ class RunningManager:
             if not aligned:
                 return
 
-        print("[Running] 开始用摇杆向前划水脱离水面")
+        print("[Running] 开始按目标方向长推摇杆脱离水面")
         w.tap_single(
             "摇杆",
             y_bias=self.WATER_FORWARD_BIAS_Y,
@@ -1437,9 +1508,82 @@ class RunningManager:
             new_location = self._get_location(w) or updated_location
             new_direction = self._get_scalar(w.get_info("direction"))
             self._log_running_state("已脱离水面", new_location, new_direction, "恢复正常跑图", target)
+            self.water_exit_last_location = new_location
+            self.water_exit_stuck_frames = 0
+            self.water_exit_last_time = time.time()
+            self.loading_road = False
+            self.current_segment_start = None
             return
 
         print("[Running] 仍在水中，下一帧继续执行脱水流程")
+
+    def _handle_recent_water_exit_stuck(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+    ) -> bool:
+        if self.water_exit_last_location is None:
+            return False
+
+        if time.time() - self.water_exit_last_time > self.WATER_EXIT_STUCK_WINDOW:
+            self.water_exit_last_location = None
+            self.water_exit_stuck_frames = 0
+            return False
+
+        moved = get_distance(self.water_exit_last_location, location)
+        if moved > self.WATER_EXIT_STUCK_DISTANCE:
+            self.water_exit_last_location = location
+            self.water_exit_stuck_frames = 0
+            self.water_exit_last_time = time.time()
+            return False
+
+        self.water_exit_stuck_frames += 1
+        if self.water_exit_stuck_frames < self.WATER_EXIT_STUCK_FRAMES:
+            return False
+
+        target = self.water_escape_target or self._get_running_target(location)
+        print("[Running] 刚上岸后位置不动，疑似卡在岸边，换上岸点")
+        self._log_running_state("岸边上岸卡住", location, direction, "后退并侧移更换上岸点", target)
+        self.stop_auto_forward(w)
+
+        w.tap_single(
+            "摇杆",
+            y_bias=280,
+            dura=self.WATER_EXIT_BACK_DURA,
+            wait=self.WATER_EXIT_BACK_WAIT,
+        )
+        w.refresh_frame()
+
+        side_bias = 360 * self.water_exit_side_sign
+        self.water_exit_side_sign *= -1
+        w.tap_single(
+            "摇杆",
+            x_bias=side_bias,
+            dura=self.WATER_EXIT_SIDE_DURA,
+            wait=self.WATER_EXIT_SIDE_WAIT,
+        )
+        w.refresh_frame()
+
+        new_location = self._get_location(w) or location
+        new_direction = self._get_scalar(w.get_info("direction"))
+        if target is not None and new_direction is not None:
+            self._align_to_point(w, new_location, new_direction, target, threshold=8)
+
+        w.tap_single(
+            "摇杆",
+            y_bias=self.WATER_FORWARD_BIAS_Y,
+            dura=self.WATER_FORWARD_DURA,
+            wait=self.WATER_FORWARD_WAIT,
+        )
+        w.refresh_frame()
+
+        self.water_exit_last_location = self._get_location(w) or new_location
+        self.water_exit_last_time = time.time()
+        self.water_exit_stuck_frames = 0
+        self.loading_road = False
+        self.current_segment_start = None
+        return True
 
     def _get_running_target(self, location: Tuple[int, int]) -> Optional[Tuple[int, int]]:
         if self.road_list:
@@ -1934,6 +2078,7 @@ class RunningManager:
         self.priority_car_search_active = True
         self.priority_car_search_finished = False
         self.priority_car_search_next_index = 0
+        self.priority_car_search_road_points = []
         self.precise_entering_car = False
         self.precise_last_distance = None
         self.precise_idle_rounds = 0

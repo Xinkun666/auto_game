@@ -21,6 +21,17 @@ class Searching_House:
     UNSTUCK_MAX_CYCLES = 6
     UNSTUCK_FORWARD_STEPS = 5
     PICKUP_MAX_PER_DIRECTION = 3
+    INITIAL_LOCATION_MIN_SAMPLES = 3
+    INITIAL_LOCATION_MAX_SAMPLES = 6
+    INITIAL_LOCATION_STABLE_DISTANCE = 2.5
+    INITIAL_LOCATION_JUMP_RESET_DISTANCE = 8.0
+    ENTRY_AUTO_FORWARD_DISTANCE = 30.0
+    ENTRY_COARSE_MOVE_DISTANCE = 10.0
+    ENTRY_ARRIVAL_DISTANCE = 1.0
+    ENTRY_COARSE_Y_BIAS = -430
+    ENTRY_COARSE_DURA = 480
+    ENTRY_FINE_Y_BIAS = -220
+    ENTRY_FINE_DURA = 240
     HOUSE_CLASS_IDS = {8}
     HOUSE_BLOCK_CENTER_OVERLAP = 0.12
     HOUSE_BLOCK_LOWER_OVERLAP = 0.18
@@ -89,6 +100,7 @@ class Searching_House:
         self.avoid_mode = None
         self.initial_target_pending = True
         self.location_missing_frames = 0
+        self.initial_location_samples = []
 
     def reset(self):
         self.completed_houses = set()
@@ -127,6 +139,7 @@ class Searching_House:
         self.avoid_mode = None
         self.initial_target_pending = True
         self.location_missing_frames = 0
+        self.initial_location_samples = []
 
     def process(self, w: 'FrameWorker'):
         # self.start_searching(w)
@@ -196,6 +209,7 @@ class Searching_House:
             self.avoid_mode = None
             self.initial_target_pending = True
             self.location_missing_frames = 0
+            self.initial_location_samples = []
             w.change_stage('跑图阶段')
             return True
 
@@ -212,6 +226,7 @@ class Searching_House:
         self.avoid_mode = None
         self.initial_target_pending = True
         self.location_missing_frames = 0
+        self.initial_location_samples = []
         return False
 
     def _get_forward_scene(self, w: 'FrameWorker'):
@@ -436,6 +451,12 @@ class Searching_House:
         # --- 智能选点 ---
         if self.current_house_id is None:
             if self.initial_target_pending:
+                stable_loc = self._get_stable_initial_location(current_loc)
+                if stable_loc is None:
+                    self.stop_auto_forward(w)
+                    w.refresh_frame()
+                    return
+                current_loc = stable_loc
                 self.select_nearest_entry(current_loc)
                 self.initial_target_pending = False
             else:
@@ -454,7 +475,7 @@ class Searching_House:
         target_loc = self.active_entry['location']
         dist = get_distance(current_loc, target_loc)
 
-        # --- 快速前进 (距离 > 5.0) ---
+        # --- 快速前进 (距离 > 30.0 才使用自动前进) ---
         if self.status == "FAST_NAV":
             # 卡顿检测逻辑
             if self.update_and_check_stuck(current_loc):
@@ -465,8 +486,8 @@ class Searching_House:
                 self.history_locations = []
                 return
 
-            if dist <= 5.0:
-                print(f"[Nav] 进入精细导航范围 (距离 {dist:.2f})")
+            if dist <= self.ENTRY_AUTO_FORWARD_DISTANCE:
+                print(f"[Nav] 进入摇杆分段导航范围 (距离 {dist:.2f})")
                 self.stop_auto_forward(w)
                 self.status = "PRECISE_NAV"
                 return
@@ -479,7 +500,7 @@ class Searching_House:
 
             self.handle_jump_logic(w)
 
-        # --- 精细逼近 ---
+        # --- 分段摇杆逼近 ---
         elif self.status == "PRECISE_NAV":
             # --- [修改 1] 在精细导航阶段加入卡顿检测 ---
             # 原因：即使在慢速移动时，也可能卡在树根或小障碍物上
@@ -492,15 +513,16 @@ class Searching_House:
                 return
             # ----------------------------------------
 
-            if dist <= 1:
+            if dist <= self.ENTRY_ARRIVAL_DISTANCE:
                 print(f"[Nav] 已到达进门点 (距离 {dist:.2f})")
                 self.status = "SCANNING"
                 return
 
             self.stop_auto_forward(w)
             self.align_direction(w, target_loc)
-            press_duration = get_time_from_distance(dist)
-            w.tap_single('摇杆', y_bias=-300, dura=300, wait=press_duration - 300)
+            y_bias, dura, wait = self._get_entry_move_params(dist)
+            print(f"[Nav] 分段推进到进门点: dist={dist:.2f}, y_bias={y_bias}, dura={dura}, wait={wait}")
+            w.tap_single('摇杆', y_bias=y_bias, dura=dura, wait=wait)
             w.refresh_frame()
             self.handle_jump_logic(w)
 
@@ -650,6 +672,53 @@ class Searching_House:
         y_coords = [loc[1] for loc in self.history_locations]
         max_dist = math.sqrt((max(x_coords) - min(x_coords)) ** 2 + (max(y_coords) - min(y_coords)) ** 2)
         return max_dist < self.stuck_threshold
+
+    def _get_stable_initial_location(self, current_loc):
+        """落地后等待小地图坐标稳定，避免沿用跳伞前旧位置选错最近入口。"""
+        loc = tuple(current_loc)
+        if self.initial_location_samples:
+            prev = self.initial_location_samples[-1]
+            jump_dist = get_distance(prev, loc)
+            if jump_dist >= self.INITIAL_LOCATION_JUMP_RESET_DISTANCE:
+                print(
+                    f"[Searching] 落地坐标跳变 {jump_dist:.2f}，"
+                    f"丢弃旧样本 prev={prev}, current={loc}"
+                )
+                self.initial_location_samples = [loc]
+                return None
+
+        self.initial_location_samples.append(loc)
+        if len(self.initial_location_samples) > self.INITIAL_LOCATION_MAX_SAMPLES:
+            self.initial_location_samples.pop(0)
+
+        if len(self.initial_location_samples) < self.INITIAL_LOCATION_MIN_SAMPLES:
+            print(
+                f"[Searching] 等待落地位置稳定 "
+                f"{len(self.initial_location_samples)}/{self.INITIAL_LOCATION_MIN_SAMPLES}: {loc}"
+            )
+            return None
+
+        x_coords = [item[0] for item in self.initial_location_samples]
+        y_coords = [item[1] for item in self.initial_location_samples]
+        spread = math.sqrt((max(x_coords) - min(x_coords)) ** 2 + (max(y_coords) - min(y_coords)) ** 2)
+        if spread <= self.INITIAL_LOCATION_STABLE_DISTANCE:
+            print(f"[Searching] 落地位置已稳定: {loc}, spread={spread:.2f}")
+            return loc
+
+        if len(self.initial_location_samples) >= self.INITIAL_LOCATION_MAX_SAMPLES:
+            print(f"[Searching] 落地位置仍有波动，使用最新坐标: {loc}, spread={spread:.2f}")
+            return loc
+
+        print(f"[Searching] 落地位置仍在刷新: latest={loc}, spread={spread:.2f}")
+        return None
+
+    def _get_entry_move_params(self, dist):
+        if dist > self.ENTRY_COARSE_MOVE_DISTANCE:
+            wait = int(max(700, min(3400, dist * 95)))
+            return self.ENTRY_COARSE_Y_BIAS, self.ENTRY_COARSE_DURA, wait
+
+        wait = int(max(220, min(1300, dist * 120)))
+        return self.ENTRY_FINE_Y_BIAS, self.ENTRY_FINE_DURA, wait
 
     def execute_unstuck_logic(self, w: 'FrameWorker', current_loc):
         self.stop_auto_forward(w)

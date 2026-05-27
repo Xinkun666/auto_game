@@ -1,8 +1,3 @@
-# import time
-# import cv2
-# import math
-# import numpy as np
-# from datetime import datetime
 import random
 import time
 from typing import TYPE_CHECKING
@@ -144,7 +139,6 @@ class Searching_House:
         self.initial_location_samples = []
 
     def process(self, w: 'FrameWorker'):
-        # self.start_searching(w)
         if self._should_abort(w):
             return
 
@@ -1261,7 +1255,6 @@ class Searching_House:
                 continue
 
             # 轨迹笔直，允许前进
-            # self.adb.forward(30)
             w.tap_single('摇杆', y_bias=-400, dura=300)
             w.refresh_frame()
             time.sleep(0.2)
@@ -1484,302 +1477,6 @@ class Searching_House:
         print("========回正方向==============")
         return len(collected)
 
-    # def _scan_for_open_door(self, w, max_rotate=360):
-    #     """旋转视角寻找开启的门（最多旋转 max_rotate 度），找到后返回 (rel_angle, box_h)"""
-    #     total = 0
-    #     while total < max_rotate:
-    #         self._turn(w, 30)
-    #         total += 30
-    #         time.sleep(0.2)
-    #         res = self._find_open_door_in_view(w)
-    #         if res:
-    #             return res
-    #     return None
-    #
-    # def _find_open_door_in_view(self, w):
-    #     """当前视角中寻找未访问的开启门，返回 (rel_angle, box_h) 或 None"""
-    #     doors = self.new_targets_of_class(w, [4])
-    #     if not doors:
-    #         return None
-    #     # 按框高排序，优先处理最近的
-    #     doors.sort(key=lambda x: x[1], reverse=True)
-    #     for rel_ang, bh, _, _ in doors:
-    #         # 去重：与已访问门比较相对角度和框高
-    #         if self._is_entry_door(rel_ang, bh):
-    #             continue
-    #             # 2. 过滤已访问的子房间门（基于绝对角度+框高去重）
-    #         abs_ang = (self.room_yaw + rel_ang) % 360
-    #         already = False
-    #         for v_abs, v_bh in self.visited_sub_doors:
-    #             if abs((abs_ang - v_abs + 180) % 360 - 180) < 10 and abs(bh - v_bh) < 30:
-    #                 already = True
-    #                 break
-    #         if not already:
-    #             return (rel_ang, bh)
-    #     return None
-
-    # def _exit_house(self,w):
-    #     print("\n>>> 离开房屋")
-    #     # 优先：入口房间存在 class=0 的非入口门
-    #     if self.has_closed_exit:
-    #         print("[出口] 入口房间存在关闭的非入口门，寻找...")
-    #         # 重新扫描当前房间门（可能视角已变）
-    #         current_doors = self._scan_current_room_doors(w)
-    #         # 排除入口门
-    #         if self.entry_door:
-    #             e_abs, e_bh, e_cls = self.entry_door
-    #             current_doors = [d for d in current_doors if not (
-    #                 abs((d[0]-e_abs+180)%360-180) < 10 and abs(d[1]-e_bh) < 30 and d[2]==e_cls
-    #             )]
-    #         # 选择 关闭着的门中框高最大的（最近）
-    #         closed_doors = [d for d in current_doors if d[2] == 0]
-    #         if closed_doors:
-    #             exit_door = max(closed_doors, key=lambda x: x[1])
-    #             rel_exit = (exit_door[0] - self.room_yaw + 180) % 360 - 180
-    #             self._enter_door_dynamic(rel_exit, 0)
-    #             return
-    #         else:
-    #             print("[出口] 未找到关闭的门，尝试其他方式...")
-    #
-    #     # 其次：尝试进入任意子房间寻找 class=0 的门
-    #     if self.sub_rooms:
-    #         print("[出口] 尝试进入子房间寻找关闭的门...")
-    #         for info in self.sub_rooms:
-    #             # 这里我们简化：重新扫描入口房间，找到一个非入口门进入（不一定是之前那个）
-    #             # 直接进入最近的子房间（假设之前记录了入口角度）
-    #             pass
-    #         # 由于我们没有保存子房间入口的绝对角度，此处略过，直接走入口门
-    #         # 实际使用时可从 self.visited_doors_info 中选取未访问过的关闭门进入
-    #
-    #     # 最后：从入口门离开
-    #     if self.entry_door:
-    #         e_abs, _, _ = self.entry_door
-    #         rel_exit = (e_abs - self.room_yaw + 180) % 360 - 180
-    #         self._enter_door_dynamic(rel_exit, 4)
-    #     else:
-    #         print("[错误] 无法找到出口")
-    #
-    #
-    # def _enter_door_dynamic(self, w, initial_rel_angle, door_class=None):
-    #     """
-    #     垂直靠近并穿过门。
-    #     若 door_class 已知，按对应策略；否则根据实时检测自动处理。
-    #     返回 (是否成功, 记录到的框高)
-    #     """
-    #     self._visual_align(w, initial_rel_angle, [0,4])
-    #     print(f"  [进门] 开始靠近...")
-    #     recorded_bh = None
-    #     for _ in range(30):
-    #         doors = self.targets_of_class(w,[0,4])
-    #         front = [d for d in doors if abs(d[0]) < 5]
-    #         if not front:
-    #             if door_class == 0:
-    #                 print("  [进门] 贴门（关闭），开门")
-    #                 if w.get_info('开门'):
-    #                     w.click('开门')
-    #                     time.sleep(1)
-    #                 time.sleep(0.5)
-    #                 w.tap_single('摇杆', y_bias=-20, dura=300, wait=200)
-    #                 w.refresh_frame()
-    #                 return True, recorded_bh
-    #             else:
-    #                 print("  [进门] 前方无门，已穿过")
-    #                 w.tap_single('摇杆', y_bias=-40, dura=300, wait=200)
-    #                 w.refresh_frame()
-    #                 time.sleep(0.5)
-    #                 w.tap_single('摇杆', y_bias=-40, dura=300, wait=200)
-    #                 w.refresh_frame()
-    #                 time.sleep(0.5)
-    #
-    #                 return True, recorded_bh
-    #
-    #         best = max(front, key=lambda x: x[1])
-    #         rel_ang, bh, cls, _ = best
-    #         recorded_bh = bh
-    #
-    #         current_cls = door_class if door_class is not None else cls
-    #
-    #         # 开门且框高极大，直接穿过
-    #         inf_w, inf_h = get_wh()
-    #         frame_h = min(inf_w, inf_h)
-    #         if current_cls == 4 and bh > frame_h * 0.7:
-    #             print("  [进门] 开着的门已贴面，穿过")
-    #             for _ in range(2):
-    #                 w.tap_single('摇杆', y_bias=-20, dura=300, wait=200)
-    #                 w.refresh_frame()
-    #                 time.sleep(0.2)
-    #             return True, recorded_bh
-    #
-    #         if abs(rel_ang) > 1:
-    #             self._turn(w, max(-5, min(5, rel_ang * 0.9)))  # 微调视角
-    #             time.sleep(0.1)
-    #             continue
-    #         w.tap_single('摇杆', y_bias=-20, dura=300, wait=200)
-    #         w.refresh_frame()
-    #         time.sleep(0.2)
-    #     print("  [进门] 超时")
-    #     return False, recorded_bh
-    #
-    # def _initial_entrance_scan(self, w):
-    #     """
-    #     入口房间进入后调用一次，旋转360°记录所有门，
-    #     标记入口门（身后框高最大的门），并记录是否存在 class=0 的非入口门。
-    #     """
-    #     # 1. 扫描所有门
-    #     all_doors = self._scan_current_room_doors(w)
-    #     if not all_doors:
-    #         print("[入口] 未发现任何门")
-    #         return
-    #
-    #     # 2. 标记入口门（身后方向，即绝对角度最接近180°）
-    #     entry = None
-    #     best_diff = float('inf')
-    #     for abs_ang, bh, cls in all_doors:
-    #         diff = abs((abs_ang - 180 + 180) % 360 - 180)
-    #         # 选择最接近180°且框高最大的
-    #         if diff < best_diff or (diff == best_diff and (entry is None or bh > entry[1])):
-    #             best_diff = diff
-    #             entry = (abs_ang, bh, cls)
-    #     self.entry_door = entry
-    #     print("当前旋转360度的门的信息{}".format(all_doors))
-    #     print(f"[入口门] 绝对角度 {entry[0]:.1f}° 框高 {entry[1]} 类型 {entry[2]}")
-    #
-    #     # 3. 判断是否存在 class=0 的非入口门
-    #     has_closed = False
-    #     for abs_ang, bh, cls in all_doors:
-    #         if (abs_ang, bh, cls) == entry:
-    #             continue
-    #         if cls[5] == 0:
-    #             has_closed = True
-    #             break
-    #     self.has_closed_exit = has_closed
-    #     print(f"[出口标记] 入口房间有非入口的关闭门: {has_closed}")
-    #
-    #     # 存储入口房间所有门信息，用于后续去重和出口
-    #     self.entrance_all_doors = all_doors
-    # def _find_sub_room_doors(self,w):
-    #     """
-    #     在入口房间内渐进旋转，每30°检测一次门，
-    #     过滤掉入口门和已访问的门，发现新门则返回其 (相对角度, 绝对角度, 框高, 类别)。
-    #     若旋转满360°仍无新门，返回 None。
-    #     """
-    #     rotated = 0
-    #     while rotated < 360 and self.rooms_done < 2:
-    #         self._turn(w, 30)
-    #         rotated += 30
-    #         time.sleep(0.2)
-    #         # 检测当前画面中的门
-    #         doors = self.targets_of_class(w,[0,4])
-    #         for rel_ang, box_h, cls, _ in doors:
-    #             abs_ang = (self.room_yaw + rel_ang) % 360
-    #
-    #             # 跳过入口门（角度接近180°且框高匹配）
-    #             if self.entry_door:
-    #                 e_abs, e_bh, e_cls = self.entry_door
-    #                 if abs((abs_ang - e_abs + 180) % 360 - 180) < 10 and abs(box_h - e_bh) < 30 and cls == e_cls:
-    #                     continue
-    #
-    #             # 跳过已访问的门
-    #             already = False
-    #             for a, h, c in self.visited_doors_info:
-    #                 if abs((abs_ang - a + 180) % 360 - 180) < 12 and abs(box_h - h) < 40 and c == cls:
-    #                     already = True
-    #                     break
-    #             if already:
-    #                 continue
-    #
-    #             # 找到新门
-    #             print(f"  [发现子房间门] 相对角度 {rel_ang:.1f}° 绝对角度 {abs_ang:.1f}° 类型 {cls}")
-    #             return (rel_ang, abs_ang, box_h, cls)
-    # def _scan_current_room_doors(self,w):
-    #     """旋转360°扫描当前房间的门，返回去重后的 (abs_ang, box_h, cls) 列表"""
-    #     doors = []
-    #     for _ in range(360 // 30):          # 例如 12 步 × 30° = 360°
-    #         self._turn(w,30)
-    #         time.sleep(0.2)
-    #         for rel_ang, box_h, cls, _ in self.targets_of_class(w, [0, 4]):
-    #             abs_ang = (self.room_yaw + rel_ang) % 360
-    #             # 去重：角度差<8°、框高差<25px、且同类别
-    #             dup = False
-    #             for a, h, c in doors:
-    #                 angle_diff = abs((abs_ang - a + 180) % 360 - 180)
-    #                 if angle_diff < 8 and abs(box_h - h) < 25 and c == cls:
-    #                     dup = True
-    #                     break
-    #             if not dup:
-    #                 doors.append((abs_ang, box_h, cls))
-    #     return doors
-    # def collect_supplies_in_room(self, w):
-    #     """
-    #     按固定方向检查并拾取房间内所有物资。
-    #     返回拾取的物资数量。
-    #     """
-    #     collected = []  # 已拾取的 (abs_angle, box_h)
-    #     player_yaw = 0.0
-    #
-    #     def calc_abs(rel_angle, box_h):
-    #         return ((player_yaw + rel_angle) % 360, box_h)
-    #
-    #     def is_duplicate(abs_ang, box_h):
-    #         for a, h in collected:
-    #             angle_diff = abs((abs_ang - a + 180) % 360 - 180)
-    #             if angle_diff < 8 and abs(box_h - h) < 25:
-    #                 return True
-    #         return False
-    #
-    #     def pickup_one_in_current_view(w):
-    #         """在当前画面拾取一个未拾取过的物资，成功返回 True，否则 False"""
-    #         # 获取当前画面所有物资，按面积取最近（最大）的一个
-    #         scene = w.get_info('forward_scene')
-    #         supplies = [obj for obj in scene if int(obj[5]) in [1]]
-    #
-    #         if not supplies:
-    #             return False
-    #         # 选择面积最大的
-    #         best = max(supplies, key=lambda d: (d[2] - d[0]) * (d[3] - d[1]))
-    #         cx = (best[0] + best[2]) / 2
-    #         rel_ang = self.pixel_to_angle(cx)
-    #         box_h = best[3] - best[1]
-    #         abs_ang = (player_yaw + rel_ang) % 360
-    #
-    #         if is_duplicate(abs_ang, box_h):
-    #             return False
-    #
-    #         # 执行对准和拾取
-    #         print(f"  发现物资（绝对{abs_ang:.1f}° 框高{box_h}px），开始拾取{best[:4]}")
-    #         success = self.approach_and_pickup(w, best[:4], [0, 1], rel_ang)
-    #         if success:
-    #             collected.append((abs_ang, box_h))
-    #             return True
-    #         return False
-    #
-    #     # ---------- 方向序列 ----------
-    #     print("======[搜资] 检查初始方向 (0°)，在刚进入房屋的视角下检查是否有物资，有则搜集======")
-    #     while pickup_one_in_current_view(w):
-    #         time.sleep(0.2)
-    #
-    #     print("======[搜资] 左转45°检查是否有物资，有则收集======")
-    #     self.turn_by_angle(w, -45, 300)
-    #     player_yaw = (player_yaw - 45) % 360
-    #     time.sleep(0.3)
-    #     while pickup_one_in_current_view(w):
-    #         time.sleep(0.2)
-    #
-    #     print("======[搜资] 左转45°后回正，右转45度检查是否有物资，有则收集======")
-    #     self.turn_by_angle(w, 45, 300)  # 回到 0°
-    #     player_yaw = (player_yaw + 45) % 360
-    #     time.sleep(0.3)
-    #     self.turn_by_angle(w, 45, 300)  # 右转 45°
-    #     player_yaw = (player_yaw + 45) % 360
-    #     time.sleep(0.3)
-    #     while pickup_one_in_current_view(w):
-    #         time.sleep(0.2)
-    #
-    #     print(f"[搜资] 结束，共拾取 {len(collected)} 个物资")
-    #     self.turn_by_angle(w, -45, 300)
-    #     print("========回正方向==============")
-    #     return len(collected)
-
     def approach_and_pickup(self, w, initial_bbox, target_class, rel_ang):
         """
         小步靠近物资，并拾取
@@ -1787,8 +1484,6 @@ class Searching_House:
         """
         if self._should_stop_house_search(w):
             return False
-        # last_bbox = initial_bbox[:4]
-        # pickup_finish = False
 
         if abs(rel_ang) > 2:
             self.turn_by_angle(w, rel_ang, 200)
@@ -1872,7 +1567,6 @@ class Searching_House:
             target_class = [4]
         scene = self._get_forward_scene(w)
         dets = [obj for obj in scene if int(obj[5]) in target_class]
-        # print("[进入子房间]，旋转360过程中，检测到当前画面中开着的门的信息{}".format(dets))
         infos = []
         for d in dets:
             if d[5] in [0, 1, 2, 3, 4]:
@@ -1888,7 +1582,6 @@ class Searching_House:
             target_class = [4]
         scene = self._get_forward_scene(w)
         dets = [obj for obj in scene if int(obj[5]) in target_class]
-        # print("[进入子房间]，旋转360过程中，检测到当前画面中开着的门的信息{}".format(dets))
         infos = []
         for d in dets:
             if d[5] in [0, 1, 2, 3, 4]:
@@ -1926,11 +1619,6 @@ class Searching_House:
                         self.turn_by_angle(w, 45, 200)
                     else:
                         self.turn_by_angle(w, -45, 200)
-
-                # if rel_ang > 0:
-                #     self.turn_by_angle(w, count_ang, 200)
-                # else:
-                #     self.turn_by_angle(w, -count_ang, 200)
 
             else:
                 self.turn_by_angle(w, rel_ang, 200)
@@ -1976,9 +1664,6 @@ class Searching_House:
                     w.tap_single('视角', x_bias=int(adjust_val), dura=500, wait=500)
                     w.refresh_frame()
                     time.sleep(0.5)
-                    # print("当前人物水平微调向相反的方向，水平滑动{}".format((adjust_val / 3) * -1))
-                    # w.tap_single('摇杆', x_bias=int(adjust_val / 3)*-1, dura=500, wait=500)
-                    # w.refresh_frame()
                     time.sleep(5)
 
                 if w.get_info('开门'):
@@ -2002,25 +1687,10 @@ class Searching_House:
         supplies = self.new_targets_of_class(w, target_class=[1])
         print("子房间查找物资的信息{}".format(supplies))
         print("子房间查找物资的信息{}".format(supplies))
-        # 过滤当前在子房间内发现的入口房间的物资
-        # if supplies:
-        #     filtered = []
-        #     for rel_ang, box_h, det, area in supplies:
-        #         # 计算该物资的绝对角度
-        #         abs_ang = (self.room_yaw + rel_ang) % 360
-        #         # 与避开方向的夹角
-        #         diff = abs((abs_ang - avoid_door_abs + 180) % 360 - 180)
-        #         if diff > 20:  # 夹角大于20°才保留
-        #             filtered.append((rel_ang, box_h, det, area))
-        #     supplies = filtered
-        #     if not supplies:
-        #         print("  [物资] 当前方向（避开门口）无物资")
-        #         return
 
         if supplies:
 
             # 选择面积最大的
-            # best = max(supplies, key=lambda d: d[3])
             best = max(supplies, key=lambda d: d[1])
             rel_ang = best[0]
             abs_ang = (self.room_yaw + rel_ang) % 360
@@ -2031,7 +1701,6 @@ class Searching_House:
                 collected.append((abs_ang, best[1]))
         else:
             print("当前子房间内未找到物资信息,继续下一次视角中获取物资...")
-            # self.turn_by_angle(w, 45)
             time.sleep(1)
 
         if len(collected) == 2:
@@ -2062,146 +1731,6 @@ class Searching_House:
             return
         self._turn(w, -45)  # 回正
 
-    # def _explore_sub_rooms(self, w):
-    #     # 查找所有开着的门
-    #     all_doors = self._scan_all_doors(w, target_class=[4])
-    #     print("当前门信息{}".format(all_doors))
-    #     if not all_doors:
-    #         print("[门] 入口房间无门")
-    #         return
-    #
-    #     best_entry = None
-    #     best_diff = float('inf')
-    #     for abs_ang, bh, rel_ang in all_doors:
-    #         diff = abs((abs_ang - 180 + 180) % 360 - 180)
-    #         if diff < best_diff or (diff == best_diff and (best_entry is None or bh > best_entry[1])):
-    #             best_diff = diff
-    #             best_entry = (abs_ang, bh)
-    #     self.entry_door_abs = best_entry
-    #     print(f"[入口门] 绝对角度 {best_entry[0]:.1f}° 框高 {best_entry[1]}px")
-    #
-    #     # 当前回到进门初始位置
-    #
-    #     while self.rooms_done < 2:
-    #         # 先判断当前视野中是否有子房间的门
-    #         doors = self.targets_of_class(w, target_class=[4])
-    #         if not doors:
-    #             self._turn(w, 45)
-    #
-    #         else:
-    #             print("当前子房间的门的信息{}并选择最大的进入".format(doors))
-    #             for rel_ang, box_h, d, area in doors:
-    #                 abs_ang = (self.room_yaw + rel_ang) % 360
-    #                 if self.entry_door_abs:
-    #                     e_abs, e_bh = self.entry_door_abs
-    #                     if self._is_same_angle(abs_ang, e_abs, 10) and abs(box_h - e_bh) < 30:
-    #                         continue
-    #                 if self._is_visited(abs_ang):
-    #                     continue
-    #                     # 检查是否已进入过（全局已访问）
-    #                 if self._is_duplicate_door(abs_ang, box_h, self.visited_doors_info, angle_thresh=12, box_thresh=40):
-    #                     continue
-    #
-    #                 print(f"\n[发现] 子房间门 绝对角度 {abs_ang:.1f}°")
-    #                 # self.visited_abs.append(abs_ang)
-    #                 self.visited_doors_info.append((abs_ang, box_h, rel_ang))
-    #                 self._enter_sub_room(w, rel_ang, abs_ang)
-    #                 print(f"\n[发现] 子房间门 绝对角度 {abs_ang:.1f}°已搜索结束")
-    #                 print("出当前子房间后往左移动一点。。。")
-    #                 w.tap_single('摇杆', x_bias=-10, dura=300)
-    #                 w.refresh_frame()
-    #                 time.sleep(0.2)
-    #                 self.rooms_done += 1
-    #                 break
-    #
-    #
-    #
-    #     # 探索子房间
-    #     self.room_yaw = 0.0
-    #     rotated = 0
-    #     while rotated < 360 and self.rooms_done < 2:
-    #         self._turn(w, 45)
-    #         rotated += 45
-    #         time.sleep(0.2)
-    #         doors = self.targets_of_class(w, target_class=[4])
-    #         print("当前子房间的门的信息{}".format(doors))
-    #         for rel_ang, box_h, d, area in doors:
-    #             abs_ang = (self.room_yaw + rel_ang) % 360
-    #             if self.entry_door_abs:
-    #                 e_abs, e_bh = self.entry_door_abs
-    #                 if self._is_same_angle(abs_ang, e_abs, 10) and abs(box_h - e_bh) < 30:
-    #                     continue
-    #             if self._is_visited(abs_ang):
-    #                 continue
-    #                 # 检查是否已进入过（全局已访问）
-    #             if self._is_duplicate_door(abs_ang, box_h, self.visited_doors_info, angle_thresh=12, box_thresh=40):
-    #                 continue
-    #
-    #             print(f"\n[发现] 子房间门 绝对角度 {abs_ang:.1f}°")
-    #             # self.visited_abs.append(abs_ang)
-    #             self.visited_doors_info.append((abs_ang, box_h, rel_ang))
-    #             self._enter_sub_room(w, rel_ang, abs_ang)
-    #             print(f"\n[发现] 子房间门 绝对角度 {abs_ang:.1f}°已搜索结束")
-    #             print("出当前子房间后往左移动一点。。。")
-    #             w.tap_single('摇杆', x_bias=-10, dura=300)
-    #             w.refresh_frame()
-    #             time.sleep(0.2)
-    #             self.rooms_done += 1
-    #             break
-    #     print("[扫描] 子房间探索结束")
-
-    #
-    # def _enter_door_straight(self, w, initial_rel_angle):
-    #     """
-    #     严格正对门进入：全程保持门框中心在屏幕正中（误差<1°），
-    #     直到门消失后点击开门。避免斜向进入。
-    #     """
-    #     # 第一步：精确对准
-    #     self._visual_align(w, initial_rel_angle, )
-    #     print("  [正对进门] 开始垂直靠近...")
-    #     recorded_bh = None
-    #     for step in range(30):
-    #         # 检测门是否还在正前方
-    #         doors = self.targets_of_class(w, target_class=[4])
-    #         front_doors = [d for d in doors if abs(d[0]) < 5]
-    #
-    #         if not front_doors:
-    #             # 门已贴面或丢失，尝试开门
-    #             print("  [正对进门] 已贴门，开门")
-    #             # self.adb.tap_door()
-    #             time.sleep(0.5)
-    #
-    #             print("已在门附近，多往前走俩步")
-    #             w.tap_single('摇杆', y_bias=-20, dura=300)
-    #             w.refresh_frame()
-    #             time.sleep(0.2)
-    #             w.tap_single('摇杆', y_bias=-15, dura=300)
-    #             w.refresh_frame()
-    #             time.sleep(0.2)
-    #             return True, recorded_bh
-    #
-    #         # 取最近的门（框高最大）
-    #         best = max(front_doors, key=lambda x: x[1])
-    #         recorded_bh = best[1]
-    #         rel_ang = best[0]
-    #
-    #         # 严格要求：偏差大于 1° 时立即微调，不前进
-    #         if abs(rel_ang) > 1.0:
-    #             # 微调视角（比例控制，限制单次最大5°）
-    #             adjust = max(-5, min(5, rel_ang * 0.9))
-    #             self._turn(w, adjust)
-    #             time.sleep(0.1)
-    #             continue  # 调整后重新检测，不移动
-    #
-    #         # 偏差极小，可以前进一步
-    #         w.tap_single('摇杆', y_bias=-20, dura=300)
-    #         w.refresh_frame()
-    #         time.sleep(0.1)
-    #
-    #     print("  [正对进门] 超时未贴门")
-    #     return False
-
-    # ─────── 视觉闭环对准 ───────
     def _visual_align(self, w, target_angle, target_class=None):
         print("开始调整。。。{}".format(target_angle))
         for _ in range(6):

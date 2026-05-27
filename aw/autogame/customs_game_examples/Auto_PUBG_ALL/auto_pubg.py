@@ -49,6 +49,7 @@ PHASE_DURATIONS = {
 
 DROP_TARGET_GARAGE = (990, 757)
 DROP_TARGET_CENTER = (990, 757)
+DROP_TARGET_RUNNING_AFTER_SEARCH = (1094, 790)
 SP_SAVE_LONG_PRESS_MS = 3000
 START_GAME_VERIFY_DELAY = 5.0
 
@@ -87,10 +88,15 @@ def prepare_round():
     all_done_reported = False
 
     need_drive = phase_timer.need_drive()
-    drop_target = DROP_TARGET_GARAGE if need_drive else DROP_TARGET_CENTER
+    need_searching = not phase_timer.is_completed(PHASE_SEARCHING)
+    landing_stage = "搜房阶段" if need_searching else "跑图阶段"
+    if need_searching:
+        drop_target = DROP_TARGET_GARAGE if need_drive else DROP_TARGET_CENTER
+    else:
+        drop_target = DROP_TARGET_RUNNING_AFTER_SEARCH
 
     parachute_manager.reset()
-    parachute_manager.configure(target_pos=drop_target, landing_stage="搜房阶段")
+    parachute_manager.configure(target_pos=drop_target, landing_stage=landing_stage)
 
     running_manager.reset(finding_car=need_drive)
 
@@ -100,11 +106,12 @@ def prepare_round():
 
     print(
         f"[Round] need_drive={need_drive}, "
+        f"need_searching={need_searching}, "
         f"total_remaining={phase_timer.get_total_remaining():.2f}s, "
         f"searching_remaining={phase_timer.get_remaining(PHASE_SEARCHING):.2f}s, "
         f"running_remaining={phase_timer.get_remaining(PHASE_RUNNING):.2f}s, "
         f"driving_remaining={phase_timer.get_remaining(PHASE_DRIVING):.2f}s, "
-        f"drop_target={drop_target}"
+        f"drop_target={drop_target}, landing_stage={landing_stage}"
     )
 
 

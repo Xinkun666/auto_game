@@ -36,11 +36,22 @@ class Searching_House:
     HOUSE_SEARCH_TIMEOUT_SECONDS = 60
     ENTRY_WALL_BACKOFF_DURA = 520
     ENTRY_WALL_BACKOFF_WAIT = 900
+    EXCLUDED_ENTRY_LOCATIONS = {
+        (1006, 706),
+        (991, 709),
+        (1010, 705),
+    }
+    ENTRY_CONFIRM_MAX_ATTEMPTS = 8
+    ENTRY_CONFIRM_FORWARD_Y_BIAS = -420
+    ENTRY_CONFIRM_FORWARD_DURA = 650
+    ENTRY_CONFIRM_FORWARD_WAIT = 850
+    ENTRY_CONFIRM_SIDE_X_BIAS = 260
 
     def __init__(self):
         self.map_tool = MapNavigator()
         self.house_data = load_json(
             r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/house_entry/house_entries_summary.json')
+        self.excluded_house_ids = self._build_excluded_house_ids()
 
         self.completed_houses = set()
         self.current_house_id = None
@@ -98,6 +109,31 @@ class Searching_House:
         self.initial_target_pending = True
         self.location_missing_frames = 0
         self.initial_location_samples = []
+
+    def _entry_location_tuple(self, entry):
+        try:
+            location = entry.get('location')
+            return (int(location[0]), int(location[1]))
+        except (TypeError, ValueError, IndexError, AttributeError):
+            return None
+
+    def _is_excluded_entry(self, entry) -> bool:
+        return self._entry_location_tuple(entry) in self.EXCLUDED_ENTRY_LOCATIONS
+
+    def _build_excluded_house_ids(self):
+        excluded = set()
+        for house_id, entries in self.house_data.items():
+            if any(self._is_excluded_entry(entry) for entry in entries):
+                excluded.add(house_id)
+        if excluded:
+            print(
+                f"[Searching] 已过滤指定进门点 {sorted(self.EXCLUDED_ENTRY_LOCATIONS)} "
+                f"对应房屋 {sorted(excluded)}"
+            )
+        return excluded
+
+    def _is_excluded_house(self, house_id) -> bool:
+        return house_id in self.excluded_house_ids
 
     def reset(self):
         self.completed_houses = set()
@@ -631,12 +667,7 @@ class Searching_House:
                     success = True
                     break
                 if w.get_info('关门'):
-                    w.click('关门')
-                    time.sleep(1.2)
-                    w.refresh_frame()
-                    if w.get_info('开门'):
-                        w.click('开门')
-                        time.sleep(0.5)
+                    print("[Interact] 检测到关门按钮，表示门已打开，不点击关门，直接准备入户")
                     success = True
                     break
                 if not self._advance_towards_entry_door(w):
@@ -661,8 +692,15 @@ class Searching_House:
                 ideal_angle = self.active_entry['direction']
                 print(f"[Entry] 调整至进门角度: {ideal_angle}")
                 self.align_direction_blocking(w, w.get_info('direction'), ideal_angle)
-            print("[Entry] 进门")
-            w.tap_single('摇杆', y_bias=-300, dura=300, wait=1000)
+            print("[Entry] 进门并确认 house_scene")
+            if not self._push_until_entered_house(w):
+                print("[Entry] 多次推进后仍未进入房屋，舍弃当前进门点")
+                if self.active_entry:
+                    self.handle_failed_entry_logic(self.active_entry['direction'])
+                else:
+                    self.current_house_id = None
+                self.status = "IDLE"
+                return
 
             if self._should_abort(w):
                 return
@@ -739,8 +777,46 @@ class Searching_House:
         wait = int(max(450, min(2100, dist * 180)))
         return self.ENTRY_FINE_Y_BIAS, self.ENTRY_FINE_DURA, wait
 
+    def _push_until_entered_house(self, w: 'FrameWorker') -> bool:
+        if self._get_house_scene(w) == 0:
+            print("[Entry] 已检测到 house_scene=0，确认已进屋")
+            return True
+
+        ideal_angle = self.active_entry['direction'] if self.active_entry else None
+        for attempt in range(self.ENTRY_CONFIRM_MAX_ATTEMPTS):
+            if self._should_abort(w):
+                return False
+
+            if ideal_angle is not None:
+                self.align_direction_blocking(w, w.get_info('direction'), ideal_angle)
+
+            if attempt == 0:
+                x_bias = 0
+                print(f"[Entry] 正前推进确认入屋 {attempt + 1}/{self.ENTRY_CONFIRM_MAX_ATTEMPTS}")
+            else:
+                x_bias = self.ENTRY_CONFIRM_SIDE_X_BIAS if attempt % 2 == 1 else -self.ENTRY_CONFIRM_SIDE_X_BIAS
+                side = "右前方" if x_bias > 0 else "左前方"
+                print(f"[Entry] house_scene 仍非 0，向{side}推进确认入屋 {attempt + 1}/{self.ENTRY_CONFIRM_MAX_ATTEMPTS}")
+
+            w.tap_single(
+                '摇杆',
+                x_bias=x_bias,
+                y_bias=self.ENTRY_CONFIRM_FORWARD_Y_BIAS,
+                dura=self.ENTRY_CONFIRM_FORWARD_DURA,
+                wait=self.ENTRY_CONFIRM_FORWARD_WAIT,
+            )
+            w.refresh_frame()
+            time.sleep(0.2)
+
+            house_scene = self._get_house_scene(w)
+            if house_scene == 0:
+                print("[Entry] 推进后 house_scene=0，确认已进屋")
+                return True
+
+        return False
+
     def _is_entry_approach_status(self):
-        return self.status in {"FAST_NAV", "PRECISE_NAV", "SCANNING", "VISUAL_APPROACH", "INTERACT"}
+        return self.status in {"FAST_NAV", "PRECISE_NAV", "SCANNING", "VISUAL_APPROACH", "INTERACT", "FINAL_ENTRY"}
 
     def _backoff_and_recheck_house_scene(self, w: 'FrameWorker'):
         print("[Unstuck] house_scene=indoor，可能是贴墙误判，先后退复核室内/室外")
@@ -883,6 +959,8 @@ class Searching_House:
         best_entry = None
 
         for house_id, entries in self.house_data.items():
+            if self._is_excluded_house(house_id):
+                continue
             if house_id in self.completed_houses:
                 continue
             for entry in entries:
@@ -905,6 +983,7 @@ class Searching_House:
         avoid_mode = getattr(self, 'avoid_mode', None)
 
         for house_id, entries in self.house_data.items():
+            if self._is_excluded_house(house_id): continue
             if house_id in self.completed_houses: continue
             if house_id in self.temp_skip_houses: continue
 

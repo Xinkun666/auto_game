@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QPlainTextEdit,
     QRadioButton,
+    QSizePolicy,
     QSplitter,
     QSpinBox,
     QVBoxLayout,
@@ -293,9 +294,11 @@ class LauncherWindow(QWidget):
         self.preview_target_info_height = 220
         self.preview_target_info_width = 360
         self._adjusting_preview_splitter = False
+        self.preset_buttons: list[QPushButton] = []
 
         self.setWindowTitle("Auto Game 启动器")
         self.resize(1260, 860)
+        self._apply_style()
 
         self.mode_testcase = QRadioButton("通过 testcases 用例启动")
         self.mode_direct = QRadioButton("直接指定 project_case / target_case")
@@ -322,6 +325,10 @@ class LauncherWindow(QWidget):
         self.run_count_spin = QSpinBox()
         self.run_count_spin.setRange(1, 9999)
         self.run_count_spin.setValue(1)
+        self.run_count_field = self._create_spin_with_presets(
+            self.run_count_spin,
+            [1, 3, 5, 8, 10],
+        )
 
         self.safe_temp_spin = QDoubleSpinBox()
         self.safe_temp_spin.setRange(0.0, 100.0)
@@ -329,11 +336,21 @@ class LauncherWindow(QWidget):
         self.safe_temp_spin.setSingleStep(0.5)
         self.safe_temp_spin.setValue(40.0)
         self.safe_temp_spin.setSuffix(" °C")
+        self.safe_temp_field = self._create_spin_with_presets(
+            self.safe_temp_spin,
+            [35, 38, 40, 42, 45],
+            suffix="°C",
+        )
 
         self.safe_battery_spin = QSpinBox()
         self.safe_battery_spin.setRange(0, 100)
         self.safe_battery_spin.setValue(25)
         self.safe_battery_spin.setSuffix(" %")
+        self.safe_battery_field = self._create_spin_with_presets(
+            self.safe_battery_spin,
+            [10, 20, 30, 40, 50, 60, 70, 80],
+            suffix="%",
+        )
 
         self.safe_time_spin = QDoubleSpinBox()
         self.safe_time_spin.setRange(0.0, 10000.0)
@@ -341,6 +358,11 @@ class LauncherWindow(QWidget):
         self.safe_time_spin.setSingleStep(1.0)
         self.safe_time_spin.setValue(0.0)
         self.safe_time_spin.setSuffix(" 分钟")
+        self.safe_time_field = self._create_spin_with_presets(
+            self.safe_time_spin,
+            [0, 10, 20, 30, 45, 60],
+            suffix="分",
+        )
 
         self.inactivity_timeout_spin = QDoubleSpinBox()
         self.inactivity_timeout_spin.setRange(0.0, 10000.0)
@@ -348,6 +370,11 @@ class LauncherWindow(QWidget):
         self.inactivity_timeout_spin.setSingleStep(1.0)
         self.inactivity_timeout_spin.setValue(5.0)
         self.inactivity_timeout_spin.setSuffix(" 分钟")
+        self.inactivity_timeout_field = self._create_spin_with_presets(
+            self.inactivity_timeout_spin,
+            [1, 3, 5, 8, 10],
+            suffix="分",
+        )
 
         self.start_button = QPushButton("启动")
         self.stop_button = QPushButton("停止")
@@ -388,17 +415,122 @@ class LauncherWindow(QWidget):
         )
         LOGGER.info("LauncherWindow init finished")
 
+    def _apply_style(self):
+        self.setStyleSheet(
+            """
+            QWidget {
+                background: #f4f6f8;
+                color: #1f2933;
+                font-size: 14px;
+            }
+            QGroupBox {
+                background: #ffffff;
+                border: 1px solid #d8dee6;
+                border-radius: 8px;
+                margin-top: 14px;
+                padding: 12px;
+                font-weight: 600;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 6px;
+                color: #334155;
+            }
+            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {
+                background: #ffffff;
+                border: 1px solid #cbd5e1;
+                border-radius: 6px;
+                padding: 6px;
+                selection-background-color: #2563eb;
+            }
+            QSpinBox, QDoubleSpinBox, QComboBox {
+                min-height: 30px;
+            }
+            QPushButton {
+                background: #e8eef7;
+                border: 1px solid #c6d3e1;
+                border-radius: 6px;
+                padding: 7px 12px;
+                color: #1e293b;
+            }
+            QPushButton:hover {
+                background: #dce8f8;
+                border-color: #9fb5d1;
+            }
+            QPushButton:pressed {
+                background: #cbdcf3;
+            }
+            QPushButton:disabled {
+                color: #94a3b8;
+                background: #eef2f6;
+                border-color: #dde4ed;
+            }
+            QPushButton[presetButton="true"] {
+                background: #f8fafc;
+                padding: 5px 9px;
+                min-width: 34px;
+                border-color: #d7dee8;
+                font-weight: 500;
+            }
+            QPushButton[presetButton="true"]:hover {
+                background: #eef6ff;
+                border-color: #93c5fd;
+                color: #1d4ed8;
+            }
+            QPushButton[primaryButton="true"] {
+                background: #2563eb;
+                color: #ffffff;
+                border-color: #1d4ed8;
+                font-weight: 600;
+            }
+            QPushButton[primaryButton="true"]:hover {
+                background: #1d4ed8;
+            }
+            QLabel {
+                background: transparent;
+            }
+            QSplitter::handle {
+                background: #d8dee6;
+            }
+            """
+        )
+
+    def _create_spin_with_presets(self, spin, values, suffix: str = "") -> QWidget:
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        spin.setMinimumWidth(118)
+        layout.addWidget(spin)
+
+        for value in values:
+            text = f"{value}{suffix}" if suffix else str(value)
+            button = QPushButton(text)
+            button.setProperty("presetButton", True)
+            button.clicked.connect(lambda checked=False, val=value, target=spin: target.setValue(val))
+            self.preset_buttons.append(button)
+            layout.addWidget(button)
+
+        layout.addStretch(1)
+        return container
+
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(14, 12, 14, 14)
+        main_layout.setSpacing(10)
 
         mode_group = QGroupBox("启动方式")
         mode_layout = QVBoxLayout(mode_group)
+        mode_layout.setSpacing(8)
         mode_layout.addWidget(self.mode_testcase)
         mode_layout.addWidget(self.mode_direct)
         main_layout.addWidget(mode_group)
 
         testcase_group = QGroupBox("testcases 用例")
         testcase_layout = QHBoxLayout(testcase_group)
+        testcase_layout.setSpacing(8)
         testcase_layout.addWidget(self.testcase_path_edit, 1)
         testcase_layout.addWidget(self.browse_button)
         testcase_layout.addWidget(self.clear_button)
@@ -406,13 +538,16 @@ class LauncherWindow(QWidget):
 
         config_group = QGroupBox("配置")
         config_layout = QFormLayout(config_group)
+        config_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        config_layout.setHorizontalSpacing(12)
+        config_layout.setVerticalSpacing(10)
         config_layout.addRow("project_case", self.project_combo)
         config_layout.addRow("target_case", self.target_combo)
-        config_layout.addRow("运行次数", self.run_count_spin)
-        config_layout.addRow("安全温度", self.safe_temp_spin)
-        config_layout.addRow("安全电量", self.safe_battery_spin)
-        config_layout.addRow("安全时间", self.safe_time_spin)
-        config_layout.addRow("无操控超时", self.inactivity_timeout_spin)
+        config_layout.addRow("运行次数", self.run_count_field)
+        config_layout.addRow("安全温度", self.safe_temp_field)
+        config_layout.addRow("安全电量", self.safe_battery_field)
+        config_layout.addRow("安全时间", self.safe_time_field)
+        config_layout.addRow("无操控超时", self.inactivity_timeout_field)
         config_layout.addRow("解析结果", self.status_label)
         config_layout.addRow("运行信息", self.runtime_label)
         config_layout.addRow("", self.refresh_button)
@@ -426,6 +561,8 @@ class LauncherWindow(QWidget):
         action_layout.addWidget(self.preview_points_button)
         action_layout.addStretch(1)
         main_layout.addLayout(action_layout)
+
+        self.start_button.setProperty("primaryButton", True)
 
         content_splitter = QSplitter(Qt.Orientation.Horizontal)
         content_splitter.setChildrenCollapsible(False)
@@ -693,6 +830,8 @@ class LauncherWindow(QWidget):
         self.safe_battery_spin.setEnabled(enabled)
         self.safe_time_spin.setEnabled(enabled)
         self.inactivity_timeout_spin.setEnabled(enabled)
+        for button in self.preset_buttons:
+            button.setEnabled(enabled)
 
     def _clear_preview_files(self):
         LOGGER.debug("clear_preview_files: dir=%s", PREVIEW_DIR)

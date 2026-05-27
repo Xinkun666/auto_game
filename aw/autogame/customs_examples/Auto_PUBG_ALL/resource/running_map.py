@@ -191,13 +191,13 @@ class RoadRouteHelper:
                 print(f"[RoadRoute] road_module 无法规划 {segment_start} -> {road_point}")
                 return [], segment_start, start_dist
 
-            segment = [tuple(map(int, point)) for point in result[2]]
-            if hasattr(topo, "get_piecewise_road_with_point"):
-                piecewise = topo.get_piecewise_road_with_point([list(point) for point in segment])
-                if piecewise:
-                    segment = [tuple(map(int, point)) for point in piecewise]
-
-            full_path = self._merge_dedupe_paths(full_path, self._sample_path(self._dedupe_path(segment)))
+            raw_segment = self._dedupe_path([tuple(map(int, point)) for point in result[2]])
+            sampled_segment = self._sample_path(raw_segment)
+            print(
+                f"[RoadRoute] 指定寻车路段 {segment_start} -> {road_point}: "
+                f"raw={len(raw_segment)}, sampled={len(sampled_segment)}, interval={self.PATH_SAMPLE_INTERVAL:.0f}"
+            )
+            full_path = self._merge_dedupe_paths(full_path, sampled_segment)
             if not full_path or full_path[-1] != road_point:
                 full_path = self._merge_dedupe_paths(full_path, [road_point])
             segment_start = road_point
@@ -403,11 +403,11 @@ class RunningManager:
     CAR_VISUAL_DYNAMIC_MID_AREA_RATIO = 0.012
     CAR_VISUAL_DYNAMIC_NEAR_AREA_RATIO = 0.045
     CAR_VISUAL_DYNAMIC_VERY_NEAR_AREA_RATIO = 0.08
-    CAR_VISUAL_DYNAMIC_MIN_WAIT = 320
-    CAR_VISUAL_DYNAMIC_NEAR_WAIT = 650
-    CAR_VISUAL_DYNAMIC_MID_WAIT = 2600
-    CAR_VISUAL_DYNAMIC_FAR_WAIT = 5200
-    CAR_VISUAL_DYNAMIC_MAX_WAIT = 7200
+    CAR_VISUAL_DYNAMIC_MIN_WAIT = 160
+    CAR_VISUAL_DYNAMIC_NEAR_WAIT = 420
+    CAR_VISUAL_DYNAMIC_MID_WAIT = 3200
+    CAR_VISUAL_DYNAMIC_FAR_WAIT = 6500
+    CAR_VISUAL_DYNAMIC_MAX_WAIT = 8500
     # 单轮寻车超过该时间仍未上车，则结束当前局；计时从进入/恢复寻车模式开始。
     CAR_SEARCH_TIMEOUT = 5 * 60
     # 路边发现远车后，允许跨帧追车，避免车辆框短暂丢失后又回头追原道路点。
@@ -421,6 +421,11 @@ class RunningManager:
     ROADSIDE_CAR_DISTANCE_SCALE = 1.6
     ROADSIDE_CAR_MIN_ESTIMATED_DISTANCE = 5.0
     ROADSIDE_CAR_MAX_ESTIMATED_DISTANCE = 70.0
+    ROADSIDE_CAR_OVERSHOOT_AREA_RATIO = 0.045
+    ROADSIDE_CAR_REAR_TURN_ATTEMPTS = 3
+    ROADSIDE_CAR_REAR_FORWARD_BIAS_Y = -130
+    ROADSIDE_CAR_REAR_FORWARD_DURA = 180
+    ROADSIDE_CAR_REAR_FORWARD_WAIT = 420
     # 落水后，上浮和向前划水脱离水面的操作参数
     WATER_FLOAT_DURA = 2000
     WATER_FORWARD_BIAS_Y = -280
@@ -433,6 +438,8 @@ class RunningManager:
     WATER_EXIT_BACK_WAIT = 900
     WATER_EXIT_SIDE_DURA = 900
     WATER_EXIT_SIDE_WAIT = 1500
+    HOUSE_SCENE_REAR_CONFIRM_TURNS = 3
+    HOUSE_SCENE_RESTORE_TURNS = 2
     # 刚下车后，忽略附近车辆交互的保护时间，避免立刻又上车
     VEHICLE_EXIT_PROTECTION = 5.0
     # 下车后若仍贴着车，先短暂移动离开载具
@@ -455,7 +462,6 @@ class RunningManager:
     CAR_SEARCH_GARAGE = "garage"
     CAR_SEARCH_ROADSIDE = "roadside"
     PRIORITY_CAR_SEARCH_ANCHORS = ((1109, 792), (1189, 783), (1322, 960))
-    PRIORITY_CAR_SEARCH_EXIT_POINT = (1189, 783)
     RUNNING_ROUTE_CIRCLE = "circle"
     RUNNING_ROUTE_PATROL = "patrol"
     RUNNING_ROUTE_RANDOM_AROUND_CIRCLE = "random_around_circle"
@@ -508,6 +514,7 @@ class RunningManager:
         self.roadside_car_lost_after_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio: Optional[float] = None
+        self.roadside_car_peak_area_ratio: Optional[float] = None
         self.current_running_route_kind: Optional[str] = None
         self.last_circle_target_point: Optional[Tuple[int, int]] = None
         self.circle_route_completed = False
@@ -559,6 +566,7 @@ class RunningManager:
         self.roadside_car_lost_after_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
+        self.roadside_car_peak_area_ratio = None
         self.current_running_route_kind = None
         self.last_circle_target_point = None
         self.circle_route_completed = False
@@ -606,9 +614,6 @@ class RunningManager:
         if self._has_rank_info(w):
             print("[Running] 检测到个人排名或队伍排名，进入结束阶段")
             self._handle_rank_finish(w)
-            return
-
-        if self._try_house_exit_when_indoor(w, location, direction, "进入跑图阶段检测"):
             return
 
         if self._handle_recent_vehicle_exit(w, location, direction):
@@ -688,6 +693,10 @@ class RunningManager:
 
         if self.trapped:
             if self._try_house_exit_when_indoor(w, location, direction, "人物困死"):
+                return
+            if not self.trapped:
+                print("[Running] 人物困死但后视角复核为室外，先按普通脱困处理")
+                self._perform_unstuck_action(w, location)
                 return
             print("[Running] 人物长时间在局部区域打转，结束当前局")
             self._log_running_state("人物困死", location, direction, "结束当前局")
@@ -907,6 +916,7 @@ class RunningManager:
         self.roadside_car_lost_after_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
+        self.roadside_car_peak_area_ratio = None
 
     def _is_in_vehicle(self, w: "FrameWorker") -> bool:
         if any(w.get_info(name) for name in ("漂移", "喇叭")):
@@ -972,23 +982,6 @@ class RunningManager:
             or self.current_running_route_kind != self.RUNNING_ROUTE_PRIORITY_CAR_SEARCH
         ):
             return False
-
-        cutoff_point = tuple(map(int, self.PRIORITY_CAR_SEARCH_EXIT_POINT))
-        cutoff_dist = get_distance(location, cutoff_point)
-        if cutoff_dist <= max(self.WAYPOINT_TOLERANCE, self.ROAD_NODE_REACHED_TOLERANCE):
-            print(f"[Running] 已到达指定寻车截止点 {cutoff_point} 仍未上车，结束当前局并重开")
-            self._log_running_state(
-                "指定寻车截止点",
-                location,
-                direction,
-                "到 1189,783 未上车，结束当前局",
-                cutoff_point,
-                cutoff_dist,
-            )
-            self.priority_car_search_finished = True
-            self.priority_car_search_active = False
-            self._handle_death(w)
-            return True
 
         if self.road_list:
             return False
@@ -1066,6 +1059,7 @@ class RunningManager:
         self.roadside_car_lost_after_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
+        self.roadside_car_peak_area_ratio = None
         self.current_running_route_kind = None
         print(
             f"[Running] 收到下车通知，载具交互保护期 {cooldown:.1f}s，"
@@ -1096,6 +1090,7 @@ class RunningManager:
         self.roadside_car_lost_after_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
+        self.roadside_car_peak_area_ratio = None
         print(
             "[Running] 收到搜房结束通知，"
             f"后续模式={'沿指定路线找车，开车完成后再跑图/进圈' if self.finding_car else '跑图/进圈'}"
@@ -1738,6 +1733,53 @@ class RunningManager:
         except (TypeError, ValueError):
             return None
 
+    def _confirm_indoor_after_rear_view(
+        self,
+        w: "FrameWorker",
+        direction: Optional[float],
+        reason: str,
+    ) -> bool:
+        front_scene = self._get_house_scene(w)
+        if front_scene != HouseExitManager.HOUSE_INDOOR:
+            return False
+
+        print(f"[Running] {reason}时前景 house_scene=indoor，先转身复核，避免贴墙/路过房子误判")
+        self.stop_auto_forward(w)
+        original_direction = direction
+        if original_direction is None:
+            original_direction = self._get_scalar(w.get_info("direction"))
+
+        if original_direction is None:
+            print("[Running] 当前朝向无效，执行粗略后视角复核")
+            w.tap_single("视角", x_bias=self.UNSTUCK_TURN_BIAS * 2, dura=850, wait=500)
+            w.refresh_frame()
+        else:
+            rear_direction = (float(original_direction) + 180.0) % 360.0
+            for _ in range(self.HOUSE_SCENE_REAR_CONFIRM_TURNS):
+                current_direction = self._get_scalar(w.get_info("direction"))
+                if current_direction is None:
+                    break
+                if self._align_to_direction(w, current_direction, rear_direction, threshold=8):
+                    break
+            w.refresh_frame()
+
+        rear_scene = self._get_house_scene(w)
+        if rear_scene == HouseExitManager.HOUSE_INDOOR:
+            print("[Running] 后视角复核仍为 indoor，确认人物在屋内")
+            return True
+
+        print(f"[Running] 后视角复核 house_scene={rear_scene}，判定为室外贴墙/路过房子误判")
+        if original_direction is not None:
+            for _ in range(self.HOUSE_SCENE_RESTORE_TURNS):
+                current_direction = self._get_scalar(w.get_info("direction"))
+                if current_direction is None:
+                    break
+                if self._align_to_direction(w, current_direction, float(original_direction), threshold=10):
+                    break
+        self.stuck = False
+        self.trapped = False
+        return False
+
     def _try_house_exit_when_indoor(
         self,
         w: "FrameWorker",
@@ -1745,11 +1787,11 @@ class RunningManager:
         direction: Optional[float],
         reason: str,
     ) -> bool:
-        if self._get_house_scene(w) != HouseExitManager.HOUSE_INDOOR:
+        if not self._confirm_indoor_after_rear_view(w, direction, reason):
             return False
 
-        print(f"[Running] {reason}且 house_scene=indoor，优先使用 HouseExitManager 脱困")
-        self._log_running_state(reason, location, direction, "屋内卡住，优先出房")
+        print(f"[Running] {reason}且后视角确认 house_scene=indoor，使用 HouseExitManager 脱困")
+        self._log_running_state(reason, location, direction, "卡住后确认屋内，优先出房")
         self.stop_auto_forward(w)
         self.house_exit_manager.reset()
         for _ in range(20):
@@ -2095,6 +2137,7 @@ class RunningManager:
         self.roadside_car_lost_after_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
+        self.roadside_car_peak_area_ratio = None
         self._discard_current_road_target()
         self._switch_view_mode(
             w,
@@ -2126,6 +2169,11 @@ class RunningManager:
                 f"前推后丢失 {self.roadside_car_lost_after_forward_pushes}/"
                 f"{self.ROADSIDE_CAR_LOST_FORWARD_LIMIT}，保持方向继续靠近"
             )
+            if self._should_try_rear_car_recovery():
+                if self._try_recover_overshot_car_behind(w, location, direction):
+                    return True
+                self._give_up_roadside_car_pursuit("近距离前推后丢车，回头也未发现车辆")
+                return True
             if self.roadside_car_lost_after_forward_pushes > self.ROADSIDE_CAR_LOST_FORWARD_LIMIT:
                 self._give_up_roadside_car_pursuit("前推后连续丢失车辆，判定为误识别")
                 return True
@@ -2183,6 +2231,7 @@ class RunningManager:
         self.roadside_car_lost_after_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
+        self.roadside_car_peak_area_ratio = None
         self.active_vehicle_entry_source = None
         self._discard_current_road_target()
 
@@ -2218,6 +2267,7 @@ class RunningManager:
         self.roadside_car_lost_after_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
+        self.roadside_car_peak_area_ratio = None
 
     def _process_precise_entry(
         self,
@@ -2755,6 +2805,81 @@ class RunningManager:
                 return left_wait + progress * (right_wait - left_wait)
         return anchors[-1][1]
 
+    def _should_try_rear_car_recovery(self) -> bool:
+        peak_ratio = self.roadside_car_peak_area_ratio or 0.0
+        last_ratio = self.roadside_car_last_area_ratio or 0.0
+        return (
+            self.roadside_car_lost_after_forward_pushes >= 1
+            and max(peak_ratio, last_ratio) >= self.ROADSIDE_CAR_OVERSHOOT_AREA_RATIO
+        )
+
+    def _try_recover_overshot_car_behind(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+    ) -> bool:
+        print(
+            "[Running] 近距离前推后车辆丢失，怀疑已经越过车辆，"
+            "转身检查身后是否有车"
+        )
+        self._log_running_state("近车过冲复核", location, direction, "转身检查身后车辆")
+        self.stop_auto_forward(w)
+
+        original_direction = direction
+        if original_direction is None:
+            original_direction = self._get_scalar(w.get_info("direction"))
+
+        if original_direction is None:
+            w.tap_single("视角", x_bias=self.UNSTUCK_TURN_BIAS * 2, dura=850, wait=500)
+            w.refresh_frame()
+        else:
+            rear_direction = (float(original_direction) + 180.0) % 360.0
+            for _ in range(self.ROADSIDE_CAR_REAR_TURN_ATTEMPTS):
+                current_direction = self._get_scalar(w.get_info("direction"))
+                if current_direction is None:
+                    break
+                if self._align_to_direction(w, current_direction, rear_direction, threshold=8):
+                    break
+            w.refresh_frame()
+
+        rear_car = self._find_largest_car(w)
+        if not rear_car:
+            print("[Running] 回头后未发现车辆")
+            if original_direction is not None:
+                for _ in range(2):
+                    current_direction = self._get_scalar(w.get_info("direction"))
+                    if current_direction is None:
+                        break
+                    if self._align_to_direction(w, current_direction, float(original_direction), threshold=10):
+                        break
+            return False
+
+        area_ratio = self._get_detection_area_ratio(w, rear_car)
+        if area_ratio is not None:
+            self.roadside_car_last_area_ratio = area_ratio
+            self.roadside_car_peak_area_ratio = max(self.roadside_car_peak_area_ratio or 0.0, area_ratio)
+        print(f"[Running] 回头发现身后车辆，area_ratio={area_ratio}，执行微调上车")
+
+        aligned = self._align_to_visible_car(w)
+        if aligned is None:
+            return False
+        if not aligned:
+            self.roadside_car_lost_rounds = 0
+            self.roadside_car_lost_after_forward_pushes = 0
+            return True
+
+        w.tap_single(
+            "摇杆",
+            y_bias=self.ROADSIDE_CAR_REAR_FORWARD_BIAS_Y,
+            dura=self.ROADSIDE_CAR_REAR_FORWARD_DURA,
+            wait=self.ROADSIDE_CAR_REAR_FORWARD_WAIT,
+        )
+        w.refresh_frame()
+        self.roadside_car_lost_rounds = 0
+        self.roadside_car_lost_after_forward_pushes = 0
+        return self._click_drive_directly_after_move(w, "回头发现身后车辆后微调点击驾驶") or True
+
     def _get_visual_frame_width(self, w: "FrameWorker") -> Optional[int]:
         frame = getattr(w, "frame", None)
         if frame is None:
@@ -2769,10 +2894,10 @@ class RunningManager:
         if not car:
             return None
 
-        if self.roadside_car_pursuing:
-            area_ratio = self._get_detection_area_ratio(w, car)
-            if area_ratio is not None:
-                self.roadside_car_last_area_ratio = area_ratio
+        area_ratio = self._get_detection_area_ratio(w, car)
+        if area_ratio is not None:
+            self.roadside_car_last_area_ratio = area_ratio
+            self.roadside_car_peak_area_ratio = max(self.roadside_car_peak_area_ratio or 0.0, area_ratio)
 
         frame_w = self._get_visual_frame_width(w)
         if not frame_w:
@@ -2812,11 +2937,16 @@ class RunningManager:
             else:
                 print(f"[Running] 已对准车辆，执行前推尝试上车 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}")
 
+            forward_wait = self._get_dynamic_car_forward_wait()
+            print(
+                f"[Running] 视觉对车前推时间 wait={forward_wait}ms, "
+                f"car_area_ratio={self.roadside_car_last_area_ratio}"
+            )
             w.tap_single(
                 "摇杆",
                 y_bias=self.CAR_VISUAL_FORWARD_BIAS_Y,
                 dura=self.CAR_VISUAL_FORWARD_DURA,
-                wait=self.CAR_VISUAL_FORWARD_WAIT,
+                wait=forward_wait,
             )
             w.refresh_frame()
 

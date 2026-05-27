@@ -371,6 +371,9 @@ class Searching_House:
             print("[Unstuck] 后退后前方未确认房体，交给通用避障")
             return False
 
+        if self._try_lock_visible_door_after_block(w):
+            return True
+
         first_side = self._choose_house_bypass_side(w)
         sides = [first_side, "left" if first_side == "right" else "right"]
         back_loc = safe_get_loc() or current_loc
@@ -412,6 +415,24 @@ class Searching_House:
 
         print("[Unstuck] 房体绕行未成功，回退到通用避障")
         return False
+
+    def _try_lock_visible_door_after_block(self, w: 'FrameWorker') -> bool:
+        door = self.find_largest_door(w)
+        if door is None:
+            return False
+
+        print("[Unstuck] 后退后前方是房子且定位到门，直接锁门进入交互流程")
+        self.stop_auto_forward(w)
+        self._align_to_door_detection(w, door)
+        w.refresh_frame()
+
+        if w.get_info('开门') or w.get_info('关门'):
+            self.status = "INTERACT"
+        else:
+            self.status = "VISUAL_APPROACH"
+
+        self.history_locations = []
+        return True
 
     def searching_logic(self, w: 'FrameWorker', current_loc, current_direction):
         if self._should_abort(w):
@@ -750,6 +771,8 @@ class Searching_House:
         if self._get_house_scene(w) == 0:
             house_scene_after_backoff = self._backoff_and_recheck_house_scene(w)
             if house_scene_after_backoff != 0:
+                if self._front_house_blocking(w) and self._try_lock_visible_door_after_block(w):
+                    return True
                 print("[Unstuck] 后退复核后已不判定为室内，按室外卡住继续导航")
                 return True
 

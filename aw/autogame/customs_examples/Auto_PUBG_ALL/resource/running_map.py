@@ -135,10 +135,18 @@ class RoadRouteHelper:
         )
         return node, get_distance(point, node)
 
-    def plan_to_node(self, start: Tuple[int, int], node: Tuple[int, int]) -> List[Tuple[int, int]]:
+    def plan_to_node(
+        self,
+        start: Tuple[int, int],
+        node: Tuple[int, int],
+        allow_fallback: bool = True,
+    ) -> List[Tuple[int, int]]:
         topo_path = self._try_topo_path(start, node)
         if topo_path:
             return self._sample_path(self._dedupe_path(topo_path))
+
+        if not allow_fallback:
+            return []
 
         planned = self.map_tool.plan_path(start, node)
         if not planned:
@@ -271,6 +279,8 @@ class RunningManager:
     LOCATION_JUMP_THRESHOLD = 25.0
     # 位置跳变后，多久内不重复触发重规划
     LOCATION_JUMP_REPLAN_COOLDOWN = 1.5
+    # OCR 偶发会把小地图坐标识别成左上角附近，直接用这种点规划会把路线带歪。
+    LOCATION_MIN_VALID_COORD = 20
 
     # 不同时期的进圈目标距离，单位是地图坐标距离
     STAGE1_DIS = 600
@@ -541,6 +551,9 @@ class RunningManager:
             self._handle_rank_finish(w)
             return
 
+        if self._try_house_exit_when_indoor(w, location, direction, "进入跑图阶段检测"):
+            return
+
         if self._handle_recent_vehicle_exit(w, location, direction):
             return
 
@@ -704,12 +717,36 @@ class RunningManager:
         if info is None:
             return None
 
+        location = None
         if isinstance(info, (list, tuple)):
             if len(info) >= 2 and not isinstance(info[0], (list, tuple)):
-                return check_location(info)
-            if len(info) > 0:
-                return check_location(info[0])
-        return None
+                location = check_location(info)
+            elif len(info) > 0:
+                location = check_location(info[0])
+
+        if location is None:
+            return None
+
+        try:
+            location = (int(location[0]), int(location[1]))
+        except (TypeError, ValueError, IndexError):
+            return None
+
+        if not self._is_reasonable_location(location):
+            print(f"[Running] 坐标疑似异常，忽略本帧 location={location}")
+            return None
+
+        return location
+
+    def _is_reasonable_location(self, location: Tuple[int, int]) -> bool:
+        x, y = location
+        width = getattr(self.map_tool, "width", None)
+        height = getattr(self.map_tool, "height", None)
+        if width is not None and height is not None:
+            if x < 0 or y < 0 or x >= int(width) or y >= int(height):
+                return False
+
+        return x > self.LOCATION_MIN_VALID_COORD and y > self.LOCATION_MIN_VALID_COORD
 
     def _get_scalar(self, value):
         if isinstance(value, (int, float)):
@@ -1226,8 +1263,8 @@ class RunningManager:
         )
         if start_node is not None and start_node_dist > self.ROAD_NODE_REACHED_TOLERANCE:
             print(f"[Running] 指定寻车路线先接入最近道路点 {start_node}, dist={start_node_dist:.2f}")
-            route = self._merge_paths(route, self.road_helper.plan_to_node(location, start_node))
-            segment_start = route[-1] if route else start_node
+            route = self._merge_paths(route, [start_node])
+            segment_start = start_node
 
         for road_point in remaining_points:
             road_point = tuple(map(int, road_point))
@@ -1236,7 +1273,20 @@ class RunningManager:
                 segment_start = road_point
                 continue
 
-            segment = self.road_helper.plan_to_node(segment_start, road_point)
+            segment = self.road_helper.plan_to_node(
+                segment_start,
+                road_point,
+                allow_fallback=not use_topology_nodes,
+            )
+            if not segment:
+                print(f"[Running] road_module 无法规划 {segment_start} -> {road_point}，放弃本次指定路线")
+                self.priority_car_search_road_points = []
+                self.road_list = []
+                self.current_running_route_kind = None
+                return False
+            if not use_topology_nodes and not self._is_priority_route_segment_reasonable(segment_start, road_point, segment):
+                print(f"[Running] 兜底规划 {segment_start} -> {road_point} 偏离过大，改用道路节点直连")
+                segment = [road_point]
             route = self._merge_paths(route, segment)
             if not route or route[-1] != road_point:
                 route = self._merge_paths(route, [road_point])
@@ -1256,6 +1306,32 @@ class RunningManager:
         self.garage_to_roadside_route_active = False
         print(f"[Running] 指定寻车路线已生成: {self.road_list}")
         return True
+
+    def _is_priority_route_segment_reasonable(
+        self,
+        start: Tuple[int, int],
+        end: Tuple[int, int],
+        segment: List[Tuple[int, int]],
+    ) -> bool:
+        if not segment:
+            return False
+
+        xs = [start[0], end[0]]
+        ys = [start[1], end[1]]
+        margin = 180
+        min_x, max_x = min(xs) - margin, max(xs) + margin
+        min_y, max_y = min(ys) - margin, max(ys) + margin
+        for point in segment:
+            if point[0] < min_x or point[0] > max_x or point[1] < min_y or point[1] > max_y:
+                return False
+
+        direct_dist = max(get_distance(start, end), 1.0)
+        path_dist = 0.0
+        prev = start
+        for point in segment:
+            path_dist += get_distance(prev, point)
+            prev = point
+        return path_dist <= direct_dist * 4
 
     def _get_priority_car_search_road_points(self, use_topology_nodes: Optional[bool] = None) -> List[Tuple[int, int]]:
         if self.priority_car_search_road_points:

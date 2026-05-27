@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QPlainTextEdit,
     QRadioButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QSpinBox,
@@ -493,6 +494,10 @@ class LauncherWindow(QWidget):
             QSplitter::handle {
                 background: #d8dee6;
             }
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
             """
         )
 
@@ -521,12 +526,24 @@ class LauncherWindow(QWidget):
         main_layout.setContentsMargins(14, 12, 14, 14)
         main_layout.setSpacing(10)
 
+        controls_scroll = QScrollArea()
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        controls_scroll.setMinimumHeight(190)
+        controls_scroll.setMaximumHeight(330)
+
+        controls_widget = QWidget()
+        controls_layout = QVBoxLayout(controls_widget)
+        controls_layout.setContentsMargins(0, 0, 4, 0)
+        controls_layout.setSpacing(10)
+
         mode_group = QGroupBox("启动方式")
         mode_layout = QVBoxLayout(mode_group)
         mode_layout.setSpacing(8)
         mode_layout.addWidget(self.mode_testcase)
         mode_layout.addWidget(self.mode_direct)
-        main_layout.addWidget(mode_group)
+        controls_layout.addWidget(mode_group)
 
         testcase_group = QGroupBox("testcases 用例")
         testcase_layout = QHBoxLayout(testcase_group)
@@ -534,7 +551,7 @@ class LauncherWindow(QWidget):
         testcase_layout.addWidget(self.testcase_path_edit, 1)
         testcase_layout.addWidget(self.browse_button)
         testcase_layout.addWidget(self.clear_button)
-        main_layout.addWidget(testcase_group)
+        controls_layout.addWidget(testcase_group)
 
         config_group = QGroupBox("配置")
         config_layout = QFormLayout(config_group)
@@ -551,7 +568,11 @@ class LauncherWindow(QWidget):
         config_layout.addRow("解析结果", self.status_label)
         config_layout.addRow("运行信息", self.runtime_label)
         config_layout.addRow("", self.refresh_button)
-        main_layout.addWidget(config_group)
+        controls_layout.addWidget(config_group)
+        controls_layout.addStretch(1)
+
+        controls_scroll.setWidget(controls_widget)
+        main_layout.addWidget(controls_scroll, 0)
 
         action_layout = QHBoxLayout()
         action_layout.addWidget(self.start_button)

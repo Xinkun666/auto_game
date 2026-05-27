@@ -155,6 +155,55 @@ class RoadRouteHelper:
             planned.append(node)
         return self._sample_path(self._dedupe_path(planned))
 
+    def plan_priority_road_path(
+        self,
+        start: Tuple[int, int],
+        road_points: List[Tuple[int, int]],
+    ) -> Tuple[List[Tuple[int, int]], Optional[Tuple[int, int]], float]:
+        topo = self._get_topo()
+        if topo is None:
+            return [], None, float("inf")
+
+        start_road_point, start_dist = topo.find_nearest_point_from_mask(start[0], start[1])
+        if start_road_point is None:
+            return [], None, float("inf")
+
+        full_path: List[Tuple[int, int]] = []
+        segment_start = tuple(map(int, start_road_point))
+        for road_point in road_points:
+            road_point = tuple(map(int, road_point))
+            if get_distance(segment_start, road_point) <= 1.0:
+                full_path = self._merge_dedupe_paths(full_path, [road_point])
+                segment_start = road_point
+                continue
+
+            dest_key = self._find_topo_node_key(topo, road_point)
+            if dest_key is None:
+                print(f"[RoadRoute] 指定寻车点 {road_point} 不是 road_module 红色节点")
+                return [], segment_start, start_dist
+
+            result = topo.shortest_path_from_point(
+                int(segment_start[0]),
+                int(segment_start[1]),
+                int(dest_key[1:]) - 1,
+            )
+            if not result or len(result) < 3 or not result[2]:
+                print(f"[RoadRoute] road_module 无法规划 {segment_start} -> {road_point}")
+                return [], segment_start, start_dist
+
+            segment = [tuple(map(int, point)) for point in result[2]]
+            if hasattr(topo, "get_piecewise_road_with_point"):
+                piecewise = topo.get_piecewise_road_with_point([list(point) for point in segment])
+                if piecewise:
+                    segment = [tuple(map(int, point)) for point in piecewise]
+
+            full_path = self._merge_dedupe_paths(full_path, self._sample_path(self._dedupe_path(segment)))
+            if not full_path or full_path[-1] != road_point:
+                full_path = self._merge_dedupe_paths(full_path, [road_point])
+            segment_start = road_point
+
+        return full_path, tuple(map(int, start_road_point)), float(start_dist)
+
     def _try_topo_path(self, start: Tuple[int, int], node: Tuple[int, int]) -> List[Tuple[int, int]]:
         topo = self._get_topo()
         if topo is None:
@@ -224,6 +273,13 @@ class RoadRouteHelper:
                 continue
             cleaned.append(item)
         return cleaned
+
+    def _merge_dedupe_paths(self, path1, path2) -> List[Tuple[int, int]]:
+        merged = self._dedupe_path(path1)
+        for point in self._dedupe_path(path2):
+            if not merged or merged[-1] != point:
+                merged.append(point)
+        return merged
 
     def _sample_path(self, path: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
         if len(path) <= 2:
@@ -398,7 +454,8 @@ class RunningManager:
     VEHICLE_ENTRY_UNKNOWN = "unknown"
     CAR_SEARCH_GARAGE = "garage"
     CAR_SEARCH_ROADSIDE = "roadside"
-    PRIORITY_CAR_SEARCH_ANCHORS = ((1109, 702), (1186, 784), (1325, 960))
+    PRIORITY_CAR_SEARCH_ANCHORS = ((1109, 792), (1189, 783), (1322, 960))
+    PRIORITY_CAR_SEARCH_EXIT_POINT = (1189, 783)
     RUNNING_ROUTE_CIRCLE = "circle"
     RUNNING_ROUTE_PATROL = "patrol"
     RUNNING_ROUTE_RANDOM_AROUND_CIRCLE = "random_around_circle"
@@ -782,6 +839,8 @@ class RunningManager:
                 self.loading_road = False
 
     def _need_circle_now(self) -> bool:
+        if self.drive_required:
+            return False
         return self.stable_circle_angle is not None and not self.circle_route_completed
 
     def _refresh_finding_car_policy(
@@ -790,27 +849,42 @@ class RunningManager:
         location: Tuple[int, int],
         direction: Optional[float],
     ):
-        should_find_car = self.drive_required and not self._need_circle_now()
-        if should_find_car == self.finding_car:
-            return
+        if self.drive_required:
+            needs_priority_route = (
+                not self.finding_car
+                or self.car_search_mode != self.CAR_SEARCH_ROADSIDE
+                or not self.priority_car_search_active
+                or self.current_running_route_kind
+                in {
+                    self.RUNNING_ROUTE_CIRCLE,
+                    self.RUNNING_ROUTE_RANDOM_AROUND_CIRCLE,
+                    self.RUNNING_ROUTE_PATROL,
+                }
+            )
+            if not needs_priority_route:
+                return
 
-        if should_find_car:
-            print("[Running] 开车阶段未完成且当前不需要进圈，恢复沿路找车")
-            self._log_running_state("恢复找车", location, direction, "到最近道路点继续找车")
+            print("[Running] 开车阶段未完成，优先沿指定路线找车，暂不处理进圈")
+            self._log_running_state("恢复找车", location, direction, "沿指定路线继续找车")
+            self.stop_auto_forward(w)
             self.finding_car = True
             self.car_search_started_at = time.time()
             self.priority_car_search_active = True
             self.priority_car_search_finished = False
             self.priority_car_search_next_index = 0
             self.priority_car_search_road_points = []
+            self.current_running_route_kind = None
             self._switch_to_roadside_car_search(
-                "开车未完成且进圈路线已处理",
+                "开车未完成，优先沿指定路线找车",
                 leave_garage_route=False,
             )
             return
 
-        print("[Running] 当前需要进圈，暂停找车并优先进圈")
-        self._log_running_state("暂停找车", location, direction, "优先进圈")
+        if not self.finding_car:
+            return
+
+        print("[Running] 开车阶段已完成，停止找车，恢复跑图/进圈")
+        self._log_running_state("停止找车", location, direction, "开车完成后恢复跑图/进圈")
         self.stop_auto_forward(w)
         self.finding_car = False
         self.car_search_started_at = None
@@ -898,6 +972,24 @@ class RunningManager:
             or self.current_running_route_kind != self.RUNNING_ROUTE_PRIORITY_CAR_SEARCH
         ):
             return False
+
+        cutoff_point = tuple(map(int, self.PRIORITY_CAR_SEARCH_EXIT_POINT))
+        cutoff_dist = get_distance(location, cutoff_point)
+        if cutoff_dist <= max(self.WAYPOINT_TOLERANCE, self.ROAD_NODE_REACHED_TOLERANCE):
+            print(f"[Running] 已到达指定寻车截止点 {cutoff_point} 仍未上车，结束当前局并重开")
+            self._log_running_state(
+                "指定寻车截止点",
+                location,
+                direction,
+                "到 1189,783 未上车，结束当前局",
+                cutoff_point,
+                cutoff_dist,
+            )
+            self.priority_car_search_finished = True
+            self.priority_car_search_active = False
+            self._handle_death(w)
+            return True
+
         if self.road_list:
             return False
 
@@ -1006,7 +1098,7 @@ class RunningManager:
         self.roadside_car_last_area_ratio = None
         print(
             "[Running] 收到搜房结束通知，"
-            f"后续模式={'沿路找车并向地图中心跑' if self.finding_car else '向地图中心跑'}"
+            f"后续模式={'沿指定路线找车，开车完成后再跑图/进圈' if self.finding_car else '跑图/进圈'}"
         )
 
     def consume_vehicle_entry_source(self) -> Optional[str]:
@@ -1161,13 +1253,11 @@ class RunningManager:
                         "距离车库点过远",
                         leave_garage_route=False,
                     )
-                    if not self._load_priority_car_search_path(location, reason="距离车库点过远，直接沿指定路线找车"):
-                        self._load_road_patrol_path(location, reason="距离车库点过远，直接沿路找车")
+                    self._load_priority_car_search_path(location, reason="距离车库点过远，直接沿指定路线找车")
                 else:
                     self._load_garage_find_path(location)
             else:
-                if not self._load_priority_car_search_path(location, reason="寻车阶段沿指定路线巡游"):
-                    self._load_road_patrol_path(location, reason="车库无车，寻车阶段沿路巡游")
+                self._load_priority_car_search_path(location, reason="寻车阶段沿指定路线巡游")
         else:
             self._load_running_path(location)
 
@@ -1235,18 +1325,17 @@ class RunningManager:
         ):
             return False
 
-        print(f"[Running] {reason}: anchors={self.PRIORITY_CAR_SEARCH_ANCHORS}")
+        print(f"[Running] {reason}: road_points={self.PRIORITY_CAR_SEARCH_ANCHORS}")
         self._log_running_state(
             reason,
             location,
             None,
-            "沿指定粗路线规划道路找车",
+            "沿指定 road_module 路线规划道路找车",
             self.PRIORITY_CAR_SEARCH_ANCHORS[-1],
         )
 
-        use_topology_nodes = self.road_helper.topology_available()
         self._sync_priority_car_route_progress(location)
-        route_points = self._get_priority_car_search_road_points(use_topology_nodes)
+        route_points = self._get_priority_car_search_road_points()
         remaining_points = route_points[self.priority_car_search_next_index:]
         if not remaining_points:
             self.priority_car_search_finished = True
@@ -1254,51 +1343,20 @@ class RunningManager:
             self.road_list = []
             return True
 
-        route: List[Tuple[int, int]] = []
-        segment_start = location
-
-        start_node, start_node_dist = self.road_helper.nearest_node(
+        route, start_road_point, start_road_dist = self.road_helper.plan_priority_road_path(
             location,
-            topology_only=use_topology_nodes,
+            remaining_points,
         )
-        if start_node is not None and start_node_dist > self.ROAD_NODE_REACHED_TOLERANCE:
-            print(f"[Running] 指定寻车路线先接入最近道路点 {start_node}, dist={start_node_dist:.2f}")
-            route = self._merge_paths(route, [start_node])
-            segment_start = start_node
-
-        for road_point in remaining_points:
-            road_point = tuple(map(int, road_point))
-            if get_distance(segment_start, road_point) <= self.WAYPOINT_TOLERANCE:
-                self._mark_priority_car_waypoint_reached(road_point)
-                segment_start = road_point
-                continue
-
-            segment = self.road_helper.plan_to_node(
-                segment_start,
-                road_point,
-                allow_fallback=not use_topology_nodes,
-            )
-            if not segment:
-                print(f"[Running] road_module 无法规划 {segment_start} -> {road_point}，放弃本次指定路线")
-                self.priority_car_search_road_points = []
-                self.road_list = []
-                self.current_running_route_kind = None
-                return False
-            if not use_topology_nodes and not self._is_priority_route_segment_reasonable(segment_start, road_point, segment):
-                print(f"[Running] 兜底规划 {segment_start} -> {road_point} 偏离过大，改用道路节点直连")
-                segment = [road_point]
-            route = self._merge_paths(route, segment)
-            if not route or route[-1] != road_point:
-                route = self._merge_paths(route, [road_point])
-            segment_start = route[-1] if route else road_point
-
         if not route:
-            final_point = route_points[-1] if route_points else tuple(map(int, self.PRIORITY_CAR_SEARCH_ANCHORS[-1]))
-            if get_distance(location, final_point) <= self.WAYPOINT_TOLERANCE:
-                self.priority_car_search_finished = True
-                self.current_running_route_kind = self.RUNNING_ROUTE_PRIORITY_CAR_SEARCH
-                return False
-            route = [final_point]
+            print("[Running] road_module 指定寻车路线规划失败，等待下一帧重试")
+            self.road_list = []
+            self.current_running_route_kind = self.RUNNING_ROUTE_PRIORITY_CAR_SEARCH
+            return False
+
+        print(
+            f"[Running] 指定寻车路线起点 A={start_road_point}, "
+            f"player_to_A={start_road_dist:.2f}, remaining={remaining_points}"
+        )
 
         self.current_road_node = None
         self.road_list = route
@@ -1337,29 +1395,11 @@ class RunningManager:
         if self.priority_car_search_road_points:
             return self.priority_car_search_road_points
 
-        if use_topology_nodes is None:
-            use_topology_nodes = self.road_helper.topology_available()
-
-        route_nodes: List[Tuple[int, int]] = []
-        for anchor in self.PRIORITY_CAR_SEARCH_ANCHORS:
-            anchor = tuple(map(int, anchor))
-            road_node, road_dist = self.road_helper.nearest_node(
-                anchor,
-                topology_only=use_topology_nodes,
-            )
-            if road_node is None:
-                road_node, road_dist = self.road_helper.nearest_node(anchor)
-
-            if road_node is None:
-                print(f"[Running] 锚点 {anchor} 未找到道路节点，跳过")
-                continue
-
-            road_node = tuple(map(int, road_node))
-            if not route_nodes or route_nodes[-1] != road_node:
-                route_nodes.append(road_node)
-            print(f"[Running] 指定寻车锚点 {anchor} -> 最近道路节点 {road_node}, dist={road_dist:.2f}")
-
-        self.priority_car_search_road_points = route_nodes
+        self.priority_car_search_road_points = [
+            tuple(map(int, point))
+            for point in self.PRIORITY_CAR_SEARCH_ANCHORS
+        ]
+        print(f"[Running] 指定寻车精确道路节点: {self.priority_car_search_road_points}")
         return self.priority_car_search_road_points
 
     def _sync_priority_car_route_progress(self, location: Tuple[int, int]):

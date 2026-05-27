@@ -490,7 +490,7 @@ class DrivingManager:
                 self._exit_vehicle_to_running(
                     w,
                     "车辆困死，切回跑图阶段",
-                    finding_car=True,
+                    finding_car=self._should_continue_finding_car_after_running_fallback("车辆困死"),
                 )
             else:
                 self._handle_death(w)
@@ -1470,19 +1470,22 @@ class DrivingManager:
         return coverage_ratio <= self.NO_FUEL_MAX_OBSTACLE_COVERAGE
 
     def _should_find_car_after_no_fuel(self) -> bool:
-        circle_angle = self.stable_circle_angle
-        if circle_angle is None:
-            circle_angle = self.latest_circle_angle
+        if self._should_continue_finding_car_after_running_fallback("疑似没油"):
+            print("[Driving] 疑似没油但开车阶段未完成，切跑图后继续沿指定路线找车")
+            return True
 
-        if circle_angle is not None:
-            print(
-                f"[Driving] 疑似没油且检测到进圈角度 {circle_angle:.1f}，"
-                "放弃寻车，切跑图优先进圈"
-            )
-            return False
+        print("[Driving] 疑似没油且开车阶段已完成，切跑图后再考虑进圈")
+        return False
 
-        print("[Driving] 疑似没油且未检测到进圈角度，切跑图后沿附近道路寻车")
-        return True
+    def _should_continue_finding_car_after_running_fallback(self, reason: str) -> bool:
+        remaining = max(0.0, self.max_driving_time - self.get_driving_elapsed_time())
+        should_find = remaining > 0.0
+        print(
+            f"[Driving] {reason}回退跑图决策: "
+            f"driving_remaining={remaining:.2f}s, "
+            f"next={'继续找车' if should_find else '跑图/进圈'}"
+        )
+        return should_find
 
     def _current_circle_angle_text(self) -> str:
         circle_angle = self.stable_circle_angle
@@ -1511,14 +1514,16 @@ class DrivingManager:
         for _ in range(20):
             if self.house_exit_manager.process(w):
                 print("[Driving] HouseExitManager 出房成功，切回跑图阶段")
+                finding_car = self._should_continue_finding_car_after_running_fallback("室内脱困完成")
                 self.reset(max_driving_time=self.max_driving_time)
-                self.next_running_finding_car = True
+                self.next_running_finding_car = finding_car
                 w.change_stage("跑图阶段")
                 return True
 
         print("[Driving] HouseExitManager 暂未出房，切回跑图阶段继续脱困")
+        finding_car = self._should_continue_finding_car_after_running_fallback("室内脱困未完成")
         self.reset(max_driving_time=self.max_driving_time)
-        self.next_running_finding_car = True
+        self.next_running_finding_car = finding_car
         w.change_stage("跑图阶段")
         return True
 
@@ -1976,7 +1981,9 @@ class DrivingManager:
         )
 
     def _handle_unexpected_vehicle_exit(self, w: "FrameWorker"):
+        finding_car = self._should_continue_finding_car_after_running_fallback("意外下车")
         self.reset(max_driving_time=self.max_driving_time)
+        self.next_running_finding_car = finding_car
         w.change_stage("跑图阶段")
 
     def _analyze_obstacles(self, w: "FrameWorker") -> Dict[str, Any]:

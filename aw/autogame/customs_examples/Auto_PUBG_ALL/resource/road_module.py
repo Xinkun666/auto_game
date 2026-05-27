@@ -129,6 +129,7 @@ class RoadTopo():
         self.mask_path = mask_path
         self.node_path = node_path
         self.route_node_path = route_node_path
+        self._road_pixel_coords = None
         self.intersections = self.load_intersections()
         self.get_matrix()
 
@@ -312,6 +313,33 @@ class RoadTopo():
             if v == path_nodes[-1]:
                 pixels.append(list(self.intersections['c'+str(v+1)]))
         return pixels
+
+    def find_nearest_point_from_mask(self, px, py):
+        if self._road_pixel_coords is None:
+            img = cv2.imread(self.mask_path, cv2.IMREAD_COLOR)
+            if img is None:
+                print(f"错误：无法读取道路 mask {self.mask_path}")
+                return None, math.inf
+
+            white = np.all(img == (255, 255, 255), axis=2)
+            red = np.all(img == (0, 0, 255), axis=2)
+            blue = np.all(img == (255, 0, 0), axis=2)
+            ys, xs = np.where(white | red | blue)
+            if len(xs) == 0:
+                print("道路 mask 中没有可用道路像素")
+                return None, math.inf
+            self._road_pixel_coords = np.column_stack((xs, ys)).astype(np.int32)
+
+        try:
+            point = np.array([int(round(float(px))), int(round(float(py)))], dtype=np.int32)
+        except (TypeError, ValueError):
+            return None, math.inf
+
+        deltas = self._road_pixel_coords - point
+        dist_sq = np.sum(deltas * deltas, axis=1)
+        idx = int(np.argmin(dist_sq))
+        nearest = self._road_pixel_coords[idx]
+        return [int(nearest[0]), int(nearest[1])], math.sqrt(float(dist_sq[idx]))
 
     def build_path_from_sequence(self,node_sequence):
         full_path = []

@@ -245,6 +245,19 @@ class HouseExitManager:
 
         if self._get_house_scene(w) == self.HOUSE_OUTDOOR:
             print("[HouseExit] 出房成功")
+            restored_dir = w.get_info("direction")
+            if restored_dir is not None:
+                print("[HouseExit] 二次确认后转回出房方向，避免回头冲回房内")
+                self._align_direction_blocking(
+                    w,
+                    restored_dir,
+                    current_dir,
+                    tolerance=15,
+                    max_steps=5,
+                    dura=450,
+                    wait=260,
+                )
+                w.refresh_frame()
             self.reset()
             return True
 

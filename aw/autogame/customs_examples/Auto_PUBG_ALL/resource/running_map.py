@@ -404,17 +404,22 @@ class RunningManager:
     CAR_VISUAL_DYNAMIC_CLOSE_AREA_RATIO = 0.030
     CAR_VISUAL_DYNAMIC_NEAR_AREA_RATIO = 0.045
     CAR_VISUAL_DYNAMIC_VERY_NEAR_AREA_RATIO = 0.08
-    CAR_VISUAL_DYNAMIC_MIN_WAIT = 100
-    CAR_VISUAL_DYNAMIC_VERY_NEAR_WAIT = 180
-    CAR_VISUAL_DYNAMIC_NEAR_WAIT = 520
-    CAR_VISUAL_DYNAMIC_CLOSE_WAIT = 1200
-    CAR_VISUAL_DYNAMIC_FAR_WAIT = 6500
+    CAR_VISUAL_DYNAMIC_MIN_WAIT = 40
+    CAR_VISUAL_DYNAMIC_VERY_NEAR_WAIT = 80
+    CAR_VISUAL_DYNAMIC_NEAR_WAIT = 160
+    CAR_VISUAL_DYNAMIC_CLOSE_WAIT = 380
+    CAR_VISUAL_DYNAMIC_FAR_WAIT = 2200
     CAR_VISUAL_DYNAMIC_MAX_WAIT = 8500
-    CAR_VISUAL_DYNAMIC_MIN_DURA = 90
-    CAR_VISUAL_DYNAMIC_VERY_NEAR_DURA = 110
-    CAR_VISUAL_DYNAMIC_NEAR_DURA = 160
-    CAR_VISUAL_DYNAMIC_CLOSE_DURA = 240
-    CAR_VISUAL_DYNAMIC_FAR_DURA = 320
+    CAR_VISUAL_DYNAMIC_MIN_DURA = 45
+    CAR_VISUAL_DYNAMIC_VERY_NEAR_DURA = 60
+    CAR_VISUAL_DYNAMIC_NEAR_DURA = 80
+    CAR_VISUAL_DYNAMIC_CLOSE_DURA = 120
+    CAR_VISUAL_DYNAMIC_FAR_DURA = 260
+    CAR_VISUAL_DYNAMIC_MIN_BIAS_Y = -65
+    CAR_VISUAL_DYNAMIC_VERY_NEAR_BIAS_Y = -80
+    CAR_VISUAL_DYNAMIC_NEAR_BIAS_Y = -100
+    CAR_VISUAL_DYNAMIC_CLOSE_BIAS_Y = -150
+    CAR_VISUAL_DYNAMIC_FAR_BIAS_Y = -220
     # 单轮寻车超过该时间仍未上车，则结束当前局；计时从进入/恢复寻车模式开始。
     CAR_SEARCH_TIMEOUT = 5 * 60
     # 路边发现远车后，允许跨帧追车，避免车辆框短暂丢失后又回头追原道路点。
@@ -429,10 +434,14 @@ class RunningManager:
     ROADSIDE_CAR_MIN_ESTIMATED_DISTANCE = 5.0
     ROADSIDE_CAR_MAX_ESTIMATED_DISTANCE = 70.0
     ROADSIDE_CAR_OVERSHOOT_AREA_RATIO = 0.045
-    ROADSIDE_CAR_REAR_TURN_ATTEMPTS = 3
-    ROADSIDE_CAR_REAR_FORWARD_BIAS_Y = -130
-    ROADSIDE_CAR_REAR_FORWARD_DURA = 180
-    ROADSIDE_CAR_REAR_FORWARD_WAIT = 420
+    ROADSIDE_CAR_REAR_TURN_ATTEMPTS = 6
+    ROADSIDE_CAR_REAR_FORWARD_BIAS_Y = -90
+    ROADSIDE_CAR_REAR_FORWARD_DURA = 90
+    ROADSIDE_CAR_REAR_FORWARD_WAIT = 180
+    POST_HOUSE_EXIT_CLEAR_X_BIAS = 260
+    POST_HOUSE_EXIT_CLEAR_Y_BIAS = -220
+    POST_HOUSE_EXIT_CLEAR_DURA = 450
+    POST_HOUSE_EXIT_CLEAR_WAIT = 550
     # 落水后，上浮和向前划水脱离水面的操作参数
     WATER_FLOAT_DURA = 2000
     WATER_FORWARD_BIAS_Y = -280
@@ -1803,6 +1812,7 @@ class RunningManager:
         self.house_exit_manager.reset()
         for _ in range(20):
             if self.house_exit_manager.process(w):
+                self._clear_after_house_exit(w)
                 new_location = self._get_location(w) or location
                 self.locations = [new_location]
                 self.history_locations = [new_location]
@@ -1818,6 +1828,19 @@ class RunningManager:
         self.stuck = False
         self.trapped = False
         return True
+
+    def _clear_after_house_exit(self, w: "FrameWorker"):
+        print("[Running] 出房后执行左右斜向清位，避免掉头冲回房内")
+        self.stop_auto_forward(w)
+        for x_bias in (-self.POST_HOUSE_EXIT_CLEAR_X_BIAS, self.POST_HOUSE_EXIT_CLEAR_X_BIAS):
+            w.tap_single(
+                "摇杆",
+                x_bias=x_bias,
+                y_bias=self.POST_HOUSE_EXIT_CLEAR_Y_BIAS,
+                dura=self.POST_HOUSE_EXIT_CLEAR_DURA,
+                wait=self.POST_HOUSE_EXIT_CLEAR_WAIT,
+            )
+            w.refresh_frame()
 
     def _perform_unstuck_action(self, w: "FrameWorker", current_loc: Tuple[int, int]):
         if self._try_house_exit_when_indoor(w, current_loc, None, "脱困前检测"):
@@ -2199,14 +2222,15 @@ class RunningManager:
                 f"{self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}"
             )
 
-        forward_dura, forward_wait = self._get_dynamic_car_forward_motion()
+        forward_bias_y, forward_dura, forward_wait = self._get_dynamic_car_forward_motion()
         print(
-            f"[Running] 路边追车前推时间 dura={forward_dura}ms, wait={forward_wait}ms, "
+            f"[Running] 路边追车前推 y_bias={forward_bias_y}, "
+            f"dura={forward_dura}ms, wait={forward_wait}ms, "
             f"car_area_ratio={self.roadside_car_last_area_ratio}"
         )
         w.tap_single(
             "摇杆",
-            y_bias=self.CAR_VISUAL_FORWARD_BIAS_Y,
+            y_bias=forward_bias_y,
             dura=forward_dura,
             wait=forward_wait,
         )
@@ -2784,8 +2808,33 @@ class RunningManager:
         )
         return False
 
-    def _get_dynamic_car_forward_motion(self) -> Tuple[int, int]:
-        return self._get_dynamic_car_forward_dura(), self._get_dynamic_car_forward_wait()
+    def _get_dynamic_car_forward_motion(self) -> Tuple[int, int, int]:
+        return (
+            self._get_dynamic_car_forward_bias_y(),
+            self._get_dynamic_car_forward_dura(),
+            self._get_dynamic_car_forward_wait(),
+        )
+
+    def _get_dynamic_car_forward_bias_y(self) -> int:
+        ratio = self.roadside_car_last_area_ratio
+        if ratio is None:
+            return self.CAR_VISUAL_FORWARD_BIAS_Y
+
+        if ratio <= self.CAR_VISUAL_DYNAMIC_MID_AREA_RATIO:
+            return self.CAR_VISUAL_DYNAMIC_FAR_BIAS_Y
+        if ratio >= self.CAR_VISUAL_DYNAMIC_VERY_NEAR_AREA_RATIO:
+            return self.CAR_VISUAL_DYNAMIC_MIN_BIAS_Y
+
+        bias_y = self._interpolate_car_forward_wait(
+            ratio,
+            [
+                (self.CAR_VISUAL_DYNAMIC_MID_AREA_RATIO, self.CAR_VISUAL_DYNAMIC_FAR_BIAS_Y),
+                (self.CAR_VISUAL_DYNAMIC_CLOSE_AREA_RATIO, self.CAR_VISUAL_DYNAMIC_CLOSE_BIAS_Y),
+                (self.CAR_VISUAL_DYNAMIC_NEAR_AREA_RATIO, self.CAR_VISUAL_DYNAMIC_NEAR_BIAS_Y),
+                (self.CAR_VISUAL_DYNAMIC_VERY_NEAR_AREA_RATIO, self.CAR_VISUAL_DYNAMIC_VERY_NEAR_BIAS_Y),
+            ],
+        )
+        return int(round(bias_y))
 
     def _get_dynamic_car_forward_dura(self) -> int:
         ratio = self.roadside_car_last_area_ratio
@@ -2858,15 +2907,19 @@ class RunningManager:
         self._log_running_state("近车过冲复核", location, direction, "转身检查身后车辆")
         self.stop_auto_forward(w)
 
-        original_direction = direction
+        original_direction = self._get_scalar(w.get_info("direction"))
         if original_direction is None:
-            original_direction = self._get_scalar(w.get_info("direction"))
+            original_direction = self._get_scalar(direction)
 
         if original_direction is None:
             w.tap_single("视角", x_bias=self.UNSTUCK_TURN_BIAS * 2, dura=850, wait=500)
             w.refresh_frame()
         else:
             rear_direction = (float(original_direction) + 180.0) % 360.0
+            print(
+                f"[Running] 以当前角度 {float(original_direction):.1f} 为基准，"
+                f"回头转向 {rear_direction:.1f}"
+            )
             for _ in range(self.ROADSIDE_CAR_REAR_TURN_ATTEMPTS):
                 current_direction = self._get_scalar(w.get_info("direction"))
                 if current_direction is None:
@@ -2969,14 +3022,15 @@ class RunningManager:
             else:
                 print(f"[Running] 已对准车辆，执行前推尝试上车 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}")
 
-            forward_dura, forward_wait = self._get_dynamic_car_forward_motion()
+            forward_bias_y, forward_dura, forward_wait = self._get_dynamic_car_forward_motion()
             print(
-                f"[Running] 视觉对车前推时间 dura={forward_dura}ms, wait={forward_wait}ms, "
+                f"[Running] 视觉对车前推 y_bias={forward_bias_y}, "
+                f"dura={forward_dura}ms, wait={forward_wait}ms, "
                 f"car_area_ratio={self.roadside_car_last_area_ratio}"
             )
             w.tap_single(
                 "摇杆",
-                y_bias=self.CAR_VISUAL_FORWARD_BIAS_Y,
+                y_bias=forward_bias_y,
                 dura=forward_dura,
                 wait=forward_wait,
             )

@@ -422,37 +422,37 @@ class LauncherWindow(QWidget):
             QWidget {
                 background: #f4f6f8;
                 color: #1f2933;
-                font-size: 14px;
+                font-size: 12px;
             }
             QGroupBox {
                 background: #ffffff;
                 border: 1px solid #d8dee6;
-                border-radius: 8px;
-                margin-top: 14px;
-                padding: 12px;
+                border-radius: 6px;
+                margin-top: 9px;
+                padding: 7px;
                 font-weight: 600;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 6px;
+                left: 9px;
+                padding: 0 4px;
                 color: #334155;
             }
             QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {
                 background: #ffffff;
                 border: 1px solid #cbd5e1;
-                border-radius: 6px;
-                padding: 6px;
+                border-radius: 5px;
+                padding: 3px 5px;
                 selection-background-color: #2563eb;
             }
             QSpinBox, QDoubleSpinBox, QComboBox {
-                min-height: 30px;
+                min-height: 24px;
             }
             QPushButton {
                 background: #e8eef7;
                 border: 1px solid #c6d3e1;
-                border-radius: 6px;
-                padding: 7px 12px;
+                border-radius: 5px;
+                padding: 4px 9px;
                 color: #1e293b;
             }
             QPushButton:hover {
@@ -469,8 +469,8 @@ class LauncherWindow(QWidget):
             }
             QPushButton[presetButton="true"] {
                 background: #f8fafc;
-                padding: 5px 9px;
-                min-width: 34px;
+                padding: 3px 6px;
+                min-width: 26px;
                 border-color: #d7dee8;
                 font-weight: 500;
             }
@@ -505,9 +505,9 @@ class LauncherWindow(QWidget):
         container = QWidget()
         layout = QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        layout.setSpacing(4)
         spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        spin.setMinimumWidth(118)
+        spin.setMinimumWidth(96)
         layout.addWidget(spin)
 
         for value in values:
@@ -523,31 +523,33 @@ class LauncherWindow(QWidget):
 
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(14, 12, 14, 14)
-        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(10, 8, 10, 10)
+        main_layout.setSpacing(7)
 
         controls_scroll = QScrollArea()
         controls_scroll.setWidgetResizable(True)
         controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        controls_scroll.setMinimumHeight(190)
-        controls_scroll.setMaximumHeight(330)
+        controls_scroll.setMinimumHeight(150)
+        controls_scroll.setMaximumHeight(260)
 
         controls_widget = QWidget()
         controls_layout = QVBoxLayout(controls_widget)
         controls_layout.setContentsMargins(0, 0, 4, 0)
-        controls_layout.setSpacing(10)
+        controls_layout.setSpacing(5)
 
         mode_group = QGroupBox("启动方式")
         mode_layout = QVBoxLayout(mode_group)
-        mode_layout.setSpacing(8)
+        mode_layout.setContentsMargins(6, 4, 6, 5)
+        mode_layout.setSpacing(3)
         mode_layout.addWidget(self.mode_testcase)
         mode_layout.addWidget(self.mode_direct)
         controls_layout.addWidget(mode_group)
 
         testcase_group = QGroupBox("testcases 用例")
         testcase_layout = QHBoxLayout(testcase_group)
-        testcase_layout.setSpacing(8)
+        testcase_layout.setContentsMargins(6, 4, 6, 5)
+        testcase_layout.setSpacing(5)
         testcase_layout.addWidget(self.testcase_path_edit, 1)
         testcase_layout.addWidget(self.browse_button)
         testcase_layout.addWidget(self.clear_button)
@@ -555,9 +557,10 @@ class LauncherWindow(QWidget):
 
         config_group = QGroupBox("配置")
         config_layout = QFormLayout(config_group)
+        config_layout.setContentsMargins(6, 4, 6, 5)
         config_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        config_layout.setHorizontalSpacing(12)
-        config_layout.setVerticalSpacing(10)
+        config_layout.setHorizontalSpacing(8)
+        config_layout.setVerticalSpacing(5)
         config_layout.addRow("project_case", self.project_combo)
         config_layout.addRow("target_case", self.target_combo)
         config_layout.addRow("运行次数", self.run_count_field)

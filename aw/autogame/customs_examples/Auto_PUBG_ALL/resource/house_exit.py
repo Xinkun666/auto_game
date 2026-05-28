@@ -30,15 +30,21 @@ class HouseExitManager:
     WINDOW_JUMP_FORWARD_WAIT = 650
     EXIT_CONFIRM_FORWARD_DURA = 220
     EXIT_CONFIRM_FORWARD_WAIT = 350
+    NO_EXIT_ESCAPE_DURA = 5000
+    NO_EXIT_ESCAPE_WAIT = 5200
+    NO_EXIT_ESCAPE_X_BIAS = 360
+    NO_EXIT_ESCAPE_Y_BIAS = -460
 
     def __init__(self):
         self.screen_w, self.screen_h = get_resolution()
         self.scan_anchor_direction: Optional[float] = None
         self.scan_index = 0
+        self.trusted_exit_signal = False
 
     def reset(self):
         self.scan_anchor_direction = None
         self.scan_index = 0
+        self.trusted_exit_signal = False
 
     def process(self, w: "FrameWorker") -> bool:
         if self._is_terminal_state(w):
@@ -56,6 +62,7 @@ class HouseExitManager:
                 return self._verify_exit_success(w)
             return False
 
+        self.trusted_exit_signal = False
         self._ensure_scan_anchor(w)
         detections = self._get_forward_scene(w)
 
@@ -69,8 +76,7 @@ class HouseExitManager:
             print("[HouseExit] 发现窗，准备翻窗")
             return self._exit_via_window(w, window)
 
-        self._search_for_exit(w)
-        return False
+        return self._search_for_exit(w)
 
     def _get_house_scene(self, w: "FrameWorker") -> Optional[int]:
         value = w.get_info("house_scene")
@@ -111,14 +117,19 @@ class HouseExitManager:
         return max(candidates, key=lambda x: (x[2] - x[0]) * (x[3] - x[1]))
 
     def _exit_via_door(self, w: "FrameWorker", door: Sequence[float]) -> bool:
+        self.trusted_exit_signal = False
         self._align_to_target(w, door)
         w.refresh_frame()
 
         if w.get_info("开门"):
             print("[HouseExit] 门已关闭，先开门")
             w.click("开门")
+            self.trusted_exit_signal = True
             time.sleep(0.8)
             w.refresh_frame()
+        elif w.get_info("关门"):
+            print("[HouseExit] 检测到关门按钮，表示门已打开，直接出门")
+            self.trusted_exit_signal = True
 
         approached = self._approach_door_with_recovery(w, door)
         if self._is_terminal_state(w):
@@ -146,8 +157,11 @@ class HouseExitManager:
                 w.refresh_frame()
                 if w.get_info("开门"):
                     w.click("开门")
+                    self.trusted_exit_signal = True
                     time.sleep(0.6)
                     w.refresh_frame()
+                elif w.get_info("关门"):
+                    self.trusted_exit_signal = True
                 self._move_forward(w, dura=240, wait=420)
                 w.refresh_frame()
                 continue
@@ -156,6 +170,7 @@ class HouseExitManager:
             self._move_forward(w, dura=self.DOOR_LOST_FORWARD_DURA, wait=self.DOOR_LOST_FORWARD_WAIT)
             w.refresh_frame()
             if w.get_info("开门") or w.get_info("关门"):
+                self.trusted_exit_signal = True
                 return True
             if self._find_largest_target(self._get_forward_scene(w), self.DOOR_CLASS_IDS):
                 continue
@@ -172,6 +187,7 @@ class HouseExitManager:
         return True
 
     def _exit_via_window(self, w: "FrameWorker", window: Sequence[float]) -> bool:
+        self.trusted_exit_signal = False
         for step in range(self.WINDOW_APPROACH_STEPS):
             self._align_to_target(w, window)
             w.refresh_frame()
@@ -183,6 +199,7 @@ class HouseExitManager:
                 self._move_forward(w, dura=self.WINDOW_JUMP_FORWARD_DURA, wait=self.WINDOW_JUMP_FORWARD_WAIT)
                 w.refresh_frame()
                 if self._get_house_scene(w) == self.HOUSE_OUTDOOR:
+                    self.trusted_exit_signal = True
                     return self._verify_exit_success(w)
                 window = self._find_largest_target(self._get_forward_scene(w), self.WINDOW_CLASS_IDS)
                 if not window:
@@ -203,6 +220,11 @@ class HouseExitManager:
         w.refresh_frame()
         if self._get_house_scene(w) != self.HOUSE_OUTDOOR:
             return False
+
+        if self.trusted_exit_signal:
+            print("[HouseExit] 已通过门/窗明确出房，跳过回头二次确认")
+            self.reset()
+            return True
 
         print("[HouseExit] 首次判定已在屋外，执行二次确认")
         self._move_forward(w, dura=self.EXIT_CONFIRM_FORWARD_DURA, wait=self.EXIT_CONFIRM_FORWARD_WAIT)
@@ -232,7 +254,7 @@ class HouseExitManager:
     def _search_for_exit(self, w: "FrameWorker"):
         current_dir = w.get_info("direction")
         if current_dir is None:
-            return
+            return False
 
         target_dir = (self.scan_anchor_direction + self.SCAN_OFFSETS[self.scan_index]) % 360
         print(f"[HouseExit] 扫视角度 {target_dir:.1f}")
@@ -243,10 +265,44 @@ class HouseExitManager:
         if self.scan_index >= len(self.SCAN_OFFSETS):
             self.scan_index = 0
             self.scan_anchor_direction = None
-            print("[HouseExit] 一圈未发现门窗，向前走并换个朝向继续搜索")
-            self._move_forward(w, dura=320, wait=500)
-            self._rotate_search_view(w)
+            return self._escape_after_failed_exit_scan(w)
+
+        return False
+
+    def _escape_after_failed_exit_scan(self, w: "FrameWorker") -> bool:
+        current_dir = w.get_info("direction")
+        if current_dir is not None:
+            target_dir = (current_dir + 180) % 360
+            print(f"[HouseExit] 多角度未发现门窗，先调转 180 度到 {target_dir:.1f}")
+            self._align_direction_blocking(w, current_dir, target_dir, tolerance=12, max_steps=8)
             w.refresh_frame()
+
+        print("[HouseExit] 未发现门窗，左上推动摇杆 5s 尝试出房")
+        w.tap_single(
+            "摇杆",
+            x_bias=-self.NO_EXIT_ESCAPE_X_BIAS,
+            y_bias=self.NO_EXIT_ESCAPE_Y_BIAS,
+            dura=self.NO_EXIT_ESCAPE_DURA,
+            wait=self.NO_EXIT_ESCAPE_WAIT,
+        )
+        w.refresh_frame()
+
+        print("[HouseExit] 未发现门窗，右上推动摇杆 5s 尝试出房")
+        w.tap_single(
+            "摇杆",
+            x_bias=self.NO_EXIT_ESCAPE_X_BIAS,
+            y_bias=self.NO_EXIT_ESCAPE_Y_BIAS,
+            dura=self.NO_EXIT_ESCAPE_DURA,
+            wait=self.NO_EXIT_ESCAPE_WAIT,
+        )
+        w.refresh_frame()
+
+        if self._get_house_scene(w) == self.HOUSE_OUTDOOR:
+            return self._verify_exit_success(w)
+
+        self._rotate_search_view(w)
+        w.refresh_frame()
+        return False
 
     def _rotate_search_view(self, w: "FrameWorker"):
         current_dir = w.get_info("direction")

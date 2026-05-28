@@ -24,9 +24,9 @@ class Searching_House:
     ENTRY_COARSE_MOVE_DISTANCE = 10.0
     ENTRY_ARRIVAL_DISTANCE = 1.0
     ENTRY_COARSE_Y_BIAS = -430
-    ENTRY_COARSE_DURA = 650
+    ENTRY_COARSE_DURA = 1300
     ENTRY_FINE_Y_BIAS = -220
-    ENTRY_FINE_DURA = 320
+    ENTRY_FINE_DURA = 480
     HOUSE_CLASS_IDS = {8}
     HOUSE_BLOCK_CENTER_OVERLAP = 0.12
     HOUSE_BLOCK_LOWER_OVERLAP = 0.18
@@ -1216,6 +1216,7 @@ class Searching_House:
     def _exit_house(self, w):
 
         print("\n>>> 准备退出房屋")
+        trusted_exit_route = False
 
         # 策略1：入口房间关闭门
         print("[出口] 策略1：在入口房间寻找关闭的门")
@@ -1227,6 +1228,7 @@ class Searching_House:
             if self._enter_closed_door(w, rel_ang, rush_time=1.2):
                 w.refresh_frame()
                 if self._get_house_scene(w) != 0:
+                    trusted_exit_route = True
                     return
 
         # 策略2：进子房间找关闭门
@@ -1251,6 +1253,7 @@ class Searching_House:
                 if self._enter_closed_door(w, c_rel_ang, rush_time=1.2):
                     w.refresh_frame()
                     if self._get_house_scene(w) != 0:
+                        trusted_exit_route = True
                         return
 
             # 子房间没找到出口，退回入口房间
@@ -1269,13 +1272,12 @@ class Searching_House:
         if a_door:
             print("[出口] 发现A门，穿过离开！")
             self._pass_through_open_door(w, a_door[0], rush_time=1.2)
+            trusted_exit_route = True
         else:
-            print("[出口] 极端情况：找不到A门，防卡死逃逸")
-            for _ in range(3):
-                w.tap_single('摇杆', y_bias=-400, dura=500)
-                w.refresh_frame()
-                time.sleep(0.2)
-                self._turn(w, random.choice([-45, 45]))
+            print("[出口] 极端情况：找不到A门，执行无门窗逃逸")
+            self.house_exit_manager.reset()
+            if self.house_exit_manager._escape_after_failed_exit_scan(w):
+                return
 
         # 策略4：所有策略均失败，启动HouseExitManager兜底
         w.refresh_frame()
@@ -1293,6 +1295,13 @@ class Searching_House:
                 w.tap_single('摇杆', y_bias=-500, dura=300)
                 w.refresh_frame()
                 time.sleep(0.3)
+            if self._get_house_scene(w) != 0:
+                self.house_exit_manager.reset()
+                self.house_exit_manager.process(w)
+        elif not trusted_exit_route:
+            print("[出口] 未经过明确门窗动作但已到屋外，执行二次确认")
+            self.house_exit_manager.reset()
+            self.house_exit_manager.process(w)
 
     def _calc_abs_angle(self, rel_ang):
 

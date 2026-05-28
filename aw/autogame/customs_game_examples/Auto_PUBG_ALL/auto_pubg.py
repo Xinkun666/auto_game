@@ -52,6 +52,21 @@ DROP_TARGET_CENTER = (990, 757)
 DROP_TARGET_RUNNING_AFTER_SEARCH = (1094, 790)
 SP_SAVE_LONG_PRESS_MS = 3000
 START_GAME_VERIFY_DELAY = 5.0
+CLOSE_POPUP_SETTLE_DELAY = 1.0
+LOBBY_CONFIRM_INTERVAL = 0.7
+LOBBY_CONFIRM_REQUIRED = 2
+CLOSE_POPUP_INFOS = (
+    "关闭公告",
+    "提示",
+    "对局结束",
+    "关闭预约",
+    "关闭",
+    "回归",
+    "关闭活动",
+    "关闭新玩法",
+    "关闭活动2",
+    "关闭活动3",
+)
 
 start_game = False
 start_game_click_time = None
@@ -60,6 +75,8 @@ rank_finish_pending = False
 next_phase_report_time = 0.0
 all_done_reported = False
 searching_view_synced = False
+last_popup_close_time = 0.0
+lobby_house_confirm_count = 0
 parachute_manager = ParachuteManager()
 running_manager = RunningManager()
 driving_manager = DrivingManager()
@@ -190,6 +207,50 @@ def finalize_after_lobby(w: "FrameWorker"):
     w.stop()
 
 
+def reset_lobby_confirm(mark_popup_closed: bool = False):
+    global last_popup_close_time, lobby_house_confirm_count
+
+    lobby_house_confirm_count = 0
+    if mark_popup_closed:
+        last_popup_close_time = time.time()
+
+
+def click_popup_and_refresh(w: "FrameWorker", target):
+    w.click(target)
+    reset_lobby_confirm(mark_popup_closed=True)
+    w.refresh_frame()
+
+
+def has_close_popup_info(w: "FrameWorker") -> bool:
+    return any(w.get_info(info_name) for info_name in CLOSE_POPUP_INFOS)
+
+
+def confirm_lobby_after_popups(w: "FrameWorker") -> bool:
+    global lobby_house_confirm_count
+
+    if last_popup_close_time > 0 and time.time() - last_popup_close_time < CLOSE_POPUP_SETTLE_DELAY:
+        return False
+
+    time.sleep(LOBBY_CONFIRM_INTERVAL)
+    w.refresh_frame()
+
+    if has_close_popup_info(w):
+        if lobby_house_confirm_count:
+            print("[Popup] 大厅确认过程中又检测到弹窗，取消本次房子图标确认")
+        reset_lobby_confirm()
+        return False
+
+    if not w.get_info("房子"):
+        if lobby_house_confirm_count:
+            print("[Popup] 房子图标未连续稳定出现，取消本次大厅确认")
+        reset_lobby_confirm()
+        return False
+
+    lobby_house_confirm_count += 1
+    print(f"[Popup] 房子图标稳定确认 {lobby_house_confirm_count}/{LOBBY_CONFIRM_REQUIRED}")
+    return lobby_house_confirm_count >= LOBBY_CONFIRM_REQUIRED
+
+
 def prepare_rank_finish_for_lobby(w: "FrameWorker"):
     global rank_finish_pending
 
@@ -274,55 +335,50 @@ def on_stage(w: "FrameWorker"):
 
     if w.current_stage == "关闭弹窗阶段":
         if w.get_info("关闭公告"):
-            w.click(w.get_info("关闭公告"))
-            w.refresh_frame()
+            click_popup_and_refresh(w, w.get_info("关闭公告"))
             return
 
         if w.get_info("提示"):
-            w.click("取消")
-            w.refresh_frame()
+            click_popup_and_refresh(w, "取消")
             return
 
         if w.get_info('对局结束'):
-            w.click('确定')
-            w.refresh_frame()
+            click_popup_and_refresh(w, "确定")
             return
 
         if w.get_info('关闭预约'):
-            w.click(w.get_info('关闭预约'))
-            w.refresh_frame()
+            click_popup_and_refresh(w, w.get_info("关闭预约"))
             return
 
         if w.get_info("关闭"):
-            w.click(w.get_info("关闭"))
-            w.refresh_frame()
+            click_popup_and_refresh(w, w.get_info("关闭"))
             return
 
         if w.get_info("回归"):
-            w.click(w.get_info("回归"))
-            w.refresh_frame()
+            click_popup_and_refresh(w, w.get_info("回归"))
             return
 
         if w.get_info("关闭活动"):
-            w.click(w.get_info("关闭活动"))
-            w.refresh_frame()
+            click_popup_and_refresh(w, w.get_info("关闭活动"))
             return
 
         if w.get_info("关闭新玩法"):
-            w.click(w.get_info("关闭新玩法"))
-            w.refresh_frame()
+            click_popup_and_refresh(w, w.get_info("关闭新玩法"))
             return
 
         if w.get_info("关闭活动2"):
-            w.click(w.get_info("关闭活动2"))
-            w.refresh_frame()
+            click_popup_and_refresh(w, w.get_info("关闭活动2"))
             return
 
-        time.sleep(2)
-        if w.get_info("房子"):
+        if w.get_info("关闭活动3"):
+            click_popup_and_refresh(w, w.get_info("关闭活动3"))
+            return
+
+        if confirm_lobby_after_popups(w):
             if final_shutdown_pending:
                 finalize_after_lobby(w)
                 return
+            reset_lobby_confirm()
             w.change_stage("选择地图阶段")
             return
 

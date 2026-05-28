@@ -401,13 +401,20 @@ class RunningManager:
     CAR_VISUAL_SEARCH_MAX_STEPS = 4
     CAR_VISUAL_DYNAMIC_FAR_AREA_RATIO = 0.0015
     CAR_VISUAL_DYNAMIC_MID_AREA_RATIO = 0.012
+    CAR_VISUAL_DYNAMIC_CLOSE_AREA_RATIO = 0.030
     CAR_VISUAL_DYNAMIC_NEAR_AREA_RATIO = 0.045
     CAR_VISUAL_DYNAMIC_VERY_NEAR_AREA_RATIO = 0.08
-    CAR_VISUAL_DYNAMIC_MIN_WAIT = 160
-    CAR_VISUAL_DYNAMIC_NEAR_WAIT = 420
-    CAR_VISUAL_DYNAMIC_MID_WAIT = 3200
+    CAR_VISUAL_DYNAMIC_MIN_WAIT = 100
+    CAR_VISUAL_DYNAMIC_VERY_NEAR_WAIT = 180
+    CAR_VISUAL_DYNAMIC_NEAR_WAIT = 520
+    CAR_VISUAL_DYNAMIC_CLOSE_WAIT = 1200
     CAR_VISUAL_DYNAMIC_FAR_WAIT = 6500
     CAR_VISUAL_DYNAMIC_MAX_WAIT = 8500
+    CAR_VISUAL_DYNAMIC_MIN_DURA = 90
+    CAR_VISUAL_DYNAMIC_VERY_NEAR_DURA = 110
+    CAR_VISUAL_DYNAMIC_NEAR_DURA = 160
+    CAR_VISUAL_DYNAMIC_CLOSE_DURA = 240
+    CAR_VISUAL_DYNAMIC_FAR_DURA = 320
     # 单轮寻车超过该时间仍未上车，则结束当前局；计时从进入/恢复寻车模式开始。
     CAR_SEARCH_TIMEOUT = 5 * 60
     # 路边发现远车后，允许跨帧追车，避免车辆框短暂丢失后又回头追原道路点。
@@ -2192,15 +2199,15 @@ class RunningManager:
                 f"{self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}"
             )
 
-        forward_wait = self._get_dynamic_car_forward_wait()
+        forward_dura, forward_wait = self._get_dynamic_car_forward_motion()
         print(
-            f"[Running] 路边追车前推时间 wait={forward_wait}ms, "
+            f"[Running] 路边追车前推时间 dura={forward_dura}ms, wait={forward_wait}ms, "
             f"car_area_ratio={self.roadside_car_last_area_ratio}"
         )
         w.tap_single(
             "摇杆",
             y_bias=self.CAR_VISUAL_FORWARD_BIAS_Y,
-            dura=self.CAR_VISUAL_FORWARD_DURA,
+            dura=forward_dura,
             wait=forward_wait,
         )
         w.refresh_frame()
@@ -2777,6 +2784,30 @@ class RunningManager:
         )
         return False
 
+    def _get_dynamic_car_forward_motion(self) -> Tuple[int, int]:
+        return self._get_dynamic_car_forward_dura(), self._get_dynamic_car_forward_wait()
+
+    def _get_dynamic_car_forward_dura(self) -> int:
+        ratio = self.roadside_car_last_area_ratio
+        if ratio is None:
+            return self.CAR_VISUAL_FORWARD_DURA
+
+        if ratio <= self.CAR_VISUAL_DYNAMIC_MID_AREA_RATIO:
+            return self.CAR_VISUAL_DYNAMIC_FAR_DURA
+        if ratio >= self.CAR_VISUAL_DYNAMIC_VERY_NEAR_AREA_RATIO:
+            return self.CAR_VISUAL_DYNAMIC_MIN_DURA
+
+        dura = self._interpolate_car_forward_wait(
+            ratio,
+            [
+                (self.CAR_VISUAL_DYNAMIC_MID_AREA_RATIO, self.CAR_VISUAL_DYNAMIC_FAR_DURA),
+                (self.CAR_VISUAL_DYNAMIC_CLOSE_AREA_RATIO, self.CAR_VISUAL_DYNAMIC_CLOSE_DURA),
+                (self.CAR_VISUAL_DYNAMIC_NEAR_AREA_RATIO, self.CAR_VISUAL_DYNAMIC_NEAR_DURA),
+                (self.CAR_VISUAL_DYNAMIC_VERY_NEAR_AREA_RATIO, self.CAR_VISUAL_DYNAMIC_VERY_NEAR_DURA),
+            ],
+        )
+        return int(round(dura))
+
     def _get_dynamic_car_forward_wait(self) -> int:
         ratio = self.roadside_car_last_area_ratio
         if ratio is None:
@@ -2792,8 +2823,9 @@ class RunningManager:
             [
                 (self.CAR_VISUAL_DYNAMIC_FAR_AREA_RATIO, self.CAR_VISUAL_DYNAMIC_MAX_WAIT),
                 (self.CAR_VISUAL_DYNAMIC_MID_AREA_RATIO, self.CAR_VISUAL_DYNAMIC_FAR_WAIT),
-                (self.CAR_VISUAL_DYNAMIC_NEAR_AREA_RATIO, self.CAR_VISUAL_DYNAMIC_MID_WAIT),
-                (self.CAR_VISUAL_DYNAMIC_VERY_NEAR_AREA_RATIO, self.CAR_VISUAL_DYNAMIC_NEAR_WAIT),
+                (self.CAR_VISUAL_DYNAMIC_CLOSE_AREA_RATIO, self.CAR_VISUAL_DYNAMIC_CLOSE_WAIT),
+                (self.CAR_VISUAL_DYNAMIC_NEAR_AREA_RATIO, self.CAR_VISUAL_DYNAMIC_NEAR_WAIT),
+                (self.CAR_VISUAL_DYNAMIC_VERY_NEAR_AREA_RATIO, self.CAR_VISUAL_DYNAMIC_VERY_NEAR_WAIT),
             ],
         )
         return int(round(wait))
@@ -2937,15 +2969,15 @@ class RunningManager:
             else:
                 print(f"[Running] 已对准车辆，执行前推尝试上车 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}")
 
-            forward_wait = self._get_dynamic_car_forward_wait()
+            forward_dura, forward_wait = self._get_dynamic_car_forward_motion()
             print(
-                f"[Running] 视觉对车前推时间 wait={forward_wait}ms, "
+                f"[Running] 视觉对车前推时间 dura={forward_dura}ms, wait={forward_wait}ms, "
                 f"car_area_ratio={self.roadside_car_last_area_ratio}"
             )
             w.tap_single(
                 "摇杆",
                 y_bias=self.CAR_VISUAL_FORWARD_BIAS_Y,
-                dura=self.CAR_VISUAL_FORWARD_DURA,
+                dura=forward_dura,
                 wait=forward_wait,
             )
             w.refresh_frame()

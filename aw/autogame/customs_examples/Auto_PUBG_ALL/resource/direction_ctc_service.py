@@ -14,7 +14,7 @@ from PIL import Image, ImageOps
 #
 # 用法示例：
 #
-# from get_direction_ctc import Get_Direction
+# from direction_ctc_service import Get_Direction
 #
 # direction_model = Get_Direction(
 #     model_weight="./ctc_checkpoints/best.pt",
@@ -568,7 +568,7 @@ class Get_Direction:
 
 if __name__ == "__main__":
     # 简单命令行测试：
-    # python get_direction_ctc.py --ckpt ./ctc_checkpoints/best.pt --image ./test.png
+    # python direction_ctc_service.py --ckpt ./ctc_checkpoints/best.pt --image ./test.png
 
     import argparse
 

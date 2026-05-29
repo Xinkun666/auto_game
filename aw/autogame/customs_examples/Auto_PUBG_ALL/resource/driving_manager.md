@@ -1,6 +1,6 @@
 # DrivingManager 说明
 
-本文档用于快速理解 `driving_car.py` 中 `DrivingManager` 的结构、状态流转和调试入口。
+本文档用于快速理解 `driving_manager.py` 中 `DrivingManager` 的结构、状态流转和调试入口。
 
 ## 1. 这个类负责什么
 
@@ -153,7 +153,7 @@
   - 没有圈目标时，走默认环路。
 
 - `_get_topology_path(location)`
-  - 如果道路拓扑资源完整，则优先使用 `road_module.py` 的拓扑路径。
+  - 如果道路拓扑资源完整，则优先使用 `road_topology.py` 的拓扑路径。
 
 ### F. 圈逻辑
 

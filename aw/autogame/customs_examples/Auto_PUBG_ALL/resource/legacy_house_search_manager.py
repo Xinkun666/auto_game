@@ -5,13 +5,13 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import cv2
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigator import MapNavigator
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigation import MapNavigator
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search import (
     EmbeddedHouseSearchAdapter,
     HouseSearchAdapter,
     QwenRoomSearchAgent,
 )
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.toolkit import *
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation_geometry import *
 from aw.autogame.tools.Utils import *
 
 if TYPE_CHECKING:
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from aw.autogame.tools.GameFrameWorker import FrameWorker
 
 
-class Searching_House:
+class LegacyHouseSearchManager:
     HOUSE_INDOOR = 0
     HOUSE_OUTDOOR = 1
     HOUSE_ROOFTOP = 2

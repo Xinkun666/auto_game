@@ -14,7 +14,7 @@ def draw_points_with_arrows(
     image_path=DEFAULT_ROUTE_IMAGE_PATH,
     output_path=DEFAULT_ROUTE_OUTPUT_PATH,
 ):
-    from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigator import (
+    from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigation import (
         draw_points_with_arrows as _draw_points_with_arrows,
     )
 

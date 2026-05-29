@@ -1,9 +1,9 @@
 import random
 import time
 from typing import TYPE_CHECKING
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigator import MapNavigator
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.toolkit import *
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.house_exit import HouseExitManager
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigation import MapNavigator
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation_geometry import *
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.house_exit_manager import HouseExitManager
 from aw.autogame.tools.Utils import *
 
 if TYPE_CHECKING:
@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from aw.autogame.tools.GameFrameWorker import FrameWorker
 
 
-class Searching_House:
+class HouseSearchManager:
     VISUAL_APPROACH_MAX_ATTEMPTS = 12
     UNSTUCK_MAX_CYCLES = 6
     UNSTUCK_FORWARD_STEPS = 5

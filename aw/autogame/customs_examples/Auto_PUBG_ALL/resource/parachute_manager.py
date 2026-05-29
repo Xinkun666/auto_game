@@ -3,8 +3,8 @@ import cv2
 import time
 import subprocess
 
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.utils import *
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.toolkit import *
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_path_utils import *
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation_geometry import *
 from typing import Tuple, Dict, Any, Optional, List
 from typing import TYPE_CHECKING
 

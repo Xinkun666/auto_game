@@ -4,7 +4,7 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.toolkit import (
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation_geometry import (
     calculate_angle,
     calculate_move_count,
     get_distance,

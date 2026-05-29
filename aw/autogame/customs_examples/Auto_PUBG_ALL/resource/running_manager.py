@@ -4,16 +4,16 @@ import os
 import time
 from typing import Callable, List, Optional, Set, Tuple, TYPE_CHECKING
 
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.house_exit import HouseExitManager
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigator import MapNavigator
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.toolkit import (
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.house_exit_manager import HouseExitManager
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigation import MapNavigator
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation_geometry import (
     calculate_angle,
     calculate_move_count,
     check_location,
     get_distance,
     is_location_stagnant, draw_points_with_arrows,
 )
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.utils import find_path, get_resolution
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_path_utils import find_path, get_resolution
 
 if TYPE_CHECKING:
     from aw.autogame.tools.GameFrameWorker import FrameWorker
@@ -26,7 +26,7 @@ ROAD_DIR = os.path.join(RESOURCE_DIR, "road")
 class RoadRouteHelper:
     """道路点路径助手。
 
-    优先使用 road_module 的拓扑路径；如果当前工程缺少 road_matrix/road_mask，
+    优先使用 road_topology 的拓扑路径；如果当前工程缺少 road_matrix/road_mask，
     则退化为读取红/蓝道路点，并用 MapNavigator 规划到下一个道路点。
     """
 
@@ -179,7 +179,7 @@ class RoadRouteHelper:
 
             dest_key = self._find_topo_node_key(topo, road_point)
             if dest_key is None:
-                print(f"[RoadRoute] 指定寻车点 {road_point} 不是 road_module 红色节点")
+                print(f"[RoadRoute] 指定寻车点 {road_point} 不是 road_topology 红色节点")
                 return [], segment_start, start_dist
 
             result = topo.shortest_path_from_point(
@@ -188,7 +188,7 @@ class RoadRouteHelper:
                 int(dest_key[1:]) - 1,
             )
             if not result or len(result) < 3 or not result[2]:
-                print(f"[RoadRoute] road_module 无法规划 {segment_start} -> {road_point}")
+                print(f"[RoadRoute] road_topology 无法规划 {segment_start} -> {road_point}")
                 return [], segment_start, start_dist
 
             raw_segment = self._dedupe_path([tuple(map(int, point)) for point in result[2]])
@@ -232,7 +232,7 @@ class RoadRouteHelper:
                 int(dest_key[1:]) - 1,
             )
         except Exception as exc:
-            print(f"[RoadRoute] road_module 规划失败，回退 A*: {exc}")
+            print(f"[RoadRoute] road_topology 规划失败，回退 A*: {exc}")
             return []
 
         if not result or len(result) < 3 or not result[2]:
@@ -247,13 +247,13 @@ class RoadRouteHelper:
 
         self._topo_load_attempted = True
         try:
-            from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.road_module import RoadTopo
+            from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.road_topology import RoadTopo
 
             self._topo = RoadTopo()
-            print("[RoadRoute] road_module 拓扑加载成功")
+            print("[RoadRoute] road_topology 拓扑加载成功")
         except Exception as exc:
             self._topo = None
-            print(f"[RoadRoute] road_module 拓扑不可用，使用道路点+A*兜底: {exc}")
+            print(f"[RoadRoute] road_topology 拓扑不可用，使用道路点+A*兜底: {exc}")
         return self._topo
 
     def _find_topo_node_key(self, topo, node: Tuple[int, int]) -> Optional[str]:
@@ -1341,7 +1341,7 @@ class RunningManager:
             reason,
             location,
             None,
-            "沿指定 road_module 路线规划道路找车",
+            "沿指定 road_topology 路线规划道路找车",
             self.PRIORITY_CAR_SEARCH_ANCHORS[-1],
         )
 
@@ -1359,7 +1359,7 @@ class RunningManager:
             remaining_points,
         )
         if not route:
-            print("[Running] road_module 指定寻车路线规划失败，等待下一帧重试")
+            print("[Running] road_topology 指定寻车路线规划失败，等待下一帧重试")
             self.road_list = []
             self.current_running_route_kind = self.RUNNING_ROUTE_PRIORITY_CAR_SEARCH
             return False

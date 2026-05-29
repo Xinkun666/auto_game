@@ -1,7 +1,7 @@
 import time
 from typing import TYPE_CHECKING, List, Optional, Sequence
 
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.toolkit import (
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation_geometry import (
     calculate_move_count,
 )
 from aw.autogame.tools.Utils import get_resolution, get_wh

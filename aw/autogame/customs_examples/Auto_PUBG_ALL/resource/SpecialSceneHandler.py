@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.get_direction import Get_Direction
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.get_direction_ctc import Get_Direction as Get_Direction_CTC
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.get_location2 import LocatePoints
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.yolo26 import YOLO26Detector
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.direction_service import Get_Direction
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.direction_ctc_service import Get_Direction as Get_Direction_CTC
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.location_service import LocatePoints
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.yolo_detector import YOLO26Detector
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.yolov5 import YOLOv5TorchScript
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.angle_tracker import AngleTracker
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.speed_classifier import SpeedClassifier
@@ -18,7 +18,7 @@ from datetime import datetime
 dire_tool = Get_Direction(model_weight=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/direction.pt')
 dire_tool_ctc = Get_Direction_CTC(model_weight=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/direction_ctc.pt')
 loc_tool = LocatePoints()
-yolo26_detector = YOLO26Detector(model_path=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/best.pt')
+yolo_detector = YOLO26Detector(model_path=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/best.pt')
 yolo5_detector = YOLOv5TorchScript(ts_model_path=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/yolov5m.torchscript')
 tracker = AngleTracker(window_size=30)
 speed_cls = SpeedClassifier(weight_path=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/speed_classifier.pt')
@@ -112,7 +112,7 @@ def forward_scene(img):
         19: 'sandband_wall',
     }
     # 1. 执行检测
-    res = yolo26_detector.infer(img)
+    res = yolo_detector.infer(img)
     if not res:
         return []
 

@@ -2,16 +2,16 @@ import time
 from typing import TYPE_CHECKING
 
 from aw.autogame.tools.Utils import *
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.parachute import ParachuteManager
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.running_map import RunningManager
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.driving_car import DrivingManager
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.searching_house_yajun import (
-    Searching_House,
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.parachute_manager import ParachuteManager
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.running_manager import RunningManager
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.driving_manager import DrivingManager
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.house_search_manager import (
+    HouseSearchManager,
 )
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.house_exit import (
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.house_exit_manager import (
     HouseExitManager,
 )
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.phase_timer import (
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.phase_time_manager import (
     PHASE_DRIVING,
     PHASE_RUNNING,
     PHASE_SEARCHING,
@@ -80,7 +80,7 @@ lobby_house_confirm_count = 0
 parachute_manager = ParachuteManager()
 running_manager = RunningManager()
 driving_manager = DrivingManager()
-searching_house_manager = Searching_House()
+searching_house_manager = HouseSearchManager()
 house_exit_manager = HouseExitManager()
 phase_timer = PhaseTimeManager(PHASE_DURATIONS, PHASE_STAGE_MAP)
 

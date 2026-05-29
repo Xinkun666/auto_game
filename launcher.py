@@ -53,17 +53,14 @@ RESTART_BAT_PATH = ROOT_DIR / "aw" / "autogame" / "restart.bat"
 STREAM_CONNECTED_MARKERS = (
     "[Stream] Start receiving...",
 )
-SP_STARTED_MARKERS = (
-    "[Timer] sp 记录已开始",
-)
+REBOOT_RELAUNCH_DELAY_SECONDS = 10
 STREAM_DISCONNECT_PATTERNS = (
     "[Stream] Channel ready timeout.",
     "[Stream] Receive loop ended unexpectedly.",
     "[Stream] gRPC Error:",
     "[Stream] Runtime Error:",
 )
-REBOOT_PROMPT_DISMISS_TAP = (1440, 260)
-REBOOT_RELAUNCH_DELAY_SECONDS = 40
+DISMISS_REBOOT_PROMPT_ENV = "AUTOGAME_DISMISS_REBOOT_PROMPT"
 
 
 def setup_logging():
@@ -308,7 +305,7 @@ class LauncherWindow(QWidget):
         self.current_run_stream_disconnected = False
         self.current_run_stream_disconnect_startup = False
         self.current_run_stream_disconnect_message = ""
-        self.dismiss_reboot_prompt_after_next_sp_start = False
+        self.dismiss_reboot_prompt_on_next_case_start = False
         self.preserve_device_apps_on_manual_stop = True
         self.current_batch_start_timestamp: Optional[str] = None
         self.current_run_start_timestamp: Optional[str] = None
@@ -840,6 +837,8 @@ class LauncherWindow(QWidget):
         env.insert("AUTOGAME_VIS_MODE", "launcher")
         env.insert("AUTOGAME_RUN_SOURCE", "launcher")
         env.insert("AUTOGAME_RUN_INDEX", str(int(run_no)))
+        if self.dismiss_reboot_prompt_on_next_case_start:
+            env.insert(DISMISS_REBOOT_PROMPT_ENV, "1")
         if self.current_batch_start_timestamp:
             env.insert("AUTOGAME_BATCH_START_TIMESTAMP", self.current_batch_start_timestamp)
         if self.current_run_start_timestamp:
@@ -1271,7 +1270,7 @@ class LauncherWindow(QWidget):
         self.current_run_stream_disconnected = False
         self.current_run_stream_disconnect_startup = False
         self.current_run_stream_disconnect_message = ""
-        self.dismiss_reboot_prompt_after_next_sp_start = False
+        self.dismiss_reboot_prompt_on_next_case_start = False
         self.preserve_device_apps_on_manual_stop = True
         self.current_batch_start_timestamp = None
         self.current_run_start_timestamp = None
@@ -1456,6 +1455,10 @@ class LauncherWindow(QWidget):
             self._finish_batch("启动失败，批量任务已终止。")
             return
 
+        if self.dismiss_reboot_prompt_on_next_case_start:
+            self._log_message("[Launcher] 已通知本次用例在打开 sp 后关闭重启弹窗。\n")
+            self.dismiss_reboot_prompt_on_next_case_start = False
+
         self.preview_timer.start()
         safe_minutes = self.current_plan["safe_minutes"]
         if safe_minutes > 0:
@@ -1541,7 +1544,6 @@ class LauncherWindow(QWidget):
         if not text:
             return
 
-        self._dismiss_reboot_prompt_if_sp_started(text)
         if self.current_run_stream_disconnected:
             return
 
@@ -1575,24 +1577,6 @@ class LauncherWindow(QWidget):
             if matched_pattern in line:
                 return line.strip()
         return matched_pattern
-
-    def _dismiss_reboot_prompt_if_sp_started(self, text: str):
-        if not self.dismiss_reboot_prompt_after_next_sp_start:
-            return
-        if not any(marker in text for marker in SP_STARTED_MARKERS):
-            return
-
-        x, y = REBOOT_PROMPT_DISMISS_TAP
-        self.dismiss_reboot_prompt_after_next_sp_start = False
-        self._log_message(
-            f"[Launcher] 重启后的用例已启动 sp，点击屏幕中上部 ({x}, {y}) 关闭充电弹窗。\n"
-        )
-        result = run_hdc_shell(f"input tap {x} {y}")
-        if result is None:
-            self._log_message(
-                "[Launcher] 关闭充电弹窗点击执行失败，请检查 hdc 连接。\n",
-                level=logging.WARNING,
-            )
 
     def _on_process_error(self, error):
         if self.process is None:
@@ -1668,7 +1652,7 @@ class LauncherWindow(QWidget):
         for _ in range(REBOOT_RELAUNCH_DELAY_SECONDS):
             QApplication.processEvents()
             time.sleep(1)
-        self.dismiss_reboot_prompt_after_next_sp_start = True
+        self.dismiss_reboot_prompt_on_next_case_start = True
         return True
 
     def _on_process_finished(self, exit_code: int, _exit_status):

@@ -35,6 +35,7 @@ class auto_pubg(TestCase):
         self.log_path = f'aw/autogame/temp/logs/{self.task_name}.txt'
         self.frame_path = f"aw/autogame/temp/logs/process_save_frames"
         self.game_display_name = '和平精英'
+        self.perf_tool_package = "com.huawei.hmsapp.hismartperf"
 
     def setup(self):
         self.log.info("预置条件：设置常亮")
@@ -43,9 +44,56 @@ class auto_pubg(TestCase):
 
     def start_perf_tool(self):
         """封装性能工具启动逻辑"""
-        print(f"正在启动性能工具并选择应用: {self.game_display_name}")
-        self.driver.start_app("com.huawei.hmsapp.hismartperf")
+        max_attempts = 2
+        text_input = None
+        last_error = None
 
+        for attempt in range(1, max_attempts + 1):
+            print(f"正在启动性能工具并选择应用: {self.game_display_name}，attempt={attempt}/{max_attempts}")
+            if attempt == 1:
+                self.driver.start_app(self.perf_tool_package)
+                self._dismiss_reboot_prompt_if_needed()
+            else:
+                self._restart_perf_tool()
+
+            try:
+                text_input = self._open_perf_tool_app_selector()
+                break
+            except RuntimeError as exc:
+                last_error = exc
+                if attempt >= max_attempts:
+                    raise
+                print(f"未找到性能工具应用搜索输入框，重启性能工具后重试: {exc}")
+
+        if text_input is None:
+            raise last_error or RuntimeError("未找到性能工具应用搜索输入框")
+
+        text_input.inputText(self.game_display_name)
+        time.sleep(1)
+
+        print("启动游戏并开始测试")
+        self.driver.touch((0.27, 0.17))  # 点击搜索出的游戏
+        time.sleep(10)
+        self.driver.touch((0.49, 0.94))  # 点击开始测试
+        time.sleep(1)
+
+    def _restart_perf_tool(self):
+        print("重启性能工具应用")
+        self.driver.hdc(f"shell aa force-stop {self.perf_tool_package}")
+        time.sleep(1)
+        self.driver.start_app(self.perf_tool_package)
+        time.sleep(1)
+
+    def _dismiss_reboot_prompt_if_needed(self):
+        if os.environ.get("AUTOGAME_DISMISS_REBOOT_PROMPT") != "1":
+            return
+
+        print("[Launcher] 重启后首次打开 sp，点击屏幕中上方关闭充电弹窗")
+        time.sleep(1)
+        self.driver.touch((0.5, 0.20))
+        time.sleep(1)
+
+    def _open_perf_tool_app_selector(self):
         steps = [
             ((0.27, 0.55), 2, "点击性能功耗测试"),
             ((0.48, 0.20), 2, "点击选择一个应用"),
@@ -55,20 +103,12 @@ class auto_pubg(TestCase):
             self.driver.touch(pos)
             time.sleep(delay)
 
-        text_input = self._wait_for_component(
+        return self._wait_for_component(
             BY.type("TextInput"),
             timeout=12,
             interval=1.0,
             desc="性能工具应用搜索输入框",
         )
-        text_input.inputText(self.game_display_name)
-        time.sleep(1)
-
-        print("启动游戏并开始测试")
-        self.driver.touch((0.27, 0.17))  # 点击搜索出的游戏
-        time.sleep(10)
-        self.driver.touch((0.49, 0.94))  # 点击开始测试
-        time.sleep(1)
 
     def _wait_for_component(self, selector, timeout=10, interval=1.0, desc="目标控件"):
         deadline = time.time() + timeout
@@ -159,5 +199,3 @@ class auto_pubg(TestCase):
 
         if self.automator is not None:
             self.automator.cleanup(('com.tencent.tmgp.pubgmhd.hw', 'com.huawei.hmsapp.hismartperf'))
-
-

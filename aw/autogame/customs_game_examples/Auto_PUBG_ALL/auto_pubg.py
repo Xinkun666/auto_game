@@ -16,6 +16,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.phase_time_mana
     PHASE_RUNNING,
     PHASE_SEARCHING,
     PhaseTimeManager,
+    PhaseTimeReporter,
 )
 
 """
@@ -72,8 +73,6 @@ start_game = False
 start_game_click_time = None
 final_shutdown_pending = False
 rank_finish_pending = False
-next_phase_report_time = 0.0
-all_done_reported = False
 searching_view_synced = False
 last_popup_close_time = 0.0
 lobby_house_confirm_count = 0
@@ -83,6 +82,7 @@ driving_manager = DrivingManager()
 searching_house_manager = HouseSearchManager()
 house_exit_manager = HouseExitManager()
 phase_timer = PhaseTimeManager(PHASE_DURATIONS, PHASE_STAGE_MAP)
+phase_reporter = PhaseTimeReporter()
 
 
 def pause_sp_after_death(w: "FrameWorker"):
@@ -96,13 +96,12 @@ driving_manager.pause_sp_callback = pause_sp_after_death
 
 
 def prepare_round():
-    global next_phase_report_time, all_done_reported, searching_view_synced, rank_finish_pending
+    global searching_view_synced, rank_finish_pending
 
     phase_timer.start_new_round()
+    phase_reporter.reset()
     searching_view_synced = False
     rank_finish_pending = False
-    next_phase_report_time = 0.0
-    all_done_reported = False
 
     need_drive = phase_timer.need_drive()
     need_searching = not phase_timer.is_completed(PHASE_SEARCHING)
@@ -264,49 +263,8 @@ def prepare_rank_finish_for_lobby(w: "FrameWorker"):
     rank_finish_pending = False
 
 
-def _format_phase_seconds(seconds: float) -> str:
-    seconds = max(0, int(round(seconds)))
-    minutes, sec = divmod(seconds, 60)
-    return f"{minutes:02d}:{sec:02d}"
-
-
 def maybe_report_phase_remaining():
-    global next_phase_report_time, all_done_reported
-
-    if phase_timer.start_game_time is None:
-        return
-
-    now = time.time()
-    if next_phase_report_time <= 0.0:
-        next_phase_report_time = now + 5.0
-
-    if now >= next_phase_report_time:
-        total_remaining = phase_timer.get_total_remaining()
-        searching_remaining = phase_timer.get_remaining(PHASE_SEARCHING)
-        running_remaining = phase_timer.get_remaining(PHASE_RUNNING)
-        driving_remaining = phase_timer.get_remaining(PHASE_DRIVING)
-        print(
-            "[Timer] 阶段剩余时间 | "
-            f"总计={_format_phase_seconds(total_remaining)} | "
-            f"搜房={_format_phase_seconds(searching_remaining)} | "
-            f"跑图={_format_phase_seconds(running_remaining)} | "
-            f"开车={_format_phase_seconds(driving_remaining)}"
-        )
-        next_phase_report_time = now + 5.0
-
-    if phase_timer.all_done() and not all_done_reported:
-        total_remaining = phase_timer.get_total_remaining()
-        searching_remaining = phase_timer.get_remaining(PHASE_SEARCHING)
-        running_remaining = phase_timer.get_remaining(PHASE_RUNNING)
-        driving_remaining = phase_timer.get_remaining(PHASE_DRIVING)
-        print(
-            "[Timer] 30 分钟总时长已圆满结束 | "
-            f"总计剩余={_format_phase_seconds(total_remaining)} | "
-            f"搜房剩余={_format_phase_seconds(searching_remaining)} | "
-            f"跑图剩余={_format_phase_seconds(running_remaining)} | "
-            f"开车剩余={_format_phase_seconds(driving_remaining)}"
-        )
-        all_done_reported = True
+    phase_reporter.maybe_report(phase_timer)
 
 
 def on_stage(w: "FrameWorker"):

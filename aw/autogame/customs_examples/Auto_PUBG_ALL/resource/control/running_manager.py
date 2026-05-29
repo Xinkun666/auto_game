@@ -14,12 +14,18 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_g
     is_location_stagnant, draw_points_with_arrows,
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_path_utils import find_path, get_resolution
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import (
+    ActiveWindow,
+    Cooldown,
+    Stopwatch,
+    TimeoutTracker,
+)
 
 if TYPE_CHECKING:
     from aw.autogame.tools.GameFrameWorker import FrameWorker
 
 
-RESOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
+RESOURCE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROAD_DIR = os.path.join(RESOURCE_DIR, "road")
 
 
@@ -488,7 +494,12 @@ class RunningManager:
         self.map_tool = map_tool or MapNavigator()
         self.road_helper = RoadRouteHelper(self.map_tool)
         self.house_exit_manager = HouseExitManager()
-        self.game_time : Optional[float] = None
+        self.match_clock = Stopwatch()
+        self.car_search_timer = TimeoutTracker(self.CAR_SEARCH_TIMEOUT)
+        self.vehicle_ignore_window = ActiveWindow()
+        self.jump_replan_cooldown = Cooldown()
+        self.jump_click_cooldown = Cooldown()
+        self.water_exit_clock = Stopwatch()
         self.screen_w, self.screen_h = get_resolution()
 
         self.road_list: List[Tuple[int, int]] = []
@@ -515,9 +526,6 @@ class RunningManager:
         self.precise_invalid_direction_count = 0
         self.current_view_mode = self.VIEW_MODE_THIRD
         self.last_valid_location: Optional[Tuple[int, int]] = None
-        self.last_jump_replan_time: float = 0.0
-        self.last_jump_click_time: float = 0.0
-        self.ignore_vehicle_until: float = 0.0
         self.pause_sp_callback: Optional[Callable] = None
         self.visited_road_nodes: Set[Tuple[int, int]] = set()
         self.current_road_node: Optional[Tuple[int, int]] = None
@@ -534,14 +542,12 @@ class RunningManager:
         self.current_running_route_kind: Optional[str] = None
         self.last_circle_target_point: Optional[Tuple[int, int]] = None
         self.circle_route_completed = False
-        self.car_search_started_at: Optional[float] = None
         self.priority_car_search_active = False
         self.priority_car_search_finished = False
         self.priority_car_search_next_index = 0
         self.priority_car_search_road_points: List[Tuple[int, int]] = []
         self.water_exit_last_location: Optional[Tuple[int, int]] = None
         self.water_exit_stuck_frames = 0
-        self.water_exit_last_time = 0.0
         self.water_exit_side_sign = 1
         self.water_escape_target: Optional[Tuple[int, int]] = None
 
@@ -568,9 +574,9 @@ class RunningManager:
         self.precise_invalid_direction_count = 0
         self.current_view_mode = self.VIEW_MODE_THIRD
         self.last_valid_location = None
-        self.last_jump_replan_time = 0.0
-        self.last_jump_click_time = 0.0
-        self.ignore_vehicle_until = 0.0
+        self.jump_replan_cooldown.reset()
+        self.jump_click_cooldown.reset()
+        self.vehicle_ignore_window.reset()
         self.visited_road_nodes = set()
         self.current_road_node = None
         self.active_vehicle_entry_source = None
@@ -586,30 +592,31 @@ class RunningManager:
         self.current_running_route_kind = None
         self.last_circle_target_point = None
         self.circle_route_completed = False
-        self.car_search_started_at = time.time() if finding_car else None
+        if finding_car:
+            self.car_search_timer.start()
+        else:
+            self.car_search_timer.reset()
         self.priority_car_search_active = bool(finding_car)
         self.priority_car_search_finished = False
         self.priority_car_search_next_index = 0
         self.priority_car_search_road_points = []
         self.water_exit_last_location = None
         self.water_exit_stuck_frames = 0
-        self.water_exit_last_time = 0.0
+        self.water_exit_clock.reset()
         self.water_exit_side_sign = 1
         self.water_escape_target = None
         self.house_exit_manager.reset()
         print("[Running] 状态已重置!")
 
     def set_game_time(self, game_time: Optional[float] = None):
-        self.game_time = time.time() if game_time is None else game_time
-        print(f'[Running] 游戏开始时间设置为： {self.game_time:.3f}')
+        started_at = self.match_clock.start(game_time)
+        print(f'[Running] 游戏开始时间设置为： {started_at:.3f}')
 
     def set_drive_required(self, required: bool):
         self.drive_required = bool(required)
 
     def get_elapsed_time(self) -> float:
-        if self.game_time is None:
-            return 0.0
-        return max(0.0, time.time() - self.game_time)
+        return self.match_clock.elapsed()
 
     def process(self, w: "FrameWorker"):
         location = self._get_location(w)
@@ -893,7 +900,7 @@ class RunningManager:
             self._log_running_state("恢复找车", location, direction, "沿指定路线继续找车")
             self.stop_auto_forward(w)
             self.finding_car = True
-            self.car_search_started_at = time.time()
+            self.car_search_timer.start()
             self.priority_car_search_active = True
             self.priority_car_search_finished = False
             self.priority_car_search_next_index = 0
@@ -912,7 +919,7 @@ class RunningManager:
         self._log_running_state("停止找车", location, direction, "开车完成后恢复跑图/进圈")
         self.stop_auto_forward(w)
         self.finding_car = False
-        self.car_search_started_at = None
+        self.car_search_timer.reset()
         self.priority_car_search_active = False
         self.precise_entering_car = False
         self.precise_last_distance = None
@@ -965,10 +972,9 @@ class RunningManager:
         if self.priority_car_search_active and not self.priority_car_search_finished:
             return False
 
-        if self.car_search_started_at is None:
-            self.car_search_started_at = time.time()
+        self.car_search_timer.start_if_needed()
 
-        elapsed = max(0.0, time.time() - self.car_search_started_at)
+        elapsed = self.car_search_timer.elapsed()
         if elapsed < self.CAR_SEARCH_TIMEOUT:
             return False
 
@@ -1045,7 +1051,10 @@ class RunningManager:
     ):
         self.drive_required = bool(finding_car)
         self.finding_car = bool(finding_car)
-        self.car_search_started_at = time.time() if self.finding_car else None
+        if self.finding_car:
+            self.car_search_timer.start()
+        else:
+            self.car_search_timer.reset()
         self.priority_car_search_active = bool(self.finding_car)
         self.priority_car_search_finished = False
         self.priority_car_search_next_index = 0
@@ -1063,8 +1072,8 @@ class RunningManager:
         self.precise_view_ready = False
         self.precise_invalid_direction_count = 0
         self.current_view_mode = self.VIEW_MODE_THIRD
-        self.ignore_vehicle_until = time.time() + cooldown
-        self.last_jump_click_time = 0.0
+        self.vehicle_ignore_window.start(cooldown)
+        self.jump_click_cooldown.reset()
         self.current_road_node = None
         self.current_segment_start = None
         self.active_vehicle_entry_source = None
@@ -1085,7 +1094,10 @@ class RunningManager:
     def notify_searching_exit(self, finding_car: bool = True):
         self.drive_required = bool(finding_car)
         self.finding_car = bool(finding_car)
-        self.car_search_started_at = time.time() if self.finding_car else None
+        if self.finding_car:
+            self.car_search_timer.start()
+        else:
+            self.car_search_timer.reset()
         self.priority_car_search_active = bool(self.finding_car)
         self.priority_car_search_finished = False
         self.priority_car_search_next_index = 0
@@ -1123,12 +1135,12 @@ class RunningManager:
         location: Tuple[int, int],
         direction: Optional[float],
     ) -> bool:
-        if time.time() >= self.ignore_vehicle_until:
+        if not self.vehicle_ignore_window.active():
             return False
 
         drive_btn = w.get_info("驾驶")
         still_vehicle_ui = self._is_in_vehicle(w)
-        remaining = max(0.0, self.ignore_vehicle_until - time.time())
+        remaining = self.vehicle_ignore_window.remaining()
 
         if not drive_btn and not still_vehicle_ui:
             return False
@@ -1230,8 +1242,7 @@ class RunningManager:
         if jump_dist < self.LOCATION_JUMP_THRESHOLD:
             return False
 
-        now = time.time()
-        if now - self.last_jump_replan_time < self.LOCATION_JUMP_REPLAN_COOLDOWN:
+        if not self.jump_replan_cooldown.try_acquire(self.LOCATION_JUMP_REPLAN_COOLDOWN):
             return False
 
         route_type = "寻车路径" if self.finding_car else "跑图路径"
@@ -1240,7 +1251,6 @@ class RunningManager:
             f"current={location}, jump_dist={jump_dist:.2f}，重新规划{route_type}"
         )
         self._log_running_state("位置跳变", location, None, f"重新规划{route_type}")
-        self.last_jump_replan_time = now
         self.loading_road = False
         self.road_list = []
         self.current_segment_start = None
@@ -1639,7 +1649,7 @@ class RunningManager:
             self._log_running_state("已脱离水面", new_location, new_direction, "恢复正常跑图", target)
             self.water_exit_last_location = new_location
             self.water_exit_stuck_frames = 0
-            self.water_exit_last_time = time.time()
+            self.water_exit_clock.start()
             self.loading_road = False
             self.current_segment_start = None
             return
@@ -1655,16 +1665,17 @@ class RunningManager:
         if self.water_exit_last_location is None:
             return False
 
-        if time.time() - self.water_exit_last_time > self.WATER_EXIT_STUCK_WINDOW:
+        if self.water_exit_clock.elapsed() > self.WATER_EXIT_STUCK_WINDOW:
             self.water_exit_last_location = None
             self.water_exit_stuck_frames = 0
+            self.water_exit_clock.reset()
             return False
 
         moved = get_distance(self.water_exit_last_location, location)
         if moved > self.WATER_EXIT_STUCK_DISTANCE:
             self.water_exit_last_location = location
             self.water_exit_stuck_frames = 0
-            self.water_exit_last_time = time.time()
+            self.water_exit_clock.start()
             return False
 
         self.water_exit_stuck_frames += 1
@@ -1708,7 +1719,7 @@ class RunningManager:
         w.refresh_frame()
 
         self.water_exit_last_location = self._get_location(w) or new_location
-        self.water_exit_last_time = time.time()
+        self.water_exit_clock.start()
         self.water_exit_stuck_frames = 0
         self.loading_road = False
         self.current_segment_start = None
@@ -1929,11 +1940,9 @@ class RunningManager:
         if not w.get_info("跳跃"):
             return False
 
-        now = time.time()
-        if now - self.last_jump_click_time < self.JUMP_CLICK_COOLDOWN:
+        if not self.jump_click_cooldown.try_acquire(self.JUMP_CLICK_COOLDOWN):
             return False
 
-        self.last_jump_click_time = now
         print("[Running] 发现跳跃键，点击跳跃")
         self._log_running_state("发现跳跃键", location, direction, "点击跳跃")
         w.click("跳跃")

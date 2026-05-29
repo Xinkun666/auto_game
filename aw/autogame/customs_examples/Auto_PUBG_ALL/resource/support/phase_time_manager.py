@@ -178,3 +178,50 @@ class PhaseTimeManager:
     def mark_sp_saved(self):
         self.sp_saved = True
         print("[Timer] sp 数据已保存")
+
+
+def format_phase_seconds(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    minutes, sec = divmod(seconds, 60)
+    return f"{minutes:02d}:{sec:02d}"
+
+
+class PhaseTimeReporter:
+    def __init__(self, report_interval: float = 5.0):
+        self.report_interval = float(report_interval)
+        self.next_report_time = 0.0
+        self.all_done_reported = False
+
+    def reset(self):
+        self.next_report_time = 0.0
+        self.all_done_reported = False
+
+    def maybe_report(self, timer: PhaseTimeManager):
+        if timer.start_game_time is None:
+            return
+
+        now = time.time()
+        if self.next_report_time <= 0.0:
+            self.next_report_time = now + self.report_interval
+
+        if now >= self.next_report_time:
+            self._print_remaining(timer)
+            self.next_report_time = now + self.report_interval
+
+        if timer.all_done() and not self.all_done_reported:
+            self._print_all_done(timer)
+            self.all_done_reported = True
+
+    def _remaining_parts(self, timer: PhaseTimeManager) -> str:
+        return (
+            f"总计={format_phase_seconds(timer.get_total_remaining())} | "
+            f"搜房={format_phase_seconds(timer.get_remaining(PHASE_SEARCHING))} | "
+            f"跑图={format_phase_seconds(timer.get_remaining(PHASE_RUNNING))} | "
+            f"开车={format_phase_seconds(timer.get_remaining(PHASE_DRIVING))}"
+        )
+
+    def _print_remaining(self, timer: PhaseTimeManager):
+        print(f"[Timer] 阶段剩余时间 | {self._remaining_parts(timer)}")
+
+    def _print_all_done(self, timer: PhaseTimeManager):
+        print(f"[Timer] 30 分钟总时长已圆满结束 | {self._remaining_parts(timer)}")

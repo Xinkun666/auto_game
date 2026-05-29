@@ -17,6 +17,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_g
     get_distance,
     is_location_stagnant,
 )
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import Cooldown, Stopwatch
 
 if TYPE_CHECKING:
     from aw.autogame.tools.GameFrameWorker import FrameWorker
@@ -305,8 +306,10 @@ class DrivingManager:
         self.house_exit_manager = HouseExitManager()
         self.turn_calibration = TurnCalibration()
 
-        self.game_time: Optional[float] = None
-        self.driving_start_time: Optional[float] = None
+        self.match_clock = Stopwatch()
+        self.driving_clock = Stopwatch()
+        self.route_replan_cooldown = Cooldown()
+        self.auto_brake_cooldown = Cooldown()
 
         self.is_first_car = True
         self.current_stage = self.STAGE_EXIT_GARAGE
@@ -319,7 +322,6 @@ class DrivingManager:
         self.stable_circle_angle: Optional[float] = None
         self.last_planned_circle_angle: Optional[float] = None
         self.road_list: List[Tuple[int, int]] = []
-        self.route_replan_cooldown_until = 0.0
         self.last_avoidance_location: Optional[Tuple[int, int]] = None
         self.local_avoidance_fail_count = 0
 
@@ -334,12 +336,10 @@ class DrivingManager:
         self.last_motion_mode: Optional[str] = None
         self.last_motion_steer: Optional[str] = None
         self.last_motion_location: Optional[Tuple[int, int]] = None
-        self.last_motion_started_at = 0.0
         self.blocked_motion_count = 0
         self.no_fuel_stall_count = 0
         self.motion_stalled_this_frame = False
         self.forward_block_recovery_active = False
-        self.last_auto_brake_time = 0.0
         self.allow_running_fallback = True
         self.pause_sp_callback: Optional[Callable] = None
         self.next_running_finding_car: Optional[bool] = None
@@ -348,18 +348,14 @@ class DrivingManager:
         self._frame_action_executed = False
 
     def set_game_time(self, game_time: Optional[float] = None):
-        self.game_time = time.time() if game_time is None else game_time
-        print(f"[Driving] 游戏开始时间设置为：{self.game_time:.3f}")
+        started_at = self.match_clock.start(game_time)
+        print(f"[Driving] 游戏开始时间设置为：{started_at:.3f}")
 
     def get_elapsed_time(self) -> float:
-        if self.game_time is None:
-            return 0.0
-        return max(0.0, time.time() - self.game_time)
+        return self.match_clock.elapsed()
 
     def get_driving_elapsed_time(self) -> float:
-        if self.driving_start_time is None:
-            return 0.0
-        return max(0.0, time.time() - self.driving_start_time)
+        return self.driving_clock.elapsed()
 
     def set_remaining_drive_time(self, remaining_time: Optional[float]):
         if remaining_time is None:
@@ -371,7 +367,7 @@ class DrivingManager:
         if max_driving_time is not None:
             self.max_driving_time = max_driving_time
 
-        self.driving_start_time = None
+        self.driving_clock.reset()
         self.is_first_car = True
         self.current_stage = self.STAGE_EXIT_GARAGE
         self.exit_garage_phase = 0
@@ -383,7 +379,7 @@ class DrivingManager:
         self.stable_circle_angle = None
         self.last_planned_circle_angle = None
         self.road_list = []
-        self.route_replan_cooldown_until = 0.0
+        self.route_replan_cooldown.reset()
         self.last_avoidance_location = None
         self.local_avoidance_fail_count = 0
 
@@ -398,12 +394,11 @@ class DrivingManager:
         self.last_motion_mode = None
         self.last_motion_steer = None
         self.last_motion_location = None
-        self.last_motion_started_at = 0.0
         self.blocked_motion_count = 0
         self.no_fuel_stall_count = 0
         self.motion_stalled_this_frame = False
         self.forward_block_recovery_active = False
-        self.last_auto_brake_time = 0.0
+        self.auto_brake_cooldown.reset()
         self.allow_running_fallback = True
         self.next_running_finding_car = None
         self.horn_missing_frames = 0
@@ -435,9 +430,8 @@ class DrivingManager:
     def process(self, w: "FrameWorker"):
         self._begin_frame()
 
-        if self.driving_start_time is None:
-            self.driving_start_time = time.time()
-            print(f"[Driving] 本次驾驶计时开始：{self.driving_start_time:.3f}")
+        if self.driving_clock.ensure_started():
+            print(f"[Driving] 本次驾驶计时开始：{self.driving_clock.started_at:.3f}")
 
         if self._has_rank_info(w):
             print("[Driving] 检测到个人排名或队伍排名，进入结束阶段")
@@ -463,7 +457,7 @@ class DrivingManager:
             self._finalize_frame(w)
             return
 
-        if self.game_time is None:
+        if not self.match_clock.is_running():
             self.set_game_time()
 
         self._update_circle_angle(w.get_info("white_angle"))
@@ -666,15 +660,13 @@ class DrivingManager:
         if nearest_dist <= self.ROUTE_DEVIATION_REPLAN_DISTANCE:
             return
 
-        now = time.time()
-        if now < self.route_replan_cooldown_until:
+        if not self.route_replan_cooldown.try_acquire(self.ROUTE_REPLAN_COOLDOWN_S):
             return
 
         print(
             f"[Driving] 当前位置偏离规划路线过远 nearest_dist={nearest_dist:.2f}，"
             "从当前位置重规划进圈路线"
         )
-        self.route_replan_cooldown_until = now + self.ROUTE_REPLAN_COOLDOWN_S
         self._load_path(location)
 
     def _record_local_avoidance(self, context: DriveContext, reason: str):
@@ -714,7 +706,7 @@ class DrivingManager:
             self.road_list.pop(0)
             skipped += 1
 
-        self.route_replan_cooldown_until = time.time() + self.ROUTE_REPLAN_COOLDOWN_S
+        self.route_replan_cooldown.trigger()
         if not self.road_list:
             self.last_planned_circle_angle = None
 
@@ -1844,16 +1836,11 @@ class DrivingManager:
         return self.last_motion_steer or "right"
 
     def _should_trigger_auto_brake(self) -> bool:
-        now = time.time()
-        if now - self.last_auto_brake_time < self.BRAKE_COOLDOWN_SPEED2:
-            return False
-        self.last_auto_brake_time = now
-        return True
+        return self.auto_brake_cooldown.try_acquire(self.BRAKE_COOLDOWN_SPEED2)
 
     def _record_motion_action(self, action: str):
         self.last_motion_mode = None
         self.last_motion_steer = None
-        self.last_motion_started_at = time.time()
 
         if action in ("straight", "forward", "forward_turn_left", "forward_turn_right"):
             self.last_motion_mode = "forward"

@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_navigation import MapNavigator
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import *
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_manager import HouseExitManager
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import TimeoutTracker
 from aw.autogame.tools.Utils import *
 
 if TYPE_CHECKING:
@@ -100,8 +101,10 @@ class HouseSearchManager:
 
         self.house_exit_manager = HouseExitManager()
         self.indoor_stuck_frames = 0
-        self.house_search_started_at = None
-        self.house_search_timeout_reported = False
+        self.house_search_timer = TimeoutTracker(
+            self.HOUSE_SEARCH_TIMEOUT_SECONDS,
+            monotonic=True,
+        )
         self.abort_callback = None
         self.can_finish_callback = None
         self.avoid_angle_ref = None
@@ -166,8 +169,7 @@ class HouseSearchManager:
 
         self.house_exit_manager.reset()
         self.indoor_stuck_frames = 0
-        self.house_search_started_at = None
-        self.house_search_timeout_reported = False
+        self.house_search_timer.reset()
         self.avoid_angle_ref = None
         self.avoid_mode = None
         self.initial_target_pending = True
@@ -279,23 +281,15 @@ class HouseSearchManager:
             return None
 
     def _start_house_search_timer(self):
-        self.house_search_started_at = time.monotonic()
-        self.house_search_timeout_reported = False
+        self.house_search_timer.start()
 
     def _clear_house_search_timer(self):
-        self.house_search_started_at = None
-        self.house_search_timeout_reported = False
+        self.house_search_timer.reset()
 
     def _house_search_timed_out(self):
-        if self.house_search_started_at is None:
-            return False
-        elapsed = time.monotonic() - self.house_search_started_at
-        if elapsed <= self.HOUSE_SEARCH_TIMEOUT_SECONDS:
-            return False
-        if not self.house_search_timeout_reported:
+        if self.house_search_timer.should_report_expired():
             print(f"[搜房] 入屋搜房已超过{self.HOUSE_SEARCH_TIMEOUT_SECONDS}s，停止搜房并执行出房策略")
-            self.house_search_timeout_reported = True
-        return True
+        return self.house_search_timer.expired()
 
     def _should_stop_house_search(self, w: 'FrameWorker'):
         return self._should_abort(w) or self._house_search_timed_out()

@@ -2,5 +2,18 @@ hdc shell reboot -D
 
 hdc wait
 
+:wait_boot
+for /f "tokens=*" %%i in ('hdc shell param get sys.boot_completed') do set boot=%%i
+if not "%boot%"=="1" (
+    timeout /t 2 /nobreak >nul
+    goto wait_boot
+)
+
+timeout /t 3 /nobreak >nul
+hdc shell input swipe 1440 1220 1440 260 500
+timeout /t 2 /nobreak >nul
+hdc shell input tap 80 80
+timeout /t 1 /nobreak >nul
+
 hdc shell setenforce 0
 hdc fport tcp:12345 tcp:12345

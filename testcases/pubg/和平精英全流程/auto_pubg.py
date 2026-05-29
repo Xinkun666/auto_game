@@ -44,7 +44,7 @@ class auto_pubg(TestCase):
 
     def start_perf_tool(self):
         """封装性能工具启动逻辑"""
-        max_attempts = 2
+        max_attempts = 5
         text_input = None
         last_error = None
 
@@ -88,9 +88,9 @@ class auto_pubg(TestCase):
         if os.environ.get("AUTOGAME_DISMISS_REBOOT_PROMPT") != "1":
             return
 
-        print("[Launcher] 重启后首次打开 sp，点击屏幕中上方关闭充电弹窗")
+        print("[Launcher] 重启后首次打开 sp，点击屏幕左下方关闭充电弹窗")
         time.sleep(1)
-        self.driver.touch((0.5, 0.20))
+        self.driver.touch((0.02, 0.92))
         time.sleep(1)
 
     def _open_perf_tool_app_selector(self):

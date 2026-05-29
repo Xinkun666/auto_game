@@ -3,7 +3,6 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.direction_se
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.direction_ctc_service import Get_Direction as Get_Direction_CTC
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.location_service import LocatePoints
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.yolo_detector import YOLO26Detector
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.yolov5 import YOLOv5TorchScript
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.angle_tracker import AngleTracker
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.speed_classifier import SpeedClassifier
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.scene_predictor import GameSceneClassifier
@@ -18,7 +17,6 @@ dire_tool = Get_Direction(model_weight=r'aw/autogame/customs_examples/Auto_PUBG_
 dire_tool_ctc = Get_Direction_CTC(model_weight=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/direction_ctc.pt')
 loc_tool = LocatePoints()
 yolo_detector = YOLO26Detector(model_path=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/best.pt')
-yolo5_detector = YOLOv5TorchScript(ts_model_path=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/yolov5m.torchscript')
 tracker = AngleTracker(window_size=30)
 speed_cls = SpeedClassifier(weight_path=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/speed_classifier.pt')
 scene_cls = GameSceneClassifier(checkpoint_path=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/scene_best_model.pth')

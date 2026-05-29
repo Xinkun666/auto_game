@@ -53,12 +53,16 @@ RESTART_BAT_PATH = ROOT_DIR / "aw" / "autogame" / "restart.bat"
 STREAM_CONNECTED_MARKERS = (
     "[Stream] Start receiving...",
 )
+SP_STARTED_MARKERS = (
+    "[Timer] sp 记录已开始",
+)
 STREAM_DISCONNECT_PATTERNS = (
     "[Stream] Channel ready timeout.",
     "[Stream] Receive loop ended unexpectedly.",
     "[Stream] gRPC Error:",
     "[Stream] Runtime Error:",
 )
+REBOOT_PROMPT_DISMISS_TAP = (1440, 260)
 
 
 def setup_logging():
@@ -303,6 +307,7 @@ class LauncherWindow(QWidget):
         self.current_run_stream_disconnected = False
         self.current_run_stream_disconnect_startup = False
         self.current_run_stream_disconnect_message = ""
+        self.dismiss_reboot_prompt_after_next_sp_start = False
         self.preserve_device_apps_on_manual_stop = True
         self.current_batch_start_timestamp: Optional[str] = None
         self.current_run_start_timestamp: Optional[str] = None
@@ -1265,6 +1270,7 @@ class LauncherWindow(QWidget):
         self.current_run_stream_disconnected = False
         self.current_run_stream_disconnect_startup = False
         self.current_run_stream_disconnect_message = ""
+        self.dismiss_reboot_prompt_after_next_sp_start = False
         self.preserve_device_apps_on_manual_stop = True
         self.current_batch_start_timestamp = None
         self.current_run_start_timestamp = None
@@ -1531,7 +1537,11 @@ class LauncherWindow(QWidget):
             LOGGER.info("child_output: %s", stripped)
 
     def _handle_stream_output(self, text: str):
-        if not text or self.current_run_stream_disconnected:
+        if not text:
+            return
+
+        self._dismiss_reboot_prompt_if_sp_started(text)
+        if self.current_run_stream_disconnected:
             return
 
         if any(marker in text for marker in STREAM_CONNECTED_MARKERS):
@@ -1564,6 +1574,24 @@ class LauncherWindow(QWidget):
             if matched_pattern in line:
                 return line.strip()
         return matched_pattern
+
+    def _dismiss_reboot_prompt_if_sp_started(self, text: str):
+        if not self.dismiss_reboot_prompt_after_next_sp_start:
+            return
+        if not any(marker in text for marker in SP_STARTED_MARKERS):
+            return
+
+        x, y = REBOOT_PROMPT_DISMISS_TAP
+        self.dismiss_reboot_prompt_after_next_sp_start = False
+        self._log_message(
+            f"[Launcher] 重启后的用例已启动 sp，点击屏幕中上部 ({x}, {y}) 关闭充电弹窗。\n"
+        )
+        result = run_hdc_shell(f"input tap {x} {y}")
+        if result is None:
+            self._log_message(
+                "[Launcher] 关闭充电弹窗点击执行失败，请检查 hdc 连接。\n",
+                level=logging.WARNING,
+            )
 
     def _on_process_error(self, error):
         if self.process is None:
@@ -1633,6 +1661,7 @@ class LauncherWindow(QWidget):
             return False
 
         self._log_message("[Launcher] 手机重启与端口恢复完成。\n")
+        self.dismiss_reboot_prompt_after_next_sp_start = True
         return True
 
     def _on_process_finished(self, exit_code: int, _exit_status):

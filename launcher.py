@@ -49,6 +49,16 @@ LOG_DIR = ROOT_DIR / "aw" / "autogame" / "temp" / "logs"
 LAUNCHER_LOG_FILE = LOG_DIR / "launcher_debug.log"
 PACKAGE_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+){2,}")
 LOGGER = logging.getLogger("launcher")
+RESTART_BAT_PATH = ROOT_DIR / "aw" / "autogame" / "restart.bat"
+STREAM_CONNECTED_MARKERS = (
+    "[Stream] Start receiving...",
+)
+STREAM_DISCONNECT_PATTERNS = (
+    "[Stream] Channel ready timeout.",
+    "[Stream] Receive loop ended unexpectedly.",
+    "[Stream] gRPC Error:",
+    "[Stream] Runtime Error:",
+)
 
 
 def setup_logging():
@@ -289,6 +299,10 @@ class LauncherWindow(QWidget):
         self.current_plan: Optional[dict] = None
         self.current_run_timed_out = False
         self.current_run_output_start = 0
+        self.current_run_stream_started = False
+        self.current_run_stream_disconnected = False
+        self.current_run_stream_disconnect_startup = False
+        self.current_run_stream_disconnect_message = ""
         self.preserve_device_apps_on_manual_stop = True
         self.current_batch_start_timestamp: Optional[str] = None
         self.current_run_start_timestamp: Optional[str] = None
@@ -1247,6 +1261,10 @@ class LauncherWindow(QWidget):
         self.current_plan = None
         self.current_run_timed_out = False
         self.current_run_output_start = 0
+        self.current_run_stream_started = False
+        self.current_run_stream_disconnected = False
+        self.current_run_stream_disconnect_startup = False
+        self.current_run_stream_disconnect_message = ""
         self.preserve_device_apps_on_manual_stop = True
         self.current_batch_start_timestamp = None
         self.current_run_start_timestamp = None
@@ -1356,6 +1374,10 @@ class LauncherWindow(QWidget):
             self.current_plan,
         )
         self.current_run_timed_out = False
+        self.current_run_stream_started = False
+        self.current_run_stream_disconnected = False
+        self.current_run_stream_disconnect_startup = False
+        self.current_run_stream_disconnect_message = ""
         self.current_run_start_timestamp = time.strftime("%Y%m%d%H%M%S")
         self._clear_preview_files()
         self.current_run_output_start = len(self.output_edit.toPlainText())
@@ -1449,6 +1471,10 @@ class LauncherWindow(QWidget):
                     "testcase_label": self.current_plan["testcase_label"],
                     "exit_code": exit_code,
                     "timed_out": self.current_run_timed_out,
+                    "stream_disconnected": self.current_run_stream_disconnected,
+                    "stream_disconnect_startup": self.current_run_stream_disconnect_startup,
+                    "stream_disconnect_message": self.current_run_stream_disconnect_message,
+                    "stream_started": self.current_run_stream_started,
                     "batch_start_timestamp": self.current_batch_start_timestamp,
                     "run_start_timestamp": self.current_run_start_timestamp,
                     "inactivity_timeout_minutes": self.current_plan["inactivity_timeout_minutes"],
@@ -1499,9 +1525,45 @@ class LauncherWindow(QWidget):
             return
         text = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
         self._append_output(text)
+        self._handle_stream_output(text)
         stripped = text.strip()
         if stripped:
             LOGGER.info("child_output: %s", stripped)
+
+    def _handle_stream_output(self, text: str):
+        if not text or self.current_run_stream_disconnected:
+            return
+
+        if any(marker in text for marker in STREAM_CONNECTED_MARKERS):
+            self.current_run_stream_started = True
+
+        matched_pattern = next(
+            (pattern for pattern in STREAM_DISCONNECT_PATTERNS if pattern in text),
+            None,
+        )
+        if matched_pattern is None:
+            return
+
+        self.current_run_stream_disconnected = True
+        self.current_run_stream_disconnect_startup = not self.current_run_stream_started
+        self.current_run_stream_disconnect_message = self._extract_stream_disconnect_line(
+            text,
+            matched_pattern,
+        )
+        phase_text = "启动阶段" if self.current_run_stream_disconnect_startup else "用例中途"
+        self._log_message(
+            f"\n[Launcher] 检测到 gRPC 流断连({phase_text})："
+            f"{self.current_run_stream_disconnect_message}\n"
+        )
+        self._set_status("检测到 gRPC 流断连，正在停止当前子进程并准备重启手机。")
+        if self.process is not None:
+            self.process.kill()
+
+    def _extract_stream_disconnect_line(self, text: str, matched_pattern: str) -> str:
+        for line in text.splitlines():
+            if matched_pattern in line:
+                return line.strip()
+        return matched_pattern
 
     def _on_process_error(self, error):
         if self.process is None:
@@ -1518,6 +1580,60 @@ class LauncherWindow(QWidget):
             f"[Launcher] 子进程错误：error={error}, detail={self.process.errorString()}\n",
             level=logging.ERROR,
         )
+
+    def _restart_device_for_stream_disconnect(self) -> bool:
+        if not RESTART_BAT_PATH.exists():
+            self._log_message(
+                f"[Launcher] 未找到重启脚本：{RESTART_BAT_PATH}\n",
+                level=logging.ERROR,
+            )
+            return False
+
+        self._log_message(
+            f"[Launcher] 开始执行断流恢复脚本：{RESTART_BAT_PATH}\n"
+        )
+        self._set_runtime("运行信息：检测到断流，正在重启手机并等待开机。")
+        QApplication.processEvents()
+
+        try:
+            if os.name == "nt":
+                cmd = ["cmd", "/c", str(RESTART_BAT_PATH)]
+            else:
+                cmd = ["bash", str(RESTART_BAT_PATH)]
+            result = subprocess.run(
+                cmd,
+                cwd=str(ROOT_DIR),
+                capture_output=True,
+                text=True,
+                timeout=360,
+            )
+        except subprocess.TimeoutExpired as exc:
+            self._log_message(
+                f"[Launcher] 执行 restart.bat 超时：{exc}\n",
+                level=logging.ERROR,
+            )
+            return False
+        except Exception:
+            log_exception("restart device after stream disconnect failed")
+            self._log_message(
+                "[Launcher] 执行 restart.bat 失败，请查看 launcher_debug.log。\n",
+                level=logging.ERROR,
+            )
+            return False
+
+        output = (result.stdout or "") + (result.stderr or "")
+        if output.strip():
+            self._log_message(f"[Launcher][restart.bat]\n{output.rstrip()}\n")
+
+        if result.returncode != 0:
+            self._log_message(
+                f"[Launcher] restart.bat 执行失败，returncode={result.returncode}\n",
+                level=logging.ERROR,
+            )
+            return False
+
+        self._log_message("[Launcher] 手机重启与端口恢复完成。\n")
+        return True
 
     def _on_process_finished(self, exit_code: int, _exit_status):
         LOGGER.info(
@@ -1550,6 +1666,51 @@ class LauncherWindow(QWidget):
             else:
                 self._cleanup_apps_between_runs("停止后清理")
             self._finish_batch("任务已停止。")
+            return
+
+        if self.current_run_stream_disconnected:
+            if self.current_run_stream_disconnect_startup:
+                self._log_message(
+                    "[Launcher] 本次断流发生在用例启动阶段，不计入已执行次数；"
+                    "重启手机后将重新运行当前用例。\n"
+                )
+                if not self._restart_device_for_stream_disconnect():
+                    self._finish_batch("断流恢复失败，批量任务已终止。")
+                    return
+                self._set_status(
+                    f"第 {self.current_run_index + 1}/{self.current_plan['run_count']} 次启动阶段断流，已重启手机，准备重跑。"
+                )
+                self._set_runtime(
+                    f"运行信息：启动阶段断流已恢复，准备重新执行第 {self.current_run_index + 1}/{self.current_plan['run_count']} 次。"
+                )
+                self._check_and_start_if_safe()
+                if self.batch_active and self.process is None and not self.safety_timer.isActive():
+                    self.safety_timer.start()
+                return
+
+            self._log_message(
+                "[Launcher] 本次断流发生在用例中途，结果已归档并写入 stream_disconnected 标志；"
+                "当前用例计为完成，重启手机后进入下一条。\n"
+            )
+            if not self._restart_device_for_stream_disconnect():
+                self._finish_batch("断流恢复失败，批量任务已终止。")
+                return
+
+            self.current_run_index += 1
+            if self.current_run_index >= self.current_plan["run_count"]:
+                self._finish_batch("所有运行次数已完成。")
+                return
+
+            next_run = self.current_run_index + 1
+            self._set_status(
+                f"第 {self.current_run_index}/{self.current_plan['run_count']} 次因断流结束，检查第 {next_run} 次启动条件。"
+            )
+            self._set_runtime(
+                f"运行信息：已完成 {self.current_run_index}/{self.current_plan['run_count']} 次，断流恢复完成，准备下一次安全检查。"
+            )
+            self._check_and_start_if_safe()
+            if self.batch_active and self.process is None and not self.safety_timer.isActive():
+                self.safety_timer.start()
             return
 
         self._cleanup_apps_between_runs("轮次结束清理")

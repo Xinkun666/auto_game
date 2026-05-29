@@ -63,6 +63,7 @@ STREAM_DISCONNECT_PATTERNS = (
     "[Stream] Runtime Error:",
 )
 REBOOT_PROMPT_DISMISS_TAP = (1440, 260)
+REBOOT_RELAUNCH_DELAY_SECONDS = 40
 
 
 def setup_logging():
@@ -1661,6 +1662,12 @@ class LauncherWindow(QWidget):
             return False
 
         self._log_message("[Launcher] 手机重启与端口恢复完成。\n")
+        self._log_message(
+            f"[Launcher] 重启后固定等待 {REBOOT_RELAUNCH_DELAY_SECONDS}s，再重新启动用例。\n"
+        )
+        for _ in range(REBOOT_RELAUNCH_DELAY_SECONDS):
+            QApplication.processEvents()
+            time.sleep(1)
         self.dismiss_reboot_prompt_after_next_sp_start = True
         return True
 

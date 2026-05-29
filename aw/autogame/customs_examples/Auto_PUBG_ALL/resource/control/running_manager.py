@@ -4,16 +4,16 @@ import os
 import time
 from typing import Callable, List, Optional, Set, Tuple, TYPE_CHECKING
 
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.house_exit_manager import HouseExitManager
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigation import MapNavigator
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation_geometry import (
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_manager import HouseExitManager
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_navigation import MapNavigator
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import (
     calculate_angle,
     calculate_move_count,
     check_location,
     get_distance,
     is_location_stagnant, draw_points_with_arrows,
 )
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_path_utils import find_path, get_resolution
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_path_utils import find_path, get_resolution
 
 if TYPE_CHECKING:
     from aw.autogame.tools.GameFrameWorker import FrameWorker
@@ -247,7 +247,7 @@ class RoadRouteHelper:
 
         self._topo_load_attempted = True
         try:
-            from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.road_topology import RoadTopo
+            from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.road_topology import RoadTopo
 
             self._topo = RoadTopo()
             print("[RoadRoute] road_topology 拓扑加载成功")

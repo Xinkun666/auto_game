@@ -4,12 +4,12 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.house_exit_manager import HouseExitManager
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigation import MapNavigator
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.obstacle_analyzer import (
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_manager import HouseExitManager
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_navigation import MapNavigator
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.obstacle_analyzer import (
     ObstacleAvoidanceAnalyzer,
 )
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation_geometry import (
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import (
     calculate_angle,
     calculate_move_count,
     check_location,
@@ -1766,7 +1766,7 @@ class DrivingManager:
             self.stable_circle_angle = None
             return
 
-        from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_path_utils import stable_angle
+        from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_path_utils import stable_angle
 
         self.stable_circle_angle = stable_angle(self.circle_angles)
         if self.stable_circle_angle is None:

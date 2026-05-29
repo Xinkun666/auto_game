@@ -1,9 +1,9 @@
 import random
 import time
 from typing import TYPE_CHECKING
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.map_navigation import MapNavigator
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation_geometry import *
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.house_exit_manager import HouseExitManager
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_navigation import MapNavigator
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import *
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_manager import HouseExitManager
 from aw.autogame.tools.Utils import *
 
 if TYPE_CHECKING:

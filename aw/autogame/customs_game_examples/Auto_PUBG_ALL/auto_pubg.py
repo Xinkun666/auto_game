@@ -2,16 +2,16 @@ import time
 from typing import TYPE_CHECKING
 
 from aw.autogame.tools.Utils import *
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.parachute_manager import ParachuteManager
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.running_manager import RunningManager
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.driving_manager import DrivingManager
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.house_search_manager import (
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.parachute_manager import ParachuteManager
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.running_manager import RunningManager
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.driving_manager import DrivingManager
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_search_manager import (
     HouseSearchManager,
 )
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.house_exit_manager import (
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_manager import (
     HouseExitManager,
 )
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.phase_time_manager import (
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.phase_time_manager import (
     PHASE_DRIVING,
     PHASE_RUNNING,
     PHASE_SEARCHING,

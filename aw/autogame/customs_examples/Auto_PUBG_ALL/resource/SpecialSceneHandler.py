@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.direction_service import Get_Direction
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.direction_ctc_service import Get_Direction as Get_Direction_CTC
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.location_service import LocatePoints
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.yolo_detector import YOLO26Detector
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.direction_service import Get_Direction
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.direction_ctc_service import Get_Direction as Get_Direction_CTC
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.location_service import LocatePoints
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.yolo_detector import YOLO26Detector
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.yolov5 import YOLOv5TorchScript
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.angle_tracker import AngleTracker
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.speed_classifier import SpeedClassifier
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.scene_predictor import GameSceneClassifier
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.angle_tracker import AngleTracker
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.speed_classifier import SpeedClassifier
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.scene_predictor import GameSceneClassifier
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.pubg_room_search.perception import special_ports as pubg_perception_ports
 
 from aw.autogame.tools.Utils import *

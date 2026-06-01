@@ -6,7 +6,7 @@ from PIL import Image
 
 
 class _EfficientNetClassifier(nn.Module):
-    def __init__(self, num_classes=3):
+    def __init__(self, num_classes=5):
         super().__init__()
         self.backbone = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
         feature_dim = self.backbone.classifier[1].in_features
@@ -28,14 +28,14 @@ class _EfficientNetClassifier(nn.Module):
 
 
 class GameSceneClassifier:
-    CLASS_LABELS = {0: 'indoor', 1: 'outdoor', 2: 'rooftop'}
+    CLASS_LABELS = {0: 'indoor', 1: 'outdoor', 2: 'rooftop', 3: 'near_door', 4: 'near_wall'}
 
     def __init__(self, checkpoint_path, device=None):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
-        self.class_to_idx = {'indoor': 0, 'outdoor': 1, 'rooftop': 2}
+        self.class_to_idx = {'indoor': 0, 'outdoor': 1, 'rooftop': 2, 'near_door': 3, 'near_wall': 4}
         self.idx_to_class = {v: k for k, v in self.class_to_idx.items()}
 
-        self.model = _EfficientNetClassifier(num_classes=3)
+        self.model = _EfficientNetClassifier(num_classes=5)
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.model.to(self.device)

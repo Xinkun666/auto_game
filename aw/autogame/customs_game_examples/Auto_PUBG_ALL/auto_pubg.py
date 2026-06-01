@@ -395,12 +395,13 @@ def on_stage(w: "FrameWorker"):
         return
 
     if w.current_stage == "搜房阶段":
-        handle_sp_start(w)
-        if should_abort_searching(w):
-            return
-
-        searching_view_synced = True
-        searching_house_manager.process(w)
+        # handle_sp_start(w)
+        # if should_abort_searching(w):
+        #     return
+        #
+        # searching_view_synced = True
+        # searching_house_manager.process(w)
+        time.sleep(0.5)
         return
         # house_scene = w.get_info("house_scene")
         # if isinstance(house_scene, (list, tuple)) and len(house_scene) == 1:

@@ -5,8 +5,8 @@ from aw.autogame.tools.Utils import *
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.parachute_manager import ParachuteManager
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.running_manager import RunningManager
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.driving_manager import DrivingManager
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_search_manager import (
-    HouseSearchManager,
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_scene_search_manager import (
+    HouseSceneSearchManager,
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_manager import (
     HouseExitManager,
@@ -79,7 +79,7 @@ lobby_house_confirm_count = 0
 parachute_manager = ParachuteManager()
 running_manager = RunningManager()
 driving_manager = DrivingManager()
-searching_house_manager = HouseSearchManager()
+searching_house_manager = HouseSceneSearchManager()
 house_exit_manager = HouseExitManager()
 phase_timer = PhaseTimeManager(PHASE_DURATIONS, PHASE_STAGE_MAP)
 phase_reporter = PhaseTimeReporter()
@@ -395,21 +395,13 @@ def on_stage(w: "FrameWorker"):
         return
 
     if w.current_stage == "搜房阶段":
-        # handle_sp_start(w)
-        # if should_abort_searching(w):
-        #     return
-        #
-        # searching_view_synced = True
-        # searching_house_manager.process(w)
-        time.sleep(0.5)
+        handle_sp_start(w)
+        if should_abort_searching(w):
+            return
+
+        searching_view_synced = True
+        searching_house_manager.process(w)
         return
-        # house_scene = w.get_info("house_scene")
-        # if isinstance(house_scene, (list, tuple)) and len(house_scene) == 1:
-        #     house_scene = house_scene[0]
-        #
-        # if house_exit_manager.process(w):
-        #     w.stop()
-        # return
 
     if w.current_stage == "跑图阶段":
         if searching_view_synced:

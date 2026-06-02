@@ -146,23 +146,60 @@ def parse_tuple_str(s):
 def run_shell(cmd: str, r = False):
     try:
         if r:
-            result = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            return result.stdout.strip()
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+            )
+            output = "\n".join(
+                part.strip()
+                for part in (result.stdout, result.stderr)
+                if part and part.strip()
+            )
+            if result.returncode != 0 and not output:
+                print(f"命令执行失败: {cmd}\nreturncode={result.returncode}")
+                return None
+            return output or None
         subprocess.run(cmd, shell=True, check=True)
     except Exception as e:
         print(f"命令执行失败: {cmd}\n{e}")
         if r:
             return None
 
+
+def _parse_screen_resolution(screen_info: str):
+    if not screen_info:
+        return None
+
+    patterns = (
+        r'activeMode:\s*(\d+)\s*x\s*(\d+)',
+        r'render\s+resolution\s*=\s*(\d+)\s*x\s*(\d+)',
+        r'physical\s+resolution\s*=\s*(\d+)\s*x\s*(\d+)',
+        r'supportedMode\[\d+\]:\s*(\d+)\s*x\s*(\d+)',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, screen_info, re.IGNORECASE)
+        if match:
+            return int(match.group(1)), int(match.group(2))
+    return None
+
+
 def get_resolution(r = True):
     resolution_mode = run_shell('hdc shell hidumper -s RenderService -a screen', r)
-    match = re.search(r'activeMode:\s*(\d+)x(\d+)', resolution_mode)
-    if match:
-        h, w = int(match.group(1)), int(match.group(2))
-        return w, h
-    else:
-        print('未能获取分辨率信息!')
-        return None, None
+    resolution = _parse_screen_resolution(resolution_mode)
+    if resolution:
+        width, height = resolution
+        return max(width, height), min(width, height)
+
+    print('未能获取分辨率信息!')
+    if resolution_mode:
+        print(f"[Resolution] RenderService 输出片段: {resolution_mode[:500]}")
+    return None, None
 
 def get_buttons():
     resolution = get_resolution()

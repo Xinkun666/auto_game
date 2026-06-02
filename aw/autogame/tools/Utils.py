@@ -317,28 +317,61 @@ def find_template_center_multiscale(target_img, template_input, threshold=0.7, m
 def run_shell(cmd: str, r = False):
     try:
         if r:
-            result = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            return result.stdout.strip()
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+            )
+            output = "\n".join(
+                part.strip()
+                for part in (result.stdout, result.stderr)
+                if part and part.strip()
+            )
+            if result.returncode != 0 and not output:
+                print(f"命令执行失败: {cmd}\nreturncode={result.returncode}")
+                return None
+            return output or None
         subprocess.run(cmd, shell=True, check=True)
     except Exception as e:
         print(f"命令执行失败: {cmd}\n{e}")
         if r:
             return None
 
+
+def _parse_screen_resolution(screen_info: str):
+    if not screen_info:
+        return None
+
+    patterns = (
+        r'activeMode:\s*(\d+)\s*x\s*(\d+)',
+        r'render\s+resolution\s*=\s*(\d+)\s*x\s*(\d+)',
+        r'physical\s+resolution\s*=\s*(\d+)\s*x\s*(\d+)',
+        r'supportedMode\[\d+\]:\s*(\d+)\s*x\s*(\d+)',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, screen_info, re.IGNORECASE)
+        if match:
+            return int(match.group(1)), int(match.group(2))
+    return None
+
+
 def get_resolution(r = True):
     resolution_mode = run_shell('hdc shell hidumper -s RenderService -a screen', r)
-    if not resolution_mode:
-        print('未能获取分辨率信息!')
-        return None, None
-
-    match = re.search(r'activeMode:\s*(\d+)x(\d+)', resolution_mode)
-    if match:
-        width, height = int(match.group(1)), int(match.group(2))
+    resolution = _parse_screen_resolution(resolution_mode)
+    if resolution:
+        width, height = resolution
         rotation = normalize_rotation(get_display_rotation())
         return normalize_resolution_by_rotation(width, height, rotation)
-    else:
-        print('未能获取分辨率信息!')
-        return None, None
+
+    print('未能获取分辨率信息!')
+    if resolution_mode:
+        print(f"[Resolution] RenderService 输出片段: {resolution_mode[:500]}")
+    return None, None
 
 
 def set_runtime_screen_resolution_env(width=None, height=None):
@@ -987,14 +1020,19 @@ def get_display_rotation():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="ignore",
             timeout=5
         )
+        output = "\n".join(
+            part.strip()
+            for part in (result.stdout, result.stderr)
+            if part and part.strip()
+        )
 
-        if result.returncode != 0:
+        if result.returncode != 0 and not output:
             print("[Rotation] Command failed:", result.stderr)
             return None
-
-        output = result.stdout
 
         # 1️⃣ 先截取 [SCREEN PROPERTY] 区块
         block_match = re.search(
@@ -1004,7 +1042,12 @@ def get_display_rotation():
         )
 
         if not block_match:
+            rot_match = re.search(r"Rotation:\s*(\d+)", output)
+            if rot_match:
+                return int(rot_match.group(1))
             print("[Rotation] SCREEN PROPERTY block not found")
+            if output:
+                print(f"[Rotation] DisplayManagerService 输出片段: {output[:500]}")
             return None
 
         block = block_match.group(1)

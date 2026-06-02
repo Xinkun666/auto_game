@@ -360,12 +360,20 @@ def _parse_screen_resolution(screen_info: str):
     return None
 
 
-def get_resolution(r = True):
+_AUTO_ROTATION = object()
+
+
+def get_resolution(r = True, rotation=_AUTO_ROTATION):
     resolution_mode = run_shell('hdc shell hidumper -s RenderService -a screen', r)
     resolution = _parse_screen_resolution(resolution_mode)
     if resolution:
         width, height = resolution
-        rotation = normalize_rotation(get_display_rotation())
+        if rotation is _AUTO_ROTATION:
+            rotation = normalize_rotation(get_display_rotation())
+        else:
+            rotation = normalize_rotation(rotation)
+        if rotation is None:
+            return max(width, height), min(width, height)
         return normalize_resolution_by_rotation(width, height, rotation)
 
     print('未能获取分辨率信息!')
@@ -382,7 +390,7 @@ def set_runtime_screen_resolution_env(width=None, height=None):
 
 def wait_for_landscape_resolution_stable(timeout=12, stable_rounds=3, interval=0.5):
     """
-    Wait until the device reports a stable landscape rotation, then return
+    Wait until the device reports a stable landscape resolution, then return
     the real display resolution normalized to landscape orientation.
     """
     deadline = time.time() + timeout
@@ -392,11 +400,11 @@ def wait_for_landscape_resolution_stable(timeout=12, stable_rounds=3, interval=0
 
     while time.time() < deadline:
         rotation = normalize_rotation(get_display_rotation())
-        width, height = get_resolution()
+        width, height = get_resolution(rotation=rotation)
         latest_resolution = (width, height)
         state = (rotation, width, height)
 
-        if rotation in (90, 270) and width and height and width > height:
+        if width and height and width > height and (rotation in (90, 270) or rotation is None):
             if state == last_state:
                 stable_count += 1
             else:
@@ -457,6 +465,18 @@ def normalize_resolution_by_rotation(width, height, rotation):
     if rotation in (0, 180):
         return (min(width, height), max(width, height))
     return width, height
+
+def infer_landscape_rotation(width, height, default=90):
+    if width is None or height is None:
+        return default
+    try:
+        width = int(width)
+        height = int(height)
+    except (TypeError, ValueError):
+        return default
+    if width > height:
+        return default
+    return 0
 
 def get_natural_resolution_by_rotation(width, height, rotation):
     if width is None or height is None:
@@ -1008,62 +1028,88 @@ def get_touch_backend(config_path="aw/autogame/config/config.json"):
 
     return "sendevent"
 
+def _parse_display_rotation(output: str):
+    if not output:
+        return None
+
+    blocks = []
+    block_match = re.search(
+        r"\[SCREEN PROPERTY\](.*?)(\n\[|\Z)",
+        output,
+        re.S
+    )
+    if block_match:
+        blocks.append(block_match.group(1))
+    blocks.append(output)
+
+    patterns = (
+        r"^\s*Rotation\s*[:=]\s*(\d+)\s*$",
+        r"\brotation\b\s*[:=]?\s*(\d+)",
+    )
+    for block in blocks:
+        for pattern in patterns:
+            match = re.search(pattern, block, re.IGNORECASE | re.MULTILINE)
+            if match:
+                return normalize_rotation(match.group(1))
+    return None
+
+
 def get_display_rotation():
     """
-    获取屏幕真实旋转角度（0/90/180/270）
-    来源：[SCREEN PROPERTY] -> Rotation
+    获取屏幕真实旋转角度（0/90/180/270）。
     """
-
-    try:
-        result = subprocess.run(
+    candidates = (
+        (
             ["hdc", "shell", "hidumper", "-s", "DisplayManagerService", "-a", "-a"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            timeout=5
-        )
-        output = "\n".join(
-            part.strip()
-            for part in (result.stdout, result.stderr)
-            if part and part.strip()
-        )
+            "DisplayManagerService",
+        ),
+        (
+            ["hdc", "shell", "hidumper", "-s", "WindowManagerService", "-a", "-a"],
+            "WindowManagerService",
+        ),
+        (
+            ["hdc", "shell", "snapshot_display"],
+            "snapshot_display",
+        ),
+        (
+            ["hdc", "shell", "hidumper", "-s", "RenderService", "-a", "screen"],
+            "RenderService",
+        ),
+    )
+    last_output = None
+    last_source = None
 
-        if result.returncode != 0 and not output:
-            print("[Rotation] Command failed:", result.stderr)
-            return None
-
-        # 1️⃣ 先截取 [SCREEN PROPERTY] 区块
-        block_match = re.search(
-            r"\[SCREEN PROPERTY\](.*?)(\n\[|\Z)",
-            output,
-            re.S
-        )
-
-        if not block_match:
-            rot_match = re.search(r"Rotation:\s*(\d+)", output)
-            if rot_match:
-                return int(rot_match.group(1))
-            print("[Rotation] SCREEN PROPERTY block not found")
+    for cmd, source in candidates:
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                timeout=5
+            )
+            output = "\n".join(
+                part.strip()
+                for part in (result.stdout, result.stderr)
+                if part and part.strip()
+            )
             if output:
-                print(f"[Rotation] DisplayManagerService 输出片段: {output[:500]}")
-            return None
+                last_output = output
+                last_source = source
 
-        block = block_match.group(1)
+            rotation = _parse_display_rotation(output)
+            if rotation is not None:
+                return rotation
+        except Exception as e:
+            last_output = str(e)
+            last_source = source
 
-        # 2️⃣ 在这个 block 里找 Rotation
-        rot_match = re.search(r"Rotation:\s*(\d+)", block)
-
-        if rot_match:
-            return int(rot_match.group(1))
-
-        print("[Rotation] Rotation not found in SCREEN PROPERTY")
-        return None
-
-    except Exception as e:
-        print("[Rotation] Error:", e)
-        return None
+    print("[Rotation] Rotation not found")
+    if last_output:
+        print(f"[Rotation] {last_source} 输出片段: {last_output[:500]}")
+    return None
 
 def insert_logs(log_name, time_dura, *key_words):
     """

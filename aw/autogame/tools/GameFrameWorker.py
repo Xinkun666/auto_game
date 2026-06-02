@@ -14,6 +14,7 @@ from typing import Dict, Tuple
 import numpy as np
 
 from aw.autogame.tools.Utils import *
+from aw.autogame.tools.Utils import _parse_display_rotation
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 from aw.autogame.tools.GameSceneHandler import StageLogicController
 
@@ -83,23 +84,21 @@ class HdcDut:
             ret = self.run_cmd_with_ret("wm size")
             match = re.search(r"(\d+)\s*x\s*(\d+)", ret)
             if match:
-                return normalize_resolution_by_rotation(
-                    int(match.group(1)),
-                    int(match.group(2)),
-                    rotation,
-                )
+                width, height = int(match.group(1)), int(match.group(2))
+                if rotation is None:
+                    return max(width, height), min(width, height)
+                return normalize_resolution_by_rotation(width, height, rotation)
         except Exception:
             pass
 
         try:
             ret = self.run_cmd_with_ret("hidumper -s RenderService -a screen")
-            match = re.search(r"activeMode:\s*(\d+)x(\d+)", ret)
+            match = re.search(r"activeMode:\s*(\d+)\s*x\s*(\d+)", ret)
             if match:
-                return normalize_resolution_by_rotation(
-                    int(match.group(1)),
-                    int(match.group(2)),
-                    rotation,
-                )
+                width, height = int(match.group(1)), int(match.group(2))
+                if rotation is None:
+                    return max(width, height), min(width, height)
+                return normalize_resolution_by_rotation(width, height, rotation)
         except Exception:
             pass
 
@@ -107,32 +106,29 @@ class HdcDut:
 
     def get_screen_rotation(self):
         candidates = [
-            "hidumper -s RenderService -a screen",
+            "hidumper -s DisplayManagerService -a -a",
             "hidumper -s WindowManagerService -a '-a'",
             "snapshot_display",
+            "hidumper -s RenderService -a screen",
         ]
 
         for cmd in candidates:
             try:
                 ret = self.run_cmd_with_ret(cmd)
-                match = re.search(r"rotation[^0-9]*(\d+)", ret, re.IGNORECASE)
-                if not match:
+                rotation = _parse_display_rotation(ret)
+                if rotation is None:
+                    match = re.search(r"rotation[^0-9]*(\d+)", ret, re.IGNORECASE)
+                    if not match:
+                        continue
+                    rotation = normalize_rotation(match.group(1))
+                if rotation is None:
                     continue
 
-                value = int(match.group(1))
-                if value in (0, 90, 180, 270):
-                    return value
-                if value == 1:
-                    return 90
-                if value == 2:
-                    return 180
-                if value == 3:
-                    return 270
-                return 0
+                return rotation
             except Exception:
                 continue
 
-        return 0
+        return None
 
 
 def get_dut_controller_handle(device_id=""):
@@ -272,7 +268,13 @@ def check_tool_exist(dut_handle):
 def get_panel_abs_xy_check_rotation(dut_handle):
     device_info = dut_handle.run_cmd_with_ret("/data/test/getevent -p")
     abs_w, abs_h, input_device = get_panel_abs_xy(device_info)
-    rotation = int(dut_handle.get_screen_rotation())
+    rotation = normalize_rotation(dut_handle.get_screen_rotation())
+    if rotation is None:
+        try:
+            pixel_w, pixel_h = dut_handle.get_resolution()
+            rotation = infer_landscape_rotation(pixel_w, pixel_h)
+        except Exception:
+            rotation = 0
     return 0, 0, abs_w, abs_h, input_device, rotation
 
 
@@ -1348,6 +1350,10 @@ class Controller:
     def _get_cached_rotation(self):
         if self._cached_rotation is None:
             self._cached_rotation = normalize_rotation(get_display_rotation())
+            if self._cached_rotation is None:
+                resolution = self._get_cached_resolution()
+                if resolution:
+                    self._cached_rotation = infer_landscape_rotation(*resolution)
         return self._cached_rotation
 
     def _get_current_frame_size(self):

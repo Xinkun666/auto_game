@@ -14,7 +14,10 @@ class GameAutomator:
         self.screen_w, self.screen_h = wait_for_landscape_resolution_stable()
         self.W, self.H = get_wh()
         if get_screen_mode() == "0":
-            rotation_mode = get_display_rotation()
+            rotation_mode = normalize_rotation(get_display_rotation())
+            if rotation_mode is None:
+                rotation_mode = infer_landscape_rotation(self.screen_w, self.screen_h)
+                print(f"[Rotation] 未获取到屏幕旋转，拉流使用兜底 rotation={rotation_mode}")
             self.client = StreamClient(global_buffer, rotation_mode=rotation_mode)
             self.client.start_backend(lowh=0, highh=10000, skip=20, width=self.W, height=self.H)
         elif get_screen_mode() == "1":

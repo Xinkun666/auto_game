@@ -30,6 +30,8 @@ class HouseSceneSearchManager(HouseSearchManager):
     HOUSE_NEAR_ENTRY_SCENES = {HOUSE_NEAR_DOOR, HOUSE_NEAR_WALL}
 
     STATUS_SCENE_ENTRY = "SCENE_ENTRY"
+    ENTRY_DIRECTION_ALIGN_TOLERANCE = 3
+    ENTRY_DIRECTION_ALIGN_MAX_STEPS = 8
 
     ENTRY_APPROACH_MAX_STEPS = 10
     ENTRY_APPROACH_FORWARD_Y_BIAS = -420
@@ -58,6 +60,8 @@ class HouseSceneSearchManager(HouseSearchManager):
     ROTATE_SEARCH_X_BIAS = 330
     ROTATE_SEARCH_Y_BIAS = -430
     ROTATE_SEARCH_TURN_DEGREES = 90
+    ROTATE_SEARCH_WALL_TURN_SEQUENCE = (90, 45, 22)
+    ROTATE_SEARCH_WALL_TURN_MAX_ATTEMPTS = 6
     ROTATE_SEARCH_HIT_SWITCH_COUNT = 6
     ROTATE_SEARCH_MAX_STEPS = 80
     ROTATE_SEARCH_RECOVER_STEP_MS = 300
@@ -185,7 +189,10 @@ class HouseSceneSearchManager(HouseSearchManager):
             return
 
         if self.status == self.STATUS_SCENE_ENTRY:
-            if not self._enter_house_by_scene(w):
+            entry_result = self._enter_house_by_scene(w)
+            if entry_result is None:
+                return
+            if not entry_result:
                 if self._should_abort(w):
                     return
                 print("[SceneSearch] house_scene 进门失败，舍弃当前进门点")
@@ -317,22 +324,42 @@ class HouseSceneSearchManager(HouseSearchManager):
         label = "墙/门"
         if wall_hit_count >= self.ROTATE_SEARCH_HIT_SWITCH_COUNT:
             if move_mode == "left_up":
-                print(f"[SceneRotate] 连续第{wall_hit_count}次撞{label}，逆时针90度并切到右上")
-                self._turn(w, -self.ROTATE_SEARCH_TURN_DEGREES)
-                return "right_up", 0
+                move_mode = "right_up"
+                print(f"[SceneRotate] 连续第{wall_hit_count}次撞{label}，切到右上并改为向左调整")
+            else:
+                move_mode = "left_up"
+                print(f"[SceneRotate] 连续第{wall_hit_count}次撞{label}，切到左上并改为向右调整")
+            wall_hit_count = 0
 
-            print(f"[SceneRotate] 连续第{wall_hit_count}次撞{label}，顺时针90度并切到左上")
-            self._turn(w, self.ROTATE_SEARCH_TURN_DEGREES)
-            return "left_up", 0
-
-        if move_mode == "left_up":
-            print(f"[SceneRotate] 连续第{wall_hit_count}次撞{label}，顺时针90度后继续左上")
-            self._turn(w, self.ROTATE_SEARCH_TURN_DEGREES)
-        else:
-            print(f"[SceneRotate] 连续第{wall_hit_count}次撞{label}，逆时针90度后继续右上")
-            self._turn(w, -self.ROTATE_SEARCH_TURN_DEGREES)
-
+        turn_sign = 1 if move_mode == "left_up" else -1
+        turn_label = "向右" if turn_sign > 0 else "向左"
+        print(f"[SceneRotate] 撞{label}后{turn_label}补转，直到不再贴墙/门")
+        self._turn_until_not_near_entry(w, turn_sign)
         return move_mode, wall_hit_count
+
+    def _turn_until_not_near_entry(self, w: "FrameWorker", turn_sign: int) -> bool:
+        for attempt in range(self.ROTATE_SEARCH_WALL_TURN_MAX_ATTEMPTS):
+            if self._should_abort(w) or self._house_search_timed_out():
+                return False
+
+            base_index = min(attempt, len(self.ROTATE_SEARCH_WALL_TURN_SEQUENCE) - 1)
+            angle = self.ROTATE_SEARCH_WALL_TURN_SEQUENCE[base_index]
+            signed_angle = turn_sign * angle
+            print(
+                f"[SceneRotate] 撞墙补转 {attempt + 1}/"
+                f"{self.ROTATE_SEARCH_WALL_TURN_MAX_ATTEMPTS}: {signed_angle}°"
+            )
+            self._turn(w, signed_angle)
+            w.refresh_frame()
+            scene = self._get_house_scene(w)
+            if scene not in self.HOUSE_NEAR_ENTRY_SCENES:
+                print(f"[SceneRotate] 补转后 house_scene={scene}，继续当前滑动方向")
+                return True
+
+            print(f"[SceneRotate] 补转后仍贴墙/门 house_scene={scene}，继续缩小角度补转")
+
+        print("[SceneRotate] 多次补转后仍贴墙/门，交给下一轮移动继续尝试")
+        return False
 
     def _recover_rotate_search_stuck(self, w: "FrameWorker", move_mode: str, dura_ms: int):
         if move_mode == "left_up":
@@ -395,12 +422,21 @@ class HouseSceneSearchManager(HouseSearchManager):
         crop = gray[y1:y2, x1:x2]
         return cv2.resize(crop, self.ROTATE_FRAME_COMPARE_SIZE, interpolation=cv2.INTER_AREA)
 
-    def _enter_house_by_scene(self, w: "FrameWorker") -> bool:
+    def _enter_house_by_scene(self, w: "FrameWorker") -> Optional[bool]:
         self.stop_auto_forward(w)
         if self.active_entry:
             ideal_angle = self.active_entry["direction"]
             print(f"[SceneEntry] 调整至进门方向: {ideal_angle}")
-            self.align_direction_blocking(w, w.get_info("direction"), ideal_angle)
+            aligned = self.align_direction_blocking(
+                w,
+                w.get_info("direction"),
+                ideal_angle,
+                threshold=self.ENTRY_DIRECTION_ALIGN_TOLERANCE,
+                max_steps=self.ENTRY_DIRECTION_ALIGN_MAX_STEPS,
+            )
+            if not aligned:
+                print("[SceneEntry] 进门方向尚未对准，继续对准后再探门")
+                return None
 
         w.refresh_frame()
         if self._is_indoor(w):

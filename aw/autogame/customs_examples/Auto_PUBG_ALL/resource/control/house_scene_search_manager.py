@@ -43,8 +43,14 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     ENTRY_SWEEP_MAX_STEPS = 14
     ENTRY_SWEEP_X_BIAS = 320
-    ENTRY_SWEEP_Y_BIAS = -420
     ENTRY_SWEEP_WAIT_PAD = 320
+    ENTRY_OPEN_SWEEP_DURA = 250
+    ENTRY_OPEN_SWEEP_OUTDOOR_BACKOFF_DURA = 250
+    ENTRY_OPEN_SWEEP_OUTDOOR_BACKOFF_WAIT = 360
+    ENTRY_INDOOR_CONFIRM_FORWARD_Y_BIAS = -420
+    ENTRY_INDOOR_CONFIRM_FORWARD_DURA = 650
+    ENTRY_INDOOR_CONFIRM_FORWARD_WAIT = 850
+    ENTRY_WINDOW_JUMP_SETTLE_SECONDS = 0.25
     OPEN_DOOR_SETTLE_SECONDS = 0.8
 
     ROTATE_SEARCH_MOVE_DURA = 1000
@@ -404,32 +410,32 @@ class HouseSceneSearchManager(HouseSearchManager):
         button_state = self._door_button_state(w)
         if button_state == "open":
             self._click_open_door(w)
-            return self._enter_open_door_by_diagonal_sweep(w)
+            return self._enter_open_door_by_horizontal_sweep(w)
         if button_state == "close":
-            print("[SceneEntry] 检测到关门按钮，门已打开，直接进门")
-            return self._enter_open_door_by_diagonal_sweep(w)
+            print("[SceneEntry] 检测到关门按钮，门已打开，水平贴墙找入口")
+            return self._enter_open_door_by_horizontal_sweep(w)
 
         approach_result = self._approach_until_near_entry(w)
         if approach_result == "indoor":
-            return True
+            return self._confirm_indoor_by_forward_push(w, "前推接近时检测到 indoor")
         if approach_result == "open":
             self._click_open_door(w)
-            return self._enter_open_door_by_diagonal_sweep(w)
+            return self._enter_open_door_by_horizontal_sweep(w)
         if approach_result == "close":
-            print("[SceneEntry] 前推过程中检测到关门按钮，门已打开，直接进门")
-            return self._enter_open_door_by_diagonal_sweep(w)
+            print("[SceneEntry] 前推过程中检测到关门按钮，门已打开，水平贴墙找入口")
+            return self._enter_open_door_by_horizontal_sweep(w)
         if approach_result != "near":
             return False
 
         button_state = self._sweep_for_door_button(w)
         if button_state == "indoor":
-            return True
+            return self._confirm_indoor_by_forward_push(w, "左右探门时检测到 indoor")
         if button_state == "open":
             self._click_open_door(w)
-            return self._enter_open_door_by_diagonal_sweep(w)
+            return self._enter_open_door_by_horizontal_sweep(w)
         if button_state == "close":
-            print("[SceneEntry] 左右探测发现关门按钮，门已打开，直接进门")
-            return self._enter_open_door_by_diagonal_sweep(w)
+            print("[SceneEntry] 左右探测发现关门按钮，门已打开，水平贴墙找入口")
+            return self._enter_open_door_by_horizontal_sweep(w)
 
         print("[SceneEntry] 左右探测未找到开门/关门按钮")
         return False
@@ -525,28 +531,39 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         return None
 
-    def _enter_open_door_by_diagonal_sweep(self, w: "FrameWorker") -> bool:
+    def _enter_open_door_by_horizontal_sweep(self, w: "FrameWorker") -> bool:
+        blocked = {"left": False, "right": False}
+
         for step in range(self.ENTRY_SWEEP_MAX_STEPS):
             if self._should_abort(w):
                 return False
 
             w.refresh_frame()
             if self._is_indoor(w):
-                print("[SceneEntry] 已检测到 indoor，进门完成")
-                return True
+                if self._confirm_indoor_by_forward_push(w, "水平探门前检测到 indoor"):
+                    return True
+                continue
 
             if self._door_button_state(w) == "open":
-                print("[SceneEntry] 进门过程中再次看到开门按钮，补点一次开门")
+                print("[SceneEntry] 水平探门时再次看到开门按钮，补点一次开门")
                 self._click_open_door(w)
 
             side = "left" if step % 2 == 0 else "right"
-            dura = (step + 1) * self.SWEEP_STEP_MS
+            if blocked[side]:
+                other_side = "right" if side == "left" else "left"
+                if blocked[other_side]:
+                    print("[SceneEntry] 左右两侧都已到 outdoor 临界点，停止水平进门探测")
+                    return False
+                print(f"[SceneEntry] {side} 侧已到 outdoor 临界点，改向{self._side_label(other_side)}小步探测")
+                side = other_side
+
+            dura = self.ENTRY_OPEN_SWEEP_DURA
             x_bias = -self.ENTRY_SWEEP_X_BIAS if side == "left" else self.ENTRY_SWEEP_X_BIAS
-            print(f"[SceneEntry] 向{self._side_label(side)}上进门 {dura}ms")
+            print(f"[SceneEntry] 门已打开，水平向{self._side_label(side)}贴墙找入口 {dura}ms")
             w.tap_single(
                 "摇杆",
                 x_bias=x_bias,
-                y_bias=self.ENTRY_SWEEP_Y_BIAS,
+                y_bias=0,
                 dura=dura,
                 wait=dura + self.ENTRY_SWEEP_WAIT_PAD,
             )
@@ -554,10 +571,60 @@ class HouseSceneSearchManager(HouseSearchManager):
 
             scene = self._get_house_scene(w)
             if scene == self.HOUSE_INDOOR:
-                print("[SceneEntry] 左上/右上推进后 house_scene=indoor，进门完成")
-                return True
+                if self._confirm_indoor_by_forward_push(w, "水平贴墙后检测到 indoor"):
+                    return True
+                continue
 
-        print("[SceneEntry] 左上/右上推进到上限，仍未进入 indoor")
+            if scene == self.HOUSE_OUTDOOR:
+                blocked[side] = True
+                print(f"[SceneEntry] 向{self._side_label(side)}已脱离墙/门范围，记录临界点")
+                if self._backoff_from_outdoor_side(w, side):
+                    return True
+
+            if blocked["left"] and blocked["right"]:
+                print("[SceneEntry] 左右两侧都到达 outdoor 临界点，停止水平进门探测")
+                return False
+
+        print("[SceneEntry] 水平贴墙探测到上限，仍未进入 indoor")
+        return False
+
+    def _backoff_from_outdoor_side(self, w: "FrameWorker", side: str) -> bool:
+        opposite_x = self.ENTRY_SWEEP_X_BIAS if side == "left" else -self.ENTRY_SWEEP_X_BIAS
+        print(f"[SceneEntry] outdoor 临界点回退，向{self._side_label('right' if side == 'left' else 'left')}小步回墙边")
+        w.tap_single(
+            "摇杆",
+            x_bias=opposite_x,
+            y_bias=0,
+            dura=self.ENTRY_OPEN_SWEEP_OUTDOOR_BACKOFF_DURA,
+            wait=self.ENTRY_OPEN_SWEEP_OUTDOOR_BACKOFF_WAIT,
+        )
+        w.refresh_frame()
+
+        if self._get_house_scene(w) == self.HOUSE_INDOOR:
+            return self._confirm_indoor_by_forward_push(w, "outdoor 回退后检测到 indoor")
+        return False
+
+    def _confirm_indoor_by_forward_push(self, w: "FrameWorker", reason: str) -> bool:
+        print(f"[SceneEntry] {reason}，前推确认入房")
+        if w.get_info("跳跃"):
+            print("[SceneEntry] indoor 信号伴随跳跃按钮，按翻窗逻辑点击跳跃后前推")
+            w.click("跳跃")
+            time.sleep(self.ENTRY_WINDOW_JUMP_SETTLE_SECONDS)
+
+        w.tap_single(
+            "摇杆",
+            y_bias=self.ENTRY_INDOOR_CONFIRM_FORWARD_Y_BIAS,
+            dura=self.ENTRY_INDOOR_CONFIRM_FORWARD_DURA,
+            wait=self.ENTRY_INDOOR_CONFIRM_FORWARD_WAIT,
+        )
+        w.refresh_frame()
+
+        scene = self._get_house_scene(w)
+        if scene == self.HOUSE_INDOOR:
+            print("[SceneEntry] 前推后 house_scene=indoor，确认已进房")
+            return True
+
+        print(f"[SceneEntry] 前推后 house_scene={scene}，indoor 信号未确认")
         return False
 
     def _door_button_state(self, w: "FrameWorker") -> Optional[str]:

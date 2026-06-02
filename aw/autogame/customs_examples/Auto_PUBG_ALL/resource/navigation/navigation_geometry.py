@@ -167,6 +167,14 @@ def calculate_move_count(current_dir, target_angle):
        - 大角度(>=20°): 使用线性回归模型: px = 5.31 * angle + 49
     3. 角度差值
     """
+    if current_dir is None or target_angle is None:
+        return None, None, None
+    try:
+        current_dir = float(current_dir)
+        target_angle = float(target_angle)
+    except (TypeError, ValueError):
+        return None, None, None
+
     # 1. 计算最小角度差 (0-180)
     diff = (target_angle - current_dir) % 360
     if diff > 180:
@@ -213,6 +221,100 @@ def calculate_move_count(current_dir, target_angle):
 
     return turn_dir, pixel, diff
 
+
+class AdaptiveTurnTable:
+    MIN_ANGLE = 5
+    MAX_ANGLE = 180
+    ANGLE_STEP = 5
+    UPDATE_ALPHA = 0.45
+    MIN_OBSERVED_DEG = 1.0
+    MIN_PX = 8
+    MIN_DURA = 80
+    SCALE_MIN = 0.45
+    SCALE_MAX = 1.8
+
+    def __init__(self):
+        self.table = {"left": {}, "right": {}}
+
+    def angle_bin(self, angle):
+        try:
+            value = float(angle)
+        except (TypeError, ValueError):
+            return None
+        if value < self.MIN_OBSERVED_DEG:
+            return None
+        value = max(self.MIN_ANGLE, min(self.MAX_ANGLE, value))
+        return int(round(value / self.ANGLE_STEP) * self.ANGLE_STEP)
+
+    def get(self, turn_dir, diff, fallback_px, fallback_dura):
+        angle_key = self.angle_bin(diff)
+        if turn_dir not in self.table or angle_key is None:
+            return int(fallback_px or 0), int(fallback_dura or 0), angle_key
+
+        entry = self.table[turn_dir].get(angle_key)
+        if entry:
+            return int(entry["px"]), int(entry["dura"]), angle_key
+
+        return int(fallback_px or 0), int(fallback_dura or 0), angle_key
+
+    def observe(self, turn_dir, desired_diff, before_angle, after_angle, used_px, used_dura):
+        angle_key = self.angle_bin(desired_diff)
+        if turn_dir not in self.table or angle_key is None:
+            return
+
+        observed = self._observed_turn_degrees(turn_dir, before_angle, after_angle)
+        if observed is None or observed < self.MIN_OBSERVED_DEG:
+            return
+
+        scale = angle_key / observed
+        scale = max(self.SCALE_MIN, min(self.SCALE_MAX, scale))
+        measured_px = max(self.MIN_PX, int(round(abs(float(used_px or 0)) * scale)))
+        measured_dura = max(self.MIN_DURA, int(round(float(used_dura or 0) * scale)))
+
+        entry = self.table[turn_dir].get(angle_key)
+        if not entry:
+            self.table[turn_dir][angle_key] = {
+                "px": measured_px,
+                "dura": measured_dura,
+                "samples": 1,
+            }
+            return
+
+        alpha = self.UPDATE_ALPHA
+        entry["px"] = int(round(entry["px"] * (1.0 - alpha) + measured_px * alpha))
+        entry["dura"] = int(round(entry["dura"] * (1.0 - alpha) + measured_dura * alpha))
+        entry["samples"] = int(entry.get("samples", 0)) + 1
+
+    @staticmethod
+    def _observed_turn_degrees(turn_dir, before_angle, after_angle):
+        try:
+            before = float(before_angle) % 360.0
+            after = float(after_angle) % 360.0
+        except (TypeError, ValueError):
+            return None
+
+        if turn_dir == "right":
+            observed = (after - before) % 360.0
+        elif turn_dir == "left":
+            observed = (before - after) % 360.0
+        else:
+            return None
+
+        if observed > 180.0:
+            return None
+        return observed
+
+
+adaptive_turn_table = AdaptiveTurnTable()
+
+
+def get_adaptive_turn_motion(turn_dir, diff, fallback_px, fallback_dura):
+    return adaptive_turn_table.get(turn_dir, diff, fallback_px, fallback_dura)
+
+
+def update_adaptive_turn_motion(turn_dir, desired_diff, before_angle, after_angle, used_px, used_dura):
+    adaptive_turn_table.observe(turn_dir, desired_diff, before_angle, after_angle, used_px, used_dura)
+
 def get_time_from_distance(distance):
     """
     根据距离计算所需时间（毫秒）。
@@ -246,12 +348,16 @@ def align_direction(w, tar_loc, threshold=5):
     print(f"[Check] 当前: {cur_dir:.1f}° | 目标: {target_angle:.1f}° | 偏差: {diff:.1f}°")
 
     if abs(diff) > threshold:
-        move_px = px if turn_dir == 'right' else -px
+        fallback_dura = 800
+        used_px, used_dura, _ = get_adaptive_turn_motion(turn_dir, diff, px, fallback_dura)
+        move_px = used_px if turn_dir == 'right' else -used_px
 
         print(f"[Align] 修正视角: 当前 {cur_dir:.1f}° -> 目标 {target_angle:.1f}° (偏差 {diff:.1f}°)")
         print(f"        执行: {'右转' if turn_dir == 'right' else '左转'} {int(move_px)} px")
 
-        w.tap_single('视角', x_bias=int(move_px), dura=800, wait=500)
+        w.tap_single('视角', x_bias=int(move_px), dura=used_dura, wait=500)
+        w.refresh_frame()
+        update_adaptive_turn_motion(turn_dir, diff, cur_dir, w.get_info('direction'), used_px, used_dura)
 
 def is_location_stagnant(history_points):
     """

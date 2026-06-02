@@ -11,7 +11,9 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_g
     calculate_move_count,
     check_location,
     get_distance,
+    get_adaptive_turn_motion,
     is_location_stagnant, draw_points_with_arrows,
+    update_adaptive_turn_motion,
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_path_utils import find_path, get_resolution
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import (
@@ -3067,11 +3069,16 @@ class RunningManager:
         if diff <= threshold:
             return True
 
-        x_bias = pixel if turn_dir == "right" else -pixel
-        dura_time = max(250, int(pixel * 1.5))
-        print(f"[Running] 调整方向: current={direction}, target={target_dir}, pixel={pixel}")
+        fallback_dura = max(250, int(pixel * 1.5))
+        used_px, dura_time, angle_key = get_adaptive_turn_motion(turn_dir, diff, pixel, fallback_dura)
+        x_bias = used_px if turn_dir == "right" else -used_px
+        print(
+            f"[Running] 调整方向: current={direction}, target={target_dir}, "
+            f"diff={diff:.1f}, bin={angle_key}, pixel={used_px}, dura={dura_time}"
+        )
         w.tap_single("视角", x_bias=int(x_bias), dura=dura_time, wait=250)
         w.refresh_frame()
+        update_adaptive_turn_motion(turn_dir, diff, direction, w.get_info("direction"), used_px, dura_time)
         return False
 
     def _align_to_direction(
@@ -3089,11 +3096,16 @@ class RunningManager:
         if diff <= threshold:
             return True
 
-        x_bias = pixel if turn_dir == "right" else -pixel
-        dura_time = max(250, int(pixel * 1.5))
-        print(f"[Running] 调整朝向: current={direction}, target={target_direction}, pixel={pixel}")
+        fallback_dura = max(250, int(pixel * 1.5))
+        used_px, dura_time, angle_key = get_adaptive_turn_motion(turn_dir, diff, pixel, fallback_dura)
+        x_bias = used_px if turn_dir == "right" else -used_px
+        print(
+            f"[Running] 调整朝向: current={direction}, target={target_direction}, "
+            f"diff={diff:.1f}, bin={angle_key}, pixel={used_px}, dura={dura_time}"
+        )
         w.tap_single("视角", x_bias=int(x_bias), dura=dura_time, wait=250)
         w.refresh_frame()
+        update_adaptive_turn_motion(turn_dir, diff, direction, w.get_info("direction"), used_px, dura_time)
         return False
 
     def _precise_approach_waypoint(
@@ -3158,19 +3170,23 @@ class RunningManager:
             self._log_running_state("前方路径正常", location, direction, "保持自动前进", target, get_distance(location, target))
             return
 
-        x_bias = pixel if turn_dir == "right" else -pixel
-        dura_time = max(400, int(pixel * 1.5))
+        fallback_dura = max(400, int(pixel * 1.5))
+        used_px, dura_time, angle_key = get_adaptive_turn_motion(turn_dir, diff, pixel, fallback_dura)
+        x_bias = used_px if turn_dir == "right" else -used_px
         print(
-            f'[Correct Dire] current_dire : {direction}, target_dire : {target_dir}, 向 {target_dir} 调整 {pixel} 像素, 用时 {dura_time} ms')
+            f'[Correct Dire] current_dire : {direction}, target_dire : {target_dir}, '
+            f'bin : {angle_key}, 向 {target_dir} 调整 {used_px} 像素, 用时 {dura_time} ms')
         self._log_running_state(
             "跑图方向偏移",
             location,
             direction,
-            f"{turn_dir}调整视角 {pixel}px/{dura_time}ms",
+            f"{turn_dir}调整视角 {used_px}px/{dura_time}ms",
             target,
             get_distance(location, target),
         )
         w.tap_single("视角", x_bias=int(x_bias), dura=dura_time, wait=300)
+        w.refresh_frame()
+        update_adaptive_turn_motion(turn_dir, diff, direction, w.get_info("direction"), used_px, dura_time)
 
 
     def stop_auto_forward(self, w: "FrameWorker"):

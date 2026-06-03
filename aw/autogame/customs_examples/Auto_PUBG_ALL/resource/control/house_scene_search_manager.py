@@ -41,6 +41,7 @@ class HouseSceneSearchManager(HouseSearchManager):
     ROTATE_RESULT_FALLBACK_EXIT = "fallback_exit"
     ENTRY_DIRECTION_ALIGN_TOLERANCE = 3
     ENTRY_DIRECTION_ALIGN_MAX_STEPS = 8
+    ENTRY_VISIBLE_DOOR_ALIGN_TOLERANCE_PX = 120
     ENTRY_ARRIVAL_DISTANCE = 0.0
     ENTRY_SIDE_ADJUST_MIN_DEGREES = 55
     ENTRY_SIDE_ADJUST_MAX_DEGREES = 125
@@ -116,37 +117,21 @@ class HouseSceneSearchManager(HouseSearchManager):
         if self._should_abort(w):
             return
 
+        house_scene = self._get_house_scene(w)
+        if house_scene == self.HOUSE_INDOOR:
+            if self._should_start_search_from_indoor():
+                if self._confirm_indoor_before_search(w, "导航/进门过程中检测到 indoor"):
+                    self._complete_current_house_search(w, "已在屋内，直接启动旋转搜房")
+                return
+
+            self._exit_unexpected_indoor(w)
+            return
+
         if self.searching_number == 5:
             self._continue_searching_until_timer(w, "已经搜满5个房间")
             return
 
-        house_scene = self._get_house_scene(w)
-        if house_scene == self.HOUSE_INDOOR and not self._is_entry_approach_status():
-            self.indoor_stuck_frames += 1
-            if self.indoor_stuck_frames > 30:
-                print("[SceneSearch] 检测到长时间困在屋内，启动兜底出房策略")
-                self.house_exit_manager.reset()
-                for _ in range(20):
-                    if self._should_abort(w):
-                        return
-                    if self.house_exit_manager.process(w):
-                        print("[SceneSearch] 兜底出房成功，继续搜房计时")
-                        self.indoor_stuck_frames = 0
-                        self.searching_number = 0
-                        self.completed_houses.add(self.current_house_id)
-                        self.current_house_id = None
-                        self.status = "IDLE"
-                        self._continue_searching_until_timer(w, "兜底出房成功")
-                        return
-                print("[SceneSearch] 兜底出房失败，重置当前目标")
-                self.indoor_stuck_frames = 0
-                self.searching_number = 0
-                self.current_house_id = None
-                self.status = "IDLE"
-                self._continue_searching_until_timer(w, "兜底出房失败")
-                return
-        else:
-            self.indoor_stuck_frames = 0
+        self.indoor_stuck_frames = 0
 
         if self.current_house_id is None:
             if self.initial_target_pending:
@@ -243,24 +228,64 @@ class HouseSceneSearchManager(HouseSearchManager):
                 self.status = "IDLE"
                 return
 
-            if self._should_abort(w):
-                return
-            if not self.start_searching(w):
-                return
-            if w.current_stage != "搜房阶段":
-                return
-
-            self.completed_houses.add(self.current_house_id)
-            self.searching_number += 1
-            print(f"[SceneSearch] 房屋 {self.current_house_id} 完成，已搜 {self.searching_number}/5")
-            w.refresh_frame()
-            exit_direction = w.get_info("direction")
-            self.prepare_next_target_logic(exit_direction)
-            self.current_house_id = None
-            self.status = "IDLE"
+            self._complete_current_house_search(w, "house_scene 进门成功")
 
     def _is_entry_approach_status(self):
         return super()._is_entry_approach_status() or self.status == self.STATUS_SCENE_ENTRY
+
+    def _should_start_search_from_indoor(self) -> bool:
+        return (
+            self.searching_number < 5
+            and self.current_house_id is not None
+            and self.current_house_id not in self.completed_houses
+        )
+
+    def _confirm_indoor_before_search(self, w: "FrameWorker", reason: str) -> bool:
+        if not w.get_info("跳跃"):
+            return True
+
+        print(f"[SceneSearch] {reason}，且检测到跳跃按钮，先按翻窗逻辑确认")
+        self.handle_jump_logic(w)
+        w.refresh_frame()
+        if self._is_indoor(w):
+            print("[SceneSearch] 跳跃后仍为 indoor，确认已进房")
+            return True
+
+        print(f"[SceneSearch] 跳跃后 house_scene={self._get_house_scene(w)}，暂不启动旋转搜房")
+        return False
+
+    def _complete_current_house_search(self, w: "FrameWorker", reason: str) -> bool:
+        if self._should_abort(w):
+            return False
+
+        self.stop_auto_forward(w)
+        self.indoor_stuck_frames = 0
+        print(f"[SceneSearch] {reason}")
+
+        if not self.start_searching(w):
+            return False
+        if w.current_stage != "搜房阶段":
+            return False
+
+        if self.current_house_id is not None:
+            self.completed_houses.add(self.current_house_id)
+        self.searching_number += 1
+        print(f"[SceneSearch] 房屋 {self.current_house_id} 完成，已搜 {self.searching_number}/5")
+        w.refresh_frame()
+        exit_direction = w.get_info("direction")
+        self.prepare_next_target_logic(exit_direction)
+        self.current_house_id = None
+        self.status = "IDLE"
+        return True
+
+    def _exit_unexpected_indoor(self, w: "FrameWorker"):
+        self.stop_auto_forward(w)
+        print("[SceneSearch] 已搜完或无待搜目标时检测到 indoor，优先执行出房")
+        if self._exit_house(w):
+            self.indoor_stuck_frames = 0
+            self.current_house_id = None
+            self.status = "IDLE"
+            self._continue_searching_until_timer(w, "意外进房后已出房")
 
     def _move_precisely_to_entry_point(self, w: "FrameWorker", current_loc, target_loc, dist: float) -> bool:
         current_dir = w.get_info("direction")
@@ -866,6 +891,11 @@ class HouseSceneSearchManager(HouseSearchManager):
             print("[SceneEntry] 已是 indoor，直接开始屋内搜索")
             return True
 
+        self._align_visible_entry_door_before_push(w)
+        if self._is_indoor(w):
+            print("[SceneEntry] 对齐视觉门后已是 indoor，直接开始屋内搜索")
+            return True
+
         button_state = self._door_button_state(w)
         if button_state == "open":
             self._click_open_door(w)
@@ -874,9 +904,10 @@ class HouseSceneSearchManager(HouseSearchManager):
             print("[SceneEntry] 检测到关门按钮，门已打开，左上/右上小步推进进门")
             return self._enter_open_door_by_diagonal_sweep(w)
 
-        approach_result = self._approach_until_near_entry(w)
+        approach_result = self._approach_until_near_entry(w, force_first_forward=True)
         if approach_result == "indoor":
-            return self._confirm_indoor_by_forward_push(w, "前推接近时检测到 indoor")
+            print("[SceneEntry] 前推/跳跃后已确认 indoor，直接开始屋内搜索")
+            return True
         if approach_result == "open":
             self._click_open_door(w)
             return self._enter_open_door_by_diagonal_sweep(w)
@@ -899,7 +930,24 @@ class HouseSceneSearchManager(HouseSearchManager):
         print("[SceneEntry] 左右探测未找到开门/关门按钮")
         return False
 
-    def _approach_until_near_entry(self, w: "FrameWorker") -> str:
+    def _align_visible_entry_door_before_push(self, w: "FrameWorker") -> bool:
+        door = self.find_largest_door(w)
+        if door is None:
+            print("[SceneEntry] 进门方向上未识别到门，直接按进门方向前推")
+            return False
+
+        print("[SceneEntry] 进门方向上识别到门，先粗略对齐门再前推")
+        aligned = self._align_to_door_detection(
+            w,
+            door,
+            tolerance_px=self.ENTRY_VISIBLE_DOOR_ALIGN_TOLERANCE_PX,
+        )
+        w.refresh_frame()
+        if not aligned:
+            print("[SceneEntry] 视觉门粗对齐未完全成功，继续按当前方向前推试探")
+        return aligned
+
+    def _approach_until_near_entry(self, w: "FrameWorker", force_first_forward: bool = False) -> str:
         for step in range(self.ENTRY_APPROACH_MAX_STEPS):
             if self._should_abort(w):
                 return "abort"
@@ -914,7 +962,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 return button_state
 
             scene = self._get_house_scene(w)
-            if scene in self.HOUSE_NEAR_ENTRY_SCENES:
+            if scene in self.HOUSE_NEAR_ENTRY_SCENES and not (force_first_forward and step == 0):
                 print(f"[SceneEntry] 已到门/墙附近 house_scene={scene}")
                 return "near"
 
@@ -924,6 +972,10 @@ class HouseSceneSearchManager(HouseSearchManager):
             )
             if w.get_info("跳跃"):
                 self.handle_jump_logic(w)
+                w.refresh_frame()
+                if self._is_indoor(w):
+                    print("[SceneEntry] 前推过程中跳跃后变为 indoor，确认翻窗进房")
+                    return "indoor"
             else:
                 w.tap_single(
                     "摇杆",
@@ -932,6 +984,9 @@ class HouseSceneSearchManager(HouseSearchManager):
                     wait=self.ENTRY_APPROACH_FORWARD_WAIT,
                 )
                 w.refresh_frame()
+                if self._is_indoor(w):
+                    print("[SceneEntry] 前推后变为 indoor，确认已进房")
+                    return "indoor"
 
         w.refresh_frame()
         if self._is_indoor(w):

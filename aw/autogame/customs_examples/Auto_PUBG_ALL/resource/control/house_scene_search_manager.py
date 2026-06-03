@@ -12,8 +12,10 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_g
     calculate_move_count,
     check_location,
     get_adaptive_forward_motion,
+    get_adaptive_side_motion,
     get_distance,
     update_adaptive_forward_motion,
+    update_adaptive_side_motion,
 )
 
 if TYPE_CHECKING:
@@ -49,13 +51,17 @@ class HouseSceneSearchManager(HouseSearchManager):
     ENTRY_SIDE_ADJUST_BASE_DURA = 100
     ENTRY_SIDE_ADJUST_MAX_DURA = 420
     ENTRY_SIDE_ADJUST_WAIT_PAD = 240
+    ENTRY_FORWARD_MAX_STEPS = 4
+    ENTRY_FORWARD_STEP_Y_SCALE = 0.62
+    ENTRY_FORWARD_STEP_MIN_DURA = 100
+    ENTRY_FORWARD_STEP_WAIT_PAD = 220
     ENTRY_FORWARD_FAST_MODE = "fast"
     ENTRY_FORWARD_SLOW_MODE = "slow"
 
-    ENTRY_APPROACH_MAX_STEPS = 3
-    ENTRY_APPROACH_FORWARD_Y_BIAS = -420
-    ENTRY_APPROACH_FORWARD_DURA = 650
-    ENTRY_APPROACH_FORWARD_WAIT = 850
+    ENTRY_APPROACH_MAX_STEPS = 4
+    ENTRY_APPROACH_FORWARD_Y_BIAS = -280
+    ENTRY_APPROACH_FORWARD_DURA = 360
+    ENTRY_APPROACH_FORWARD_WAIT = 560
 
     SWEEP_STEP_MS = 100
     BUTTON_SWEEP_MAX_STEPS = 16
@@ -302,19 +308,12 @@ class HouseSceneSearchManager(HouseSearchManager):
                 self.ENTRY_SIDE_ADJUST_BASE_DURA,
                 self.ENTRY_SIDE_ADJUST_MAX_DURA,
             )
+            wait = dura + self.ENTRY_SIDE_ADJUST_WAIT_PAD
             print(
                 f"[SceneSearch] 进门点在{self._side_label(side)}侧，水平微调到点: "
                 f"dist={dist:.2f}, diff={diff:.1f}, dura={dura}"
             )
-            w.tap_single(
-                "摇杆",
-                x_bias=x_bias,
-                y_bias=0,
-                dura=dura,
-                wait=dura + self.ENTRY_SIDE_ADJUST_WAIT_PAD,
-            )
-            w.refresh_frame()
-            return True
+            return self._tap_entry_side_with_learning(w, target_loc, dist, side, x_bias, dura, wait)
 
         self.align_direction(w, target_loc, threshold=5, max_steps=1)
         mode = self._entry_forward_mode(dist)
@@ -357,10 +356,82 @@ class HouseSceneSearchManager(HouseSearchManager):
         fallback_dura: int,
         fallback_wait: int,
     ) -> bool:
-        y_bias, dura, wait, distance_key = get_adaptive_forward_motion(
-            mode,
+        before_dist = self._get_current_entry_distance(w, target_loc)
+        if before_dist is None:
+            before_dist = desired_dist
+
+        previous_dist = before_dist
+        for step in range(self.ENTRY_FORWARD_MAX_STEPS):
+            if self._should_abort(w):
+                return False
+
+            current_dist = self._get_current_entry_distance(w, target_loc)
+            if current_dist is None:
+                current_dist = previous_dist
+            if current_dist <= self.ENTRY_ARRIVAL_DISTANCE:
+                return True
+
+            remaining_steps = max(1, self.ENTRY_FORWARD_MAX_STEPS - step)
+            desired_step_dist = max(0.2, min(float(desired_dist), float(current_dist)) / remaining_steps)
+            step_y_bias, step_dura, step_wait = self._entry_forward_step_fallback(
+                fallback_y_bias,
+                fallback_dura,
+                fallback_wait,
+            )
+            y_bias, dura, wait, distance_key = get_adaptive_forward_motion(
+                mode,
+                desired_step_dist,
+                step_y_bias,
+                step_dura,
+                step_wait,
+            )
+
+            print(
+                f"[SceneSearch] 执行{self._entry_forward_mode_label(mode)}小步 "
+                f"{step + 1}/{self.ENTRY_FORWARD_MAX_STEPS}: bin={distance_key}, "
+                f"before={current_dist:.2f}, y_bias={y_bias}, dura={dura}, wait={wait}"
+            )
+            w.tap_single("摇杆", y_bias=y_bias, dura=dura, wait=wait)
+            w.refresh_frame()
+
+            after_dist = self._get_current_entry_distance(w, target_loc)
+            update_adaptive_forward_motion(
+                mode,
+                desired_step_dist,
+                current_dist,
+                after_dist,
+                y_bias,
+                dura,
+                wait,
+            )
+            if after_dist is None:
+                return True
+
+            moved = current_dist - after_dist
+            print(
+                f"[SceneSearch] 推进反馈: mode={mode}, bin={distance_key}, "
+                f"after={after_dist:.2f}, moved={moved:.2f}"
+            )
+            if after_dist <= self.ENTRY_ARRIVAL_DISTANCE or moved <= 0:
+                break
+            previous_dist = after_dist
+
+        return True
+
+    def _tap_entry_side_with_learning(
+        self,
+        w: "FrameWorker",
+        target_loc,
+        desired_dist: float,
+        side: str,
+        fallback_x_bias: int,
+        fallback_dura: int,
+        fallback_wait: int,
+    ) -> bool:
+        x_bias, dura, wait, distance_key = get_adaptive_side_motion(
+            side,
             desired_dist,
-            fallback_y_bias,
+            fallback_x_bias,
             fallback_dura,
             fallback_wait,
         )
@@ -369,30 +440,46 @@ class HouseSceneSearchManager(HouseSearchManager):
             before_dist = desired_dist
 
         print(
-            f"[SceneSearch] 执行{self._entry_forward_mode_label(mode)}: "
+            f"[SceneSearch] 执行{self._side_label(side)}滑微调: "
             f"bin={distance_key}, before={before_dist:.2f}, "
-            f"y_bias={y_bias}, dura={dura}, wait={wait}"
+            f"x_bias={x_bias}, dura={dura}, wait={wait}"
         )
-        w.tap_single("摇杆", y_bias=y_bias, dura=dura, wait=wait)
+        w.tap_single("摇杆", x_bias=x_bias, y_bias=0, dura=dura, wait=wait)
         w.refresh_frame()
 
         after_dist = self._get_current_entry_distance(w, target_loc)
-        update_adaptive_forward_motion(
-            mode,
+        update_adaptive_side_motion(
+            side,
             desired_dist,
             before_dist,
             after_dist,
-            y_bias,
+            x_bias,
             dura,
             wait,
         )
         if after_dist is not None:
             moved = before_dist - after_dist
             print(
-                f"[SceneSearch] 推进反馈: mode={mode}, bin={distance_key}, "
+                f"[SceneSearch] 侧滑反馈: side={side}, bin={distance_key}, "
                 f"after={after_dist:.2f}, moved={moved:.2f}"
             )
         return True
+
+    def _entry_forward_step_fallback(self, y_bias: int, dura: int, wait: int):
+        step_y = int(round(float(y_bias) * self.ENTRY_FORWARD_STEP_Y_SCALE))
+        step_dura = max(
+            self.ENTRY_FORWARD_STEP_MIN_DURA,
+            int(round(float(dura) / self.ENTRY_FORWARD_MAX_STEPS)),
+        )
+        step_wait = max(
+            step_dura + self.ENTRY_FORWARD_STEP_WAIT_PAD,
+            int(round(float(wait) / self.ENTRY_FORWARD_MAX_STEPS)),
+        )
+        if y_bias < 0:
+            step_y = min(-80, step_y)
+        else:
+            step_y = max(80, step_y)
+        return step_y, step_dura, step_wait
 
     def _get_current_entry_distance(self, w: "FrameWorker", target_loc) -> Optional[float]:
         raw = w.get_info("location")

@@ -447,6 +447,137 @@ def update_adaptive_forward_motion(
         used_wait,
     )
 
+
+class AdaptiveSideMoveTable:
+    MIN_DISTANCE = 1
+    MAX_DISTANCE = 60
+    DISTANCE_STEP = 1
+    UPDATE_ALPHA = 0.45
+    MIN_OBSERVED_DISTANCE = 0.2
+    MIN_X_BIAS = 80
+    MAX_X_BIAS = 520
+    MIN_DURA = 80
+    MAX_DURA = 1600
+    MIN_WAIT = 120
+    MAX_WAIT = 3600
+    MIN_WAIT_PAD = 120
+    SCALE_MIN = 0.55
+    SCALE_MAX = 1.85
+
+    def __init__(self):
+        self.table = {"left": {}, "right": {}}
+
+    def distance_bin(self, distance):
+        try:
+            value = float(distance)
+        except (TypeError, ValueError):
+            return None
+        if value < self.MIN_OBSERVED_DISTANCE:
+            return None
+        value = max(self.MIN_DISTANCE, min(self.MAX_DISTANCE, value))
+        return int(round(value / self.DISTANCE_STEP) * self.DISTANCE_STEP)
+
+    def get(self, side, desired_distance, fallback_x_bias, fallback_dura, fallback_wait):
+        distance_key = self.distance_bin(desired_distance)
+        if side not in self.table or distance_key is None:
+            return int(fallback_x_bias or 0), int(fallback_dura or 0), int(fallback_wait or 0), distance_key
+
+        entry = self.table[side].get(distance_key)
+        if entry:
+            x_bias = int(entry["x_bias"])
+            return x_bias, int(entry["dura"]), int(entry["wait"]), distance_key
+
+        return int(fallback_x_bias or 0), int(fallback_dura or 0), int(fallback_wait or 0), distance_key
+
+    def observe(self, side, desired_distance, before_distance, after_distance, used_x_bias, used_dura, used_wait):
+        distance_key = self.distance_bin(desired_distance)
+        if side not in self.table or distance_key is None:
+            return
+
+        observed = self._observed_side_distance(before_distance, after_distance)
+        if observed is None or observed < self.MIN_OBSERVED_DISTANCE:
+            return
+
+        scale = distance_key / observed
+        scale = max(self.SCALE_MIN, min(self.SCALE_MAX, scale))
+
+        measured_x = self._scaled_side_bias(used_x_bias, side, scale)
+        measured_dura = max(self.MIN_DURA, min(self.MAX_DURA, int(round(float(used_dura or 0) * scale))))
+        measured_wait = max(
+            measured_dura + self.MIN_WAIT_PAD,
+            max(self.MIN_WAIT, min(self.MAX_WAIT, int(round(float(used_wait or 0) * scale)))),
+        )
+
+        entry = self.table[side].get(distance_key)
+        if not entry:
+            self.table[side][distance_key] = {
+                "x_bias": measured_x,
+                "dura": measured_dura,
+                "wait": measured_wait,
+                "samples": 1,
+            }
+            return
+
+        alpha = self.UPDATE_ALPHA
+        entry["x_bias"] = int(round(entry["x_bias"] * (1.0 - alpha) + measured_x * alpha))
+        entry["dura"] = int(round(entry["dura"] * (1.0 - alpha) + measured_dura * alpha))
+        entry["wait"] = int(round(entry["wait"] * (1.0 - alpha) + measured_wait * alpha))
+        entry["samples"] = int(entry.get("samples", 0)) + 1
+
+    def _scaled_side_bias(self, x_bias, side, scale):
+        try:
+            value = float(x_bias)
+        except (TypeError, ValueError):
+            value = -self.MIN_X_BIAS if side == "left" else self.MIN_X_BIAS
+        sign = -1 if side == "left" else 1
+        magnitude = max(self.MIN_X_BIAS, min(self.MAX_X_BIAS, int(round(abs(value) * scale))))
+        return sign * magnitude
+
+    @staticmethod
+    def _observed_side_distance(before_distance, after_distance):
+        try:
+            before = float(before_distance)
+            after = float(after_distance)
+        except (TypeError, ValueError):
+            return None
+        observed = before - after
+        if observed <= 0:
+            return None
+        return observed
+
+
+adaptive_side_move_table = AdaptiveSideMoveTable()
+
+
+def get_adaptive_side_motion(side, desired_distance, fallback_x_bias, fallback_dura, fallback_wait):
+    return adaptive_side_move_table.get(
+        side,
+        desired_distance,
+        fallback_x_bias,
+        fallback_dura,
+        fallback_wait,
+    )
+
+
+def update_adaptive_side_motion(
+    side,
+    desired_distance,
+    before_distance,
+    after_distance,
+    used_x_bias,
+    used_dura,
+    used_wait,
+):
+    adaptive_side_move_table.observe(
+        side,
+        desired_distance,
+        before_distance,
+        after_distance,
+        used_x_bias,
+        used_dura,
+        used_wait,
+    )
+
 def get_time_from_distance(distance):
     """
     根据距离计算所需时间（毫秒）。

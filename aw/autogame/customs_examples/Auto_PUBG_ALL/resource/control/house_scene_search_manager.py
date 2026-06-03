@@ -897,38 +897,64 @@ class HouseSceneSearchManager(HouseSearchManager):
             return True
 
         button_state = self._door_button_state(w)
-        if button_state == "open":
-            self._click_open_door(w)
-            return self._enter_open_door_by_diagonal_sweep(w)
-        if button_state == "close":
-            print("[SceneEntry] 检测到关门按钮，门已打开，左上/右上小步推进进门")
-            return self._enter_open_door_by_diagonal_sweep(w)
+        if button_state:
+            return self._handle_entry_door_button_then_forward(w, button_state, "进门前")
 
         approach_result = self._approach_until_near_entry(w, force_first_forward=True)
         if approach_result == "indoor":
             print("[SceneEntry] 前推/跳跃后已确认 indoor，直接开始屋内搜索")
             return True
-        if approach_result == "open":
-            self._click_open_door(w)
-            return self._enter_open_door_by_diagonal_sweep(w)
-        if approach_result == "close":
-            print("[SceneEntry] 前推过程中检测到关门按钮，门已打开，左上/右上小步推进进门")
-            return self._enter_open_door_by_diagonal_sweep(w)
+        if approach_result in {"open", "close"}:
+            return self._handle_entry_door_button_then_forward(w, approach_result, "前推过程中")
         if approach_result != "near":
             return False
 
         button_state = self._sweep_for_door_button(w)
         if button_state == "indoor":
             return self._confirm_indoor_by_forward_push(w, "左右探门时检测到 indoor")
-        if button_state == "open":
-            self._click_open_door(w)
-            return self._enter_open_door_by_diagonal_sweep(w)
-        if button_state == "close":
-            print("[SceneEntry] 左右探测发现关门按钮，门已打开，左上/右上小步推进进门")
-            return self._enter_open_door_by_diagonal_sweep(w)
+        if button_state in {"open", "close"}:
+            return self._handle_entry_door_button_then_forward(w, button_state, "左右探门时")
 
         print("[SceneEntry] 左右探测未找到开门/关门按钮")
         return False
+
+    def _handle_entry_door_button_then_forward(
+        self,
+        w: "FrameWorker",
+        button_state: str,
+        reason: str,
+    ) -> bool:
+        self.stop_auto_forward(w)
+        if button_state == "open":
+            print(f"[SceneEntry] {reason}发现开门按钮，点击开门后停止贴门前推")
+            self._click_open_door(w)
+        else:
+            print(f"[SceneEntry] {reason}发现关门按钮，门已打开，不点击关门，停止贴门前推")
+
+        self._realign_to_entry_direction(w, "门按钮出现后")
+
+        if self._confirm_indoor_by_forward_push(w, "门按钮处理后重新对准进门方向"):
+            return True
+
+        print("[SceneEntry] 正前推后仍未 indoor，开始左前/右前小步进门")
+        return self._enter_open_door_by_diagonal_sweep(w)
+
+    def _realign_to_entry_direction(self, w: "FrameWorker", reason: str) -> bool:
+        if not self.active_entry:
+            return False
+
+        ideal_angle = self.active_entry["direction"]
+        print(f"[SceneEntry] {reason}，重新修正至进门方向: {ideal_angle}")
+        aligned = self.align_direction_blocking(
+            w,
+            w.get_info("direction"),
+            ideal_angle,
+            threshold=self.ENTRY_DIRECTION_ALIGN_TOLERANCE,
+            max_steps=self.ENTRY_DIRECTION_ALIGN_MAX_STEPS,
+        )
+        if not aligned:
+            print("[SceneEntry] 门按钮后进门方向未完全对准，仍按当前方向尝试一次正前推")
+        return aligned
 
     def _align_visible_entry_door_before_push(self, w: "FrameWorker") -> bool:
         door = self.find_largest_door(w)

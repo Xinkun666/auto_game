@@ -91,6 +91,9 @@ class HouseSceneSearchManager(HouseSearchManager):
     ROTATE_SEARCH_WALL_TURN_SEQUENCE = (90, 45, 22)
     ROTATE_SEARCH_WALL_TURN_MAX_ATTEMPTS = 6
     ROTATE_SEARCH_HIT_SWITCH_COUNT = 6
+    ROTATE_SEARCH_TURN_CORRECT_THRESHOLD = 6.0
+    ROTATE_SEARCH_TURN_CORRECT_MAX_STEPS = 2
+    ROTATE_SEARCH_TURN_CORRECT_MAX_DEGREES = 45.0
     ROTATE_SEARCH_EXIT_FALLBACK_SWITCHES = 2
     ROTATE_SEARCH_MAX_STEPS = 80
     ROTATE_SEARCH_RECOVER_STEP_MS = 300
@@ -635,10 +638,12 @@ class HouseSceneSearchManager(HouseSearchManager):
         current_mode = move_mode
         if wall_hit_count >= self.ROTATE_SEARCH_HIT_SWITCH_COUNT:
             if current_mode == "left_up":
-                print(f"[SceneRotate] 左上撞{label}已达{wall_hit_count}次，立即切到右上，下一次撞墙改为向左调整")
+                print(f"[SceneRotate] 左上撞{label}已达{wall_hit_count}次，立即切到右上，并改为向左补转")
+                self._turn_until_not_near_entry(w, -1)
                 return "right_up", 0, True
 
-            print(f"[SceneRotate] 右上撞{label}已达{wall_hit_count}次，立即切到左上，下一次撞墙改为向右调整")
+            print(f"[SceneRotate] 右上撞{label}已达{wall_hit_count}次，立即切到左上，并改为向右补转")
+            self._turn_until_not_near_entry(w, 1)
             return "left_up", 0, True
 
         turn_sign = 1 if current_mode == "left_up" else -1
@@ -659,7 +664,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 f"[SceneRotate] 撞墙补转 {attempt + 1}/"
                 f"{self.ROTATE_SEARCH_WALL_TURN_MAX_ATTEMPTS}: {signed_angle}°"
             )
-            self._turn(w, signed_angle)
+            self._turn_with_direction_correction(w, signed_angle)
             w.refresh_frame()
             scene = self._get_house_scene(w)
             if scene not in self.HOUSE_NEAR_ENTRY_SCENES:
@@ -670,6 +675,50 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         print("[SceneRotate] 多次补转后仍贴墙/门，交给下一轮移动继续尝试")
         return False
+
+    def _turn_with_direction_correction(self, w: "FrameWorker", signed_angle: float):
+        before_dir = self._direction_as_float(w.get_info("direction"))
+        self._turn(w, signed_angle)
+        w.refresh_frame()
+        if before_dir is None:
+            print("[SceneRotate] 当前 direction 无效，跳过本次补角到位校验")
+            return
+
+        target_dir = (before_dir + float(signed_angle)) % 360.0
+        for step in range(self.ROTATE_SEARCH_TURN_CORRECT_MAX_STEPS):
+            current_dir = self._direction_as_float(w.get_info("direction"))
+            turn_dir, _, diff = calculate_move_count(current_dir, target_dir)
+            if diff is None or turn_dir is None:
+                print("[SceneRotate] 补角后 direction 无效，无法继续校验角度")
+                return
+            if diff <= self.ROTATE_SEARCH_TURN_CORRECT_THRESHOLD:
+                return
+
+            correction = min(float(diff), self.ROTATE_SEARCH_TURN_CORRECT_MAX_DEGREES)
+            signed_correction = correction if turn_dir == "right" else -correction
+            print(
+                f"[SceneRotate] 补角未到位，二次校正 {step + 1}/"
+                f"{self.ROTATE_SEARCH_TURN_CORRECT_MAX_STEPS}: "
+                f"current={current_dir:.1f}, target={target_dir:.1f}, "
+                f"remaining={diff:.1f}, turn={signed_correction:.1f}°"
+            )
+            self._turn(w, signed_correction)
+            w.refresh_frame()
+
+        current_dir = self._direction_as_float(w.get_info("direction"))
+        _, _, remaining = calculate_move_count(current_dir, target_dir)
+        if remaining is not None and remaining > self.ROTATE_SEARCH_TURN_CORRECT_THRESHOLD:
+            print(
+                f"[SceneRotate] 二次校正后仍有角度偏差: "
+                f"current={current_dir:.1f}, target={target_dir:.1f}, remaining={remaining:.1f}"
+            )
+
+    @staticmethod
+    def _direction_as_float(direction) -> Optional[float]:
+        try:
+            return float(direction) % 360.0
+        except (TypeError, ValueError):
+            return None
 
     def _recover_rotate_search_stuck(self, w: "FrameWorker", move_mode: str, dura_ms: int):
         if move_mode == "left_up":

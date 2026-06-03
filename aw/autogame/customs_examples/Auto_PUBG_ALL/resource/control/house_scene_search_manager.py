@@ -187,6 +187,9 @@ class HouseSceneSearchManager(HouseSearchManager):
                 self.status = "PRECISE_NAV"
                 return
 
+            if self._maybe_bypass_front_house_on_route(w, current_loc, target_loc, dist, "FAST_NAV"):
+                return
+
             self.align_direction(w, target_loc)
 
             if not self.auto_forward:
@@ -209,6 +212,9 @@ class HouseSceneSearchManager(HouseSearchManager):
                 print(f"[SceneSearch] 已到达进门点 (距离 {dist:.2f})，进入 house_scene 进门流程")
                 self.stop_auto_forward(w)
                 self.status = self.STATUS_SCENE_ENTRY
+                return
+
+            if self._maybe_bypass_front_house_on_route(w, current_loc, target_loc, dist, "PRECISE_NAV"):
                 return
 
             self.stop_auto_forward(w)

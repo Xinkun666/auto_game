@@ -8,6 +8,66 @@ from sklearn.cluster import DBSCAN
 RESOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_ROUTE_IMAGE_PATH = os.path.join(RESOURCE_DIR, "map", "hpjy.png")
 DEFAULT_ROUTE_OUTPUT_PATH = os.path.join("aw", "autogame", "temp", "road", "route.jpg")
+ADAPTIVE_MOTION_TABLE_PATH = os.path.join(RESOURCE_DIR, "adaptive_motion_table.json")
+_ADAPTIVE_MOTION_DATA = None
+
+
+def _load_adaptive_motion_data():
+    global _ADAPTIVE_MOTION_DATA
+    if _ADAPTIVE_MOTION_DATA is not None:
+        return _ADAPTIVE_MOTION_DATA
+
+    if not os.path.exists(ADAPTIVE_MOTION_TABLE_PATH):
+        _ADAPTIVE_MOTION_DATA = {}
+        return _ADAPTIVE_MOTION_DATA
+
+    try:
+        with open(ADAPTIVE_MOTION_TABLE_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception as e:
+        print(f"[AdaptiveMotion] 加载持久化动作表失败: {e}")
+        raw = {}
+
+    _ADAPTIVE_MOTION_DATA = raw if isinstance(raw, dict) else {}
+    return _ADAPTIVE_MOTION_DATA
+
+
+def _get_adaptive_motion_section(section):
+    raw = _load_adaptive_motion_data().get(section)
+    return raw if isinstance(raw, dict) else {}
+
+
+def _persist_adaptive_motion_section(section, table):
+    data = _load_adaptive_motion_data()
+    data[section] = table
+    tmp_path = f"{ADAPTIVE_MOTION_TABLE_PATH}.tmp"
+    try:
+        os.makedirs(os.path.dirname(ADAPTIVE_MOTION_TABLE_PATH), exist_ok=True)
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, ADAPTIVE_MOTION_TABLE_PATH)
+    except Exception as e:
+        print(f"[AdaptiveMotion] 保存持久化动作表失败: {e}")
+
+
+def _motion_entry_as_ints(entry, required_fields):
+    if not isinstance(entry, dict):
+        return None
+
+    cleaned = {}
+    for field in required_fields:
+        if field not in entry:
+            return None
+        try:
+            cleaned[field] = int(round(float(entry[field])))
+        except (TypeError, ValueError):
+            return None
+
+    try:
+        cleaned["samples"] = int(entry.get("samples", 1))
+    except (TypeError, ValueError):
+        cleaned["samples"] = 1
+    return cleaned
 
 def draw_points_with_arrows(
     road_list,
@@ -235,6 +295,23 @@ class AdaptiveTurnTable:
 
     def __init__(self):
         self.table = {"left": {}, "right": {}}
+        self._load_persisted_table()
+
+    def _load_persisted_table(self):
+        raw = _get_adaptive_motion_section("turn")
+        for turn_dir in ("left", "right"):
+            entries = raw.get(turn_dir)
+            if not isinstance(entries, dict):
+                continue
+
+            for angle, entry in entries.items():
+                angle_key = self.angle_bin(angle)
+                cleaned = _motion_entry_as_ints(entry, ("px", "dura"))
+                if angle_key is not None and cleaned:
+                    self.table[turn_dir][angle_key] = cleaned
+
+    def _persist(self):
+        _persist_adaptive_motion_section("turn", self.table)
 
     def angle_bin(self, angle):
         try:
@@ -278,12 +355,14 @@ class AdaptiveTurnTable:
                 "dura": measured_dura,
                 "samples": 1,
             }
+            self._persist()
             return
 
         alpha = self.UPDATE_ALPHA
         entry["px"] = int(round(entry["px"] * (1.0 - alpha) + measured_px * alpha))
         entry["dura"] = int(round(entry["dura"] * (1.0 - alpha) + measured_dura * alpha))
         entry["samples"] = int(entry.get("samples", 0)) + 1
+        self._persist()
 
     @staticmethod
     def _observed_turn_degrees(turn_dir, before_angle, after_angle):
@@ -334,6 +413,23 @@ class AdaptiveForwardMoveTable:
 
     def __init__(self):
         self.table = {}
+        self._load_persisted_table()
+
+    def _load_persisted_table(self):
+        raw = _get_adaptive_motion_section("forward")
+        for mode, entries in raw.items():
+            if not isinstance(entries, dict):
+                continue
+
+            mode_table = self.table.setdefault(str(mode), {})
+            for distance, entry in entries.items():
+                distance_key = self.distance_bin(distance)
+                cleaned = _motion_entry_as_ints(entry, ("y_bias", "dura", "wait"))
+                if distance_key is not None and cleaned:
+                    mode_table[distance_key] = cleaned
+
+    def _persist(self):
+        _persist_adaptive_motion_section("forward", self.table)
 
     def distance_bin(self, distance):
         try:
@@ -385,6 +481,7 @@ class AdaptiveForwardMoveTable:
                 "wait": measured_wait,
                 "samples": 1,
             }
+            self._persist()
             return
 
         alpha = self.UPDATE_ALPHA
@@ -392,6 +489,7 @@ class AdaptiveForwardMoveTable:
         entry["dura"] = int(round(entry["dura"] * (1.0 - alpha) + measured_dura * alpha))
         entry["wait"] = int(round(entry["wait"] * (1.0 - alpha) + measured_wait * alpha))
         entry["samples"] = int(entry.get("samples", 0)) + 1
+        self._persist()
 
     def _scaled_forward_bias(self, y_bias, scale):
         try:
@@ -466,6 +564,23 @@ class AdaptiveSideMoveTable:
 
     def __init__(self):
         self.table = {"left": {}, "right": {}}
+        self._load_persisted_table()
+
+    def _load_persisted_table(self):
+        raw = _get_adaptive_motion_section("side")
+        for side in ("left", "right"):
+            entries = raw.get(side)
+            if not isinstance(entries, dict):
+                continue
+
+            for distance, entry in entries.items():
+                distance_key = self.distance_bin(distance)
+                cleaned = _motion_entry_as_ints(entry, ("x_bias", "dura", "wait"))
+                if distance_key is not None and cleaned:
+                    self.table[side][distance_key] = cleaned
+
+    def _persist(self):
+        _persist_adaptive_motion_section("side", self.table)
 
     def distance_bin(self, distance):
         try:
@@ -516,6 +631,7 @@ class AdaptiveSideMoveTable:
                 "wait": measured_wait,
                 "samples": 1,
             }
+            self._persist()
             return
 
         alpha = self.UPDATE_ALPHA
@@ -523,6 +639,7 @@ class AdaptiveSideMoveTable:
         entry["dura"] = int(round(entry["dura"] * (1.0 - alpha) + measured_dura * alpha))
         entry["wait"] = int(round(entry["wait"] * (1.0 - alpha) + measured_wait * alpha))
         entry["samples"] = int(entry.get("samples", 0)) + 1
+        self._persist()
 
     def _scaled_side_bias(self, x_bias, side, scale):
         try:

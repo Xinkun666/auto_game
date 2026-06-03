@@ -74,6 +74,9 @@ start_game_click_time = None
 final_shutdown_pending = False
 rank_finish_pending = False
 searching_view_synced = False
+searching_phase_finishing = False
+searching_to_running_notified = False
+searching_exit_retry_count = 0
 last_popup_close_time = 0.0
 lobby_house_confirm_count = 0
 parachute_manager = ParachuteManager()
@@ -97,10 +100,14 @@ driving_manager.pause_sp_callback = pause_sp_after_death
 
 def prepare_round():
     global searching_view_synced, rank_finish_pending
+    global searching_phase_finishing, searching_to_running_notified, searching_exit_retry_count
 
     phase_timer.start_new_round()
     phase_reporter.reset()
     searching_view_synced = False
+    searching_phase_finishing = False
+    searching_to_running_notified = False
+    searching_exit_retry_count = 0
     rank_finish_pending = False
 
     need_drive = phase_timer.need_drive()
@@ -156,12 +163,6 @@ def should_abort_searching(w: "FrameWorker"):
     if w.current_stage != "搜房阶段":
         return True
 
-    if phase_timer.is_completed(PHASE_SEARCHING):
-        print("[Timer] 搜房阶段 600s 已用完，强制切换到跑图阶段")
-        searching_house_manager.stop_auto_forward(w)
-        w.change_stage("跑图阶段")
-        return True
-
     if w.get_info("变身") or w.get_info("红色血条"):
         print("[Searching] 检测到死亡，进入结束阶段")
         searching_house_manager.stop_auto_forward(w)
@@ -177,11 +178,79 @@ def should_abort_searching(w: "FrameWorker"):
         w.change_stage("结束阶段")
         return True
 
+    if searching_phase_finishing:
+        return False
+
+    if phase_timer.is_completed(PHASE_SEARCHING):
+        print("[Timer] 搜房阶段 600s 已用完，强制切换到跑图阶段")
+        finish_searching_and_enter_running(w, "搜房阶段计时已用完")
+        return True
+
     return False
 
 
 searching_house_manager.abort_callback = should_abort_searching
 searching_house_manager.can_finish_callback = lambda w: phase_timer.is_completed(PHASE_SEARCHING)
+
+
+def _should_find_car_after_searching() -> bool:
+    return (
+        not phase_timer.is_completed(PHASE_DRIVING)
+        and phase_timer.get_remaining(PHASE_DRIVING) > 0
+    )
+
+
+def finish_searching_and_enter_running(w: "FrameWorker", reason: str):
+    global searching_view_synced, searching_phase_finishing, searching_to_running_notified
+    global searching_exit_retry_count
+
+    if searching_phase_finishing:
+        return True
+
+    searching_phase_finishing = True
+    print(
+        f"[Flow] 搜房结束: {reason} | "
+        f"searching_remaining={phase_timer.get_remaining(PHASE_SEARCHING):.2f}s, "
+        f"running_remaining={phase_timer.get_remaining(PHASE_RUNNING):.2f}s, "
+        f"driving_remaining={phase_timer.get_remaining(PHASE_DRIVING):.2f}s"
+    )
+
+    searching_house_manager.stop_auto_forward(w)
+    w.refresh_frame()
+    house_scene = searching_house_manager._get_house_scene(w)
+    if house_scene == searching_house_manager.HOUSE_INDOOR:
+        searching_exit_retry_count += 1
+        print(
+            f"[Flow] 搜房结束时仍在屋内，先执行新搜房出房策略，再切跑图 "
+            f"(retry={searching_exit_retry_count})"
+        )
+        exit_ok = searching_house_manager._exit_house(w)
+        if w.current_stage != "搜房阶段":
+            searching_phase_finishing = False
+            return True
+        w.refresh_frame()
+        if not exit_ok and searching_house_manager._get_house_scene(w) == searching_house_manager.HOUSE_INDOOR:
+            print("[Flow] 搜房结束出房未确认，暂不切跑图；下一帧继续用搜房阶段出房")
+            searching_phase_finishing = False
+            return True
+    else:
+        searching_exit_retry_count = 0
+
+    finding_car = _should_find_car_after_searching()
+    running_manager.notify_searching_exit(finding_car=finding_car)
+    running_manager.set_drive_required(finding_car)
+    if phase_timer.start_game_time is not None:
+        running_manager.set_game_time(phase_timer.start_game_time)
+    searching_house_manager.reset()
+    searching_view_synced = True
+    searching_to_running_notified = True
+    searching_exit_retry_count = 0
+    searching_phase_finishing = False
+    w.change_stage("跑图阶段")
+    return True
+
+
+searching_house_manager.finish_callback = finish_searching_and_enter_running
 
 
 def finalize_automation(w: "FrameWorker"):
@@ -268,7 +337,8 @@ def maybe_report_phase_remaining():
 
 
 def on_stage(w: "FrameWorker"):
-    global start_game, start_game_click_time, final_shutdown_pending, searching_view_synced
+    global start_game, start_game_click_time, final_shutdown_pending
+    global searching_view_synced, searching_to_running_notified
 
     previous_stage = phase_timer.last_stage
     stage_events = phase_timer.sync_stage(w.current_stage)
@@ -281,7 +351,10 @@ def on_stage(w: "FrameWorker"):
         running_manager.notify_vehicle_exit(finding_car=finding_car)
 
     if previous_stage == "搜房阶段" and w.current_stage == "跑图阶段":
-        running_manager.notify_searching_exit(finding_car=phase_timer.need_drive())
+        if searching_to_running_notified:
+            searching_to_running_notified = False
+        else:
+            running_manager.notify_searching_exit(finding_car=_should_find_car_after_searching())
 
     if "landed" in stage_events and not phase_timer.all_done():
         if phase_timer.start_game_time is not None:

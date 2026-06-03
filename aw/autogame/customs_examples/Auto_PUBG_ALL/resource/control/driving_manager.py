@@ -65,9 +65,12 @@ class TurnCalibration:
             }
 
     def save(self):
+        tmp_path = f"{self.path}.tmp"
         try:
-            with open(self.path, "w", encoding="utf-8") as f:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, ensure_ascii=False, indent=2, sort_keys=True)
+            os.replace(tmp_path, self.path)
         except Exception as exc:
             print(f"[TurnCalibration] 保存转向标定失败: {exc}")
 

@@ -6,3 +6,7 @@ __pycache__/
 .vscode/
 
 aw/autogame/temp/
+aw/autogame/customs_examples/Auto_PUBG_ALL/resource/navigation/adaptive_motion_table.json
+aw/autogame/customs_examples/Auto_PUBG_ALL/resource/navigation/adaptive_motion_table.json.tmp
+aw/autogame/customs_examples/Auto_PUBG_ALL/resource/control/driving_turn_calibration.json
+aw/autogame/customs_examples/Auto_PUBG_ALL/resource/control/driving_turn_calibration.json.tmp

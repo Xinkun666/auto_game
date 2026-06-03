@@ -76,6 +76,8 @@ class HouseSceneSearchManager(HouseSearchManager):
     ENTRY_OPEN_SWEEP_STEP_MS = 50
     ENTRY_OPEN_SWEEP_MAX_DURA = 750
     ENTRY_OPEN_SWEEP_OUTDOOR_BACKOFF_DURA = 250
+    ENTRY_OPEN_SWEEP_OUTDOOR_BACKOFF_MAX_DURA = 650
+    ENTRY_OPEN_SWEEP_OUTDOOR_BACKOFF_Y_BIAS = 360
     ENTRY_OPEN_SWEEP_OUTDOOR_BACKOFF_WAIT = 360
     ENTRY_INDOOR_CONFIRM_FORWARD_Y_BIAS = -420
     ENTRY_INDOOR_CONFIRM_FORWARD_DURA = 650
@@ -1247,25 +1249,41 @@ class HouseSceneSearchManager(HouseSearchManager):
             if scene in self.HOUSE_NEAR_ENTRY_SCENES:
                 print(f"[SceneEntry] 小步推进后仍贴墙/门 house_scene={scene}，继续换边")
             elif scene == self.HOUSE_OUTDOOR:
-                print("[SceneEntry] 小步推进后仍在 outdoor，继续小幅换边进门")
+                print("[SceneEntry] 小步推进后变为 outdoor，先反向斜后回拉，再换边进门")
+                if self._backoff_from_outdoor_side(w, side, dura):
+                    return True
 
         print("[SceneEntry] 左上/右上小步推进到上限，仍未进入 indoor")
         return False
 
-    def _backoff_from_outdoor_side(self, w: "FrameWorker", side: str) -> bool:
+    def _backoff_from_outdoor_side(self, w: "FrameWorker", side: str, dura_ms: Optional[int] = None) -> bool:
         opposite_x = self.ENTRY_SWEEP_X_BIAS if side == "left" else -self.ENTRY_SWEEP_X_BIAS
-        print(f"[SceneEntry] outdoor 临界点回退，向{self._side_label('right' if side == 'left' else 'left')}小步回墙边")
+        try:
+            backoff_dura = int(dura_ms or self.ENTRY_OPEN_SWEEP_OUTDOOR_BACKOFF_DURA)
+        except (TypeError, ValueError):
+            backoff_dura = self.ENTRY_OPEN_SWEEP_OUTDOOR_BACKOFF_DURA
+        backoff_dura = min(
+            max(self.ENTRY_OPEN_SWEEP_OUTDOOR_BACKOFF_DURA, backoff_dura),
+            self.ENTRY_OPEN_SWEEP_OUTDOOR_BACKOFF_MAX_DURA,
+        )
+        opposite_side = "right" if side == "left" else "left"
+        print(
+            f"[SceneEntry] outdoor 临界点回拉，向{self._side_label(opposite_side)}后 "
+            f"{backoff_dura}ms 回到墙/门附近"
+        )
         w.tap_single(
             "摇杆",
             x_bias=opposite_x,
-            y_bias=0,
-            dura=self.ENTRY_OPEN_SWEEP_OUTDOOR_BACKOFF_DURA,
-            wait=self.ENTRY_OPEN_SWEEP_OUTDOOR_BACKOFF_WAIT,
+            y_bias=self.ENTRY_OPEN_SWEEP_OUTDOOR_BACKOFF_Y_BIAS,
+            dura=backoff_dura,
+            wait=backoff_dura + self.ENTRY_OPEN_SWEEP_OUTDOOR_BACKOFF_WAIT,
         )
         w.refresh_frame()
 
-        if self._get_house_scene(w) == self.HOUSE_INDOOR:
+        scene = self._get_house_scene(w)
+        if scene == self.HOUSE_INDOOR:
             return self._confirm_indoor_by_forward_push(w, "outdoor 回退后检测到 indoor")
+        print(f"[SceneEntry] outdoor 回拉后 house_scene={scene}，下一步换边继续尝试")
         return False
 
     def _confirm_indoor_by_forward_push(self, w: "FrameWorker", reason: str) -> bool:

@@ -111,6 +111,7 @@ class HouseSearchManager:
         )
         self.abort_callback = None
         self.can_finish_callback = None
+        self.finish_callback = None
         self.avoid_angle_ref = None
         self.avoid_mode = None
         self.initial_target_pending = True
@@ -235,6 +236,17 @@ class HouseSearchManager:
             print(f"[Searching] 结束条件检查失败: {exc}")
             return False
 
+    def _finish_searching_phase(self, w: 'FrameWorker', reason: str):
+        callback = getattr(self, "finish_callback", None)
+        if callback is not None:
+            try:
+                return bool(callback(w, reason))
+            except Exception as exc:
+                print(f"[Searching] 搜房结束回调失败: {exc}")
+
+        w.change_stage('跑图阶段')
+        return True
+
     def _continue_searching_until_timer(self, w: 'FrameWorker', reason: str):
         self.stop_auto_forward(w)
         if self._can_finish_searching(w):
@@ -248,8 +260,7 @@ class HouseSearchManager:
             self.initial_target_pending = True
             self.location_missing_frames = 0
             self.initial_location_samples = []
-            w.change_stage('跑图阶段')
-            return True
+            return self._finish_searching_phase(w, reason)
 
         print(f"[Searching] {reason}，但搜房未满10分钟，重置本轮目标继续搜房")
         self.searching_number = 0

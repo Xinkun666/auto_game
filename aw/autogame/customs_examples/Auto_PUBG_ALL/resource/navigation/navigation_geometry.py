@@ -315,6 +315,138 @@ def get_adaptive_turn_motion(turn_dir, diff, fallback_px, fallback_dura):
 def update_adaptive_turn_motion(turn_dir, desired_diff, before_angle, after_angle, used_px, used_dura):
     adaptive_turn_table.observe(turn_dir, desired_diff, before_angle, after_angle, used_px, used_dura)
 
+
+class AdaptiveForwardMoveTable:
+    MIN_DISTANCE = 1
+    MAX_DISTANCE = 60
+    DISTANCE_STEP = 1
+    UPDATE_ALPHA = 0.45
+    MIN_OBSERVED_DISTANCE = 0.2
+    MIN_Y_BIAS = 80
+    MAX_Y_BIAS = 520
+    MIN_DURA = 80
+    MAX_DURA = 2600
+    MIN_WAIT = 120
+    MAX_WAIT = 7000
+    MIN_WAIT_PAD = 120
+    SCALE_MIN = 0.55
+    SCALE_MAX = 1.85
+
+    def __init__(self):
+        self.table = {}
+
+    def distance_bin(self, distance):
+        try:
+            value = float(distance)
+        except (TypeError, ValueError):
+            return None
+        if value < self.MIN_OBSERVED_DISTANCE:
+            return None
+        value = max(self.MIN_DISTANCE, min(self.MAX_DISTANCE, value))
+        return int(round(value / self.DISTANCE_STEP) * self.DISTANCE_STEP)
+
+    def get(self, mode, desired_distance, fallback_y_bias, fallback_dura, fallback_wait):
+        distance_key = self.distance_bin(desired_distance)
+        if distance_key is None:
+            return int(fallback_y_bias or 0), int(fallback_dura or 0), int(fallback_wait or 0), distance_key
+
+        mode_table = self.table.get(mode, {})
+        entry = mode_table.get(distance_key)
+        if entry:
+            return int(entry["y_bias"]), int(entry["dura"]), int(entry["wait"]), distance_key
+
+        return int(fallback_y_bias or 0), int(fallback_dura or 0), int(fallback_wait or 0), distance_key
+
+    def observe(self, mode, desired_distance, before_distance, after_distance, used_y_bias, used_dura, used_wait):
+        distance_key = self.distance_bin(desired_distance)
+        if distance_key is None:
+            return
+
+        observed = self._observed_forward_distance(before_distance, after_distance)
+        if observed is None or observed < self.MIN_OBSERVED_DISTANCE:
+            return
+
+        scale = distance_key / observed
+        scale = max(self.SCALE_MIN, min(self.SCALE_MAX, scale))
+
+        measured_y = self._scaled_forward_bias(used_y_bias, scale)
+        measured_dura = max(self.MIN_DURA, min(self.MAX_DURA, int(round(float(used_dura or 0) * scale))))
+        measured_wait = max(
+            measured_dura + self.MIN_WAIT_PAD,
+            max(self.MIN_WAIT, min(self.MAX_WAIT, int(round(float(used_wait or 0) * scale)))),
+        )
+
+        mode_table = self.table.setdefault(mode, {})
+        entry = mode_table.get(distance_key)
+        if not entry:
+            mode_table[distance_key] = {
+                "y_bias": measured_y,
+                "dura": measured_dura,
+                "wait": measured_wait,
+                "samples": 1,
+            }
+            return
+
+        alpha = self.UPDATE_ALPHA
+        entry["y_bias"] = int(round(entry["y_bias"] * (1.0 - alpha) + measured_y * alpha))
+        entry["dura"] = int(round(entry["dura"] * (1.0 - alpha) + measured_dura * alpha))
+        entry["wait"] = int(round(entry["wait"] * (1.0 - alpha) + measured_wait * alpha))
+        entry["samples"] = int(entry.get("samples", 0)) + 1
+
+    def _scaled_forward_bias(self, y_bias, scale):
+        try:
+            value = float(y_bias)
+        except (TypeError, ValueError):
+            value = -self.MIN_Y_BIAS
+        sign = -1 if value <= 0 else 1
+        magnitude = max(self.MIN_Y_BIAS, min(self.MAX_Y_BIAS, int(round(abs(value) * scale))))
+        return sign * magnitude
+
+    @staticmethod
+    def _observed_forward_distance(before_distance, after_distance):
+        try:
+            before = float(before_distance)
+            after = float(after_distance)
+        except (TypeError, ValueError):
+            return None
+        observed = before - after
+        if observed <= 0:
+            return None
+        return observed
+
+
+adaptive_forward_move_table = AdaptiveForwardMoveTable()
+
+
+def get_adaptive_forward_motion(mode, desired_distance, fallback_y_bias, fallback_dura, fallback_wait):
+    return adaptive_forward_move_table.get(
+        mode,
+        desired_distance,
+        fallback_y_bias,
+        fallback_dura,
+        fallback_wait,
+    )
+
+
+def update_adaptive_forward_motion(
+    mode,
+    desired_distance,
+    before_distance,
+    after_distance,
+    used_y_bias,
+    used_dura,
+    used_wait,
+):
+    adaptive_forward_move_table.observe(
+        mode,
+        desired_distance,
+        before_distance,
+        after_distance,
+        used_y_bias,
+        used_dura,
+        used_wait,
+    )
+
 def get_time_from_distance(distance):
     """
     根据距离计算所需时间（毫秒）。

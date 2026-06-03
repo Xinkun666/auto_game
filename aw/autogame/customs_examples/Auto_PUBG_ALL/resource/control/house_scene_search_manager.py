@@ -521,20 +521,18 @@ class HouseSceneSearchManager(HouseSearchManager):
     def _handle_rotate_wall_hit(self, w: "FrameWorker", move_mode: str, wall_hit_count: int):
         label = "墙/门"
         current_mode = move_mode
+        if wall_hit_count >= self.ROTATE_SEARCH_HIT_SWITCH_COUNT:
+            if current_mode == "left_up":
+                print(f"[SceneRotate] 左上撞{label}已达{wall_hit_count}次，立即切到右上，下一次撞墙改为向左调整")
+                return "right_up", 0, True
+
+            print(f"[SceneRotate] 右上撞{label}已达{wall_hit_count}次，立即切到左上，下一次撞墙改为向右调整")
+            return "left_up", 0, True
+
         turn_sign = 1 if current_mode == "left_up" else -1
         turn_label = "向右" if turn_sign > 0 else "向左"
         print(f"[SceneRotate] 撞{label}后{turn_label}补转，直到不再贴墙/门")
         self._turn_until_not_near_entry(w, turn_sign)
-
-        if wall_hit_count >= self.ROTATE_SEARCH_HIT_SWITCH_COUNT:
-            if current_mode == "left_up":
-                move_mode = "right_up"
-                print(f"[SceneRotate] 左上向右调整已达{wall_hit_count}次，下一轮切到右上并改为向左调整")
-            else:
-                move_mode = "left_up"
-                print(f"[SceneRotate] 右上向左调整已达{wall_hit_count}次，下一轮切到左上并改为向右调整")
-            return move_mode, 0, True
-
         return move_mode, wall_hit_count, False
 
     def _turn_until_not_near_entry(self, w: "FrameWorker", turn_sign: int) -> bool:

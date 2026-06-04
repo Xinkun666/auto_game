@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -53,6 +54,10 @@ STREAM_CONNECTED_MARKERS = (
     "[Stream] Start receiving...",
 )
 REBOOT_RELAUNCH_DELAY_SECONDS = 10
+STREAM_DISCONNECT_SP_LONG_PRESS_MS = 3000
+STREAM_DISCONNECT_SP_NORM_POS = (0.048, 0.295)
+STREAM_DISCONNECT_GRACEFUL_STOP_TIMEOUT_MS = 15000
+STREAM_DISCONNECT_FORCE_KILL_TIMEOUT_MS = 5000
 STREAM_DISCONNECT_PATTERNS = (
     "[Stream] Channel ready timeout.",
     "[Stream] Receive loop ended unexpectedly.",
@@ -254,6 +259,20 @@ def run_hdc_shell(command: str) -> Optional[str]:
     return output
 
 
+def install_helper_signal_handlers():
+    def _request_graceful_exit(signum, _frame):
+        LOGGER.warning("helper process received signal=%s, exiting gracefully", signum)
+        raise SystemExit(128 + int(signum))
+
+    for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)):
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _request_graceful_exit)
+        except Exception:
+            LOGGER.debug("install signal handler failed: sig=%s", sig, exc_info=True)
+
+
 def get_battery_temperature_c() -> Optional[float]:
     raw = run_hdc_shell("cat /sys/class/power_supply/Battery/temp")
     if not raw:
@@ -311,6 +330,8 @@ class LauncherWindow(QWidget):
         self.safety_timer.setInterval(5000)
         self.run_timeout_timer = QTimer(self)
         self.run_timeout_timer.setSingleShot(True)
+        self.stream_disconnect_signal_timer = QTimer(self)
+        self.stream_disconnect_signal_timer.setInterval(500)
 
         self.batch_active = False
         self.stop_requested = False
@@ -323,10 +344,12 @@ class LauncherWindow(QWidget):
         self.current_run_stream_disconnected = False
         self.current_run_stream_disconnect_startup = False
         self.current_run_stream_disconnect_message = ""
+        self.current_run_stream_preserved = False
         self.dismiss_reboot_prompt_on_next_case_start = False
         self.preserve_device_apps_on_manual_stop = True
         self.current_batch_start_timestamp: Optional[str] = None
         self.current_run_start_timestamp: Optional[str] = None
+        self.current_run_archive_dir: Optional[Path] = None
         self.preview_target_info_height = 90
         self.preview_target_info_width = 360
         self._adjusting_preview_splitter = False
@@ -1109,6 +1132,7 @@ class LauncherWindow(QWidget):
         self.preview_timer.timeout.connect(self._poll_preview_frame)
         self.safety_timer.timeout.connect(self._check_and_start_if_safe)
         self.run_timeout_timer.timeout.connect(self._handle_run_timeout)
+        self.stream_disconnect_signal_timer.timeout.connect(self._poll_stream_disconnect_signal)
         LOGGER.debug("signals bound")
 
     def _append_output(self, text: str):
@@ -1336,6 +1360,7 @@ class LauncherWindow(QWidget):
         env.insert("AUTOGAME_RUN_SOURCE", "launcher")
         env.insert("AUTOGAME_RUN_INDEX", str(int(run_no)))
         env.insert("AUTOGAME_DEVICE_LOG_PATH", str(LOG_DIR / f"{target_case}.txt"))
+        env.insert("AUTOGAME_EXIT_ON_STREAM_DISCONNECT", "1")
         if self.dismiss_reboot_prompt_on_next_case_start:
             env.insert(DISMISS_REBOOT_PROMPT_ENV, "1")
         if self.current_batch_start_timestamp:
@@ -1353,6 +1378,7 @@ class LauncherWindow(QWidget):
                 extra_metadata=archive_metadata,
                 create=True,
             )
+            self.current_run_archive_dir = run_archive_dir
             env.insert("AUTOGAME_RUN_ARCHIVE_DIR", str(run_archive_dir))
         except Exception:
             log_exception(f"resolve run archive dir failed: run_no={run_no}")
@@ -1783,16 +1809,19 @@ class LauncherWindow(QWidget):
         self.current_run_stream_disconnected = False
         self.current_run_stream_disconnect_startup = False
         self.current_run_stream_disconnect_message = ""
+        self.current_run_stream_preserved = False
         self.dismiss_reboot_prompt_on_next_case_start = False
         self.preserve_device_apps_on_manual_stop = True
         self.current_batch_start_timestamp = None
         self.current_run_start_timestamp = None
+        self.current_run_archive_dir = None
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self._set_inputs_enabled(True)
         self.preview_timer.stop()
         self.safety_timer.stop()
         self.run_timeout_timer.stop()
+        self.stream_disconnect_signal_timer.stop()
         self._set_status(message)
         self._set_runtime(message)
 
@@ -1897,7 +1926,9 @@ class LauncherWindow(QWidget):
         self.current_run_stream_disconnected = False
         self.current_run_stream_disconnect_startup = False
         self.current_run_stream_disconnect_message = ""
+        self.current_run_stream_preserved = False
         self.current_run_start_timestamp = time.strftime("%Y%m%d%H%M%S")
+        self.current_run_archive_dir = None
         self._clear_preview_files()
         self.current_run_output_start = len(self.output_edit.toPlainText())
 
@@ -1976,6 +2007,7 @@ class LauncherWindow(QWidget):
         safe_minutes = self.current_plan["safe_minutes"]
         if safe_minutes > 0:
             self.run_timeout_timer.start(int(safe_minutes * 60 * 1000))
+        self.stream_disconnect_signal_timer.start()
 
     def _resolve_current_device_log_path(self) -> Optional[Path]:
         if self.current_plan is None:
@@ -2041,6 +2073,257 @@ class LauncherWindow(QWidget):
             "说明: 本文件由 launcher 在归档时生成，用于快速定位断流对应的 testcases 设备日志。",
         ]
         return "\n".join(lines) + "\n"
+
+    def _resolve_current_run_archive_dir(self) -> Optional[Path]:
+        if self.current_run_archive_dir is not None:
+            self.current_run_archive_dir.mkdir(parents=True, exist_ok=True)
+            return self.current_run_archive_dir
+
+        if self.current_plan is None:
+            return None
+
+        archive_metadata = {}
+        if self.current_batch_start_timestamp:
+            archive_metadata["batch_start_timestamp"] = self.current_batch_start_timestamp
+        if self.current_run_start_timestamp:
+            archive_metadata["run_start_timestamp"] = self.current_run_start_timestamp
+
+        try:
+            archive_dir = resolve_run_archive_dir(
+                self.current_run_index + 1,
+                extra_metadata=archive_metadata,
+                create=True,
+            )
+            self.current_run_archive_dir = archive_dir
+            return archive_dir
+        except Exception:
+            log_exception("resolve current run archive dir failed")
+            return None
+
+    def _write_stream_disconnect_immediate_artifacts(self):
+        archive_dir = self._resolve_current_run_archive_dir()
+        if archive_dir is None:
+            return
+
+        try:
+            logs_dir = archive_dir / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            run_output_text = self.output_edit.toPlainText()[self.current_run_output_start:]
+            (logs_dir / "launcher_output_partial.txt").write_text(
+                run_output_text,
+                encoding="utf-8",
+            )
+
+            marker = {
+                "event": "stream_disconnected",
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "run_index": self.current_run_index + 1,
+                "stream_started": self.current_run_stream_started,
+                "stream_disconnect_startup": self.current_run_stream_disconnect_startup,
+                "stream_disconnect_message": self.current_run_stream_disconnect_message,
+                "batch_start_timestamp": self.current_batch_start_timestamp,
+                "run_start_timestamp": self.current_run_start_timestamp,
+                "note": "launcher 检测到断流后立即写入，完整归档会在子进程退出后继续执行。",
+            }
+            (archive_dir / "stream_disconnect_immediate.json").write_text(
+                json.dumps(marker, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            log_exception(f"write stream disconnect immediate artifacts failed: archive_dir={archive_dir}")
+
+    def _capture_stream_disconnect_screenshot(self, archive_dir: Path) -> Optional[Path]:
+        screenshot_dir = archive_dir / "stream_disconnect_screenshots"
+        screenshot_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        remote_path = f"/data/local/tmp/stream_disconnect_{timestamp}.jpeg"
+        local_path = screenshot_dir / f"stream_disconnect_{timestamp}.jpeg"
+        need_remote_rm = False
+
+        try:
+            snap_result = subprocess.run(
+                ["hdc", "shell", "snapshot_display", "-f", remote_path],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=10,
+            )
+            if snap_result.returncode != 0:
+                raise RuntimeError(snap_result.stderr.strip() or snap_result.stdout.strip())
+            need_remote_rm = True
+
+            recv_result = subprocess.run(
+                ["hdc", "file", "recv", remote_path, str(local_path)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=10,
+            )
+            if recv_result.returncode != 0:
+                raise RuntimeError(recv_result.stderr.strip() or recv_result.stdout.strip())
+
+            return local_path
+        except Exception:
+            log_exception("capture stream disconnect screenshot failed")
+            return None
+        finally:
+            if need_remote_rm:
+                try:
+                    subprocess.run(
+                        ["hdc", "shell", "rm", remote_path],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        timeout=5,
+                    )
+                except Exception:
+                    pass
+
+    def _save_sp_on_stream_disconnect(self) -> bool:
+        try:
+            resolution = get_resolution()
+        except Exception:
+            resolution = None
+
+        if resolution:
+            screen_w, screen_h = int(resolution[0]), int(resolution[1])
+        else:
+            screen_w, screen_h = 2832, 1316
+
+        x = int(round(screen_w * STREAM_DISCONNECT_SP_NORM_POS[0]))
+        y = int(round(screen_h * STREAM_DISCONNECT_SP_NORM_POS[1]))
+        command = f"uinput -T -d {x} {y} -i {STREAM_DISCONNECT_SP_LONG_PRESS_MS} -u {x} {y}"
+
+        self._log_message(
+            f"[Launcher] 断流保全：尝试长按 SP 保存，pos=({x},{y}), duration={STREAM_DISCONNECT_SP_LONG_PRESS_MS}ms。\n"
+        )
+        result = run_hdc_shell(command)
+        ok = result is not None
+        if not ok:
+            self._log_message("[Launcher] 断流保全：SP 保存指令执行失败，请检查 hdc/uinput 状态。\n", level=logging.WARNING)
+        return ok
+
+    def _preserve_stream_disconnect_run_state(self):
+        if self.current_run_stream_preserved:
+            return
+        self.current_run_stream_preserved = True
+
+        archive_dir = self._resolve_current_run_archive_dir()
+        preserve_result = {
+            "event": "stream_disconnect_preserve",
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "run_index": self.current_run_index + 1,
+            "stream_disconnect_startup": self.current_run_stream_disconnect_startup,
+            "stream_disconnect_message": self.current_run_stream_disconnect_message,
+            "screenshot_path": None,
+            "sp_save_attempted": False,
+            "sp_save_ok": False,
+        }
+
+        if archive_dir is not None:
+            screenshot_path = self._capture_stream_disconnect_screenshot(archive_dir)
+            preserve_result["screenshot_path"] = str(screenshot_path) if screenshot_path else None
+
+        if not self.current_run_stream_disconnect_startup:
+            preserve_result["sp_save_attempted"] = True
+            preserve_result["sp_save_ok"] = self._save_sp_on_stream_disconnect()
+
+        if archive_dir is not None:
+            try:
+                (archive_dir / "stream_disconnect_preserve.json").write_text(
+                    json.dumps(preserve_result, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception:
+                log_exception(f"write stream disconnect preserve result failed: archive_dir={archive_dir}")
+
+    def _mark_stream_disconnected(self, message: str, source: str):
+        if self.current_run_stream_disconnected:
+            return
+
+        self.current_run_stream_disconnected = True
+        self.current_run_stream_disconnect_startup = not self.current_run_stream_started
+        self.current_run_stream_disconnect_message = str(message or source or "stream disconnected")
+        phase_text = "启动阶段" if self.current_run_stream_disconnect_startup else "用例中途"
+        self._log_message(
+            f"\n[Launcher] 检测到 gRPC 流断连({phase_text}, source={source})："
+            f"{self.current_run_stream_disconnect_message}\n"
+        )
+        self._write_stream_disconnect_immediate_artifacts()
+        self._preserve_stream_disconnect_run_state()
+        self._log_message("[Launcher] 归档时会把本次 testcases 设备日志复制到对应运行目录。\n")
+        self._set_status("检测到 gRPC 流断连，正在保存本轮状态并停止当前子进程。")
+        self._request_stream_disconnect_process_exit()
+
+    def _request_stream_disconnect_process_exit(self):
+        if self.process is None:
+            return
+        if self.process.state() == QProcess.ProcessState.NotRunning:
+            self._log_message("[Launcher] 断流保全：子进程已退出，继续归档本轮状态。\n")
+            return
+
+        self._log_message(
+            "[Launcher] 断流保全：等待子进程正常退出，"
+            f"{STREAM_DISCONNECT_GRACEFUL_STOP_TIMEOUT_MS // 1000}s 后仍未退出则发送终止信号。\n"
+        )
+        QTimer.singleShot(
+            STREAM_DISCONNECT_GRACEFUL_STOP_TIMEOUT_MS,
+            self._terminate_stream_disconnect_process_if_running,
+        )
+
+    def _terminate_stream_disconnect_process_if_running(self):
+        if (
+            self.process is not None
+            and self.current_run_stream_disconnected
+            and self.process.state() != QProcess.ProcessState.NotRunning
+        ):
+            self._log_message(
+                "[Launcher] 断流保全：子进程未在宽限时间内退出，发送终止信号。\n",
+                level=logging.WARNING,
+            )
+            self.process.terminate()
+            QTimer.singleShot(
+                STREAM_DISCONNECT_FORCE_KILL_TIMEOUT_MS,
+                self._force_kill_stream_disconnect_process_if_running,
+            )
+
+    def _force_kill_stream_disconnect_process_if_running(self):
+        if (
+            self.process is not None
+            and self.current_run_stream_disconnected
+            and self.process.state() != QProcess.ProcessState.NotRunning
+        ):
+            self._log_message(
+                "[Launcher] 断流保全：子进程收到终止信号后仍未退出，执行强制结束。\n",
+                level=logging.WARNING,
+            )
+            self.process.kill()
+
+    def _poll_stream_disconnect_signal(self):
+        if self.process is None or self.current_run_stream_disconnected:
+            return
+
+        archive_dir = self._resolve_current_run_archive_dir()
+        if archive_dir is None:
+            return
+
+        signal_path = archive_dir / "stream_disconnect_signal.json"
+        if not signal_path.exists():
+            return
+
+        try:
+            payload = json.loads(signal_path.read_text(encoding="utf-8"))
+            message = payload.get("message") or payload.get("reason") or str(signal_path)
+            reason = str(payload.get("reason") or "")
+        except Exception:
+            message = str(signal_path)
+            reason = ""
+
+        if not self.current_run_stream_started and reason != "channel_ready_timeout":
+            self.current_run_stream_started = True
+
+        self._mark_stream_disconnected(message, "signal_file")
 
     def _archive_run_outputs(self, run_no: int, exit_code: int):
         if self.current_plan is None:
@@ -2172,21 +2455,11 @@ class LauncherWindow(QWidget):
         if matched_pattern is None:
             return
 
-        self.current_run_stream_disconnected = True
-        self.current_run_stream_disconnect_startup = not self.current_run_stream_started
-        self.current_run_stream_disconnect_message = self._extract_stream_disconnect_line(
+        message = self._extract_stream_disconnect_line(
             text,
             matched_pattern,
         )
-        phase_text = "启动阶段" if self.current_run_stream_disconnect_startup else "用例中途"
-        self._log_message(
-            f"\n[Launcher] 检测到 gRPC 流断连({phase_text})："
-            f"{self.current_run_stream_disconnect_message}\n"
-        )
-        self._log_message("[Launcher] 归档时会把本次 testcases 设备日志复制到对应运行目录。\n")
-        self._set_status("检测到 gRPC 流断连，正在停止当前子进程并准备重启手机。")
-        if self.process is not None:
-            self.process.kill()
+        self._mark_stream_disconnected(message, "stdout")
 
     def _extract_stream_disconnect_line(self, text: str, matched_pattern: str) -> str:
         for line in text.splitlines():
@@ -2280,6 +2553,9 @@ class LauncherWindow(QWidget):
             self.current_run_timed_out,
         )
         self.run_timeout_timer.stop()
+        self.stream_disconnect_signal_timer.stop()
+        if not self.current_run_stream_disconnected:
+            self._poll_stream_disconnect_signal()
         finish_prefix = "进程结束"
         if self.stop_requested:
             finish_prefix = "进程已手动停止"
@@ -2326,15 +2602,20 @@ class LauncherWindow(QWidget):
 
             self._log_message(
                 "[Launcher] 本次断流发生在用例中途，结果已归档并写入 stream_disconnected 标志；"
-                "当前用例计为完成，重启手机后进入下一条。\n"
+                "当前用例计为完成。\n"
             )
-            if not self._restart_device_for_stream_disconnect():
-                self._finish_batch("断流恢复失败，批量任务已终止。")
-                return
 
             self.current_run_index += 1
             if self.current_run_index >= self.current_plan["run_count"]:
-                self._finish_batch("所有运行次数已完成。")
+                self._log_message(
+                    "[Launcher] 本次中途断流发生在最后一轮，已保存 SP 并归档本轮状态，跳过手机重启。\n"
+                )
+                self._cleanup_apps_between_runs("最后一轮断流后清理")
+                self._finish_batch("所有运行次数已完成。最后一轮断流已归档，未执行重启。")
+                return
+
+            if not self._restart_device_for_stream_disconnect():
+                self._finish_batch("断流恢复失败，批量任务已终止。")
                 return
 
             next_run = self.current_run_index + 1
@@ -2430,6 +2711,7 @@ def main():
 
     if args.run_testcase or args.run_direct:
         LOGGER.info("enter helper mode")
+        install_helper_signal_handlers()
         raise SystemExit(_run_helper_command(args))
 
     ensure_pyqt6_platform_plugin_path()

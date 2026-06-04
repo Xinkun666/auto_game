@@ -17,6 +17,7 @@ ROOT_DIR = Path(__file__).resolve().parents[3]
 TEMP_DIR = ROOT_DIR / "aw" / "autogame" / "temp"
 LOG_DIR = TEMP_DIR / "logs"
 PROCESS_TEMP_LOGS_DIR = LOG_DIR / "process_temp_logs"
+PROCESS_SAVE_FRAMES_DIR = LOG_DIR / "process_save_frames"
 
 
 def _safe_write_text(path: Path, content: str):
@@ -45,6 +46,23 @@ def _copy_process_temp_logs(dst_dir: Path) -> list[str]:
 
     dst_dir.mkdir(parents=True, exist_ok=True)
     for path in sorted(PROCESS_TEMP_LOGS_DIR.iterdir()):
+        target = dst_dir / path.name
+        if path.is_file():
+            shutil.copy2(path, target)
+            copied.append(path.name)
+        elif path.is_dir():
+            shutil.copytree(path, target, dirs_exist_ok=True)
+            copied.append(path.name + "/")
+    return copied
+
+
+def _copy_process_save_frames(dst_dir: Path) -> list[str]:
+    copied = []
+    if not PROCESS_SAVE_FRAMES_DIR.exists():
+        return copied
+
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for path in sorted(PROCESS_SAVE_FRAMES_DIR.iterdir()):
         target = dst_dir / path.name
         if path.is_file():
             shutil.copy2(path, target)
@@ -143,8 +161,8 @@ def _read_image_quietly(path: Path) -> Optional[np.ndarray]:
         return None
 
 
-def _create_preview_video(src_dir: Path, output_path: Path, fps: int = 10) -> Optional[str]:
-    frame_paths = sorted(src_dir.glob("frame_*.jpg"), key=_frame_sort_key)
+def _create_preview_video(src_dir: Path, output_path: Path, fps: int = 10, pattern: str = "frame_*.jpg") -> Optional[str]:
+    frame_paths = sorted(src_dir.glob(pattern), key=_frame_sort_key)
     if not frame_paths:
         return None
 
@@ -199,14 +217,28 @@ def archive_run_artifacts(
     )
     log_archive_dir = archive_dir / "logs"
     process_archive_dir = archive_dir / "process_temp_logs"
+    save_frame_archive_dir = archive_dir / "process_save_frames"
 
     copied_log_files = _copy_top_level_log_files(log_archive_dir)
     copied_process_files = _copy_process_temp_logs(process_archive_dir)
+    copied_process_save_frames = _copy_process_save_frames(save_frame_archive_dir)
+    video_source = None
     video_file = _create_preview_video(
         process_archive_dir,
         archive_dir / "preview_10fps.mp4",
         fps=10,
     )
+    if video_file:
+        video_source = "process_temp_logs"
+    elif copied_process_save_frames:
+        video_file = _create_preview_video(
+            save_frame_archive_dir,
+            archive_dir / "preview_10fps.mp4",
+            fps=10,
+            pattern="*.jpg",
+        )
+        if video_file:
+            video_source = "process_save_frames"
 
     if extra_text_files:
         for name, content in extra_text_files.items():
@@ -236,8 +268,10 @@ def archive_run_artifacts(
         "batch_dir": str(archive_dir.parent),
         "copied_log_files": copied_log_files,
         "copied_process_temp_logs": copied_process_files,
+        "copied_process_save_frames": copied_process_save_frames,
         "copied_extra_log_files": copied_extra_log_files,
         "preview_video": video_file,
+        "preview_video_source": video_source,
     }
     if extra_metadata:
         metadata.update(extra_metadata)

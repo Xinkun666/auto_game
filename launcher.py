@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
-    QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -29,7 +29,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QPlainTextEdit,
     QRadioButton,
-    QScrollArea,
     QSizePolicy,
     QSplitter,
     QSpinBox,
@@ -100,6 +99,23 @@ def install_global_exception_hooks():
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
 
     sys.excepthook = _excepthook
+
+
+def ensure_pyqt6_platform_plugin_path():
+    if os.environ.get("QT_QPA_PLATFORM_PLUGIN_PATH"):
+        return
+
+    try:
+        import PyQt6
+
+        platforms_dir = Path(PyQt6.__file__).resolve().parent / "Qt6" / "plugins" / "platforms"
+    except Exception:
+        LOGGER.debug("failed to resolve PyQt6 platform plugin path", exc_info=True)
+        return
+
+    if platforms_dir.exists():
+        os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = str(platforms_dir)
+        LOGGER.debug("QT_QPA_PLATFORM_PLUGIN_PATH set to %s", platforms_dir)
 
 
 def parse_case_vars(py_file: Path) -> Dict[str, str]:
@@ -309,13 +325,15 @@ class LauncherWindow(QWidget):
         self.preserve_device_apps_on_manual_stop = True
         self.current_batch_start_timestamp: Optional[str] = None
         self.current_run_start_timestamp: Optional[str] = None
-        self.preview_target_info_height = 220
+        self.preview_target_info_height = 90
         self.preview_target_info_width = 360
         self._adjusting_preview_splitter = False
         self.preset_buttons: list[QPushButton] = []
+        self.theme_mode = "light"
 
         self.setWindowTitle("Auto Game 启动器")
         self.resize(1260, 860)
+        self.setMinimumSize(1120, 820)
         self._apply_style()
 
         self.mode_testcase = QRadioButton("通过 testcases 用例启动")
@@ -334,9 +352,11 @@ class LauncherWindow(QWidget):
         self.target_combo = QComboBox()
 
         self.status_label = QLabel("请选择启动方式，并选择 testcases 用例或直接指定配置。")
+        self.status_label.setObjectName("statusLabel")
         self.status_label.setWordWrap(True)
         self.status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.runtime_label = QLabel("运行信息：未开始")
+        self.runtime_label.setObjectName("runtimeLabel")
         self.runtime_label.setWordWrap(True)
         self.runtime_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
@@ -395,32 +415,48 @@ class LauncherWindow(QWidget):
         )
 
         self.start_button = QPushButton("启动")
+        self.start_button.setProperty("primaryButton", True)
         self.stop_button = QPushButton("停止")
+        self.stop_button.setProperty("dangerButton", True)
         self.stop_button.setEnabled(False)
         self.keep_process_on_manual_stop_button = QPushButton("停止保活")
         self.keep_process_on_manual_stop_button.setCheckable(True)
         self.keep_process_on_manual_stop_button.setChecked(False)
+        self.keep_process_on_manual_stop_button.setProperty("toggleButton", True)
         self.preview_overlay_button = QPushButton("显示标注")
         self.preview_overlay_button.setCheckable(True)
         self.preview_overlay_button.setChecked(False)
+        self.preview_overlay_button.setProperty("toggleButton", True)
         self.preview_points_button = QPushButton("显示控点")
         self.preview_points_button.setCheckable(True)
         self.preview_points_button.setChecked(False)
+        self.preview_points_button.setProperty("toggleButton", True)
+
+        self.theme_combo = QComboBox()
+        self.theme_combo.setObjectName("themeCombo")
+        self.theme_combo.addItem("亮白", "light")
+        self.theme_combo.addItem("暗黑", "dark")
+        self.theme_combo.setCurrentIndex(0)
+        self.theme_combo.setFixedWidth(96)
 
         self.output_edit = QPlainTextEdit()
+        self.output_edit.setObjectName("outputConsole")
         self.output_edit.setReadOnly(True)
+        self.output_edit.setMinimumHeight(90)
         self.output_edit.setPlaceholderText("运行输出会显示在这里...")
 
         self.preview_image_label = QLabel("启动后将在这里实时显示可视化帧")
+        self.preview_image_label.setObjectName("previewSurface")
         self.preview_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_image_label.setMinimumWidth(640)
-        self.preview_image_label.setMinimumHeight(320)
-        self.preview_image_label.setStyleSheet("border: 1px solid #666; background: #111; color: #ddd;")
+        self.preview_image_label.setMinimumHeight(100)
+        self.preview_image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self.preview_info_edit = QPlainTextEdit()
+        self.preview_info_edit.setObjectName("previewInfo")
         self.preview_info_edit.setReadOnly(True)
         self.preview_info_edit.setPlaceholderText("当前帧识别信息会显示在这里...")
-        self.preview_info_edit.setMinimumHeight(150)
+        self.preview_info_edit.setMinimumHeight(50)
         self.preview_info_edit.setMinimumWidth(280)
 
         self._build_ui()
@@ -434,86 +470,461 @@ class LauncherWindow(QWidget):
         LOGGER.info("LauncherWindow init finished")
 
     def _apply_style(self):
+        if getattr(self, "theme_mode", "light") != "dark":
+            self.setStyleSheet(
+                """
+                QWidget {
+                    background: #eef3f8;
+                    color: #18212f;
+                    font-family: "Microsoft YaHei UI", "PingFang SC", "Segoe UI", sans-serif;
+                    font-size: 13px;
+                }
+                QWidget#headerBar {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #ffffff, stop:0.55 #f4f9ff, stop:1 #e8f2ff);
+                    border: 1px solid #d6e3f0;
+                    border-radius: 10px;
+                }
+                QWidget#actionBar {
+                    background: #ffffff;
+                    border: 1px solid #d9e5f1;
+                    border-radius: 8px;
+                }
+                QWidget#statusStrip {
+                    background: #ffffff;
+                    border: 1px solid #d9e5f1;
+                    border-radius: 8px;
+                }
+                QLabel#launcherTitle {
+                    color: #101828;
+                    font-size: 20px;
+                    font-weight: 700;
+                }
+                QLabel#launcherSubtitle {
+                    color: #64748b;
+                    font-size: 12px;
+                }
+                QLabel#headerStatusPill,
+                QLabel#headerRuntimePill {
+                    background: #f7fbff;
+                    border: 1px solid #cbddec;
+                    border-radius: 13px;
+                    color: #334155;
+                    padding: 5px 12px;
+                    font-weight: 600;
+                }
+                QLabel#headerStatusPill {
+                    color: #087f5b;
+                    border-color: #9ce3c8;
+                    background: #eafff7;
+                }
+                QLabel#formLabel {
+                    color: #475569;
+                    font-weight: 600;
+                }
+                QGroupBox {
+                    background: #ffffff;
+                    border: 1px solid #d9e5f1;
+                    border-radius: 8px;
+                    margin-top: 15px;
+                    padding: 12px;
+                    font-weight: 600;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    left: 12px;
+                    padding: 0 6px;
+                    color: #334155;
+                    background: #eef3f8;
+                    font-size: 12px;
+                    letter-spacing: 0px;
+                }
+                QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {
+                    background: #fbfdff;
+                    border: 1px solid #c7d6e5;
+                    border-radius: 6px;
+                    padding: 5px 8px;
+                    color: #18212f;
+                    selection-background-color: #2563eb;
+                    selection-color: #ffffff;
+                }
+                QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus {
+                    border-color: #2f80ed;
+                    background: #ffffff;
+                }
+                QSpinBox, QDoubleSpinBox, QComboBox {
+                    min-height: 28px;
+                }
+                QComboBox#themeCombo {
+                    background: #ffffff;
+                    border-color: #b9cde2;
+                    font-weight: 600;
+                }
+                QComboBox::drop-down {
+                    border: none;
+                    width: 24px;
+                }
+                QComboBox QAbstractItemView {
+                    background: #ffffff;
+                    border: 1px solid #c7d6e5;
+                    color: #18212f;
+                    selection-background-color: #e8f2ff;
+                    selection-color: #0f172a;
+                    outline: none;
+                }
+                QPushButton {
+                    background: #f7faff;
+                    border: 1px solid #c9d8e8;
+                    border-radius: 7px;
+                    padding: 7px 13px;
+                    color: #1f2937;
+                    font-weight: 600;
+                }
+                QPushButton:hover {
+                    background: #edf6ff;
+                    border-color: #8fb9e8;
+                }
+                QPushButton:pressed {
+                    background: #dceeff;
+                }
+                QPushButton:disabled {
+                    color: #94a3b8;
+                    background: #f1f5f9;
+                    border-color: #dbe4ee;
+                }
+                QPushButton[presetButton="true"] {
+                    background: #f8fbff;
+                    padding: 5px 8px;
+                    min-width: 30px;
+                    border-color: #d5e2ef;
+                    font-weight: 600;
+                    color: #475569;
+                }
+                QPushButton[presetButton="true"]:hover {
+                    background: #eaf4ff;
+                    border-color: #7bb5f4;
+                    color: #1d4ed8;
+                }
+                QPushButton[primaryButton="true"] {
+                    background: #2563eb;
+                    color: #ffffff;
+                    border-color: #1d4ed8;
+                    font-weight: 700;
+                }
+                QPushButton[primaryButton="true"]:hover {
+                    background: #1d4ed8;
+                }
+                QPushButton[dangerButton="true"] {
+                    background: #fff4f5;
+                    border-color: #f2a4ad;
+                    color: #b4232d;
+                }
+                QPushButton[dangerButton="true"]:hover {
+                    background: #ffe7ea;
+                    border-color: #e65f6d;
+                }
+                QPushButton[toggleButton="true"]:checked {
+                    background: #eafff7;
+                    border-color: #34c79a;
+                    color: #087f5b;
+                }
+                QLabel {
+                    background: transparent;
+                }
+                QLabel#statusLabel,
+                QLabel#runtimeLabel {
+                    color: #334155;
+                    background: #f8fbff;
+                    border: 1px solid #d5e2ef;
+                    border-radius: 6px;
+                    padding: 6px 8px;
+                }
+                QLabel#previewSurface {
+                    background: #05070b;
+                    border: 1px solid #cbd8e6;
+                    border-radius: 8px;
+                    color: #8b96a6;
+                    font-size: 14px;
+                }
+                QPlainTextEdit#outputConsole,
+                QPlainTextEdit#previewInfo {
+                    background: #fbfdff;
+                    border: 1px solid #d3dfec;
+                    border-radius: 8px;
+                    color: #1f2937;
+                    font-family: "JetBrains Mono", "SF Mono", "Consolas", monospace;
+                    font-size: 12px;
+                }
+                QRadioButton {
+                    color: #334155;
+                    spacing: 8px;
+                }
+                QRadioButton::indicator {
+                    width: 15px;
+                    height: 15px;
+                    border-radius: 8px;
+                    border: 1px solid #9aaebe;
+                    background: #ffffff;
+                }
+                QRadioButton::indicator:checked {
+                    border: 4px solid #2f80ed;
+                    background: #ffffff;
+                }
+                QSplitter::handle {
+                    background: #eef3f8;
+                }
+                QSplitter::handle:hover {
+                    background: #d4e3f3;
+                }
+                QScrollArea {
+                    background: transparent;
+                    border: none;
+                }
+                QScrollBar:vertical {
+                    background: #eef3f8;
+                    width: 10px;
+                    margin: 2px;
+                }
+                QScrollBar::handle:vertical {
+                    background: #b8c7d8;
+                    border-radius: 5px;
+                    min-height: 28px;
+                }
+                QScrollBar::handle:vertical:hover {
+                    background: #8fa4bb;
+                }
+                QScrollBar::add-line:vertical,
+                QScrollBar::sub-line:vertical {
+                    height: 0px;
+                }
+                """
+            )
+            return
+
         self.setStyleSheet(
             """
             QWidget {
-                background: #f4f6f8;
-                color: #1f2933;
+                background: #0e1116;
+                color: #eef2f7;
+                font-family: "Microsoft YaHei UI", "PingFang SC", "Segoe UI", sans-serif;
+                font-size: 13px;
+            }
+            QWidget#headerBar {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #182130, stop:0.55 #121820, stop:1 #151a21);
+                border: 1px solid #293241;
+                border-radius: 10px;
+            }
+            QWidget#actionBar {
+                background: #151a21;
+                border: 1px solid #293241;
+                border-radius: 8px;
+            }
+            QWidget#statusStrip {
+                background: #151a21;
+                border: 1px solid #293241;
+                border-radius: 8px;
+            }
+            QLabel#launcherTitle {
+                color: #f8fafc;
+                font-size: 20px;
+                font-weight: 700;
+            }
+            QLabel#launcherSubtitle {
+                color: #9aa4b2;
                 font-size: 12px;
             }
+            QLabel#headerStatusPill,
+            QLabel#headerRuntimePill {
+                background: #101722;
+                border: 1px solid #334155;
+                border-radius: 13px;
+                color: #cbd5e1;
+                padding: 5px 12px;
+                font-weight: 600;
+            }
+            QLabel#headerStatusPill {
+                color: #77e4c8;
+                border-color: #1f7a65;
+                background: #10231f;
+            }
+            QLabel#formLabel {
+                color: #b8c2d0;
+                font-weight: 600;
+            }
             QGroupBox {
-                background: #ffffff;
-                border: 1px solid #d8dee6;
-                border-radius: 6px;
-                margin-top: 9px;
-                padding: 7px;
+                background: #151a21;
+                border: 1px solid #293241;
+                border-radius: 8px;
+                margin-top: 15px;
+                padding: 12px;
                 font-weight: 600;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
-                left: 9px;
-                padding: 0 4px;
-                color: #334155;
+                left: 12px;
+                padding: 0 6px;
+                color: #d6dde8;
+                background: #0e1116;
+                font-size: 12px;
+                letter-spacing: 0px;
             }
             QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {
-                background: #ffffff;
-                border: 1px solid #cbd5e1;
-                border-radius: 5px;
-                padding: 3px 5px;
-                selection-background-color: #2563eb;
+                background: #0f131a;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 5px 8px;
+                color: #edf2f7;
+                selection-background-color: #2f80ed;
+                selection-color: #ffffff;
+            }
+            QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus {
+                border-color: #2dd4bf;
+                background: #111821;
             }
             QSpinBox, QDoubleSpinBox, QComboBox {
-                min-height: 24px;
+                min-height: 28px;
             }
-            QPushButton {
-                background: #e8eef7;
-                border: 1px solid #c6d3e1;
-                border-radius: 5px;
-                padding: 4px 9px;
-                color: #1e293b;
-            }
-            QPushButton:hover {
-                background: #dce8f8;
-                border-color: #9fb5d1;
-            }
-            QPushButton:pressed {
-                background: #cbdcf3;
-            }
-            QPushButton:disabled {
-                color: #94a3b8;
-                background: #eef2f6;
-                border-color: #dde4ed;
-            }
-            QPushButton[presetButton="true"] {
-                background: #f8fafc;
-                padding: 3px 6px;
-                min-width: 26px;
-                border-color: #d7dee8;
-                font-weight: 500;
-            }
-            QPushButton[presetButton="true"]:hover {
-                background: #eef6ff;
-                border-color: #93c5fd;
-                color: #1d4ed8;
-            }
-            QPushButton[primaryButton="true"] {
-                background: #2563eb;
-                color: #ffffff;
-                border-color: #1d4ed8;
+            QComboBox#themeCombo {
+                background: #101722;
+                border-color: #334155;
                 font-weight: 600;
             }
+            QComboBox::drop-down {
+                border: none;
+                width: 24px;
+            }
+            QComboBox QAbstractItemView {
+                background: #111821;
+                border: 1px solid #334155;
+                color: #eef2f7;
+                selection-background-color: #1f6feb;
+                outline: none;
+            }
+            QPushButton {
+                background: #1b2330;
+                border: 1px solid #334155;
+                border-radius: 7px;
+                padding: 7px 13px;
+                color: #e5e7eb;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #243044;
+                border-color: #4b647f;
+            }
+            QPushButton:pressed {
+                background: #111827;
+            }
+            QPushButton:disabled {
+                color: #687384;
+                background: #141820;
+                border-color: #202735;
+            }
+            QPushButton[presetButton="true"] {
+                background: #101722;
+                padding: 5px 8px;
+                min-width: 30px;
+                border-color: #293241;
+                font-weight: 500;
+                color: #b8c2d0;
+            }
+            QPushButton[presetButton="true"]:hover {
+                background: #162334;
+                border-color: #2f80ed;
+                color: #d9ecff;
+            }
+            QPushButton[primaryButton="true"] {
+                background: #2f80ed;
+                color: #ffffff;
+                border-color: #4493ff;
+                font-weight: 700;
+            }
             QPushButton[primaryButton="true"]:hover {
-                background: #1d4ed8;
+                background: #1f6feb;
+            }
+            QPushButton[dangerButton="true"] {
+                background: #2a1519;
+                border-color: #7f3038;
+                color: #ffd8dc;
+            }
+            QPushButton[dangerButton="true"]:hover {
+                background: #3a1b22;
+                border-color: #ef6a74;
+            }
+            QPushButton[toggleButton="true"]:checked {
+                background: #10231f;
+                border-color: #1f9d7a;
+                color: #97f5d2;
             }
             QLabel {
                 background: transparent;
             }
+            QLabel#statusLabel,
+            QLabel#runtimeLabel {
+                color: #cbd5e1;
+                background: #101722;
+                border: 1px solid #273142;
+                border-radius: 6px;
+                padding: 6px 8px;
+            }
+            QLabel#previewSurface {
+                background: #05070b;
+                border: 1px solid #293241;
+                border-radius: 8px;
+                color: #8b96a6;
+                font-size: 14px;
+            }
+            QPlainTextEdit#outputConsole,
+            QPlainTextEdit#previewInfo {
+                background: #060912;
+                border: 1px solid #273142;
+                border-radius: 8px;
+                color: #d6dde8;
+                font-family: "JetBrains Mono", "SF Mono", "Consolas", monospace;
+                font-size: 12px;
+            }
+            QRadioButton {
+                color: #d6dde8;
+                spacing: 8px;
+            }
+            QRadioButton::indicator {
+                width: 15px;
+                height: 15px;
+                border-radius: 8px;
+                border: 1px solid #4b5563;
+                background: #0f131a;
+            }
+            QRadioButton::indicator:checked {
+                border: 4px solid #2dd4bf;
+                background: #071512;
+            }
             QSplitter::handle {
-                background: #d8dee6;
+                background: #0e1116;
+            }
+            QSplitter::handle:hover {
+                background: #293241;
             }
             QScrollArea {
                 background: transparent;
                 border: none;
+            }
+            QScrollBar:vertical {
+                background: #0e1116;
+                width: 10px;
+                margin: 2px;
+            }
+            QScrollBar::handle:vertical {
+                background: #334155;
+                border-radius: 5px;
+                min-height: 28px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #4b647f;
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {
+                height: 0px;
             }
             """
         )
@@ -540,77 +951,124 @@ class LauncherWindow(QWidget):
 
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 8, 10, 10)
-        main_layout.setSpacing(7)
+        main_layout.setContentsMargins(14, 12, 14, 14)
+        main_layout.setSpacing(10)
 
-        controls_scroll = QScrollArea()
-        controls_scroll.setWidgetResizable(True)
-        controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        controls_scroll.setMinimumHeight(150)
-        controls_scroll.setMaximumHeight(260)
+        header_bar = QWidget()
+        header_bar.setObjectName("headerBar")
+        header_layout = QHBoxLayout(header_bar)
+        header_layout.setContentsMargins(18, 13, 18, 13)
+        header_layout.setSpacing(14)
+
+        title_column = QVBoxLayout()
+        title_column.setContentsMargins(0, 0, 0, 0)
+        title_column.setSpacing(3)
+        title_label = QLabel("Auto Game Launcher")
+        title_label.setObjectName("launcherTitle")
+        subtitle_label = QLabel("自动化运行控制台")
+        subtitle_label.setObjectName("launcherSubtitle")
+        title_column.addWidget(title_label)
+        title_column.addWidget(subtitle_label)
+        header_layout.addLayout(title_column, 1)
+
+        self.header_runtime_label = QLabel("未开始")
+        self.header_runtime_label.setObjectName("headerRuntimePill")
+        self.header_status_label = QLabel("待命")
+        self.header_status_label.setObjectName("headerStatusPill")
+        header_layout.addWidget(self.header_runtime_label)
+        header_layout.addWidget(self.header_status_label)
+        header_layout.addWidget(self.theme_combo)
+        main_layout.addWidget(header_bar, 0)
 
         controls_widget = QWidget()
+        controls_widget.setObjectName("controlsPanel")
+        controls_widget.setFixedHeight(380)
         controls_layout = QVBoxLayout(controls_widget)
         controls_layout.setContentsMargins(0, 0, 4, 0)
-        controls_layout.setSpacing(5)
+        controls_layout.setSpacing(10)
+
+        launch_row = QHBoxLayout()
+        launch_row.setContentsMargins(0, 0, 0, 0)
+        launch_row.setSpacing(10)
 
         mode_group = QGroupBox("启动方式")
         mode_layout = QVBoxLayout(mode_group)
-        mode_layout.setContentsMargins(6, 4, 6, 5)
-        mode_layout.setSpacing(3)
+        mode_layout.setContentsMargins(12, 8, 12, 10)
+        mode_layout.setSpacing(7)
         mode_layout.addWidget(self.mode_testcase)
         mode_layout.addWidget(self.mode_direct)
-        controls_layout.addWidget(mode_group)
+        launch_row.addWidget(mode_group, 1)
 
         testcase_group = QGroupBox("testcases 用例")
         testcase_layout = QHBoxLayout(testcase_group)
-        testcase_layout.setContentsMargins(6, 4, 6, 5)
-        testcase_layout.setSpacing(5)
+        testcase_layout.setContentsMargins(12, 8, 12, 10)
+        testcase_layout.setSpacing(8)
         testcase_layout.addWidget(self.testcase_path_edit, 1)
         testcase_layout.addWidget(self.browse_button)
         testcase_layout.addWidget(self.clear_button)
-        controls_layout.addWidget(testcase_group)
+        launch_row.addWidget(testcase_group, 2)
+        controls_layout.addLayout(launch_row)
 
         config_group = QGroupBox("配置")
-        config_layout = QFormLayout(config_group)
-        config_layout.setContentsMargins(6, 4, 6, 5)
-        config_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        config_layout.setHorizontalSpacing(8)
-        config_layout.setVerticalSpacing(5)
-        config_layout.addRow("project_case", self.project_combo)
-        config_layout.addRow("target_case", self.target_combo)
-        config_layout.addRow("运行次数", self.run_count_field)
-        config_layout.addRow("安全温度", self.safe_temp_field)
-        config_layout.addRow("安全电量", self.safe_battery_field)
-        config_layout.addRow("安全时间", self.safe_time_field)
-        config_layout.addRow("无操控超时", self.inactivity_timeout_field)
-        config_layout.addRow("解析结果", self.status_label)
-        config_layout.addRow("运行信息", self.runtime_label)
-        config_layout.addRow("", self.refresh_button)
+        config_group.setFixedHeight(250)
+        config_layout = QGridLayout(config_group)
+        config_layout.setContentsMargins(12, 8, 12, 10)
+        config_layout.setHorizontalSpacing(12)
+        config_layout.setVerticalSpacing(8)
+
+        def add_config_item(row: int, column: int, label_text: str, widget: QWidget):
+            label = QLabel(label_text)
+            label.setObjectName("formLabel")
+            label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            config_layout.addWidget(label, row, column * 2)
+            config_layout.addWidget(widget, row, column * 2 + 1)
+
+        add_config_item(0, 0, "project_case", self.project_combo)
+        add_config_item(0, 1, "target_case", self.target_combo)
+        add_config_item(1, 0, "运行次数", self.run_count_field)
+        add_config_item(1, 1, "安全温度", self.safe_temp_field)
+        add_config_item(2, 0, "安全电量", self.safe_battery_field)
+        add_config_item(2, 1, "安全时间", self.safe_time_field)
+        add_config_item(3, 0, "无操控超时", self.inactivity_timeout_field)
+        config_layout.addWidget(self.refresh_button, 3, 3)
+
+        config_layout.setColumnStretch(1, 1)
+        config_layout.setColumnStretch(3, 1)
         controls_layout.addWidget(config_group)
-        controls_layout.addStretch(1)
 
-        controls_scroll.setWidget(controls_widget)
-        main_layout.addWidget(controls_scroll, 0)
+        main_layout.addWidget(controls_widget, 0)
 
-        action_layout = QHBoxLayout()
+        action_bar = QWidget()
+        action_bar.setObjectName("actionBar")
+        action_layout = QHBoxLayout(action_bar)
+        action_layout.setContentsMargins(12, 9, 12, 9)
+        action_layout.setSpacing(8)
         action_layout.addWidget(self.start_button)
         action_layout.addWidget(self.stop_button)
         action_layout.addWidget(self.keep_process_on_manual_stop_button)
         action_layout.addWidget(self.preview_overlay_button)
         action_layout.addWidget(self.preview_points_button)
         action_layout.addStretch(1)
-        main_layout.addLayout(action_layout)
+        main_layout.addWidget(action_bar, 0)
 
-        self.start_button.setProperty("primaryButton", True)
+        status_strip = QWidget()
+        status_strip.setObjectName("statusStrip")
+        status_layout = QHBoxLayout(status_strip)
+        status_layout.setContentsMargins(12, 9, 12, 9)
+        status_layout.setSpacing(10)
+        status_layout.addWidget(self.status_label, 1)
+        status_layout.addWidget(self.runtime_label, 1)
+        main_layout.addWidget(status_strip, 0)
 
         content_splitter = QSplitter(Qt.Orientation.Horizontal)
         content_splitter.setChildrenCollapsible(False)
         content_splitter.setHandleWidth(8)
 
         preview_group = QGroupBox("实时可视化")
+        preview_group.setObjectName("previewPanel")
         preview_layout = QVBoxLayout(preview_group)
+        preview_layout.setContentsMargins(12, 10, 12, 12)
+        preview_layout.setSpacing(8)
         self.preview_splitter = QSplitter(Qt.Orientation.Vertical)
         self.preview_splitter.setChildrenCollapsible(False)
         self.preview_splitter.setHandleWidth(8)
@@ -622,7 +1080,9 @@ class LauncherWindow(QWidget):
         preview_layout.addWidget(self.preview_splitter)
 
         log_group = QGroupBox("运行输出")
+        log_group.setObjectName("logPanel")
         log_layout = QVBoxLayout(log_group)
+        log_layout.setContentsMargins(12, 10, 12, 12)
         log_layout.addWidget(self.output_edit)
         content_splitter.addWidget(preview_group)
         content_splitter.addWidget(log_group)
@@ -630,6 +1090,7 @@ class LauncherWindow(QWidget):
         content_splitter.setStretchFactor(1, 2)
 
         main_layout.addWidget(content_splitter, 1)
+        self._update_header_badges()
 
     def _bind_signals(self):
         self.mode_testcase.toggled.connect(self._sync_mode_ui)
@@ -642,6 +1103,7 @@ class LauncherWindow(QWidget):
         self.keep_process_on_manual_stop_button.toggled.connect(self._toggle_keep_process_on_manual_stop)
         self.preview_overlay_button.toggled.connect(self._toggle_preview_overlay)
         self.preview_points_button.toggled.connect(self._toggle_preview_points)
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
         self.preview_timer.timeout.connect(self._poll_preview_frame)
         self.safety_timer.timeout.connect(self._check_and_start_if_safe)
         self.run_timeout_timer.timeout.connect(self._handle_run_timeout)
@@ -672,11 +1134,36 @@ class LauncherWindow(QWidget):
         if message:
             LOGGER.log(level, message)
 
+    def _update_header_badges(self):
+        if not hasattr(self, "header_status_label") or not hasattr(self, "header_runtime_label"):
+            return
+
+        if self.stop_requested:
+            state_text = "停止中"
+        elif self.process is not None:
+            state_text = "运行中"
+        elif self.batch_active:
+            state_text = "等待中"
+        else:
+            state_text = "待命"
+
+        if self.current_plan is not None:
+            total_runs = int(self.current_plan.get("run_count", self.total_runs))
+            progress = min(self.current_run_index + (1 if self.process is not None else 0), total_runs)
+            runtime_text = f"{progress}/{total_runs}"
+        else:
+            runtime_text = "未开始"
+
+        self.header_status_label.setText(state_text)
+        self.header_runtime_label.setText(runtime_text)
+
     def _set_status(self, text: str):
         self.status_label.setText(text)
+        self._update_header_badges()
 
     def _set_runtime(self, text: str):
         self.runtime_label.setText(text)
+        self._update_header_badges()
 
     def _toggle_preview_overlay(self, checked: bool):
         self.preview_overlay_button.setText("隐藏标注" if checked else "显示标注")
@@ -686,6 +1173,15 @@ class LauncherWindow(QWidget):
     def _toggle_preview_points(self, checked: bool):
         self.preview_points_button.setText("隐藏控点" if checked else "显示控点")
         LOGGER.info("preview points toggled: %s", checked)
+        self._refresh_preview_pixmap()
+
+    def _on_theme_changed(self):
+        theme_mode = self.theme_combo.currentData() or "light"
+        if theme_mode == self.theme_mode:
+            return
+        self.theme_mode = str(theme_mode)
+        LOGGER.info("launcher theme changed: %s", self.theme_mode)
+        self._apply_style()
         self._refresh_preview_pixmap()
 
     def _toggle_keep_process_on_manual_stop(self, checked: bool):
@@ -1816,7 +2312,9 @@ def main():
         LOGGER.info("enter helper mode")
         raise SystemExit(_run_helper_command(args))
 
+    ensure_pyqt6_platform_plugin_path()
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")
     window = LauncherWindow()
     window.show()
     LOGGER.info("launcher window shown")

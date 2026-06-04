@@ -1,3 +1,5 @@
+import json
+import os
 import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Set
@@ -34,8 +36,34 @@ class PhaseTimeManager:
         self.round_index = 0
         self.landed = False
         self.start_game_time: Optional[float] = None
+        self.sp_started_ever = False
         self.sp_recording = False
         self.sp_saved = False
+
+    def _write_sp_state(self, event_name: str):
+        archive_dir = os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()
+        if not archive_dir:
+            return
+
+        try:
+            os.makedirs(archive_dir, exist_ok=True)
+            payload = {
+                "event": event_name,
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "round_index": self.round_index,
+                "sp_started_ever": self.sp_started_ever,
+                "sp_recording": self.sp_recording,
+                "sp_saved": self.sp_saved,
+                "last_stage": self.last_stage,
+                "active_phase": self.active_phase,
+            }
+            signal_path = os.path.join(archive_dir, "sp_recording_state.json")
+            tmp_path = signal_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, signal_path)
+        except Exception as exc:
+            print(f"[Timer] 写入 sp 状态失败: {exc}")
 
     def _phase_for_stage(self, stage_name: Optional[str]) -> Optional[str]:
         return self.stage_phase_map.get(stage_name)
@@ -167,17 +195,21 @@ class PhaseTimeManager:
         return max(0.0, time.time() - self.start_game_time)
 
     def mark_sp_started(self):
+        self.sp_started_ever = True
         self.sp_recording = True
         print("[Timer] sp 记录已开始")
+        self._write_sp_state("sp_started")
 
     def mark_sp_stopped(self):
         if self.sp_recording:
             print("[Timer] sp 记录已停止")
         self.sp_recording = False
+        self._write_sp_state("sp_stopped")
 
     def mark_sp_saved(self):
         self.sp_saved = True
         print("[Timer] sp 数据已保存")
+        self._write_sp_state("sp_saved")
 
 
 def format_phase_seconds(seconds: float) -> str:

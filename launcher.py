@@ -64,6 +64,11 @@ STREAM_DISCONNECT_PATTERNS = (
     "[Stream] gRPC Error:",
     "[Stream] Runtime Error:",
 )
+SP_RECORD_EVER_STARTED_MARKERS = (
+    "[Timer] sp 记录已开始",
+    "[Timer] sp 记录已停止",
+    "[Timer] sp 数据已保存",
+)
 DISMISS_REBOOT_PROMPT_ENV = "AUTOGAME_DISMISS_REBOOT_PROMPT"
 DEVICE_LOG_SETTLE_TIMEOUT_SECONDS = 3.0
 DEVICE_LOG_SETTLE_INTERVAL_SECONDS = 0.2
@@ -345,6 +350,8 @@ class LauncherWindow(QWidget):
         self.current_run_stream_disconnect_startup = False
         self.current_run_stream_disconnect_message = ""
         self.current_run_stream_preserved = False
+        self.current_run_sp_started = False
+        self.current_run_sp_state: dict = {}
         self.dismiss_reboot_prompt_on_next_case_start = False
         self.preserve_device_apps_on_manual_stop = True
         self.current_batch_start_timestamp: Optional[str] = None
@@ -1810,6 +1817,8 @@ class LauncherWindow(QWidget):
         self.current_run_stream_disconnect_startup = False
         self.current_run_stream_disconnect_message = ""
         self.current_run_stream_preserved = False
+        self.current_run_sp_started = False
+        self.current_run_sp_state = {}
         self.dismiss_reboot_prompt_on_next_case_start = False
         self.preserve_device_apps_on_manual_stop = True
         self.current_batch_start_timestamp = None
@@ -1927,6 +1936,8 @@ class LauncherWindow(QWidget):
         self.current_run_stream_disconnect_startup = False
         self.current_run_stream_disconnect_message = ""
         self.current_run_stream_preserved = False
+        self.current_run_sp_started = False
+        self.current_run_sp_state = {}
         self.current_run_start_timestamp = time.strftime("%Y%m%d%H%M%S")
         self.current_run_archive_dir = None
         self._clear_preview_files()
@@ -2062,11 +2073,12 @@ class LauncherWindow(QWidget):
             return False
 
     def _build_stream_disconnect_notice(self, device_log_path: Optional[Path], archived_log_name: Optional[str]) -> str:
-        phase_text = "启动阶段" if self.current_run_stream_disconnect_startup else "用例中途"
+        phase_text = "启动阶段(SP未开始)" if self.current_run_stream_disconnect_startup else "SP记录后"
         lines = [
             "gRPC 流断连提醒",
             f"发生阶段: {phase_text}",
             f"断流信息: {self.current_run_stream_disconnect_message}",
+            f"SP是否已开始: {self.current_run_sp_started}",
             f"设备日志源文件: {device_log_path if device_log_path else '未定位'}",
             f"归档日志文件: logs/{archived_log_name}" if archived_log_name else "归档日志文件: 未找到设备日志源文件",
             "",
@@ -2131,6 +2143,37 @@ class LauncherWindow(QWidget):
             )
         except Exception:
             log_exception(f"write stream disconnect immediate artifacts failed: archive_dir={archive_dir}")
+
+    def _mark_current_run_sp_started(self, source: str, state: Optional[dict] = None):
+        if state:
+            self.current_run_sp_state = state
+        if self.current_run_sp_started:
+            return
+        self.current_run_sp_started = True
+        LOGGER.info("sp recording started detected: source=%s state=%s", source, state)
+
+    def _refresh_current_run_sp_state(self):
+        archive_dir = self.current_run_archive_dir
+        if archive_dir is None:
+            return
+
+        state_path = archive_dir / "sp_recording_state.json"
+        if not state_path.exists():
+            return
+
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            log_exception(f"read sp recording state failed: state_path={state_path}")
+            return
+
+        self.current_run_sp_state = state
+        if (
+            state.get("sp_started_ever")
+            or state.get("sp_recording")
+            or state.get("sp_saved")
+        ):
+            self._mark_current_run_sp_started("state_file", state)
 
     def _capture_stream_disconnect_screenshot(self, archive_dir: Path) -> Optional[Path]:
         screenshot_dir = archive_dir / "stream_disconnect_screenshots"
@@ -2216,6 +2259,8 @@ class LauncherWindow(QWidget):
             "run_index": self.current_run_index + 1,
             "stream_disconnect_startup": self.current_run_stream_disconnect_startup,
             "stream_disconnect_message": self.current_run_stream_disconnect_message,
+            "sp_started": self.current_run_sp_started,
+            "sp_state": self.current_run_sp_state,
             "screenshot_path": None,
             "sp_save_attempted": False,
             "sp_save_ok": False,
@@ -2242,25 +2287,47 @@ class LauncherWindow(QWidget):
         if self.current_run_stream_disconnected:
             return
 
+        self._refresh_current_run_sp_state()
         self.current_run_stream_disconnected = True
-        self.current_run_stream_disconnect_startup = not self.current_run_stream_started
+        self.current_run_stream_disconnect_startup = not self.current_run_sp_started
         self.current_run_stream_disconnect_message = str(message or source or "stream disconnected")
-        phase_text = "启动阶段" if self.current_run_stream_disconnect_startup else "用例中途"
+        phase_text = "启动阶段" if self.current_run_stream_disconnect_startup else "SP记录后"
         self._log_message(
             f"\n[Launcher] 检测到 gRPC 流断连({phase_text}, source={source})："
             f"{self.current_run_stream_disconnect_message}\n"
         )
+        if self.current_run_stream_disconnect_startup:
+            self._log_message(
+                "[Launcher] SP 记录尚未开始，本次按启动阶段断流处理："
+                "不截图、不保存 SP、不归档本轮日志，直接停止当前子进程并准备重启。\n"
+            )
+            self._set_status("启动阶段 gRPC 流断连，正在停止当前子进程并准备重启手机。")
+            self._request_stream_disconnect_process_exit(immediate=True)
+            return
+
         self._write_stream_disconnect_immediate_artifacts()
         self._preserve_stream_disconnect_run_state()
-        self._log_message("[Launcher] 归档时会把本次 testcases 设备日志复制到对应运行目录。\n")
-        self._set_status("检测到 gRPC 流断连，正在保存本轮状态并停止当前子进程。")
-        self._request_stream_disconnect_process_exit()
+        self._log_message(
+            "[Launcher] 归档时会把本次 testcases 设备日志复制到对应运行目录；"
+            "子进程退出前会先触发 testcases 的 stop_device_log()。\n"
+        )
+        self._set_status("SP记录后检测到 gRPC 流断连，正在保存本轮状态并等待用例收尾。")
+        self._request_stream_disconnect_process_exit(immediate=False)
 
-    def _request_stream_disconnect_process_exit(self):
+    def _request_stream_disconnect_process_exit(self, immediate: bool = False):
         if self.process is None:
             return
         if self.process.state() == QProcess.ProcessState.NotRunning:
             self._log_message("[Launcher] 断流保全：子进程已退出，继续归档本轮状态。\n")
+            return
+
+        if immediate:
+            self._log_message("[Launcher] 启动阶段断流：立即终止当前子进程，随后执行重启恢复。\n")
+            self.process.terminate()
+            QTimer.singleShot(
+                STREAM_DISCONNECT_FORCE_KILL_TIMEOUT_MS,
+                self._force_kill_stream_disconnect_process_if_running,
+            )
             return
 
         self._log_message(
@@ -2373,6 +2440,8 @@ class LauncherWindow(QWidget):
                     "stream_disconnect_device_log_archived": stream_archived_log_name,
                     "stream_disconnect_notice_written": stream_notice_written,
                     "stream_started": self.current_run_stream_started,
+                    "sp_started": self.current_run_sp_started,
+                    "sp_state": self.current_run_sp_state,
                     "batch_start_timestamp": self.current_batch_start_timestamp,
                     "run_start_timestamp": self.current_run_start_timestamp,
                     "inactivity_timeout_minutes": self.current_plan["inactivity_timeout_minutes"],
@@ -2393,6 +2462,23 @@ class LauncherWindow(QWidget):
         except Exception:
             log_exception(f"archive_run_outputs failed: run_no={run_no}")
             self._log_message("[Launcher] 运行产物归档失败，请查看 launcher_debug.log。\n", level=logging.ERROR)
+
+    def _discard_startup_disconnect_archive_dir(self):
+        archive_dir = self.current_run_archive_dir
+        if archive_dir is None or not archive_dir.exists():
+            return
+
+        try:
+            shutil.rmtree(archive_dir)
+            self._log_message(
+                f"[Launcher] 启动阶段断流未归档本轮产物，已清理预创建目录：{archive_dir}\n"
+            )
+        except Exception:
+            log_exception(f"discard startup disconnect archive dir failed: archive_dir={archive_dir}")
+            self._log_message(
+                f"[Launcher] 启动阶段断流目录清理失败，请手动检查：{archive_dir}\n",
+                level=logging.WARNING,
+            )
 
     def _handle_run_timeout(self):
         if self.process is None or self.current_plan is None:
@@ -2442,6 +2528,8 @@ class LauncherWindow(QWidget):
         if not text:
             return
 
+        self._handle_sp_output(text)
+
         if self.current_run_stream_disconnected:
             return
 
@@ -2460,6 +2548,10 @@ class LauncherWindow(QWidget):
             matched_pattern,
         )
         self._mark_stream_disconnected(message, "stdout")
+
+    def _handle_sp_output(self, text: str):
+        if any(marker in text for marker in SP_RECORD_EVER_STARTED_MARKERS):
+            self._mark_current_run_sp_started("stdout")
 
     def _extract_stream_disconnect_line(self, text: str, matched_pattern: str) -> str:
         for line in text.splitlines():
@@ -2562,7 +2654,14 @@ class LauncherWindow(QWidget):
         self._log_message(f"\n[Launcher] {finish_prefix}，exit_code={exit_code}\n")
         self._poll_preview_frame()
         run_no = self.current_run_index + 1
-        self._archive_run_outputs(run_no, exit_code)
+        startup_stream_disconnect = (
+            self.current_run_stream_disconnected
+            and self.current_run_stream_disconnect_startup
+        )
+        if startup_stream_disconnect:
+            self._discard_startup_disconnect_archive_dir()
+        else:
+            self._archive_run_outputs(run_no, exit_code)
         self.preview_timer.stop()
         if self.process is not None:
             self.process.deleteLater()
@@ -2583,8 +2682,8 @@ class LauncherWindow(QWidget):
         if self.current_run_stream_disconnected:
             if self.current_run_stream_disconnect_startup:
                 self._log_message(
-                    "[Launcher] 本次断流发生在用例启动阶段，不计入已执行次数；"
-                    "重启手机后将重新运行当前用例。\n"
+                    "[Launcher] 本次断流发生在 SP 记录开始前，不计入已执行次数，"
+                    "本轮不保存产物；重启手机后将重新运行当前用例。\n"
                 )
                 if not self._restart_device_for_stream_disconnect():
                     self._finish_batch("断流恢复失败，批量任务已终止。")
@@ -2601,7 +2700,7 @@ class LauncherWindow(QWidget):
                 return
 
             self._log_message(
-                "[Launcher] 本次断流发生在用例中途，结果已归档并写入 stream_disconnected 标志；"
+                "[Launcher] 本次断流发生在 SP 记录开始后，结果已归档并写入 stream_disconnected 标志；"
                 "当前用例计为完成。\n"
             )
 

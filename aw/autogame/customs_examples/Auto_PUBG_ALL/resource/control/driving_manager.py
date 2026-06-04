@@ -1,5 +1,3 @@
-import json
-import os
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -16,6 +14,8 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_g
     draw_points_with_arrows,
     get_distance,
     is_location_stagnant,
+    load_adaptive_motion_section,
+    persist_adaptive_motion_section,
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import Cooldown, Stopwatch
 
@@ -33,6 +33,7 @@ class DriveContext:
 
 
 class TurnCalibration:
+    SECTION = "drive_turn"
     DEFAULT_DEG_PER_MS = 0.08
     MIN_DEG_PER_MS = 0.02
     MAX_DEG_PER_MS = 0.20
@@ -43,20 +44,12 @@ class TurnCalibration:
     MAX_OBSERVED_DEG = 120.0
 
     def __init__(self, path: Optional[str] = None):
-        resource_dir = os.path.dirname(os.path.abspath(__file__))
-        self.path = path or os.path.join(resource_dir, "driving_turn_calibration.json")
+        self.path = path
         self.data: Dict[str, Dict[str, Any]] = {}
         self.load()
 
     def load(self):
-        if not os.path.exists(self.path):
-            return
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-        except Exception as exc:
-            print(f"[TurnCalibration] 读取转向标定失败: {exc}")
-            return
+        raw = load_adaptive_motion_section(self.SECTION)
         if isinstance(raw, dict):
             self.data = {
                 str(key): value
@@ -65,14 +58,7 @@ class TurnCalibration:
             }
 
     def save(self):
-        tmp_path = f"{self.path}.tmp"
-        try:
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, ensure_ascii=False, indent=2, sort_keys=True)
-            os.replace(tmp_path, self.path)
-        except Exception as exc:
-            print(f"[TurnCalibration] 保存转向标定失败: {exc}")
+        persist_adaptive_motion_section(self.SECTION, self.data)
 
     def estimate_duration(
         self,

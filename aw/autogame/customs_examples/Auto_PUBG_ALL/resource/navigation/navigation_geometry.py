@@ -50,6 +50,14 @@ def _persist_adaptive_motion_section(section, table):
         print(f"[AdaptiveMotion] 保存持久化动作表失败: {e}")
 
 
+def load_adaptive_motion_section(section):
+    return dict(_get_adaptive_motion_section(section))
+
+
+def persist_adaptive_motion_section(section, table):
+    _persist_adaptive_motion_section(section, table if isinstance(table, dict) else {})
+
+
 def _motion_entry_as_ints(entry, required_fields):
     if not isinstance(entry, dict):
         return None
@@ -287,22 +295,62 @@ class AdaptiveTurnTable:
     MAX_ANGLE = 180
     ANGLE_STEP = 5
     UPDATE_ALPHA = 0.45
+    MODEL_UPDATE_ALPHA = 0.28
     MIN_OBSERVED_DEG = 1.0
     MIN_OBSERVED_RATIO = 0.2
     MIN_PX = 8
     MAX_PX = 1200
     MIN_DURA = 80
     MAX_DURA = 1800
+    MIN_SLOPE = 2.0
+    MAX_SLOPE = 10.0
+    MIN_INTERCEPT = 0.0
+    MAX_INTERCEPT = 220.0
+    MIN_DURA_SCALE = 0.9
+    MAX_DURA_SCALE = 2.4
     SCALE_MIN = 0.45
     SCALE_MAX = 1.8
+    MODEL_KEY = "models"
+    DEFAULT_MODELS = {
+        "left": {"slope": 5.31, "intercept": 49.0, "dura_scale": 1.5, "samples": 0},
+        "right": {"slope": 5.31, "intercept": 49.0, "dura_scale": 1.5, "samples": 0},
+    }
 
     def __init__(self):
         self.table = {"left": {}, "right": {}}
+        self.models = {
+            turn_dir: dict(model)
+            for turn_dir, model in self.DEFAULT_MODELS.items()
+        }
         self._load_persisted_table()
 
     def _load_persisted_table(self):
         raw = _get_adaptive_motion_section("turn")
         dirty = False
+        model_entries = raw.get(self.MODEL_KEY)
+        if isinstance(model_entries, dict):
+            for turn_dir in ("left", "right"):
+                entry = model_entries.get(turn_dir)
+                if not isinstance(entry, dict):
+                    continue
+                model = dict(self.models[turn_dir])
+                raw_slope = entry.get("slope", model["slope"])
+                raw_intercept = entry.get("intercept", model["intercept"])
+                raw_dura_scale = entry.get("dura_scale", model["dura_scale"])
+                model["slope"] = self._clamp_slope(raw_slope)
+                model["intercept"] = self._clamp_intercept(raw_intercept)
+                model["dura_scale"] = self._clamp_dura_scale(raw_dura_scale)
+                try:
+                    model["samples"] = int(entry.get("samples", 0))
+                except (TypeError, ValueError):
+                    model["samples"] = 0
+                dirty = dirty or (
+                    model["slope"] != raw_slope
+                    or model["intercept"] != raw_intercept
+                    or model["dura_scale"] != raw_dura_scale
+                )
+                self.models[turn_dir] = model
+
         for turn_dir in ("left", "right"):
             entries = raw.get(turn_dir)
             if not isinstance(entries, dict):
@@ -322,7 +370,12 @@ class AdaptiveTurnTable:
             self._persist()
 
     def _persist(self):
-        _persist_adaptive_motion_section("turn", self.table)
+        payload = {
+            "left": self.table.get("left", {}),
+            "right": self.table.get("right", {}),
+            self.MODEL_KEY: self.models,
+        }
+        _persist_adaptive_motion_section("turn", payload)
 
     def angle_bin(self, angle):
         try:
@@ -343,7 +396,8 @@ class AdaptiveTurnTable:
         if entry:
             return self._clamp_px(entry["px"]), self._clamp_dura(entry["dura"]), angle_key
 
-        return self._clamp_px(fallback_px), self._clamp_dura(fallback_dura), angle_key
+        model_px, model_dura = self._predict_model_motion(turn_dir, angle_key, fallback_px, fallback_dura)
+        return model_px, model_dura, angle_key
 
     def observe(self, turn_dir, desired_diff, before_angle, after_angle, used_px, used_dura):
         angle_key = self.angle_bin(desired_diff)
@@ -360,6 +414,7 @@ class AdaptiveTurnTable:
             )
             return
 
+        had_entry = angle_key in self.table[turn_dir]
         scale = angle_key / observed
         scale = max(self.SCALE_MIN, min(self.SCALE_MAX, scale))
         measured_px = self._clamp_px(abs(float(used_px or 0)) * scale)
@@ -367,11 +422,16 @@ class AdaptiveTurnTable:
 
         entry = self.table[turn_dir].get(angle_key)
         if not entry:
+            self._update_model(turn_dir, angle_key, measured_px, measured_dura)
             self.table[turn_dir][angle_key] = {
                 "px": measured_px,
                 "dura": measured_dura,
                 "samples": 1,
             }
+            print(
+                f"[AdaptiveMotion] 建立转向表: turn={turn_dir}, angle={angle_key}, "
+                f"px={measured_px}, dura={measured_dura}"
+            )
             self._persist()
             return
 
@@ -379,7 +439,59 @@ class AdaptiveTurnTable:
         entry["px"] = self._clamp_px(entry["px"] * (1.0 - alpha) + measured_px * alpha)
         entry["dura"] = self._clamp_dura(entry["dura"] * (1.0 - alpha) + measured_dura * alpha)
         entry["samples"] = int(entry.get("samples", 0)) + 1
+        if had_entry:
+            print(
+                f"[AdaptiveMotion] 更新转向表: turn={turn_dir}, angle={angle_key}, "
+                f"px={entry['px']}, dura={entry['dura']}, samples={entry['samples']}"
+            )
         self._persist()
+
+    def _predict_model_motion(self, turn_dir, angle_key, fallback_px, fallback_dura):
+        model = self.models.get(turn_dir, self.DEFAULT_MODELS.get(turn_dir, self.DEFAULT_MODELS["right"]))
+        try:
+            angle = float(angle_key)
+        except (TypeError, ValueError):
+            angle = 0.0
+        if angle <= 0:
+            return self._clamp_px(fallback_px), self._clamp_dura(fallback_dura)
+
+        predicted_px = self._clamp_px(float(model["slope"]) * angle + float(model["intercept"]))
+        predicted_dura = float(predicted_px) * float(model["dura_scale"])
+        try:
+            predicted_dura = max(predicted_dura, float(fallback_dura or 0))
+        except (TypeError, ValueError):
+            pass
+        return predicted_px, self._clamp_dura(predicted_dura)
+
+    def _update_model(self, turn_dir, angle_key, measured_px, measured_dura):
+        model = self.models.get(turn_dir)
+        if not model:
+            return
+        try:
+            angle = max(float(angle_key), 1.0)
+            px = float(measured_px)
+            dura = float(measured_dura)
+        except (TypeError, ValueError):
+            return
+
+        target_slope = self._clamp_slope((px - float(model["intercept"])) / angle)
+        target_intercept = self._clamp_intercept(px - float(model["slope"]) * angle)
+        target_dura_scale = self._clamp_dura_scale(dura / max(px, 1.0))
+        alpha = self.MODEL_UPDATE_ALPHA
+        intercept_alpha = alpha * 0.35
+        model["slope"] = self._clamp_slope(model["slope"] * (1.0 - alpha) + target_slope * alpha)
+        model["intercept"] = self._clamp_intercept(
+            model["intercept"] * (1.0 - intercept_alpha) + target_intercept * intercept_alpha
+        )
+        model["dura_scale"] = self._clamp_dura_scale(
+            model["dura_scale"] * (1.0 - alpha) + target_dura_scale * alpha
+        )
+        model["samples"] = int(model.get("samples", 0)) + 1
+        print(
+            f"[AdaptiveMotion] 更新转向模型: turn={turn_dir}, angle={angle_key}, "
+            f"slope={model['slope']:.3f}, intercept={model['intercept']:.1f}, "
+            f"dura_scale={model['dura_scale']:.3f}, samples={model['samples']}"
+        )
 
     def _clamp_px(self, value):
         try:
@@ -398,6 +510,27 @@ class AdaptiveTurnTable:
         if value <= 0:
             return 0
         return max(self.MIN_DURA, min(self.MAX_DURA, value))
+
+    def _clamp_slope(self, value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = self.DEFAULT_MODELS["right"]["slope"]
+        return max(self.MIN_SLOPE, min(self.MAX_SLOPE, value))
+
+    def _clamp_intercept(self, value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = self.DEFAULT_MODELS["right"]["intercept"]
+        return max(self.MIN_INTERCEPT, min(self.MAX_INTERCEPT, value))
+
+    def _clamp_dura_scale(self, value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = self.DEFAULT_MODELS["right"]["dura_scale"]
+        return max(self.MIN_DURA_SCALE, min(self.MAX_DURA_SCALE, value))
 
     @staticmethod
     def _observed_turn_degrees(turn_dir, before_angle, after_angle):
@@ -430,110 +563,253 @@ def update_adaptive_turn_motion(turn_dir, desired_diff, before_angle, after_angl
     adaptive_turn_table.observe(turn_dir, desired_diff, before_angle, after_angle, used_px, used_dura)
 
 
+def plan_view_turn_motion(
+    current_angle,
+    target_angle,
+    fallback_dura=None,
+    min_dura=None,
+    max_dura=None,
+    max_px=None,
+):
+    turn_dir, fallback_px, diff = calculate_move_count(current_angle, target_angle)
+    if turn_dir is None or diff is None:
+        return None
+
+    if fallback_dura is None:
+        fallback_dura = max(250, int((fallback_px or 0) * 1.5))
+
+    used_px, used_dura, angle_key = get_adaptive_turn_motion(turn_dir, diff, fallback_px, fallback_dura)
+    if max_px is not None:
+        used_px = min(int(max_px), int(used_px or 0))
+    if min_dura is not None:
+        used_dura = max(int(min_dura), int(used_dura or 0))
+    if max_dura is not None:
+        used_dura = min(int(max_dura), int(used_dura or 0))
+
+    x_bias = used_px if turn_dir == "right" else -used_px
+    return {
+        "turn_dir": turn_dir,
+        "diff": diff,
+        "angle_key": angle_key,
+        "px": int(used_px or 0),
+        "dura": int(used_dura or 0),
+        "x_bias": int(x_bias or 0),
+        "fallback_px": int(fallback_px or 0),
+        "fallback_dura": int(fallback_dura or 0),
+    }
+
+
+def execute_view_turn(
+    w,
+    current_angle,
+    target_angle,
+    threshold=5,
+    max_steps=1,
+    wait=250,
+    fallback_dura=None,
+    min_dura=None,
+    max_dura=None,
+    max_px=None,
+    log_prefix="[Turn]",
+):
+    for _ in range(max_steps):
+        motion = plan_view_turn_motion(
+            current_angle,
+            target_angle,
+            fallback_dura=fallback_dura,
+            min_dura=min_dura,
+            max_dura=max_dura,
+            max_px=max_px,
+        )
+        if motion is None:
+            return False
+        if motion["diff"] <= threshold:
+            return True
+        if not motion["px"]:
+            return True
+
+        print(
+            f"{log_prefix} current={current_angle}, target={target_angle}, "
+            f"diff={motion['diff']:.1f}, bin={motion['angle_key']}, "
+            f"x_bias={motion['x_bias']}, dura={motion['dura']}"
+        )
+        before_angle = current_angle
+        w.tap_single("视角", x_bias=motion["x_bias"], dura=motion["dura"], wait=wait)
+        w.refresh_frame()
+        current_angle = w.get_info("direction")
+        update_adaptive_turn_motion(
+            motion["turn_dir"],
+            motion["diff"],
+            before_angle,
+            current_angle,
+            motion["px"],
+            motion["dura"],
+        )
+        if current_angle is None:
+            return False
+    return False
+
+
 class AdaptiveForwardMoveTable:
-    MIN_DISTANCE = 1
+    MIN_DISTANCE = 0.2
     MAX_DISTANCE = 60
-    DISTANCE_STEP = 1
-    UPDATE_ALPHA = 0.45
+    UPDATE_ALPHA = 0.55
     MIN_OBSERVED_DISTANCE = 0.2
-    MIN_Y_BIAS = 80
-    MAX_Y_BIAS = 520
-    MIN_DURA = 80
-    MAX_DURA = 2600
-    MIN_WAIT = 120
+    MIN_OBSERVED_RATIO = 0.08
+    ARRIVAL_DISTANCE = 1.0
+    FIXED_DURA = 300
+    MIN_WAIT = 180
     MAX_WAIT = 7000
-    MIN_WAIT_PAD = 120
-    SCALE_MIN = 0.55
+    MIN_SLOPE = 12.0
+    MAX_SLOPE = 260.0
+    MIN_INTERCEPT = 120.0
+    MAX_INTERCEPT = 1000.0
+    SCALE_MIN = 0.65
     SCALE_MAX = 1.85
+    DEFAULT_MODELS = {
+        "slow": {"y_bias": -100, "slope": 60.0, "intercept": 300.0},
+        "fast": {"y_bias": -300, "slope": 32.0, "intercept": 220.0},
+    }
 
     def __init__(self):
-        self.table = {}
+        self.table = {
+            mode: dict(model, samples=0)
+            for mode, model in self.DEFAULT_MODELS.items()
+        }
         self._load_persisted_table()
 
     def _load_persisted_table(self):
         raw = _get_adaptive_motion_section("forward")
-        for mode, entries in raw.items():
-            if not isinstance(entries, dict):
+        if not isinstance(raw, dict):
+            return
+
+        dirty = False
+        for mode in self.DEFAULT_MODELS:
+            entry = raw.get(mode)
+            if not isinstance(entry, dict):
                 continue
 
-            mode_table = self.table.setdefault(str(mode), {})
-            for distance, entry in entries.items():
-                distance_key = self.distance_bin(distance)
-                cleaned = _motion_entry_as_ints(entry, ("y_bias", "dura", "wait"))
-                if distance_key is not None and cleaned:
-                    mode_table[distance_key] = cleaned
+            if "slope" not in entry or "intercept" not in entry:
+                continue
+
+            model = dict(self.table[mode])
+            raw_y = entry.get("y_bias", model["y_bias"])
+            raw_slope = entry.get("slope", model["slope"])
+            raw_intercept = entry.get("intercept", model["intercept"])
+            model["y_bias"] = self.DEFAULT_MODELS[mode]["y_bias"]
+            model["slope"] = self._clamp_slope(raw_slope)
+            model["intercept"] = self._clamp_intercept(raw_intercept)
+            try:
+                model["samples"] = int(entry.get("samples", 0))
+            except (TypeError, ValueError):
+                model["samples"] = 0
+
+            dirty = dirty or (
+                model["y_bias"] != raw_y
+                or model["slope"] != raw_slope
+                or model["intercept"] != raw_intercept
+            )
+            self.table[mode] = model
+
+        if dirty:
+            self._persist()
 
     def _persist(self):
         _persist_adaptive_motion_section("forward", self.table)
 
-    def distance_bin(self, distance):
+    def _clamp_distance(self, distance):
         try:
             value = float(distance)
         except (TypeError, ValueError):
-            return None
-        if value < self.MIN_OBSERVED_DISTANCE:
-            return None
-        value = max(self.MIN_DISTANCE, min(self.MAX_DISTANCE, value))
-        return int(round(value / self.DISTANCE_STEP) * self.DISTANCE_STEP)
+            value = 0.0
+        return max(0.0, min(self.MAX_DISTANCE, value))
+
+    def _normalize_mode(self, mode, fallback_y_bias=None):
+        mode = str(mode or "").lower()
+        if mode in self.DEFAULT_MODELS:
+            return mode
+        try:
+            y_bias = abs(float(fallback_y_bias or 0))
+        except (TypeError, ValueError):
+            y_bias = 0
+        return "slow" if y_bias <= 150 else "fast"
+
+    def _get_model(self, mode, fallback_y_bias=None):
+        mode = self._normalize_mode(mode, fallback_y_bias)
+        return mode, self.table.setdefault(mode, dict(self.DEFAULT_MODELS[mode], samples=0))
 
     def get(self, mode, desired_distance, fallback_y_bias, fallback_dura, fallback_wait):
-        distance_key = self.distance_bin(desired_distance)
-        if distance_key is None:
-            return int(fallback_y_bias or 0), int(fallback_dura or 0), int(fallback_wait or 0), distance_key
+        mode, model = self._get_model(mode, fallback_y_bias)
+        distance = self._clamp_distance(desired_distance)
+        if distance < self.MIN_DISTANCE:
+            return int(model["y_bias"]), self.FIXED_DURA, 0, 0
 
-        mode_table = self.table.get(mode, {})
-        entry = mode_table.get(distance_key)
-        if entry:
-            return int(entry["y_bias"]), int(entry["dura"]), int(entry["wait"]), distance_key
-
-        return int(fallback_y_bias or 0), int(fallback_dura or 0), int(fallback_wait or 0), distance_key
+        wait = self._predict_wait(model, distance)
+        return int(model["y_bias"]), self.FIXED_DURA, wait, round(distance, 2)
 
     def observe(self, mode, desired_distance, before_distance, after_distance, used_y_bias, used_dura, used_wait):
-        distance_key = self.distance_bin(desired_distance)
-        if distance_key is None:
+        mode, model = self._get_model(mode, used_y_bias)
+        desired = self._clamp_distance(desired_distance)
+        if desired < self.MIN_DISTANCE:
             return
 
         observed = self._observed_forward_distance(before_distance, after_distance)
+        if after_distance is not None:
+            try:
+                if float(after_distance) <= self.ARRIVAL_DISTANCE:
+                    observed = desired
+            except (TypeError, ValueError):
+                pass
+
         if observed is None or observed < self.MIN_OBSERVED_DISTANCE:
             return
-
-        scale = distance_key / observed
-        scale = max(self.SCALE_MIN, min(self.SCALE_MAX, scale))
-
-        measured_y = self._scaled_forward_bias(used_y_bias, scale)
-        measured_dura = max(self.MIN_DURA, min(self.MAX_DURA, int(round(float(used_dura or 0) * scale))))
-        measured_wait = max(
-            measured_dura + self.MIN_WAIT_PAD,
-            max(self.MIN_WAIT, min(self.MAX_WAIT, int(round(float(used_wait or 0) * scale)))),
-        )
-
-        mode_table = self.table.setdefault(mode, {})
-        entry = mode_table.get(distance_key)
-        if not entry:
-            mode_table[distance_key] = {
-                "y_bias": measured_y,
-                "dura": measured_dura,
-                "wait": measured_wait,
-                "samples": 1,
-            }
-            self._persist()
+        if observed < desired * self.MIN_OBSERVED_RATIO:
+            print(
+                f"[AdaptiveMotion] 跳过异常前推样本: mode={mode}, "
+                f"desired={desired:.2f}, observed={observed:.2f}"
+            )
             return
 
+        scale = desired / observed
+        scale = max(self.SCALE_MIN, min(self.SCALE_MAX, scale))
+        measured_wait = self._clamp_wait(float(used_wait or 0) * scale)
+        target_slope = (measured_wait - float(model["intercept"])) / max(desired, self.MIN_DISTANCE)
+        target_slope = self._clamp_slope(target_slope)
         alpha = self.UPDATE_ALPHA
-        entry["y_bias"] = int(round(entry["y_bias"] * (1.0 - alpha) + measured_y * alpha))
-        entry["dura"] = int(round(entry["dura"] * (1.0 - alpha) + measured_dura * alpha))
-        entry["wait"] = int(round(entry["wait"] * (1.0 - alpha) + measured_wait * alpha))
-        entry["samples"] = int(entry.get("samples", 0)) + 1
+        model["slope"] = self._clamp_slope(model["slope"] * (1.0 - alpha) + target_slope * alpha)
+        model["samples"] = int(model.get("samples", 0)) + 1
+        print(
+            f"[AdaptiveMotion] 更新前推模型: mode={mode}, desired={desired:.2f}, "
+            f"observed={observed:.2f}, wait={used_wait}->{measured_wait}, "
+            f"slope={model['slope']:.2f}, samples={model['samples']}"
+        )
         self._persist()
 
-    def _scaled_forward_bias(self, y_bias, scale):
+    def _predict_wait(self, model, distance):
+        return self._clamp_wait(float(model["slope"]) * float(distance) + float(model["intercept"]))
+
+    def _clamp_wait(self, value):
         try:
-            value = float(y_bias)
+            value = int(round(float(value or 0)))
         except (TypeError, ValueError):
-            value = -self.MIN_Y_BIAS
-        sign = -1 if value <= 0 else 1
-        magnitude = max(self.MIN_Y_BIAS, min(self.MAX_Y_BIAS, int(round(abs(value) * scale))))
-        return sign * magnitude
+            value = 0
+        if value <= 0:
+            return 0
+        return max(self.MIN_WAIT, min(self.MAX_WAIT, value))
+
+    def _clamp_slope(self, value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = self.MIN_SLOPE
+        return max(self.MIN_SLOPE, min(self.MAX_SLOPE, value))
+
+    def _clamp_intercept(self, value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = self.MIN_INTERCEPT
+        return max(self.MIN_INTERCEPT, min(self.MAX_INTERCEPT, value))
 
     @staticmethod
     def _observed_forward_distance(before_distance, after_distance):
@@ -757,22 +1033,18 @@ def align_direction(w, tar_loc, threshold=5):
     cur_dir = w.get_info('direction')
 
     target_angle = calculate_angle(cur_loc, tar_loc)
-    turn_dir, px, diff = calculate_move_count(cur_dir, target_angle)
-
-    # [Print] 仅在偏差存在时打印，避免刷屏
-    print(f"[Check] 当前: {cur_dir:.1f}° | 目标: {target_angle:.1f}° | 偏差: {diff:.1f}°")
-
-    if abs(diff) > threshold:
-        fallback_dura = 800
-        used_px, used_dura, _ = get_adaptive_turn_motion(turn_dir, diff, px, fallback_dura)
-        move_px = used_px if turn_dir == 'right' else -used_px
-
-        print(f"[Align] 修正视角: 当前 {cur_dir:.1f}° -> 目标 {target_angle:.1f}° (偏差 {diff:.1f}°)")
-        print(f"        执行: {'右转' if turn_dir == 'right' else '左转'} {int(move_px)} px")
-
-        w.tap_single('视角', x_bias=int(move_px), dura=used_dura, wait=500)
-        w.refresh_frame()
-        update_adaptive_turn_motion(turn_dir, diff, cur_dir, w.get_info('direction'), used_px, used_dura)
+    if cur_dir is None or target_angle is None:
+        return False
+    return execute_view_turn(
+        w,
+        cur_dir,
+        target_angle,
+        threshold=threshold,
+        max_steps=1,
+        wait=500,
+        fallback_dura=800,
+        log_prefix="[Align]",
+    )
 
 def is_location_stagnant(history_points):
     """

@@ -10,10 +10,11 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_g
     calculate_angle,
     calculate_move_count,
     check_location,
+    execute_view_turn,
     get_distance,
-    get_adaptive_turn_motion,
+    get_adaptive_forward_motion,
     is_location_stagnant, draw_points_with_arrows,
-    update_adaptive_turn_motion,
+    update_adaptive_forward_motion,
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_path_utils import find_path, get_resolution
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import (
@@ -2366,9 +2367,14 @@ class RunningManager:
                 self._handle_precise_entry_no_progress(w, location, direction, dist_to_entry)
                 return
 
-            self._align_to_point(w, location, direction, self.CAR_ENTRY_POINT, threshold=3)
-            w.tap_single("摇杆", y_bias=-120, dura=180, wait=350)
-            w.refresh_frame()
+            if not self._align_to_point(w, location, direction, self.CAR_ENTRY_POINT, threshold=3):
+                return
+            self._tap_distance_forward_with_learning(
+                w,
+                self.CAR_ENTRY_POINT,
+                dist_to_entry,
+                "精调靠近上车点",
+            )
             return
 
         print(
@@ -3061,25 +3067,15 @@ class RunningManager:
         threshold: int = 5,
     ) -> bool:
         target_dir = calculate_angle(location, target)
-        turn_dir, pixel, diff = calculate_move_count(direction, target_dir)
-
-        if turn_dir is None:
-            return False
-
-        if diff <= threshold:
-            return True
-
-        fallback_dura = max(250, int(pixel * 1.5))
-        used_px, dura_time, angle_key = get_adaptive_turn_motion(turn_dir, diff, pixel, fallback_dura)
-        x_bias = used_px if turn_dir == "right" else -used_px
-        print(
-            f"[Running] 调整方向: current={direction}, target={target_dir}, "
-            f"diff={diff:.1f}, bin={angle_key}, pixel={used_px}, dura={dura_time}"
+        return execute_view_turn(
+            w,
+            direction,
+            target_dir,
+            threshold=threshold,
+            max_steps=1,
+            wait=250,
+            log_prefix="[RunningAlign]",
         )
-        w.tap_single("视角", x_bias=int(x_bias), dura=dura_time, wait=250)
-        w.refresh_frame()
-        update_adaptive_turn_motion(turn_dir, diff, direction, w.get_info("direction"), used_px, dura_time)
-        return False
 
     def _align_to_direction(
         self,
@@ -3088,25 +3084,15 @@ class RunningManager:
         target_direction: float,
         threshold: int = 5,
     ) -> bool:
-        turn_dir, pixel, diff = calculate_move_count(direction, target_direction)
-
-        if turn_dir is None:
-            return False
-
-        if diff <= threshold:
-            return True
-
-        fallback_dura = max(250, int(pixel * 1.5))
-        used_px, dura_time, angle_key = get_adaptive_turn_motion(turn_dir, diff, pixel, fallback_dura)
-        x_bias = used_px if turn_dir == "right" else -used_px
-        print(
-            f"[Running] 调整朝向: current={direction}, target={target_direction}, "
-            f"diff={diff:.1f}, bin={angle_key}, pixel={used_px}, dura={dura_time}"
+        return execute_view_turn(
+            w,
+            direction,
+            target_direction,
+            threshold=threshold,
+            max_steps=1,
+            wait=250,
+            log_prefix="[RunningDirection]",
         )
-        w.tap_single("视角", x_bias=int(x_bias), dura=dura_time, wait=250)
-        w.refresh_frame()
-        update_adaptive_turn_motion(turn_dir, diff, direction, w.get_info("direction"), used_px, dura_time)
-        return False
 
     def _precise_approach_waypoint(
         self,
@@ -3132,21 +3118,70 @@ class RunningManager:
             self._log_running_state("精确逼近调方向", location, direction, "先对齐目标点", target, dist)
             return
 
+        mode = self._forward_model_mode(dist)
+        y_bias, dura, wait, model_dist = self._get_distance_forward_motion(mode, dist)
         self._log_running_state(
             "精确逼近目标点",
             location,
             direction,
-            f"短推摇杆 {self.WAYPOINT_PRECISE_DURA}ms",
+            f"{mode}前推 y_bias={y_bias}, dura={dura}, wait={wait}, model_dist={model_dist}",
             target,
             dist,
         )
+        self._tap_distance_forward_with_learning(w, target, dist, "精确逼近目标点")
+
+    def _forward_model_mode(self, dist: float) -> str:
+        try:
+            dist_val = float(dist)
+        except (TypeError, ValueError):
+            dist_val = 0.0
+        return "fast" if dist_val > self.WAYPOINT_PRECISE_APPROACH_DISTANCE else "slow"
+
+    @staticmethod
+    def _forward_model_fallback_wait(mode: str, dist: float) -> int:
+        try:
+            dist_val = max(0.0, float(dist))
+        except (TypeError, ValueError):
+            dist_val = 0.0
+        if mode == "fast":
+            return int(max(180, min(7000, dist_val * 32 + 220)))
+        return int(max(180, min(7000, dist_val * 60 + 300)))
+
+    def _get_distance_forward_motion(self, mode: str, dist: float):
+        fallback_y_bias = -300 if mode == "fast" else -100
+        fallback_dura = 300
+        fallback_wait = self._forward_model_fallback_wait(mode, dist)
+        return get_adaptive_forward_motion(
+            mode,
+            dist,
+            fallback_y_bias,
+            fallback_dura,
+            fallback_wait,
+        )
+
+    def _tap_distance_forward_with_learning(
+        self,
+        w: "FrameWorker",
+        target: Tuple[int, int],
+        dist: float,
+        reason: str,
+    ):
+        mode = self._forward_model_mode(dist)
+        y_bias, dura, wait, model_dist = self._get_distance_forward_motion(mode, dist)
+        print(
+            f"[Running] {reason}: mode={mode}, dist={dist:.2f}, "
+            f"model_dist={model_dist}, y_bias={y_bias}, dura={dura}, wait={wait}"
+        )
         w.tap_single(
             "摇杆",
-            y_bias=self.WAYPOINT_PRECISE_BIAS_Y,
-            dura=self.WAYPOINT_PRECISE_DURA,
-            wait=self.WAYPOINT_PRECISE_WAIT,
+            y_bias=y_bias,
+            dura=dura,
+            wait=wait,
         )
         w.refresh_frame()
+        after_location = self._get_location(w)
+        after_dist = get_distance(after_location, target) if after_location is not None else None
+        update_adaptive_forward_motion(mode, dist, dist, after_dist, y_bias, dura, wait)
 
     def _move_towards_target(
         self,
@@ -3170,23 +3205,25 @@ class RunningManager:
             self._log_running_state("前方路径正常", location, direction, "保持自动前进", target, get_distance(location, target))
             return
 
-        fallback_dura = max(400, int(pixel * 1.5))
-        used_px, dura_time, angle_key = get_adaptive_turn_motion(turn_dir, diff, pixel, fallback_dura)
-        x_bias = used_px if turn_dir == "right" else -used_px
-        print(
-            f'[Correct Dire] current_dire : {direction}, target_dire : {target_dir}, '
-            f'bin : {angle_key}, 向 {target_dir} 调整 {used_px} 像素, 用时 {dura_time} ms')
+        motion_ok = execute_view_turn(
+            w,
+            direction,
+            target_dir,
+            threshold=5,
+            max_steps=1,
+            wait=300,
+            fallback_dura=max(400, int(pixel * 1.5)),
+            log_prefix="[Correct Dire]",
+        )
         self._log_running_state(
             "跑图方向偏移",
             location,
             direction,
-            f"{turn_dir}调整视角 {used_px}px/{dura_time}ms",
+            "统一角度模型调整视角",
             target,
             get_distance(location, target),
         )
-        w.tap_single("视角", x_bias=int(x_bias), dura=dura_time, wait=300)
-        w.refresh_frame()
-        update_adaptive_turn_motion(turn_dir, diff, direction, w.get_info("direction"), used_px, dura_time)
+        return motion_ok
 
 
     def stop_auto_forward(self, w: "FrameWorker"):

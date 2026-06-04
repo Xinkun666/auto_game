@@ -690,10 +690,15 @@ class HouseSearchManager:
 
             self.stop_auto_forward(w)
             self.align_direction(w, target_loc)
+            before_dist = dist
+            mode = self._entry_forward_mode(dist)
             y_bias, dura, wait = self._get_entry_move_params(dist)
             print(f"[Nav] 分段推进到进门点: dist={dist:.2f}, y_bias={y_bias}, dura={dura}, wait={wait}")
             w.tap_single('摇杆', y_bias=y_bias, dura=dura, wait=wait)
             w.refresh_frame()
+            after_loc = self._get_current_location(w)
+            after_dist = get_distance(after_loc, target_loc) if after_loc is not None else None
+            update_adaptive_forward_motion(mode, before_dist, before_dist, after_dist, y_bias, dura, wait)
             self.handle_jump_logic(w)
 
         # --- 进门点扫描 ---
@@ -886,13 +891,41 @@ class HouseSearchManager:
         print(f"[Searching] 落地位置仍在刷新: latest={loc}, spread={spread:.2f}")
         return None
 
-    def _get_entry_move_params(self, dist):
-        if dist > self.ENTRY_COARSE_MOVE_DISTANCE:
-            wait = int(max(1100, min(5200, dist * 140)))
-            return self.ENTRY_COARSE_Y_BIAS, self.ENTRY_COARSE_DURA, wait
+    def _entry_forward_mode(self, dist: float) -> str:
+        try:
+            dist_val = float(dist)
+        except (TypeError, ValueError):
+            dist_val = 0.0
+        return "fast" if dist_val > self.ENTRY_COARSE_MOVE_DISTANCE else "slow"
 
-        wait = int(max(450, min(2100, dist * 180)))
-        return self.ENTRY_FINE_Y_BIAS, self.ENTRY_FINE_DURA, wait
+    def _get_entry_move_params(self, dist):
+        mode = self._entry_forward_mode(dist)
+        try:
+            dist_val = max(0.0, float(dist))
+        except (TypeError, ValueError):
+            dist_val = 0.0
+        fallback_y_bias = -300 if mode == "fast" else -100
+        fallback_dura = 300
+        fallback_wait = int(max(
+            180,
+            min(7000, dist_val * (32 if mode == "fast" else 60) + (220 if mode == "fast" else 300)),
+        ))
+        y_bias, dura, wait, _ = get_adaptive_forward_motion(
+            mode,
+            dist_val,
+            fallback_y_bias,
+            fallback_dura,
+            fallback_wait,
+        )
+        return y_bias, dura, wait
+
+    def _get_current_location(self, w: 'FrameWorker'):
+        raw = w.get_info('location')
+        if not raw:
+            return None
+        if isinstance(raw, (list, tuple)) and raw and isinstance(raw[0], (list, tuple)):
+            return check_location(raw[0])
+        return check_location(raw)
 
     def _push_until_entered_house(self, w: 'FrameWorker') -> bool:
         if self._get_house_scene(w) == 0:
@@ -1157,67 +1190,43 @@ class HouseSearchManager:
             w.click('自动前进')
             self.auto_forward = False
 
-    def _get_align_motion(self, turn_dir, diff, px):
-        if turn_dir is None or px is None:
-            return 0, 0, None
-        fallback_px = max(0, min(self.ALIGN_MAX_BIAS, int(px)))
-        fallback_dura = max(self.ALIGN_MIN_DURA, min(self.ALIGN_MAX_DURA, int(fallback_px * 1.5)))
-        used_px, dura, angle_key = get_adaptive_turn_motion(turn_dir, diff, fallback_px, fallback_dura)
-        used_px = max(0, min(self.ALIGN_MAX_BIAS, int(used_px)))
-        dura = max(self.ALIGN_MIN_DURA, min(self.ALIGN_MAX_DURA, int(dura)))
-        x_bias = used_px if turn_dir == 'right' else -used_px
-        x_bias = max(-self.ALIGN_MAX_BIAS, min(self.ALIGN_MAX_BIAS, int(x_bias)))
-        return x_bias, dura, angle_key
-
     def align_direction_blocking(self, w, current_dir, target_angle, threshold=5, max_steps=10):
-        for _ in range(max_steps):
-            if current_dir is None or target_angle is None:
-                return False
-            turn_dir, px, diff = calculate_move_count(current_dir, target_angle)
-            if diff is None:
-                return False
-            if diff <= threshold:
-                return True
-            x_bias, dura, _ = self._get_align_motion(turn_dir, diff, px)
-            if not x_bias:
-                return True
-            before_dir = current_dir
-            w.tap_single('视角', x_bias=x_bias, dura=dura, wait=self.ALIGN_WAIT)
-            w.refresh_frame()
-            current_dir = w.get_info('direction')
-            update_adaptive_turn_motion(turn_dir, diff, before_dir, current_dir, abs(x_bias), dura)
-        return False
+        return execute_view_turn(
+            w,
+            current_dir,
+            target_angle,
+            threshold=threshold,
+            max_steps=max_steps,
+            wait=self.ALIGN_WAIT,
+            min_dura=self.ALIGN_MIN_DURA,
+            max_dura=self.ALIGN_MAX_DURA,
+            max_px=self.ALIGN_MAX_BIAS,
+            log_prefix="[NavAlign]",
+        )
 
     def align_direction(self, w, tar_loc, threshold=8, max_steps=1):
-        for _ in range(max_steps):
-            location_raw = w.get_info('location')
-            if location_raw is None:
-                return False
-            cur_loc = check_location(location_raw[0])
-            cur_dir = w.get_info('direction')
-            if cur_loc is None or cur_dir is None:
-                return False
-            target_angle = calculate_angle(cur_loc, tar_loc)
-            if target_angle is None:
-                return False
-            turn_dir, px, diff = calculate_move_count(cur_dir, target_angle)
-            if diff is None:
-                return False
-            if diff <= threshold:
-                return True
-            move_px, dura, angle_key = self._get_align_motion(turn_dir, diff, px)
-            if not move_px:
-                return True
-            print(
-                f"[Nav] 修正进门点方向: current={cur_dir}, "
-                f"target={target_angle}, diff={diff:.1f}, bin={angle_key}, "
-                f"x_bias={move_px}, dura={dura}"
-            )
-            w.tap_single('视角', x_bias=move_px, dura=dura, wait=self.ALIGN_WAIT)
-            w.refresh_frame()
-            update_adaptive_turn_motion(turn_dir, diff, cur_dir, w.get_info('direction'), abs(move_px), dura)
+        location_raw = w.get_info('location')
+        if location_raw is None:
             return False
-        return False
+        cur_loc = check_location(location_raw[0])
+        cur_dir = w.get_info('direction')
+        if cur_loc is None or cur_dir is None:
+            return False
+        target_angle = calculate_angle(cur_loc, tar_loc)
+        if target_angle is None:
+            return False
+        return execute_view_turn(
+            w,
+            cur_dir,
+            target_angle,
+            threshold=threshold,
+            max_steps=max_steps,
+            wait=self.ALIGN_WAIT,
+            min_dura=self.ALIGN_MIN_DURA,
+            max_dura=self.ALIGN_MAX_DURA,
+            max_px=self.ALIGN_MAX_BIAS,
+            log_prefix="[Nav]",
+        )
 
     def find_largest_door(self, w):
         """
@@ -1794,23 +1803,20 @@ class HouseSearchManager:
             return
         if abs(delta_angle) < 1.0:
             return
-        swipe_dist = delta_angle * 7.16
-        if swipe_dist > 0:
-            swipe_dist = swipe_dist + 10
-        else:
-            swipe_dist = swipe_dist - 10
-
-        turn_dir = 'right' if delta_angle > 0 else 'left'
-        desired_diff = abs(float(delta_angle))
-        fallback_px = abs(int(swipe_dist))
-        fallback_dura = 800
-        used_px, used_dura, _ = get_adaptive_turn_motion(turn_dir, desired_diff, fallback_px, fallback_dura)
-        move_px = used_px if turn_dir == 'right' else -used_px
         before_dir = w.get_info('direction')
-        w.tap_single('视角', x_bias=int(move_px), dura=used_dura, wait=20)
-        # 旋转视角后，刷新当前帧
-        w.refresh_frame()
-        update_adaptive_turn_motion(turn_dir, desired_diff, before_dir, w.get_info('direction'), used_px, used_dura)
+        if before_dir is None:
+            return
+        target_dir = (float(before_dir) + delta_angle) % 360.0
+        execute_view_turn(
+            w,
+            before_dir,
+            target_dir,
+            threshold=1,
+            max_steps=1,
+            wait=20,
+            fallback_dura=800,
+            log_prefix="[SearchTurn]",
+        )
 
     def targets_of_class(self, w, target_class=None):
         if target_class is None:

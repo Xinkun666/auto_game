@@ -2,9 +2,7 @@ import time
 from typing import TYPE_CHECKING, List, Optional, Sequence
 
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import (
-    calculate_move_count,
-    get_adaptive_turn_motion,
-    update_adaptive_turn_motion,
+    execute_view_turn,
 )
 from aw.autogame.tools.Utils import get_resolution, get_wh
 
@@ -372,21 +370,13 @@ class HouseExitManager:
         dura=800,
         wait=500,
     ):
-        for _ in range(max_steps):
-            turn_dir, px, diff = calculate_move_count(current_dir, target_angle)
-            if turn_dir is None or diff is None:
-                return False
-            if diff <= tolerance:
-                return True
-            used_px, used_dura, _ = get_adaptive_turn_motion(turn_dir, diff, px, dura)
-            if not used_px:
-                return True
-            x_bias = used_px if turn_dir == "right" else -used_px
-            before_dir = current_dir
-            w.tap_single("视角", x_bias=int(x_bias), dura=used_dura, wait=wait)
-            w.refresh_frame()
-            current_dir = w.get_info("direction")
-            update_adaptive_turn_motion(turn_dir, diff, before_dir, current_dir, used_px, used_dura)
-            if current_dir is None:
-                return False
-        return False
+        return execute_view_turn(
+            w,
+            current_dir,
+            target_angle,
+            threshold=tolerance,
+            max_steps=max_steps,
+            wait=wait,
+            fallback_dura=dura,
+            log_prefix="[HouseExit]",
+        )

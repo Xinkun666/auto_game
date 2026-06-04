@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2023. All rights reserved.
 import os
+import json
 
 project_case = 'Auto_PUBG_ALL'  # 这是你在标注工具导出的自动化资源目录名
 target_case = "auto_pubg"  # 这是你编写的自动化用例脚本名
@@ -37,6 +38,32 @@ class auto_pubg(TestCase):
         self.frame_path = f"aw/autogame/temp/logs/process_save_frames"
         self.game_display_name = '和平精英'
         self.perf_tool_package = "com.huawei.hmsapp.hismartperf"
+
+    def _write_device_log_state(self, event_name, stop_ok=None, error=""):
+        archive_dir = os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()
+        if not archive_dir:
+            return
+
+        try:
+            log_exists = os.path.exists(self.log_path)
+            payload = {
+                "event": event_name,
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "log_path": self.log_path,
+                "log_exists": log_exists,
+                "log_size": os.path.getsize(self.log_path) if log_exists else 0,
+                "device_log_started": self.device_log_started,
+                "stop_ok": stop_ok,
+                "error": str(error or ""),
+            }
+            os.makedirs(archive_dir, exist_ok=True)
+            signal_path = os.path.join(archive_dir, "device_log_state.json")
+            tmp_path = signal_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, signal_path)
+        except Exception as exc:
+            print(f"写入设备日志状态失败: {exc}")
 
     def setup(self):
         self.log.info("预置条件：设置常亮")
@@ -132,18 +159,24 @@ class auto_pubg(TestCase):
         print('开始抓取日志!')
         self.device_logger.start_log(self.log_path)
         self.device_log_started = True
+        self._write_device_log_state("device_log_started")
 
     def stop_device_log(self):
         if not self.device_log_started:
             return
+        stop_ok = False
+        stop_error = ""
         try:
             print('自动化结束，结束抓取日志!')
             try:
                 self.device_logger.stop_log()
+                stop_ok = True
                 print(f'日志文件保存在: {self.log_path}')
             except Exception as exc:
+                stop_error = exc
                 print(f'停止设备日志失败: {exc}')
         finally:
+            self._write_device_log_state("device_log_stopped", stop_ok=stop_ok, error=stop_error)
             self.device_log_started = False
 
     def start_yuanshen(self):

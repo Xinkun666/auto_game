@@ -56,7 +56,7 @@ STREAM_CONNECTED_MARKERS = (
 REBOOT_RELAUNCH_DELAY_SECONDS = 10
 STREAM_DISCONNECT_SP_LONG_PRESS_MS = 3000
 STREAM_DISCONNECT_SP_NORM_POS = (0.048, 0.295)
-STREAM_DISCONNECT_GRACEFUL_STOP_TIMEOUT_MS = 15000
+STREAM_DISCONNECT_GRACEFUL_STOP_TIMEOUT_MS = 60000
 STREAM_DISCONNECT_FORCE_KILL_TIMEOUT_MS = 5000
 STREAM_DISCONNECT_PATTERNS = (
     "[Stream] Channel ready timeout.",
@@ -72,6 +72,7 @@ SP_RECORD_EVER_STARTED_MARKERS = (
 DISMISS_REBOOT_PROMPT_ENV = "AUTOGAME_DISMISS_REBOOT_PROMPT"
 DEVICE_LOG_SETTLE_TIMEOUT_SECONDS = 3.0
 DEVICE_LOG_SETTLE_INTERVAL_SECONDS = 0.2
+DEVICE_LOG_STOP_WAIT_TIMEOUT_SECONDS = 15.0
 
 
 def setup_logging():
@@ -2055,6 +2056,30 @@ class LauncherWindow(QWidget):
 
         return log_path.exists() and log_path.is_file()
 
+    def _wait_for_device_log_stopped_signal(self) -> Optional[dict]:
+        archive_dir = self.current_run_archive_dir
+        if archive_dir is None:
+            return None
+
+        signal_path = archive_dir / "device_log_state.json"
+        deadline = time.time() + DEVICE_LOG_STOP_WAIT_TIMEOUT_SECONDS
+        last_payload = None
+
+        while time.time() < deadline:
+            QApplication.processEvents()
+            if signal_path.exists():
+                try:
+                    payload = json.loads(signal_path.read_text(encoding="utf-8"))
+                    last_payload = payload
+                    if payload.get("event") == "device_log_stopped":
+                        return payload
+                except Exception:
+                    log_exception(f"read device log state failed: signal_path={signal_path}")
+                    return last_payload
+            time.sleep(DEVICE_LOG_SETTLE_INTERVAL_SECONDS)
+
+        return last_payload
+
     def _append_stream_disconnect_notice_to_device_log(self, log_path: Path, exit_code: int) -> bool:
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2402,10 +2427,24 @@ class LauncherWindow(QWidget):
         stream_device_log_path = None
         stream_archived_log_name = None
         stream_notice_written = False
+        device_log_stop_state = None
 
         if self.current_run_stream_disconnected:
             stream_device_log_path = self._resolve_current_device_log_path()
             if stream_device_log_path is not None:
+                if not self.current_run_stream_disconnect_startup:
+                    device_log_stop_state = self._wait_for_device_log_stopped_signal()
+                    if device_log_stop_state and device_log_stop_state.get("event") == "device_log_stopped":
+                        self._log_message(
+                            "[Launcher] 已确认 testcases 执行 stop_device_log()，"
+                            f"log_path={device_log_stop_state.get('log_path')}。\n"
+                        )
+                    else:
+                        self._log_message(
+                            "[Launcher] 未等到 testcases 的 device_log_stopped 标记，"
+                            "将继续尝试复制当前日志文件；请检查子进程是否被提前终止或 stop_log 是否失败。\n",
+                            level=logging.WARNING,
+                        )
                 self._wait_for_device_log_stable(stream_device_log_path)
                 stream_notice_written = self._append_stream_disconnect_notice_to_device_log(
                     stream_device_log_path,
@@ -2439,6 +2478,7 @@ class LauncherWindow(QWidget):
                     "stream_disconnect_device_log_source": str(stream_device_log_path) if stream_device_log_path else None,
                     "stream_disconnect_device_log_archived": stream_archived_log_name,
                     "stream_disconnect_notice_written": stream_notice_written,
+                    "device_log_stop_state": device_log_stop_state,
                     "stream_started": self.current_run_stream_started,
                     "sp_started": self.current_run_sp_started,
                     "sp_state": self.current_run_sp_state,

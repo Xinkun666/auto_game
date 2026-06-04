@@ -36,6 +36,22 @@ def should_archive_run_outputs() -> bool:
     return source == "launcher" or vis_mode == "launcher"
 
 
+def get_launcher_run_metadata(run_mode: str) -> dict:
+    metadata = {
+        "run_mode": run_mode,
+        "project_case": os.environ.get("TARGET_PROJECT_CASE", ""),
+        "target_case": os.environ.get("TARGET_GAME_CASE", ""),
+        "testcase_label": DEFAULT_TESTCASE_LABEL if run_mode == "testcase" else None,
+    }
+    batch_start_timestamp = os.environ.get("AUTOGAME_BATCH_START_TIMESTAMP", "").strip()
+    run_start_timestamp = os.environ.get("AUTOGAME_RUN_START_TIMESTAMP", "").strip()
+    if batch_start_timestamp:
+        metadata["batch_start_timestamp"] = batch_start_timestamp
+    if run_start_timestamp:
+        metadata["run_start_timestamp"] = run_start_timestamp
+    return metadata
+
+
 if __name__ == '__main__':
     run_mode = os.environ.get("AUTOGAME_MAIN_MODE", "direct").strip().lower()
 
@@ -46,13 +62,14 @@ if __name__ == '__main__':
             run_direct()
     finally:
         if should_archive_run_outputs():
+            run_index_text = os.environ.get("AUTOGAME_RUN_INDEX", "").strip()
+            try:
+                run_index = int(run_index_text) if run_index_text else 1
+            except ValueError:
+                run_index = 1
             archive_run_artifacts(
-                run_index=1,
+                run_index=run_index,
                 source=f"main:{run_mode}",
-                extra_metadata={
-                    "run_mode": run_mode,
-                    "project_case": os.environ.get("TARGET_PROJECT_CASE", ""),
-                    "target_case": os.environ.get("TARGET_GAME_CASE", ""),
-                    "testcase_label": DEFAULT_TESTCASE_LABEL if run_mode == "testcase" else None,
-                },
+                extra_metadata=get_launcher_run_metadata(run_mode),
+                reuse_existing=bool(os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()),
             )

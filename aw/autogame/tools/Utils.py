@@ -188,6 +188,7 @@ def archive_run_artifacts(
     run_index: int,
     source: str,
     extra_text_files: Optional[dict[str, str]] = None,
+    extra_log_files: Optional[dict[str, str]] = None,
     extra_metadata: Optional[dict] = None,
     reuse_existing: bool = False,
 ) -> Path:
@@ -213,6 +214,20 @@ def archive_run_artifacts(
                 continue
             _safe_write_text(log_archive_dir / name, content)
 
+    copied_extra_log_files = []
+    if extra_log_files:
+        log_archive_dir.mkdir(parents=True, exist_ok=True)
+        for archive_name, source_path in extra_log_files.items():
+            if not archive_name or not source_path:
+                continue
+            src = Path(source_path)
+            if not src.exists() or not src.is_file():
+                continue
+            safe_name = _sanitize_archive_name_part(archive_name) + src.suffix
+            target = log_archive_dir / safe_name
+            shutil.copy2(src, target)
+            copied_extra_log_files.append(safe_name)
+
     metadata = {
         "source": source,
         "run_index": run_index,
@@ -221,6 +236,7 @@ def archive_run_artifacts(
         "batch_dir": str(archive_dir.parent),
         "copied_log_files": copied_log_files,
         "copied_process_temp_logs": copied_process_files,
+        "copied_extra_log_files": copied_extra_log_files,
         "preview_video": video_file,
     }
     if extra_metadata:

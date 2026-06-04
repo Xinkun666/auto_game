@@ -1830,6 +1830,14 @@ class FrameWorker(threading.Thread):
         return True
 
     def _resolve_launcher_run_archive_dir(self):
+        explicit_archive_dir = os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()
+        if explicit_archive_dir:
+            try:
+                os.makedirs(explicit_archive_dir, exist_ok=True)
+                return explicit_archive_dir
+            except Exception as exc:
+                print(f"[FrameWorker] 创建 launcher 归档目录失败: {explicit_archive_dir}, err={exc}")
+
         run_index_text = os.environ.get("AUTOGAME_RUN_INDEX", "").strip()
         batch_start_timestamp = os.environ.get("AUTOGAME_BATCH_START_TIMESTAMP", "").strip()
         run_start_timestamp = os.environ.get("AUTOGAME_RUN_START_TIMESTAMP", "").strip()

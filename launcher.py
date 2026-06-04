@@ -36,7 +36,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from aw.autogame.tools.Utils import archive_run_artifacts, get_resolution, select_scene_resolution
+from aw.autogame.tools.Utils import archive_run_artifacts, get_resolution, resolve_run_archive_dir, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -60,6 +60,8 @@ STREAM_DISCONNECT_PATTERNS = (
     "[Stream] Runtime Error:",
 )
 DISMISS_REBOOT_PROMPT_ENV = "AUTOGAME_DISMISS_REBOOT_PROMPT"
+DEVICE_LOG_SETTLE_TIMEOUT_SECONDS = 3.0
+DEVICE_LOG_SETTLE_INTERVAL_SECONDS = 0.2
 
 
 def setup_logging():
@@ -1333,12 +1335,27 @@ class LauncherWindow(QWidget):
         env.insert("AUTOGAME_VIS_MODE", "launcher")
         env.insert("AUTOGAME_RUN_SOURCE", "launcher")
         env.insert("AUTOGAME_RUN_INDEX", str(int(run_no)))
+        env.insert("AUTOGAME_DEVICE_LOG_PATH", str(LOG_DIR / f"{target_case}.txt"))
         if self.dismiss_reboot_prompt_on_next_case_start:
             env.insert(DISMISS_REBOOT_PROMPT_ENV, "1")
         if self.current_batch_start_timestamp:
             env.insert("AUTOGAME_BATCH_START_TIMESTAMP", self.current_batch_start_timestamp)
         if self.current_run_start_timestamp:
             env.insert("AUTOGAME_RUN_START_TIMESTAMP", self.current_run_start_timestamp)
+        archive_metadata = {}
+        if self.current_batch_start_timestamp:
+            archive_metadata["batch_start_timestamp"] = self.current_batch_start_timestamp
+        if self.current_run_start_timestamp:
+            archive_metadata["run_start_timestamp"] = self.current_run_start_timestamp
+        try:
+            run_archive_dir = resolve_run_archive_dir(
+                int(run_no),
+                extra_metadata=archive_metadata,
+                create=True,
+            )
+            env.insert("AUTOGAME_RUN_ARCHIVE_DIR", str(run_archive_dir))
+        except Exception:
+            log_exception(f"resolve run archive dir failed: run_no={run_no}")
         if self.current_plan is not None:
             env.insert(
                 "AUTOGAME_LAUNCHER_INACTIVITY_TIMEOUT_MINUTES",
@@ -1960,16 +1977,105 @@ class LauncherWindow(QWidget):
         if safe_minutes > 0:
             self.run_timeout_timer.start(int(safe_minutes * 60 * 1000))
 
+    def _resolve_current_device_log_path(self) -> Optional[Path]:
+        if self.current_plan is None:
+            return None
+        target_case = str(self.current_plan.get("target_case") or "").strip()
+        if not target_case:
+            return None
+        return LOG_DIR / f"{target_case}.txt"
+
+    def _wait_for_device_log_stable(self, log_path: Path) -> bool:
+        deadline = time.time() + DEVICE_LOG_SETTLE_TIMEOUT_SECONDS
+        last_size = None
+        stable_since = None
+
+        while time.time() < deadline:
+            QApplication.processEvents()
+            if log_path.exists() and log_path.is_file():
+                try:
+                    size = log_path.stat().st_size
+                except OSError:
+                    size = None
+
+                now = time.time()
+                if size is not None and size == last_size:
+                    if stable_since is None:
+                        stable_since = now
+                    if now - stable_since >= DEVICE_LOG_SETTLE_INTERVAL_SECONDS:
+                        return True
+                else:
+                    last_size = size
+                    stable_since = None
+
+            time.sleep(DEVICE_LOG_SETTLE_INTERVAL_SECONDS)
+
+        return log_path.exists() and log_path.is_file()
+
+    def _append_stream_disconnect_notice_to_device_log(self, log_path: Path, exit_code: int) -> bool:
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            phase_text = "启动阶段" if self.current_run_stream_disconnect_startup else "用例中途"
+            notice = (
+                "\n"
+                f"[AutoGame][StreamDisconnect] {timestamp} launcher 检测到 gRPC 流断连({phase_text})，"
+                f"exit_code={exit_code}，message={self.current_run_stream_disconnect_message}\n"
+            )
+            with log_path.open("a", encoding="utf-8", errors="ignore") as f:
+                f.write(notice)
+            return True
+        except Exception:
+            log_exception(f"append stream disconnect notice failed: log_path={log_path}")
+            return False
+
+    def _build_stream_disconnect_notice(self, device_log_path: Optional[Path], archived_log_name: Optional[str]) -> str:
+        phase_text = "启动阶段" if self.current_run_stream_disconnect_startup else "用例中途"
+        lines = [
+            "gRPC 流断连提醒",
+            f"发生阶段: {phase_text}",
+            f"断流信息: {self.current_run_stream_disconnect_message}",
+            f"设备日志源文件: {device_log_path if device_log_path else '未定位'}",
+            f"归档日志文件: logs/{archived_log_name}" if archived_log_name else "归档日志文件: 未找到设备日志源文件",
+            "",
+            "说明: 本文件由 launcher 在归档时生成，用于快速定位断流对应的 testcases 设备日志。",
+        ]
+        return "\n".join(lines) + "\n"
+
     def _archive_run_outputs(self, run_no: int, exit_code: int):
         if self.current_plan is None:
             return
 
         run_output_text = self.output_edit.toPlainText()[self.current_run_output_start:]
+        extra_text_files = {"launcher_output.txt": run_output_text}
+        extra_log_files = {}
+        stream_device_log_path = None
+        stream_archived_log_name = None
+        stream_notice_written = False
+
+        if self.current_run_stream_disconnected:
+            stream_device_log_path = self._resolve_current_device_log_path()
+            if stream_device_log_path is not None:
+                self._wait_for_device_log_stable(stream_device_log_path)
+                stream_notice_written = self._append_stream_disconnect_notice_to_device_log(
+                    stream_device_log_path,
+                    exit_code,
+                )
+                if stream_device_log_path.exists() and stream_device_log_path.is_file():
+                    stream_archived_log_name = f"stream_disconnect_device_log_{stream_device_log_path.name}"
+                    extra_log_files[stream_archived_log_name] = str(stream_device_log_path)
+
+            extra_text_files["stream_disconnect_notice.txt"] = self._build_stream_disconnect_notice(
+                stream_device_log_path,
+                stream_archived_log_name,
+            )
+
         try:
             archive_dir = archive_run_artifacts(
                 run_index=run_no,
                 source="launcher",
-                extra_text_files={"launcher_output.txt": run_output_text},
+                extra_text_files=extra_text_files,
+                extra_log_files=extra_log_files or None,
                 extra_metadata={
                     "mode": self.current_plan["mode"],
                     "project_case": self.current_plan["project_case"],
@@ -1980,6 +2086,9 @@ class LauncherWindow(QWidget):
                     "stream_disconnected": self.current_run_stream_disconnected,
                     "stream_disconnect_startup": self.current_run_stream_disconnect_startup,
                     "stream_disconnect_message": self.current_run_stream_disconnect_message,
+                    "stream_disconnect_device_log_source": str(stream_device_log_path) if stream_device_log_path else None,
+                    "stream_disconnect_device_log_archived": stream_archived_log_name,
+                    "stream_disconnect_notice_written": stream_notice_written,
                     "stream_started": self.current_run_stream_started,
                     "batch_start_timestamp": self.current_batch_start_timestamp,
                     "run_start_timestamp": self.current_run_start_timestamp,
@@ -1988,6 +2097,16 @@ class LauncherWindow(QWidget):
                 reuse_existing=True,
             )
             self._log_message(f"[Launcher] 本次运行产物已归档到：{archive_dir}\n")
+            if self.current_run_stream_disconnected:
+                if stream_archived_log_name:
+                    self._log_message(
+                        f"[Launcher] 断流设备日志已额外归档：{archive_dir / 'logs' / stream_archived_log_name}\n"
+                    )
+                else:
+                    self._log_message(
+                        "[Launcher] 未找到本次断流对应的设备日志文件，已写入 stream_disconnect_notice.txt。\n",
+                        level=logging.WARNING,
+                    )
         except Exception:
             log_exception(f"archive_run_outputs failed: run_no={run_no}")
             self._log_message("[Launcher] 运行产物归档失败，请查看 launcher_debug.log。\n", level=logging.ERROR)
@@ -2064,6 +2183,7 @@ class LauncherWindow(QWidget):
             f"\n[Launcher] 检测到 gRPC 流断连({phase_text})："
             f"{self.current_run_stream_disconnect_message}\n"
         )
+        self._log_message("[Launcher] 归档时会把本次 testcases 设备日志复制到对应运行目录。\n")
         self._set_status("检测到 gRPC 流断连，正在停止当前子进程并准备重启手机。")
         if self.process is not None:
             self.process.kill()

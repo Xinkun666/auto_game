@@ -32,7 +32,8 @@ class auto_pubg(TestCase):
         self.automator = None
         self.task_name = os.environ.get("TARGET_GAME_CASE")
         self.device_logger = DeviceLogger(self.driver)
-        self.log_path = f'aw/autogame/temp/logs/{self.task_name}.txt'
+        self.device_log_started = False
+        self.log_path = os.environ.get("AUTOGAME_DEVICE_LOG_PATH") or f'aw/autogame/temp/logs/{self.task_name}.txt'
         self.frame_path = f"aw/autogame/temp/logs/process_save_frames"
         self.game_display_name = '和平精英'
         self.perf_tool_package = "com.huawei.hmsapp.hismartperf"
@@ -119,10 +120,8 @@ class auto_pubg(TestCase):
             time.sleep(interval)
         raise RuntimeError(f"未找到{desc}，请检查当前页面是否已正确进入目标界面")
 
-    def start_yuanshen(self):
-        print('和平精英-启动!!!')
-        # self.driver.start_app('com.tencent.tmgp.pubgmhd.hw')
-
+    def start_device_log(self):
+        print('和平精英-启动日志采集!!!')
         if os.path.exists(self.log_path):
             os.remove(self.log_path)
             print(f"检测到旧日志，已成功删除: {self.log_path}")
@@ -132,6 +131,25 @@ class auto_pubg(TestCase):
 
         print('开始抓取日志!')
         self.device_logger.start_log(self.log_path)
+        self.device_log_started = True
+
+    def stop_device_log(self):
+        if not self.device_log_started:
+            return
+        try:
+            print('自动化结束，结束抓取日志!')
+            try:
+                self.device_logger.stop_log()
+                print(f'日志文件保存在: {self.log_path}')
+            except Exception as exc:
+                print(f'停止设备日志失败: {exc}')
+        finally:
+            self.device_log_started = False
+
+    def start_yuanshen(self):
+        print('和平精英-启动!!!')
+        # self.driver.start_app('com.tencent.tmgp.pubgmhd.hw')
+        self.start_device_log()
         # time.sleep(30)
 
     def _wait_for_game_rotation(self, timeout=20, stable_rounds=3, interval=1.0):
@@ -176,26 +194,28 @@ class auto_pubg(TestCase):
         self.automator = GameAutomator(driver=self.driver, logger=self.log)
 
     def test_step(self):
-        # 1. 启动并开始游戏
-        # self.start_yuanshen()
-        self.start_perf_tool()
-        self._ensure_automator()
+        automation_completed = False
+        try:
+            # 1. 启动本地设备日志。即使后续 gRPC 断流被 launcher 杀进程，
+            #    已生成的日志文件也会被 launcher 归档到本次运行目录。
+            self.start_device_log()
+            self.start_perf_tool()
+            self._ensure_automator()
 
-        # 2. 运行自动化逻辑（现在执行完会返回了）
-        print('开始游戏自动化!')
-        self.automator.start()
+            # 2. 运行自动化逻辑（现在执行完会返回了）
+            print('开始游戏自动化!')
+            self.automator.start()
+            automation_completed = True
+        finally:
+            self.stop_device_log()
 
-        print('自动化结束，结束抓取日志!')
-        self.device_logger.stop_log()
-        print(f'日志文件保存在: {self.log_path}')
+            if automation_completed and os.path.exists(f'aw/autogame/temp/results/{self.task_name}/time.txt'):
+                result_path = f'aw/autogame/temp/results/{self.task_name}/results.txt'
+                if os.path.exists(result_path):
+                    os.remove(result_path)
+                    print(f'检测到旧的结果日志，已成功删除: {result_path}')
+                analyze_txt(self.log_path, self.frame_path, time_txt_path=f'aw/autogame/temp/results/{self.task_name}/time.txt', result_path=result_path)
+                print(f'分析完成, 结果保存在 aw/autogame/temp/results/{self.task_name}/results.txt 中')
 
-        if os.path.exists(f'aw/autogame/temp/results/{self.task_name}/time.txt'):
-            result_path = f'aw/autogame/temp/results/{self.task_name}/results.txt'
-            if os.path.exists(result_path):
-                os.remove(result_path)
-                print(f'检测到旧的结果日志，已成功删除: {result_path}')
-            analyze_txt(self.log_path, self.frame_path, time_txt_path=f'aw/autogame/temp/results/{self.task_name}/time.txt', result_path=result_path)
-            print(f'分析完成, 结果保存在 aw/autogame/temp/results/{self.task_name}/results.txt 中')
-
-        if self.automator is not None:
-            self.automator.cleanup(('com.tencent.tmgp.pubgmhd.hw', 'com.huawei.hmsapp.hismartperf'))
+            if self.automator is not None:
+                self.automator.cleanup(('com.tencent.tmgp.pubgmhd.hw', 'com.huawei.hmsapp.hismartperf'))

@@ -84,6 +84,12 @@ class HouseSceneSearchManager(HouseSearchManager):
     ENTRY_INDOOR_CONFIRM_FORWARD_WAIT = 850
     ENTRY_WINDOW_JUMP_SETTLE_SECONDS = 0.25
     OPEN_DOOR_SETTLE_SECONDS = 0.8
+    ENTRY_OPEN_DOOR_SHORT_PUSH_RATIO = 1.0 / 3.0
+    ENTRY_OPEN_DOOR_SHORT_PUSH_MIN_DURA = 120
+    ENTRY_OPEN_DOOR_RELOCK_BACKOFF_Y_BIAS = 360
+    ENTRY_OPEN_DOOR_RELOCK_BACKOFF_DURA = 320
+    ENTRY_OPEN_DOOR_RELOCK_BACKOFF_WAIT = 520
+    ENTRY_OPEN_DOOR_RELOCK_TOLERANCE_PX = 90
 
     ROTATE_SEARCH_MOVE_DURA = 1000
     ROTATE_SEARCH_MOVE_WAIT_PAD = 260
@@ -130,12 +136,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         house_scene = self._get_house_scene(w)
         if house_scene == self.HOUSE_INDOOR:
-            if self._should_start_search_from_indoor():
-                if self._confirm_indoor_before_search(w, "导航/进门过程中检测到 indoor"):
-                    self._complete_current_house_search(w, "已在屋内，直接启动旋转搜房")
-                return
-
-            self._exit_unexpected_indoor(w)
+            self._handle_indoor_during_entry_route(w, current_loc, "导航/进门过程中检测到 indoor")
             return
 
         if self.searching_number == 5:
@@ -292,7 +293,10 @@ class HouseSceneSearchManager(HouseSearchManager):
         exit_direction = w.get_info("direction")
         self.prepare_next_target_logic(exit_direction)
         self.current_house_id = None
+        self.active_entry = None
         self.status = "IDLE"
+        self.history_locations = []
+        self._reset_route_stuck_bypass()
         return True
 
     def _exit_unexpected_indoor(self, w: "FrameWorker"):
@@ -1051,16 +1055,81 @@ class HouseSceneSearchManager(HouseSearchManager):
         if button_state == "open":
             print(f"[SceneEntry] {reason}发现开门按钮，点击开门后停止贴门前推")
             self._click_open_door(w)
+            opened_now = True
         else:
             print(f"[SceneEntry] {reason}发现关门按钮，门已打开，不点击关门，停止贴门前推")
+            opened_now = False
 
         self._realign_to_entry_direction(w, "门按钮出现后")
 
-        if self._confirm_indoor_by_forward_push(w, "门按钮处理后重新对准进门方向"):
+        if opened_now:
+            if self._short_push_after_open_door(w, reason):
+                return True
+            if self._backoff_relock_door_and_push(w, reason):
+                return True
+        elif self._confirm_indoor_by_forward_push(w, "门按钮处理后重新对准进门方向"):
             return True
 
         print("[SceneEntry] 正前推后仍未 indoor，开始左前/右前小步进门")
         return self._enter_open_door_by_diagonal_sweep(w)
+
+    def _short_push_after_open_door(self, w: "FrameWorker", reason: str) -> bool:
+        dura = int(round(self.ENTRY_INDOOR_CONFIRM_FORWARD_DURA * self.ENTRY_OPEN_DOOR_SHORT_PUSH_RATIO))
+        wait = int(round(self.ENTRY_INDOOR_CONFIRM_FORWARD_WAIT * self.ENTRY_OPEN_DOOR_SHORT_PUSH_RATIO))
+        dura = max(self.ENTRY_OPEN_DOOR_SHORT_PUSH_MIN_DURA, dura)
+        wait = max(dura, wait)
+
+        print(
+            f"[SceneEntry] {reason}开门后先短前推确认入房: "
+            f"dura={dura}, wait={wait}"
+        )
+        w.tap_single(
+            "摇杆",
+            y_bias=self.ENTRY_INDOOR_CONFIRM_FORWARD_Y_BIAS,
+            dura=dura,
+            wait=wait,
+        )
+        w.refresh_frame()
+
+        if self._is_indoor(w):
+            print("[SceneEntry] 开门后短前推已进入 indoor")
+            return True
+
+        print(f"[SceneEntry] 开门后短前推未进房 house_scene={self._get_house_scene(w)}")
+        return False
+
+    def _backoff_relock_door_and_push(self, w: "FrameWorker", reason: str) -> bool:
+        print(f"[SceneEntry] {reason}短前推未进房，后拉后重新锁定门框")
+        w.tap_single(
+            "摇杆",
+            y_bias=self.ENTRY_OPEN_DOOR_RELOCK_BACKOFF_Y_BIAS,
+            dura=self.ENTRY_OPEN_DOOR_RELOCK_BACKOFF_DURA,
+            wait=self.ENTRY_OPEN_DOOR_RELOCK_BACKOFF_WAIT,
+        )
+        w.refresh_frame()
+
+        if self._is_indoor(w):
+            print("[SceneEntry] 后拉复核时已是 indoor，直接确认入房")
+            return True
+
+        door = self.find_largest_door(w)
+        if door is None:
+            print("[SceneEntry] 后拉后未重新识别到门，交给左右小步进门兜底")
+            return False
+
+        print("[SceneEntry] 后拉后重新锁定当前门，先对齐门框再前推")
+        self._align_to_door_detection(
+            w,
+            door,
+            tolerance_px=self.ENTRY_OPEN_DOOR_RELOCK_TOLERANCE_PX,
+        )
+        w.refresh_frame()
+
+        if self._is_indoor(w):
+            print("[SceneEntry] 重新锁门对齐后已是 indoor")
+            return True
+
+        return self._confirm_indoor_by_forward_push(w, "重新锁定门框后")
 
     def _realign_to_entry_direction(self, w: "FrameWorker", reason: str) -> bool:
         if not self.active_entry:

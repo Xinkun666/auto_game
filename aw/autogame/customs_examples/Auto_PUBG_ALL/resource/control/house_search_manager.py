@@ -44,6 +44,14 @@ class HouseSearchManager:
     HOUSE_PROACTIVE_BYPASS_FORWARD_DURA = 320
     HOUSE_PROACTIVE_BYPASS_FORWARD_WAIT = 700
     HOUSE_PROACTIVE_BYPASS_NEAR_ENTRY_SCENES = {3, 4}
+    ACCIDENTAL_HOUSE_MATCH_MAX_DISTANCE = 22.0
+    ROUTE_STUCK_TURN_DEGREES = 90
+    ROUTE_STUCK_REPEAT_RADIUS = 4.0
+    ROUTE_STUCK_BYPASS_FORWARD_Y_BIAS = -300
+    ROUTE_STUCK_BYPASS_FORWARD_DURA = 300
+    ROUTE_STUCK_BYPASS_FORWARD_BASE_WAIT = 700
+    ROUTE_STUCK_BYPASS_FORWARD_STEP_WAIT = 450
+    ROUTE_STUCK_BYPASS_FORWARD_MAX_WAIT = 2600
     HOUSE_SEARCH_TIMEOUT_SECONDS = 60
     ENTRY_WALL_BACKOFF_DURA = 520
     ENTRY_WALL_BACKOFF_WAIT = 900
@@ -127,6 +135,8 @@ class HouseSearchManager:
         self.initial_target_pending = True
         self.location_missing_frames = 0
         self.initial_location_samples = []
+        self.route_stuck_reference_loc = None
+        self.route_stuck_bypass_attempts = 0
 
     def _entry_location_tuple(self, entry):
         try:
@@ -190,6 +200,8 @@ class HouseSearchManager:
         self.initial_target_pending = True
         self.location_missing_frames = 0
         self.initial_location_samples = []
+        self.route_stuck_reference_loc = None
+        self.route_stuck_bypass_attempts = 0
 
     def process(self, w: 'FrameWorker'):
         if self._should_abort(w):
@@ -304,6 +316,128 @@ class HouseSearchManager:
             return int(value)
         except (TypeError, ValueError):
             return None
+
+    def _normalize_location_value(self, value):
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple)) and value and isinstance(value[0], (list, tuple)):
+            value = value[0]
+        return check_location(value)
+
+    def _reset_route_stuck_bypass(self):
+        self.route_stuck_reference_loc = None
+        self.route_stuck_bypass_attempts = 0
+
+    def _resolve_house_by_location(self, current_loc, max_distance=None):
+        loc = self._normalize_location_value(current_loc)
+        if loc is None:
+            return None
+
+        limit = self.ACCIDENTAL_HOUSE_MATCH_MAX_DISTANCE if max_distance is None else float(max_distance)
+        best = None
+        for house_id, entries in self.house_data.items():
+            for entry in entries:
+                entry_loc = self._entry_location_tuple(entry)
+                if entry_loc is None:
+                    continue
+                dist = get_distance(loc, entry_loc)
+                if best is None or dist < best[2]:
+                    best = (house_id, entry, dist)
+
+        if best and best[2] <= limit:
+            return best
+        return None
+
+    def _confirm_indoor_before_search(self, w: 'FrameWorker', reason: str) -> bool:
+        return True
+
+    def _complete_current_house_search(self, w: 'FrameWorker', reason: str) -> bool:
+        if self._should_abort(w):
+            return False
+
+        self.stop_auto_forward(w)
+        self.indoor_stuck_frames = 0
+        print(f"[Searching] {reason}")
+
+        if not self.start_searching(w):
+            return False
+        if w.current_stage != '搜房阶段':
+            return False
+
+        if self.current_house_id is not None:
+            self.completed_houses.add(self.current_house_id)
+        self.searching_number += 1
+        print(f"[Searching] 房屋 {self.current_house_id} 完成，已搜 {self.searching_number}/5")
+
+        w.refresh_frame()
+        exit_direction = w.get_info('direction')
+        self.prepare_next_target_logic(exit_direction)
+        self.current_house_id = None
+        self.active_entry = None
+        self.status = "IDLE"
+        self.history_locations = []
+        self._reset_route_stuck_bypass()
+        return True
+
+    def _exit_current_indoor_house(self, w: 'FrameWorker', reason: str) -> bool:
+        self.stop_auto_forward(w)
+        self._clear_house_search_timer()
+        print(f"[Searching] {reason}，执行快速出房")
+
+        result = self._exit_house(w)
+        if result is None:
+            w.refresh_frame()
+            result = self._get_house_scene(w) != 0
+
+        self.indoor_stuck_frames = 0
+        self.current_house_id = None
+        self.active_entry = None
+        self.status = "IDLE"
+        self.history_locations = []
+        self._reset_route_stuck_bypass()
+
+        if result:
+            print("[Searching] 快速出房完成，继续寻找下一个进门点")
+            return True
+        print("[Searching] 快速出房暂未确认成功，下一轮继续兜底")
+        return False
+
+    def _handle_indoor_during_entry_route(self, w: 'FrameWorker', current_loc, reason: str) -> bool:
+        if self._get_house_scene(w) != 0:
+            return False
+
+        current_stage = getattr(w, "current_stage", None)
+        if current_stage and current_stage != '搜房阶段':
+            return False
+
+        self.stop_auto_forward(w)
+        matched = self._resolve_house_by_location(current_loc)
+        matched_house_id = None
+        matched_entry = None
+
+        if matched:
+            matched_house_id, matched_entry, matched_dist = matched
+            print(
+                f"[Searching] {reason}，当前位置匹配到房屋 {matched_house_id}，"
+                f"nearest_entry_dist={matched_dist:.2f}"
+            )
+            if matched_house_id in self.completed_houses or self._is_excluded_house(matched_house_id):
+                return self._exit_current_indoor_house(
+                    w,
+                    f"误入房屋 {matched_house_id}，该房屋已搜过或被排除",
+                )
+
+            self.current_house_id = matched_house_id
+            self.active_entry = matched_entry
+        else:
+            print(f"[Searching] {reason}，当前位置未匹配到房屋列表，搜完后不写入完成房屋")
+            self.current_house_id = None
+            self.active_entry = None
+
+        if not self._confirm_indoor_before_search(w, reason):
+            return True
+
+        return self._complete_current_house_search(w, reason)
 
     def _start_house_search_timer(self):
         self.house_search_timer.start()
@@ -591,6 +725,10 @@ class HouseSearchManager:
 
         # --- 屋内卡死兜底检测 ---
         house_scene = self._get_house_scene(w)
+        if house_scene == 0 and self._is_entry_approach_status():
+            if self._handle_indoor_during_entry_route(w, current_loc, "前往进门点途中检测到 indoor"):
+                return
+
         if house_scene == 0 and not self._is_entry_approach_status():
             self.indoor_stuck_frames += 1
             if self.indoor_stuck_frames > 30:
@@ -663,6 +801,8 @@ class HouseSearchManager:
                 return
 
             self.align_direction(w, target_loc)
+            if self._maybe_bypass_front_house_on_route(w, current_loc, target_loc, dist, "FAST_NAV"):
+                return
 
             if not self.auto_forward:
                 w.click('自动前进')
@@ -689,6 +829,9 @@ class HouseSearchManager:
                 return
 
             self.stop_auto_forward(w)
+            if self._maybe_bypass_front_house_on_route(w, current_loc, target_loc, dist, "PRECISE_NAV"):
+                return
+
             self.align_direction(w, target_loc)
             before_dist = dist
             mode = self._entry_forward_mode(dist)
@@ -837,7 +980,10 @@ class HouseSearchManager:
             exit_direction = w.get_info('direction')
             self.prepare_next_target_logic(exit_direction)
             self.current_house_id = None
+            self.active_entry = None
             self.status = "IDLE"
+            self.history_locations = []
+            self._reset_route_stuck_bypass()
 
     def update_and_check_stuck(self, current_loc):
         self.history_locations.append(current_loc)
@@ -921,11 +1067,7 @@ class HouseSearchManager:
 
     def _get_current_location(self, w: 'FrameWorker'):
         raw = w.get_info('location')
-        if not raw:
-            return None
-        if isinstance(raw, (list, tuple)) and raw and isinstance(raw[0], (list, tuple)):
-            return check_location(raw[0])
-        return check_location(raw)
+        return self._normalize_location_value(raw)
 
     def _push_until_entered_house(self, w: 'FrameWorker') -> bool:
         if self._get_house_scene(w) == 0:
@@ -979,33 +1121,151 @@ class HouseSearchManager:
         w.refresh_frame()
         return self._get_house_scene(w)
 
+    def _next_route_stuck_attempt(self, current_loc):
+        loc = self._normalize_location_value(current_loc)
+        if loc is None:
+            self.route_stuck_bypass_attempts += 1
+            return self.route_stuck_bypass_attempts
+
+        if (
+            self.route_stuck_reference_loc is not None
+            and get_distance(self.route_stuck_reference_loc, loc) <= self.ROUTE_STUCK_REPEAT_RADIUS
+        ):
+            self.route_stuck_bypass_attempts += 1
+        else:
+            self.route_stuck_reference_loc = loc
+            self.route_stuck_bypass_attempts = 1
+        return self.route_stuck_bypass_attempts
+
+    def _route_stuck_forward_wait(self, attempt: int) -> int:
+        return int(min(
+            self.ROUTE_STUCK_BYPASS_FORWARD_MAX_WAIT,
+            self.ROUTE_STUCK_BYPASS_FORWARD_BASE_WAIT
+            + max(0, attempt - 1) * self.ROUTE_STUCK_BYPASS_FORWARD_STEP_WAIT,
+        ))
+
+    def _resume_entry_direction_after_bypass(self, w: 'FrameWorker', target_loc):
+        current_loc = self._get_current_location(w)
+        if current_loc is None or target_loc is None:
+            return
+
+        self.align_direction(w, target_loc, threshold=10, max_steps=1)
+        dist = get_distance(current_loc, target_loc)
+        if dist <= self.ENTRY_ARRIVAL_DISTANCE:
+            return
+
+        mode = self._entry_forward_mode(dist)
+        y_bias, dura, wait = self._get_entry_move_params(dist)
+        print(
+            f"[Unstuck] 绕障后恢复朝进门点推进: "
+            f"dist={dist:.2f}, y_bias={y_bias}, dura={dura}, wait={wait}"
+        )
+        before_dist = dist
+        w.tap_single('摇杆', y_bias=y_bias, dura=dura, wait=wait)
+        w.refresh_frame()
+        after_loc = self._get_current_location(w)
+        after_dist = get_distance(after_loc, target_loc) if after_loc is not None else None
+        update_adaptive_forward_motion(mode, before_dist, before_dist, after_dist, y_bias, dura, wait)
+
+    def _recover_route_stuck_by_side_forward(
+        self,
+        w: 'FrameWorker',
+        current_loc,
+        target_loc,
+        backoff_first: bool = True,
+    ) -> bool:
+        self.stop_auto_forward(w)
+        attempt = self._next_route_stuck_attempt(current_loc)
+
+        if backoff_first:
+            print(f"[Unstuck] 前往进门点卡住，先后退复位 attempt={attempt}")
+            w.tap_single('摇杆', y_bias=300, dura=450, wait=850)
+            w.refresh_frame()
+            if self._get_house_scene(w) == 0:
+                loc_after_back = self._get_current_location(w) or current_loc
+                return self._handle_indoor_during_entry_route(
+                    w,
+                    loc_after_back,
+                    "卡住后后退复核确认误入房",
+                )
+
+        side = self._choose_house_bypass_side(w)
+        current_dir = w.get_info('direction')
+        if current_dir is not None:
+            turn_delta = self.ROUTE_STUCK_TURN_DEGREES if side == "right" else -self.ROUTE_STUCK_TURN_DEGREES
+            target_dir = (float(current_dir) + turn_delta) % 360
+            print(
+                f"[Unstuck] 视野向{side}侧转 {self.ROUTE_STUCK_TURN_DEGREES}° "
+                f"复核室内/室外: target={target_dir:.1f}"
+            )
+            self.align_direction_blocking(
+                w,
+                current_dir,
+                target_dir,
+                threshold=10,
+                max_steps=4,
+            )
+            w.refresh_frame()
+
+        if self._get_house_scene(w) == 0:
+            loc_after_turn = self._get_current_location(w) or current_loc
+            return self._handle_indoor_during_entry_route(
+                w,
+                loc_after_turn,
+                "卡住后转向复核确认误入房",
+            )
+
+        wait = self._route_stuck_forward_wait(attempt)
+        print(
+            f"[Unstuck] 确认为室外卡住，沿{side}侧前推绕开障碍 "
+            f"attempt={attempt}, dura={self.ROUTE_STUCK_BYPASS_FORWARD_DURA}, wait={wait}"
+        )
+        w.tap_single(
+            '摇杆',
+            y_bias=self.ROUTE_STUCK_BYPASS_FORWARD_Y_BIAS,
+            dura=self.ROUTE_STUCK_BYPASS_FORWARD_DURA,
+            wait=wait,
+        )
+        w.refresh_frame()
+
+        if self._get_house_scene(w) == 0:
+            loc_after_forward = self._get_current_location(w) or current_loc
+            return self._handle_indoor_during_entry_route(
+                w,
+                loc_after_forward,
+                "绕障前推后确认误入房",
+            )
+
+        self._resume_entry_direction_after_bypass(w, target_loc)
+        self.history_locations = []
+        return True
+
     def execute_unstuck_logic(self, w: 'FrameWorker', current_loc):
         self.stop_auto_forward(w)
+        target_loc = self.active_entry['location'] if self.active_entry else None
 
         def _safe_get_loc():
-            raw = w.get_info('location')
-            if raw is None:
-                return None
-            return check_location(raw[0])
+            return self._get_current_location(w)
 
         if self._get_house_scene(w) == 0:
             house_scene_after_backoff = self._backoff_and_recheck_house_scene(w)
             if house_scene_after_backoff != 0:
-                if self._front_house_blocking(w) and self._try_lock_visible_door_after_block(w):
-                    return True
-                print("[Unstuck] 后退复核后已不判定为室内，按室外卡住继续导航")
-                return True
+                print("[Unstuck] 后退复核后已不判定为室内，按室外卡住绕障")
+                return self._recover_route_stuck_by_side_forward(
+                    w,
+                    _safe_get_loc() or current_loc,
+                    target_loc,
+                    backoff_first=False,
+                )
 
-            print("[Unstuck] 后退复核后仍为室内，使用 HouseExitManager 脱困")
-            self.house_exit_manager.reset()
-            for _ in range(20):
-                if self._should_abort(w):
-                    return False
-                if self.house_exit_manager.process(w):
-                    print("[Unstuck] HouseExitManager 出房成功")
-                    return True
-            print("[Unstuck] HouseExitManager 暂未出房")
-            return False
+            return self._handle_indoor_during_entry_route(
+                w,
+                _safe_get_loc() or current_loc,
+                "后退复核后仍为 indoor",
+            )
+
+        if self._recover_route_stuck_by_side_forward(w, current_loc, target_loc):
+            return True
 
         if self._bypass_front_house_block(w, current_loc, _safe_get_loc):
             return True
@@ -1124,6 +1384,7 @@ class HouseSearchManager:
         self.active_entry = best_entry
         self.avoid_angle_ref = None
         self.avoid_mode = None
+        self._reset_route_stuck_bypass()
 
     def select_smart_target(self, current_loc, current_direction):
         best_dist = float('inf')
@@ -1158,6 +1419,7 @@ class HouseSearchManager:
         self.avoid_angle_ref = None
         self.avoid_mode = None
         self.temp_skip_houses.clear()
+        self._reset_route_stuck_bypass()
 
     def handle_failed_entry_logic(self, failed_entry_angle):
         print(f"[Smart] 进门失败，临时跳过 {self.current_house_id}")

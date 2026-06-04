@@ -11,6 +11,8 @@ from aw.autogame.tools.Utils import *
 
 import os
 import cv2
+import time
+from functools import wraps
 from datetime import datetime
 
 dire_tool = Get_Direction(model_weight=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/direction.pt')
@@ -22,6 +24,22 @@ speed_cls = SpeedClassifier(weight_path=r'aw/autogame/customs_examples/Auto_PUBG
 scene_cls = GameSceneClassifier(checkpoint_path=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/scene_best_model.pth')
 
 h, w = get_wh()
+
+
+def special_timing(func):
+    """
+    Special 方法耗时统计装饰器。
+    使用方式：在需要统计的 special 方法上方增加 @special_timing。
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        result = func(*args, **kwargs)
+        elapsed_ms = round((time.perf_counter() - start) * 1000.0, 3)
+        return result, elapsed_ms
+
+    wrapper.__special_timing_enabled__ = True
+    return wrapper
 
 
 def direction(img):

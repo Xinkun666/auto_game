@@ -1807,8 +1807,7 @@ class HouseSearchManager:
         used_px, used_dura, _ = get_adaptive_turn_motion(turn_dir, desired_diff, fallback_px, fallback_dura)
         move_px = used_px if turn_dir == 'right' else -used_px
         before_dir = w.get_info('direction')
-        w.tap_single('视角', x_bias=int(move_px), dura=used_dura, wait=500)
-        time.sleep(0.5)
+        w.tap_single('视角', x_bias=int(move_px), dura=used_dura, wait=20)
         # 旋转视角后，刷新当前帧
         w.refresh_frame()
         update_adaptive_turn_motion(turn_dir, desired_diff, before_dir, w.get_info('direction'), used_px, used_dura)

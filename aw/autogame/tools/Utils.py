@@ -830,7 +830,25 @@ def visualizer_process(queue, visual=True):
     target_width = 826 * 2
     target_height = 384 * 2
 
+    def is_timed_special_value(value):
+        if not isinstance(value, (list, tuple)) or len(value) != 2:
+            return False
+        timing = value[1]
+        if not isinstance(timing, (list, tuple)) or len(timing) != 1:
+            return False
+        try:
+            float(timing[0])
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    def unwrap_timed_special_value(value):
+        if is_timed_special_value(value):
+            return value[0]
+        return value
+
     def is_detection_list(value):
+        value = unwrap_timed_special_value(value)
         if not isinstance(value, list) or not value:
             return False
 
@@ -866,6 +884,8 @@ def visualizer_process(queue, visual=True):
 
     def collect_visualizations(value):
         visuals = []
+        if is_timed_special_value(value):
+            return collect_visualizations(value[0])
         if isinstance(value, dict):
             own_visuals = value.get("__visualizations__")
             if isinstance(own_visuals, list):
@@ -930,6 +950,8 @@ def visualizer_process(queue, visual=True):
         return frame
 
     def sanitize_info_for_log(value):
+        if is_timed_special_value(value):
+            return [sanitize_info_for_log(value[0]), [value[1][0]]]
         if isinstance(value, dict):
             sanitized = {}
             for key, child in value.items():
@@ -985,7 +1007,8 @@ def visualizer_process(queue, visual=True):
                 for k, v in sorted_info_items:
                     if is_detection_list(v):
                         detection_keys.add(k)
-                        frame_rotated = draw_detection_list(frame_rotated, v, get_scaled_size, font_info)
+                        detections = unwrap_timed_special_value(v)
+                        frame_rotated = draw_detection_list(frame_rotated, detections, get_scaled_size, font_info)
                 visual_items = collect_visualizations(info)
                 if visual_items:
                     frame_rotated = draw_algorithm_visualizations(

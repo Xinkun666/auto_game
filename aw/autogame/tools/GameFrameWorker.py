@@ -21,6 +21,25 @@ from aw.autogame.tools.GameSceneHandler import StageLogicController
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def _is_timed_special_info(value):
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return False
+    timing = value[1]
+    if not isinstance(timing, (list, tuple)) or len(timing) != 1:
+        return False
+    try:
+        float(timing[0])
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _unwrap_timed_special_info(value):
+    if _is_timed_special_info(value):
+        return value[0]
+    return value
+
+
 class HdcDut:
     """基于 hdc 的设备控制封装。"""
 
@@ -2042,7 +2061,7 @@ class FrameWorker(threading.Thread):
         suffix = f"__{area_name}"
         for key, value in self.stage_info.items():
             if key.endswith(suffix):
-                return value
+                return _unwrap_timed_special_info(value)
         return None
 
     def change_stage(self, stage_name):

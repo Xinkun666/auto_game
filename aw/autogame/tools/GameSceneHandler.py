@@ -108,6 +108,19 @@ class GameImageProcessor:
         mapped_result["__visualizations__"] = mapped_visuals
         return mapped_result
 
+    @staticmethod
+    def _split_special_timing_result(method, result):
+        if getattr(method, "__special_timing_enabled__", False):
+            if isinstance(result, tuple) and len(result) == 2:
+                return result[0], result[1]
+        return result, None
+
+    @staticmethod
+    def _format_special_result_for_info(result, timing_ms):
+        if timing_ms is None:
+            return result
+        return [result, [timing_ms]]
+
     def process(self, raw_frame, tasks_config, buffer_ratio=0.1):
         self.task_config = tasks_config
         curr_h, curr_w = raw_frame.shape[:2]
@@ -150,10 +163,13 @@ class GameImageProcessor:
                     method = getattr(self.special_handler, handler_name, None)
                     if not method:
                         return task_id, f"Error: {handler_name} not found"
-                    return task_id, self._map_special_visualizations(
-                        method(target_img),
+                    raw_special_result = method(target_img)
+                    special_result, timing_ms = self._split_special_timing_result(method, raw_special_result)
+                    mapped_result = self._map_special_visualizations(
+                        special_result,
                         (x1, y1, x2, y2),
                     )
+                    return task_id, self._format_special_result_for_info(mapped_result, timing_ms)
 
                 # Case 2: 模板匹配
                 elif task_type == 'template':

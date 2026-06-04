@@ -288,8 +288,11 @@ class AdaptiveTurnTable:
     ANGLE_STEP = 5
     UPDATE_ALPHA = 0.45
     MIN_OBSERVED_DEG = 1.0
+    MIN_OBSERVED_RATIO = 0.2
     MIN_PX = 8
+    MAX_PX = 1200
     MIN_DURA = 80
+    MAX_DURA = 1800
     SCALE_MIN = 0.45
     SCALE_MAX = 1.8
 
@@ -299,6 +302,7 @@ class AdaptiveTurnTable:
 
     def _load_persisted_table(self):
         raw = _get_adaptive_motion_section("turn")
+        dirty = False
         for turn_dir in ("left", "right"):
             entries = raw.get(turn_dir)
             if not isinstance(entries, dict):
@@ -308,7 +312,14 @@ class AdaptiveTurnTable:
                 angle_key = self.angle_bin(angle)
                 cleaned = _motion_entry_as_ints(entry, ("px", "dura"))
                 if angle_key is not None and cleaned:
+                    raw_px = cleaned["px"]
+                    raw_dura = cleaned["dura"]
+                    cleaned["px"] = self._clamp_px(cleaned["px"])
+                    cleaned["dura"] = self._clamp_dura(cleaned["dura"])
+                    dirty = dirty or cleaned["px"] != raw_px or cleaned["dura"] != raw_dura
                     self.table[turn_dir][angle_key] = cleaned
+        if dirty:
+            self._persist()
 
     def _persist(self):
         _persist_adaptive_motion_section("turn", self.table)
@@ -326,13 +337,13 @@ class AdaptiveTurnTable:
     def get(self, turn_dir, diff, fallback_px, fallback_dura):
         angle_key = self.angle_bin(diff)
         if turn_dir not in self.table or angle_key is None:
-            return int(fallback_px or 0), int(fallback_dura or 0), angle_key
+            return self._clamp_px(fallback_px), self._clamp_dura(fallback_dura), angle_key
 
         entry = self.table[turn_dir].get(angle_key)
         if entry:
-            return int(entry["px"]), int(entry["dura"]), angle_key
+            return self._clamp_px(entry["px"]), self._clamp_dura(entry["dura"]), angle_key
 
-        return int(fallback_px or 0), int(fallback_dura or 0), angle_key
+        return self._clamp_px(fallback_px), self._clamp_dura(fallback_dura), angle_key
 
     def observe(self, turn_dir, desired_diff, before_angle, after_angle, used_px, used_dura):
         angle_key = self.angle_bin(desired_diff)
@@ -342,11 +353,17 @@ class AdaptiveTurnTable:
         observed = self._observed_turn_degrees(turn_dir, before_angle, after_angle)
         if observed is None or observed < self.MIN_OBSERVED_DEG:
             return
+        if angle_key >= 20 and observed < angle_key * self.MIN_OBSERVED_RATIO:
+            print(
+                f"[AdaptiveMotion] 跳过异常转向样本: turn={turn_dir}, "
+                f"desired={angle_key}, observed={observed:.1f}"
+            )
+            return
 
         scale = angle_key / observed
         scale = max(self.SCALE_MIN, min(self.SCALE_MAX, scale))
-        measured_px = max(self.MIN_PX, int(round(abs(float(used_px or 0)) * scale)))
-        measured_dura = max(self.MIN_DURA, int(round(float(used_dura or 0) * scale)))
+        measured_px = self._clamp_px(abs(float(used_px or 0)) * scale)
+        measured_dura = self._clamp_dura(float(used_dura or 0) * scale)
 
         entry = self.table[turn_dir].get(angle_key)
         if not entry:
@@ -359,10 +376,28 @@ class AdaptiveTurnTable:
             return
 
         alpha = self.UPDATE_ALPHA
-        entry["px"] = int(round(entry["px"] * (1.0 - alpha) + measured_px * alpha))
-        entry["dura"] = int(round(entry["dura"] * (1.0 - alpha) + measured_dura * alpha))
+        entry["px"] = self._clamp_px(entry["px"] * (1.0 - alpha) + measured_px * alpha)
+        entry["dura"] = self._clamp_dura(entry["dura"] * (1.0 - alpha) + measured_dura * alpha)
         entry["samples"] = int(entry.get("samples", 0)) + 1
         self._persist()
+
+    def _clamp_px(self, value):
+        try:
+            value = int(round(float(value or 0)))
+        except (TypeError, ValueError):
+            value = 0
+        if value <= 0:
+            return 0
+        return max(self.MIN_PX, min(self.MAX_PX, value))
+
+    def _clamp_dura(self, value):
+        try:
+            value = int(round(float(value or 0)))
+        except (TypeError, ValueError):
+            value = 0
+        if value <= 0:
+            return 0
+        return max(self.MIN_DURA, min(self.MAX_DURA, value))
 
     @staticmethod
     def _observed_turn_degrees(turn_dir, before_angle, after_angle):

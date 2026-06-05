@@ -424,7 +424,7 @@ class RunningManager:
     CAR_VISUAL_DYNAMIC_CLOSE_AREA_RATIO = 0.030
     CAR_VISUAL_DYNAMIC_NEAR_AREA_RATIO = 0.045
     CAR_VISUAL_DYNAMIC_VERY_NEAR_AREA_RATIO = 0.08
-    CAR_VISUAL_DYNAMIC_MIN_WAIT = 70
+    CAR_VISUAL_DYNAMIC_MIN_WAIT = 100
     CAR_VISUAL_DYNAMIC_VERY_NEAR_WAIT = 130
     CAR_VISUAL_DYNAMIC_NEAR_WAIT = 260
     CAR_VISUAL_DYNAMIC_CLOSE_WAIT = 650
@@ -556,6 +556,7 @@ class RunningManager:
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio: Optional[float] = None
         self.roadside_car_peak_area_ratio: Optional[float] = None
+        self.roadside_car_last_forward_motion: Optional[Tuple[int, int, int]] = None
         self.current_running_route_kind: Optional[str] = None
         self.last_circle_target_point: Optional[Tuple[int, int]] = None
         self.circle_route_completed = False
@@ -606,6 +607,7 @@ class RunningManager:
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
         self.roadside_car_peak_area_ratio = None
+        self.roadside_car_last_forward_motion = None
         self.current_running_route_kind = None
         self.last_circle_target_point = None
         self.circle_route_completed = False
@@ -957,6 +959,7 @@ class RunningManager:
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
         self.roadside_car_peak_area_ratio = None
+        self.roadside_car_last_forward_motion = None
 
     def _is_in_vehicle(self, w: "FrameWorker") -> bool:
         if any(w.get_info(name) for name in ("漂移", "喇叭")):
@@ -1102,6 +1105,7 @@ class RunningManager:
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
         self.roadside_car_peak_area_ratio = None
+        self.roadside_car_last_forward_motion = None
         self.current_running_route_kind = None
         print(
             f"[Running] 收到下车通知，载具交互保护期 {cooldown:.1f}s，"
@@ -1136,6 +1140,7 @@ class RunningManager:
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
         self.roadside_car_peak_area_ratio = None
+        self.roadside_car_last_forward_motion = None
         print(
             "[Running] 收到搜房结束通知，"
             f"后续模式={'沿指定路线找车，开车完成后再跑图/进圈' if self.finding_car else '跑图/进圈'}"
@@ -2194,6 +2199,7 @@ class RunningManager:
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
         self.roadside_car_peak_area_ratio = None
+        self.roadside_car_last_forward_motion = None
         self._discard_current_road_target()
         self._switch_view_mode(
             w,
@@ -2248,7 +2254,14 @@ class RunningManager:
                 f"{self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}"
             )
 
-        forward_bias_y, forward_dura, forward_wait = self._get_dynamic_car_forward_motion()
+        if aligned is None and self.roadside_car_last_forward_motion is not None:
+            forward_bias_y, forward_dura, forward_wait = self._get_lost_car_half_forward_motion()
+            print(
+                f"[Running] 路边追车丢车补前推使用上次一半时间: "
+                f"y_bias={forward_bias_y}, dura={forward_dura}ms, wait={forward_wait}ms"
+            )
+        else:
+            forward_bias_y, forward_dura, forward_wait = self._get_dynamic_car_forward_motion()
         print(
             f"[Running] 路边追车前推 y_bias={forward_bias_y}, "
             f"dura={forward_dura}ms, wait={forward_wait}ms, "
@@ -2260,6 +2273,7 @@ class RunningManager:
             dura=forward_dura,
             wait=forward_wait,
         )
+        self.roadside_car_last_forward_motion = (forward_bias_y, forward_dura, forward_wait)
         w.refresh_frame()
 
         if self._attempt_drive_after_move(
@@ -2307,6 +2321,7 @@ class RunningManager:
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
         self.roadside_car_peak_area_ratio = None
+        self.roadside_car_last_forward_motion = None
         self.active_vehicle_entry_source = None
         self._discard_current_road_target()
 
@@ -2343,6 +2358,7 @@ class RunningManager:
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
         self.roadside_car_peak_area_ratio = None
+        self.roadside_car_last_forward_motion = None
 
     def _process_precise_entry(
         self,
@@ -2863,6 +2879,15 @@ class RunningManager:
             self._get_dynamic_car_forward_dura(),
             self._get_dynamic_car_forward_wait(),
         )
+
+    def _get_lost_car_half_forward_motion(self) -> Tuple[int, int, int]:
+        if self.roadside_car_last_forward_motion is None:
+            return self._get_dynamic_car_forward_motion()
+
+        bias_y, dura, wait = self.roadside_car_last_forward_motion
+        half_dura = max(1, int(round(dura * 0.5)))
+        half_wait = max(half_dura, int(round(wait * 0.5)))
+        return bias_y, half_dura, half_wait
 
     def _get_dynamic_car_forward_bias_y(self) -> int:
         ratio = self.roadside_car_last_area_ratio

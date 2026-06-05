@@ -94,6 +94,9 @@ class HouseSceneSearchManager(HouseSearchManager):
     ENTRY_OPEN_DOOR_RELOCK_BACKOFF_DURAS = (360, 420, 500, 580, 650)
     ENTRY_OPEN_DOOR_RELOCK_BACKOFF_DURA = 500
     ENTRY_OPEN_DOOR_RELOCK_BACKOFF_WAIT = 650
+    ENTRY_OPEN_DOOR_RELOCK_EXTRA_BACKOFF_STEPS = 2
+    ENTRY_OPEN_DOOR_RELOCK_EXTRA_BACKOFF_DURA = 260
+    ENTRY_OPEN_DOOR_RELOCK_EXTRA_BACKOFF_WAIT = 420
     ENTRY_OPEN_DOOR_RELOCK_TOLERANCE_PX = 90
 
     ROTATE_SEARCH_MOVE_DURA = 1000
@@ -1074,10 +1077,6 @@ class HouseSceneSearchManager(HouseSearchManager):
             print("[SceneEntry] 对齐视觉门后已是 indoor，直接开始屋内搜索")
             return True
 
-        button_state = self._door_button_state(w)
-        if button_state:
-            return self._handle_entry_door_button_then_forward(w, button_state, "进门前")
-
         approach_result = self._approach_until_near_entry(w, force_first_forward=True)
         if approach_result == "indoor":
             print("[SceneEntry] 前推/跳跃后已确认 indoor，直接开始屋内搜索")
@@ -1087,9 +1086,11 @@ class HouseSceneSearchManager(HouseSearchManager):
         if approach_result != "near":
             return False
 
+        self._realign_to_entry_direction(w, "未发现门按钮，左右震荡探门前")
         button_state = self._sweep_for_door_button(w)
         if button_state == "indoor":
-            return self._confirm_indoor_by_forward_push(w, "左右探门时检测到 indoor")
+            print("[SceneEntry] 左右探门时检测到 indoor，确认已进房")
+            return True
         if button_state in {"open", "close"}:
             return self._handle_entry_door_button_then_forward(w, button_state, "左右探门时")
 
@@ -1116,8 +1117,8 @@ class HouseSceneSearchManager(HouseSearchManager):
         if self._enter_after_door_button_relock_loop(w, reason, opened_now):
             return True
 
-        print("[SceneEntry] 5次后拉重锁门仍未 indoor，开始左前/右前小步进门")
-        return self._enter_open_door_by_diagonal_sweep(w)
+        print("[SceneEntry] 多次后拉、重锁门、短前推仍未 indoor，严格进门流程失败")
+        return False
 
     def _enter_after_door_button_relock_loop(
         self,
@@ -1129,8 +1130,12 @@ class HouseSceneSearchManager(HouseSearchManager):
             if self._should_abort(w):
                 return False
 
-            if attempt > 0 and not self._backoff_and_relock_entry_door(w, reason, attempt):
-                return False
+            if attempt > 0:
+                relock_result = self._backoff_and_relock_entry_door(w, reason, attempt)
+                if relock_result == "indoor":
+                    return True
+                if relock_result != "aligned":
+                    return False
             if self._is_indoor(w):
                 print("[SceneEntry] 后拉/重锁门后已是 indoor，直接确认入房")
                 return True
@@ -1183,7 +1188,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         print(f"[SceneEntry] 前推后 house_scene={scene}，未进入 indoor")
         return False
 
-    def _backoff_and_relock_entry_door(self, w: "FrameWorker", reason: str, attempt: int) -> bool:
+    def _backoff_and_relock_entry_door(self, w: "FrameWorker", reason: str, attempt: int) -> str:
         backoff_dura, backoff_wait = self._entry_door_relock_backoff_motion(attempt)
         print(
             f"[SceneEntry] {reason}前推未进房，后拉后重新锁定门框 "
@@ -1200,12 +1205,14 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         if self._is_indoor(w):
             print("[SceneEntry] 后拉复核时已是 indoor，直接确认入房")
-            return True
+            return "indoor"
 
-        door = self.find_largest_door(w)
+        door = self._find_entry_door_after_backoff(w)
+        if isinstance(door, str) and door == "indoor":
+            return "indoor"
         if door is None:
-            print("[SceneEntry] 后拉后未重新识别到门，交给左右小步进门兜底")
-            return False
+            print("[SceneEntry] 后拉后仍未重新识别到门，停止本轮严格进门流程")
+            return "failed"
 
         print("[SceneEntry] 后拉后重新锁定当前门，先对齐门框再前推")
         self._align_to_door_detection(
@@ -1217,9 +1224,32 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         if self._is_indoor(w):
             print("[SceneEntry] 重新锁门对齐后已是 indoor")
-            return True
+            return "indoor"
 
-        return True
+        return "aligned"
+
+    def _find_entry_door_after_backoff(self, w: "FrameWorker"):
+        door = self.find_largest_door(w)
+        for step in range(self.ENTRY_OPEN_DOOR_RELOCK_EXTRA_BACKOFF_STEPS):
+            if door is not None or self._should_abort(w):
+                break
+
+            print(
+                f"[SceneEntry] 后拉后未看到门，再后拉一点寻找门框 "
+                f"{step + 1}/{self.ENTRY_OPEN_DOOR_RELOCK_EXTRA_BACKOFF_STEPS}"
+            )
+            w.tap_single(
+                "摇杆",
+                y_bias=self.ENTRY_OPEN_DOOR_RELOCK_BACKOFF_Y_BIAS,
+                dura=self.ENTRY_OPEN_DOOR_RELOCK_EXTRA_BACKOFF_DURA,
+                wait=self.ENTRY_OPEN_DOOR_RELOCK_EXTRA_BACKOFF_WAIT,
+            )
+            w.refresh_frame()
+            if self._is_indoor(w):
+                return "indoor"
+            door = self.find_largest_door(w)
+
+        return door
 
     def _entry_door_relock_push_motion(self, attempt: int):
         dura = self._sequence_value(self.ENTRY_OPEN_DOOR_RELOCK_PUSH_DURAS, attempt)
@@ -1288,7 +1318,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 return "indoor"
 
             button_state = self._door_button_state(w)
-            if button_state:
+            if button_state and not (force_first_forward and step == 0):
                 return button_state
 
             scene = self._get_house_scene(w)

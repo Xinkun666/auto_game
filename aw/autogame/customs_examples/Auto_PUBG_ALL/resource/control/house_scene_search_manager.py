@@ -103,6 +103,10 @@ class HouseSceneSearchManager(HouseSearchManager):
     ROTATE_SEARCH_MOVE_WAIT_PAD = 260
     ROTATE_SEARCH_X_BIAS = 330
     ROTATE_SEARCH_Y_BIAS = -430
+    ROTATE_SEARCH_AUTO_TIMEOUT_SECONDS = 90
+    ROTATE_SEARCH_AUTO_POLL_SECONDS = 0.35
+    ROTATE_SEARCH_WALL_TURN_DEGREES = 60
+    ROTATE_SEARCH_STUCK_SIMILAR_FRAMES = 5
     ROTATE_SEARCH_TURN_DEGREES = 90
     ROTATE_SEARCH_WALL_TURN_SEQUENCE = (90, 45, 22)
     ROTATE_SEARCH_WALL_TURN_MAX_ATTEMPTS = 6
@@ -557,83 +561,116 @@ class HouseSceneSearchManager(HouseSearchManager):
         return False
 
     def _rotate_search_inside_house(self, w: "FrameWorker"):
-        move_mode = "left_up"
+        self._ensure_rotate_auto_forward(w, "进入房屋后启动自动前进搜房")
+        start_time = time.monotonic()
+        turn_sign = 1
         wall_hit_count = 0
-        wall_switch_cycles = 0
-        recover_ms = {
-            "left_up": self.ROTATE_SEARCH_RECOVER_STEP_MS,
-            "right_up": self.ROTATE_SEARCH_RECOVER_STEP_MS,
-        }
+        similar_frame_count = 0
+        previous_frame = None
+        step = 0
 
-        for step in range(self.ROTATE_SEARCH_MAX_STEPS):
+        while True:
             if self._should_abort(w):
                 break
 
+            if time.monotonic() - start_time >= self.ROTATE_SEARCH_AUTO_TIMEOUT_SECONDS:
+                print(
+                    f"[SceneRotate] 自动前进搜房超过 "
+                    f"{self.ROTATE_SEARCH_AUTO_TIMEOUT_SECONDS}s 仍未出房，切出房策略"
+                )
+                self.stop_auto_forward(w)
+                return self.ROTATE_RESULT_FALLBACK_EXIT
+
+            step += 1
+            time.sleep(self.ROTATE_SEARCH_AUTO_POLL_SECONDS)
             w.refresh_frame()
-            scene_before = self._get_house_scene(w)
-            if scene_before is None:
-                print("[SceneRotate] 当前 house_scene 暂未识别，继续按室内旋转搜房尝试")
-            elif scene_before in self.HOUSE_EXIT_SCENES:
-                print(f"[SceneRotate] 滑动前已判定出房 house_scene={scene_before}")
+            scene = self._get_house_scene(w)
+            current_frame = self._copy_current_frame(w)
+            similar = False
+            mean_diff = 0.0
+            changed_ratio = 0.0
+            if previous_frame is not None and current_frame is not None:
+                similar, mean_diff, changed_ratio = self._frames_are_similar(previous_frame, current_frame)
+                similar_frame_count = similar_frame_count + 1 if similar else 0
+            previous_frame = current_frame
+
+            turn_label = "右" if turn_sign > 0 else "左"
+            print(
+                f"[SceneRotate] auto_step={step}, turn={turn_label}, "
+                f"house_scene={scene}, wall_hits={wall_hit_count}, "
+                f"same_frames={similar_frame_count}/{self.ROTATE_SEARCH_STUCK_SIMILAR_FRAMES}, "
+                f"frame_mean={mean_diff:.2f}, changed={changed_ratio:.3f}"
+            )
+
+            if scene in self.HOUSE_EXIT_SCENES:
+                print(f"[SceneRotate] 自动前进搜房中判定出房 house_scene={scene}")
+                self.stop_auto_forward(w)
                 return self.ROTATE_RESULT_EXITED
-            elif scene_before not in {
+
+            if scene is not None and scene not in {
                 self.HOUSE_INDOOR,
                 self.HOUSE_NEAR_DOOR,
                 self.HOUSE_NEAR_WALL,
             }:
-                print(f"[SceneRotate] 当前 house_scene={scene_before}，停止室内旋转搜房")
+                print(f"[SceneRotate] 当前 house_scene={scene}，停止室内旋转搜房")
+                self.stop_auto_forward(w)
                 return self.ROTATE_RESULT_FINISHED
 
-            before_frame = self._copy_current_frame(w)
-            self._move_rotate_search_step(w, move_mode)
-            after_frame = self._copy_current_frame(w)
-            similar, mean_diff, changed_ratio = self._frames_are_similar(before_frame, after_frame)
-            scene_after = self._get_house_scene(w)
-            print(
-                f"[SceneRotate] step={step + 1}, mode={move_mode}, "
-                f"house_scene={scene_after}, frame_mean={mean_diff:.2f}, "
-                f"changed={changed_ratio:.3f}, similar={similar}"
-            )
-
-            if scene_after in self.HOUSE_EXIT_SCENES:
-                print(f"[SceneRotate] {self._move_mode_label(move_mode)}滑动后判定出房 house_scene={scene_after}")
-                return self.ROTATE_RESULT_EXITED
-
-            if scene_after in self.HOUSE_NEAR_ENTRY_SCENES:
+            if scene in self.HOUSE_NEAR_ENTRY_SCENES:
                 wall_hit_count += 1
+                if wall_hit_count > self.ROTATE_SEARCH_HIT_SWITCH_COUNT:
+                    turn_sign = -1
+                    turn_label = "左"
                 print(
-                    f"[SceneRotate] 累计撞墙/门 {wall_hit_count}/"
-                    f"{self.ROTATE_SEARCH_HIT_SWITCH_COUNT}, mode={move_mode}"
+                    f"[SceneRotate] 自动前进撞墙/门累计 {wall_hit_count}，"
+                    f"向{turn_label}滑视角 {self.ROTATE_SEARCH_WALL_TURN_DEGREES}°"
                 )
-                move_mode, wall_hit_count, switched = self._handle_rotate_wall_hit(
+                self._turn_with_direction_correction(
                     w,
-                    move_mode,
-                    wall_hit_count,
+                    turn_sign * self.ROTATE_SEARCH_WALL_TURN_DEGREES,
                 )
-                if switched:
-                    wall_switch_cycles += 1
-                    print(
-                        f"[SceneRotate] 撞墙循环切换 {wall_switch_cycles}/"
-                        f"{self.ROTATE_SEARCH_EXIT_FALLBACK_SWITCHES}"
-                    )
-                    if wall_switch_cycles >= self.ROTATE_SEARCH_EXIT_FALLBACK_SWITCHES:
-                        return self.ROTATE_RESULT_FALLBACK_EXIT
+                previous_frame = self._copy_current_frame(w)
+                similar_frame_count = 0
                 continue
 
-            if scene_after not in {self.HOUSE_INDOOR, None}:
-                print(f"[SceneRotate] 推进后 house_scene={scene_after}，停止室内旋转搜房")
-                return self.ROTATE_RESULT_FINISHED
+            if similar_frame_count >= self.ROTATE_SEARCH_STUCK_SIMILAR_FRAMES:
+                self._recover_rotate_auto_forward_stuck(w, turn_sign)
+                self._ensure_rotate_auto_forward(w, "卡住横拉后恢复自动前进")
+                previous_frame = self._copy_current_frame(w)
+                similar_frame_count = 0
 
-            if similar:
-                self._recover_rotate_search_stuck(w, move_mode, recover_ms[move_mode])
-                recover_ms[move_mode] = min(
-                    recover_ms[move_mode] + self.ROTATE_SEARCH_RECOVER_STEP_MS,
-                    self.ROTATE_SEARCH_RECOVER_MAX_MS,
-                )
-            else:
-                recover_ms[move_mode] = self.ROTATE_SEARCH_RECOVER_STEP_MS
-
+        self.stop_auto_forward(w)
         return self.ROTATE_RESULT_FINISHED
+
+    def _ensure_rotate_auto_forward(self, w: "FrameWorker", reason: str):
+        if self.auto_forward:
+            return
+        print(f"[SceneRotate] {reason}")
+        w.click("自动前进")
+        self.auto_forward = True
+        w.refresh_frame()
+
+    def _recover_rotate_auto_forward_stuck(self, w: "FrameWorker", turn_sign: int):
+        if turn_sign > 0:
+            x_bias = -self.ROTATE_SEARCH_RECOVER_X_BIAS
+            label = "左"
+        else:
+            x_bias = self.ROTATE_SEARCH_RECOVER_X_BIAS
+            label = "右"
+
+        print(
+            f"[SceneRotate] 连续 {self.ROTATE_SEARCH_STUCK_SIMILAR_FRAMES} 帧前景相似，"
+            f"判定卡住，向{label}横拉一下"
+        )
+        w.tap_single(
+            "摇杆",
+            x_bias=x_bias,
+            y_bias=0,
+            dura=self.ROTATE_SEARCH_RECOVER_STEP_MS,
+            wait=self.ROTATE_SEARCH_RECOVER_STEP_MS + self.ROTATE_SEARCH_MOVE_WAIT_PAD,
+        )
+        self.auto_forward = False
+        w.refresh_frame()
 
     def _move_rotate_search_step(self, w: "FrameWorker", move_mode: str):
         x_bias = self._rotate_move_x_bias(move_mode)

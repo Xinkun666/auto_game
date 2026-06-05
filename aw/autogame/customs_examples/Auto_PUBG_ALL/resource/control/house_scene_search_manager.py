@@ -87,8 +87,13 @@ class HouseSceneSearchManager(HouseSearchManager):
     ENTRY_OPEN_DOOR_SHORT_PUSH_RATIO = 1.0 / 3.0
     ENTRY_OPEN_DOOR_SHORT_PUSH_MIN_DURA = 120
     ENTRY_OPEN_DOOR_RELOCK_BACKOFF_Y_BIAS = 360
-    ENTRY_OPEN_DOOR_RELOCK_BACKOFF_DURA = 320
-    ENTRY_OPEN_DOOR_RELOCK_BACKOFF_WAIT = 520
+    ENTRY_OPEN_DOOR_RELOCK_MAX_ATTEMPTS = 5
+    ENTRY_OPEN_DOOR_RELOCK_PUSH_WAITS = (300, 500, 600, 700, 800)
+    ENTRY_OPEN_DOOR_RELOCK_PUSH_DURAS = (220, 300, 360, 420, 480)
+    ENTRY_OPEN_DOOR_RELOCK_BACKOFF_WAITS = (500, 580, 650, 730, 800)
+    ENTRY_OPEN_DOOR_RELOCK_BACKOFF_DURAS = (360, 420, 500, 580, 650)
+    ENTRY_OPEN_DOOR_RELOCK_BACKOFF_DURA = 500
+    ENTRY_OPEN_DOOR_RELOCK_BACKOFF_WAIT = 650
     ENTRY_OPEN_DOOR_RELOCK_TOLERANCE_PX = 90
 
     ROTATE_SEARCH_MOVE_DURA = 1000
@@ -1095,27 +1100,60 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         self._realign_to_entry_direction(w, "门按钮出现后")
 
-        if opened_now:
-            if self._short_push_after_open_door(w, reason):
-                return True
-            if self._backoff_relock_door_and_push(w, reason):
-                return True
-        elif self._confirm_indoor_by_forward_push(w, "门按钮处理后重新对准进门方向"):
+        if self._enter_after_door_button_relock_loop(w, reason, opened_now):
             return True
 
-        print("[SceneEntry] 正前推后仍未 indoor，开始左前/右前小步进门")
+        print("[SceneEntry] 5次后拉重锁门仍未 indoor，开始左前/右前小步进门")
         return self._enter_open_door_by_diagonal_sweep(w)
 
-    def _short_push_after_open_door(self, w: "FrameWorker", reason: str) -> bool:
-        dura = int(round(self.ENTRY_INDOOR_CONFIRM_FORWARD_DURA * self.ENTRY_OPEN_DOOR_SHORT_PUSH_RATIO))
-        wait = int(round(self.ENTRY_INDOOR_CONFIRM_FORWARD_WAIT * self.ENTRY_OPEN_DOOR_SHORT_PUSH_RATIO))
-        dura = max(self.ENTRY_OPEN_DOOR_SHORT_PUSH_MIN_DURA, dura)
-        wait = max(dura, wait)
+    def _enter_after_door_button_relock_loop(
+        self,
+        w: "FrameWorker",
+        reason: str,
+        opened_now: bool,
+    ) -> bool:
+        for attempt in range(self.ENTRY_OPEN_DOOR_RELOCK_MAX_ATTEMPTS):
+            if self._should_abort(w):
+                return False
 
-        print(
-            f"[SceneEntry] {reason}开门后先短前推确认入房: "
-            f"dura={dura}, wait={wait}"
-        )
+            if attempt > 0 and not self._backoff_and_relock_entry_door(w, reason, attempt):
+                return False
+            if self._is_indoor(w):
+                print("[SceneEntry] 后拉/重锁门后已是 indoor，直接确认入房")
+                return True
+
+            if attempt == 0 and not opened_now:
+                self._realign_to_entry_direction(w, "关门按钮出现后")
+
+            push_dura, push_wait = self._entry_door_relock_push_motion(attempt)
+            print(
+                f"[SceneEntry] 门按钮后尝试进房 {attempt + 1}/"
+                f"{self.ENTRY_OPEN_DOOR_RELOCK_MAX_ATTEMPTS}: "
+                f"dura={push_dura}, wait={push_wait}"
+            )
+            if self._push_entry_forward_and_check_indoor(
+                w,
+                f"{reason}门按钮后第{attempt + 1}次前推",
+                push_dura,
+                push_wait,
+            ):
+                return True
+
+            scene = self._get_house_scene(w)
+            if scene not in {
+                self.HOUSE_INDOOR,
+                self.HOUSE_NEAR_DOOR,
+                self.HOUSE_NEAR_WALL,
+                self.HOUSE_OUTDOOR,
+                None,
+            }:
+                print(f"[SceneEntry] 前推后 house_scene={scene}，停止重锁门循环")
+                return False
+
+        return False
+
+    def _push_entry_forward_and_check_indoor(self, w: "FrameWorker", reason: str, dura: int, wait: int) -> bool:
+        print(f"[SceneEntry] {reason}，前推确认入房")
         w.tap_single(
             "摇杆",
             y_bias=self.ENTRY_INDOOR_CONFIRM_FORWARD_Y_BIAS,
@@ -1124,20 +1162,26 @@ class HouseSceneSearchManager(HouseSearchManager):
         )
         w.refresh_frame()
 
-        if self._is_indoor(w):
-            print("[SceneEntry] 开门后短前推已进入 indoor")
+        scene = self._get_house_scene(w)
+        if scene == self.HOUSE_INDOOR:
+            print("[SceneEntry] 前推后 house_scene=indoor，确认已进房")
             return True
 
-        print(f"[SceneEntry] 开门后短前推未进房 house_scene={self._get_house_scene(w)}")
+        print(f"[SceneEntry] 前推后 house_scene={scene}，未进入 indoor")
         return False
 
-    def _backoff_relock_door_and_push(self, w: "FrameWorker", reason: str) -> bool:
-        print(f"[SceneEntry] {reason}短前推未进房，后拉后重新锁定门框")
+    def _backoff_and_relock_entry_door(self, w: "FrameWorker", reason: str, attempt: int) -> bool:
+        backoff_dura, backoff_wait = self._entry_door_relock_backoff_motion(attempt)
+        print(
+            f"[SceneEntry] {reason}前推未进房，后拉后重新锁定门框 "
+            f"{attempt + 1}/{self.ENTRY_OPEN_DOOR_RELOCK_MAX_ATTEMPTS}: "
+            f"dura={backoff_dura}, wait={backoff_wait}"
+        )
         w.tap_single(
             "摇杆",
             y_bias=self.ENTRY_OPEN_DOOR_RELOCK_BACKOFF_Y_BIAS,
-            dura=self.ENTRY_OPEN_DOOR_RELOCK_BACKOFF_DURA,
-            wait=self.ENTRY_OPEN_DOOR_RELOCK_BACKOFF_WAIT,
+            dura=backoff_dura,
+            wait=backoff_wait,
         )
         w.refresh_frame()
 
@@ -1162,7 +1206,29 @@ class HouseSceneSearchManager(HouseSearchManager):
             print("[SceneEntry] 重新锁门对齐后已是 indoor")
             return True
 
-        return self._confirm_indoor_by_forward_push(w, "重新锁定门框后")
+        return True
+
+    def _entry_door_relock_push_motion(self, attempt: int):
+        dura = self._sequence_value(self.ENTRY_OPEN_DOOR_RELOCK_PUSH_DURAS, attempt)
+        wait = self._sequence_value(self.ENTRY_OPEN_DOOR_RELOCK_PUSH_WAITS, attempt)
+        dura = max(self.ENTRY_OPEN_DOOR_SHORT_PUSH_MIN_DURA, int(dura))
+        wait = max(dura, int(wait))
+        return dura, wait
+
+    def _entry_door_relock_backoff_motion(self, attempt: int):
+        index = max(0, int(attempt) - 1)
+        dura = self._sequence_value(self.ENTRY_OPEN_DOOR_RELOCK_BACKOFF_DURAS, index)
+        wait = self._sequence_value(self.ENTRY_OPEN_DOOR_RELOCK_BACKOFF_WAITS, index)
+        dura = max(1, int(dura))
+        wait = max(dura, int(wait))
+        return dura, wait
+
+    @staticmethod
+    def _sequence_value(values, index: int):
+        if not values:
+            return 0
+        index = max(0, min(int(index), len(values) - 1))
+        return values[index]
 
     def _realign_to_entry_direction(self, w: "FrameWorker", reason: str) -> bool:
         if not self.active_entry:

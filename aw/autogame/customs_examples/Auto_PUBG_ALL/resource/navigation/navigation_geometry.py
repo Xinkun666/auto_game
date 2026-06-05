@@ -298,6 +298,10 @@ class AdaptiveTurnTable:
     MODEL_UPDATE_ALPHA = 0.28
     MIN_OBSERVED_DEG = 1.0
     MIN_OBSERVED_RATIO = 0.2
+    MAX_OBSERVED_RATIO = 2.2
+    STRONG_SAMPLE_MIN_RATIO = 0.65
+    STRONG_SAMPLE_MAX_RATIO = 1.45
+    MIN_SAMPLE_WEIGHT = 0.25
     MIN_PX = 8
     MAX_PX = 1200
     MIN_DURA = 80
@@ -413,35 +417,51 @@ class AdaptiveTurnTable:
                 f"desired={angle_key}, observed={observed:.1f}"
             )
             return
+        observed_ratio = observed / float(max(angle_key, 1))
+        if angle_key >= 20 and observed_ratio > self.MAX_OBSERVED_RATIO:
+            print(
+                f"[AdaptiveMotion] 跳过异常转向样本: turn={turn_dir}, "
+                f"desired={angle_key}, observed={observed:.1f}, ratio={observed_ratio:.2f}"
+            )
+            return
 
         had_entry = angle_key in self.table[turn_dir]
         scale = angle_key / observed
         scale = max(self.SCALE_MIN, min(self.SCALE_MAX, scale))
         measured_px = self._clamp_px(abs(float(used_px or 0)) * scale)
         measured_dura = self._clamp_dura(float(used_dura or 0) * scale)
+        sample_weight = self._sample_weight(observed_ratio)
 
         entry = self.table[turn_dir].get(angle_key)
         if not entry:
-            self._update_model(turn_dir, angle_key, measured_px, measured_dura)
+            self._update_model(turn_dir, angle_key, measured_px, measured_dura, sample_weight=sample_weight)
             self.table[turn_dir][angle_key] = {
                 "px": measured_px,
                 "dura": measured_dura,
                 "samples": 1,
+                "confidence": round(sample_weight, 3),
             }
             print(
                 f"[AdaptiveMotion] 建立转向表: turn={turn_dir}, angle={angle_key}, "
+                f"observed={observed:.1f}, weight={sample_weight:.2f}, "
                 f"px={measured_px}, dura={measured_dura}"
             )
             self._persist()
             return
 
-        alpha = self.UPDATE_ALPHA
+        self._update_model(turn_dir, angle_key, measured_px, measured_dura, sample_weight=sample_weight)
+        alpha = self.UPDATE_ALPHA * sample_weight
         entry["px"] = self._clamp_px(entry["px"] * (1.0 - alpha) + measured_px * alpha)
         entry["dura"] = self._clamp_dura(entry["dura"] * (1.0 - alpha) + measured_dura * alpha)
         entry["samples"] = int(entry.get("samples", 0)) + 1
+        entry["confidence"] = round(
+            float(entry.get("confidence", sample_weight)) * 0.7 + sample_weight * 0.3,
+            3,
+        )
         if had_entry:
             print(
                 f"[AdaptiveMotion] 更新转向表: turn={turn_dir}, angle={angle_key}, "
+                f"observed={observed:.1f}, weight={sample_weight:.2f}, "
                 f"px={entry['px']}, dura={entry['dura']}, samples={entry['samples']}"
             )
         self._persist()
@@ -463,7 +483,7 @@ class AdaptiveTurnTable:
             pass
         return predicted_px, self._clamp_dura(predicted_dura)
 
-    def _update_model(self, turn_dir, angle_key, measured_px, measured_dura):
+    def _update_model(self, turn_dir, angle_key, measured_px, measured_dura, sample_weight=1.0):
         model = self.models.get(turn_dir)
         if not model:
             return
@@ -477,7 +497,7 @@ class AdaptiveTurnTable:
         target_slope = self._clamp_slope((px - float(model["intercept"])) / angle)
         target_intercept = self._clamp_intercept(px - float(model["slope"]) * angle)
         target_dura_scale = self._clamp_dura_scale(dura / max(px, 1.0))
-        alpha = self.MODEL_UPDATE_ALPHA
+        alpha = self.MODEL_UPDATE_ALPHA * self._clamp_sample_weight(sample_weight)
         intercept_alpha = alpha * 0.35
         model["slope"] = self._clamp_slope(model["slope"] * (1.0 - alpha) + target_slope * alpha)
         model["intercept"] = self._clamp_intercept(
@@ -490,8 +510,30 @@ class AdaptiveTurnTable:
         print(
             f"[AdaptiveMotion] 更新转向模型: turn={turn_dir}, angle={angle_key}, "
             f"slope={model['slope']:.3f}, intercept={model['intercept']:.1f}, "
-            f"dura_scale={model['dura_scale']:.3f}, samples={model['samples']}"
+            f"dura_scale={model['dura_scale']:.3f}, weight={sample_weight:.2f}, samples={model['samples']}"
         )
+
+    def _sample_weight(self, observed_ratio):
+        try:
+            ratio = float(observed_ratio)
+        except (TypeError, ValueError):
+            return self.MIN_SAMPLE_WEIGHT
+        if self.STRONG_SAMPLE_MIN_RATIO <= ratio <= self.STRONG_SAMPLE_MAX_RATIO:
+            return 1.0
+        if ratio < self.STRONG_SAMPLE_MIN_RATIO:
+            span = max(0.000001, self.STRONG_SAMPLE_MIN_RATIO - self.MIN_OBSERVED_RATIO)
+            progress = (ratio - self.MIN_OBSERVED_RATIO) / span
+        else:
+            span = max(0.000001, self.MAX_OBSERVED_RATIO - self.STRONG_SAMPLE_MAX_RATIO)
+            progress = (self.MAX_OBSERVED_RATIO - ratio) / span
+        return self._clamp_sample_weight(progress)
+
+    def _clamp_sample_weight(self, value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = self.MIN_SAMPLE_WEIGHT
+        return max(self.MIN_SAMPLE_WEIGHT, min(1.0, value))
 
     def _clamp_px(self, value):
         try:
@@ -656,6 +698,10 @@ class AdaptiveForwardMoveTable:
     UPDATE_ALPHA = 0.55
     MIN_OBSERVED_DISTANCE = 0.2
     MIN_OBSERVED_RATIO = 0.08
+    MAX_OBSERVED_RATIO = 2.0
+    STRONG_SAMPLE_MIN_RATIO = 0.65
+    STRONG_SAMPLE_MAX_RATIO = 1.35
+    MIN_SAMPLE_WEIGHT = 0.25
     ARRIVAL_DISTANCE = 1.0
     FIXED_DURA = 300
     MIN_WAIT = 180
@@ -769,18 +815,30 @@ class AdaptiveForwardMoveTable:
                 f"desired={desired:.2f}, observed={observed:.2f}"
             )
             return
+        observed_ratio = observed / float(max(desired, self.MIN_DISTANCE))
+        if observed_ratio > self.MAX_OBSERVED_RATIO:
+            print(
+                f"[AdaptiveMotion] 跳过异常前推样本: mode={mode}, "
+                f"desired={desired:.2f}, observed={observed:.2f}, ratio={observed_ratio:.2f}"
+            )
+            return
 
         scale = desired / observed
         scale = max(self.SCALE_MIN, min(self.SCALE_MAX, scale))
         measured_wait = self._clamp_wait(float(used_wait or 0) * scale)
         target_slope = (measured_wait - float(model["intercept"])) / max(desired, self.MIN_DISTANCE)
         target_slope = self._clamp_slope(target_slope)
-        alpha = self.UPDATE_ALPHA
+        sample_weight = self._sample_weight(observed_ratio)
+        alpha = self.UPDATE_ALPHA * sample_weight
         model["slope"] = self._clamp_slope(model["slope"] * (1.0 - alpha) + target_slope * alpha)
         model["samples"] = int(model.get("samples", 0)) + 1
+        model["confidence"] = round(
+            float(model.get("confidence", sample_weight)) * 0.7 + sample_weight * 0.3,
+            3,
+        )
         print(
             f"[AdaptiveMotion] 更新前推模型: mode={mode}, desired={desired:.2f}, "
-            f"observed={observed:.2f}, wait={used_wait}->{measured_wait}, "
+            f"observed={observed:.2f}, weight={sample_weight:.2f}, wait={used_wait}->{measured_wait}, "
             f"slope={model['slope']:.2f}, samples={model['samples']}"
         )
         self._persist()
@@ -810,6 +868,25 @@ class AdaptiveForwardMoveTable:
         except (TypeError, ValueError):
             value = self.MIN_INTERCEPT
         return max(self.MIN_INTERCEPT, min(self.MAX_INTERCEPT, value))
+
+    def _sample_weight(self, observed_ratio):
+        try:
+            ratio = float(observed_ratio)
+        except (TypeError, ValueError):
+            return self.MIN_SAMPLE_WEIGHT
+        if self.STRONG_SAMPLE_MIN_RATIO <= ratio <= self.STRONG_SAMPLE_MAX_RATIO:
+            return 1.0
+        if ratio < self.STRONG_SAMPLE_MIN_RATIO:
+            span = max(0.000001, self.STRONG_SAMPLE_MIN_RATIO - self.MIN_OBSERVED_RATIO)
+            progress = (ratio - self.MIN_OBSERVED_RATIO) / span
+        else:
+            span = max(0.000001, self.MAX_OBSERVED_RATIO - self.STRONG_SAMPLE_MAX_RATIO)
+            progress = (self.MAX_OBSERVED_RATIO - ratio) / span
+        try:
+            progress = float(progress)
+        except (TypeError, ValueError):
+            progress = self.MIN_SAMPLE_WEIGHT
+        return max(self.MIN_SAMPLE_WEIGHT, min(1.0, progress))
 
     @staticmethod
     def _observed_forward_distance(before_distance, after_distance):

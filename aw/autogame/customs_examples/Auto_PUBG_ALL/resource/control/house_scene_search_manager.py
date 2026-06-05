@@ -580,6 +580,10 @@ class HouseSceneSearchManager(HouseSearchManager):
 
             if scene_after in self.HOUSE_NEAR_ENTRY_SCENES:
                 wall_hit_count += 1
+                print(
+                    f"[SceneRotate] 累计撞墙/门 {wall_hit_count}/"
+                    f"{self.ROTATE_SEARCH_HIT_SWITCH_COUNT}, mode={move_mode}"
+                )
                 move_mode, wall_hit_count, switched = self._handle_rotate_wall_hit(
                     w,
                     move_mode,
@@ -599,7 +603,6 @@ class HouseSceneSearchManager(HouseSearchManager):
                 print(f"[SceneRotate] 推进后 house_scene={scene_after}，停止室内旋转搜房")
                 return self.ROTATE_RESULT_FINISHED
 
-            wall_hit_count = 0
             if similar:
                 self._recover_rotate_search_stuck(w, move_mode, recover_ms[move_mode])
                 recover_ms[move_mode] = min(
@@ -612,8 +615,8 @@ class HouseSceneSearchManager(HouseSearchManager):
         return self.ROTATE_RESULT_FINISHED
 
     def _move_rotate_search_step(self, w: "FrameWorker", move_mode: str):
-        x_bias = -self.ROTATE_SEARCH_X_BIAS if move_mode == "left_up" else self.ROTATE_SEARCH_X_BIAS
-        label = "左上" if move_mode == "left_up" else "右上"
+        x_bias = self._rotate_move_x_bias(move_mode)
+        label = self._move_mode_label(move_mode)
         print(f"[SceneRotate] 向{label}滑动 {self.ROTATE_SEARCH_MOVE_DURA}ms")
         w.tap_single(
             "摇杆",
@@ -624,20 +627,29 @@ class HouseSceneSearchManager(HouseSearchManager):
         )
         w.refresh_frame()
 
+    def _move_mode_turn_sign(self, move_mode: str) -> int:
+        return 1 if move_mode == "left_up" else -1
+
+    def _rotate_move_x_bias(self, move_mode: str) -> int:
+        return -self.ROTATE_SEARCH_X_BIAS if move_mode == "left_up" else self.ROTATE_SEARCH_X_BIAS
+
+    def _opposite_move_mode(self, move_mode: str) -> str:
+        return "right_up" if move_mode == "left_up" else "left_up"
+
     def _handle_rotate_wall_hit(self, w: "FrameWorker", move_mode: str, wall_hit_count: int):
         label = "墙/门"
         current_mode = move_mode
         if wall_hit_count >= self.ROTATE_SEARCH_HIT_SWITCH_COUNT:
             if current_mode == "left_up":
-                print(f"[SceneRotate] 左上撞{label}已达{wall_hit_count}次，立即切到右上，并改为向左补转")
+                print(f"[SceneRotate] 左上累计撞{label}已达{wall_hit_count}次，立即切到右上，并改为向左补转")
                 self._turn_until_not_near_entry(w, -1)
                 return "right_up", 0, True
 
-            print(f"[SceneRotate] 右上撞{label}已达{wall_hit_count}次，立即切到左上，并改为向右补转")
+            print(f"[SceneRotate] 右上累计撞{label}已达{wall_hit_count}次，立即切到左上，并改为向右补转")
             self._turn_until_not_near_entry(w, 1)
             return "left_up", 0, True
 
-        turn_sign = 1 if current_mode == "left_up" else -1
+        turn_sign = self._move_mode_turn_sign(current_mode)
         turn_label = "向右" if turn_sign > 0 else "向左"
         print(f"[SceneRotate] 撞{label}后{turn_label}补转，直到不再贴墙/门")
         self._turn_until_not_near_entry(w, turn_sign)
@@ -734,6 +746,8 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _exit_house_by_scene_strategy(self, w: "FrameWorker") -> bool:
         print("[SceneExit] 启动 house_scene 多路径出房策略")
+        move_mode = "left_up"
+        wall_hit_count = 0
 
         for step in range(self.EXIT_SEARCH_MAX_STEPS):
             if self._should_abort(w):
@@ -752,10 +766,11 @@ class HouseSceneSearchManager(HouseSearchManager):
             if button_state and self._exit_via_door_button(w, button_state):
                 return True
 
-            print(f"[SceneExit] 左上绕圈找出口 {step + 1}/{self.EXIT_SEARCH_MAX_STEPS}")
-            self._move_exit_search_left_up(w)
+            label = self._move_mode_label(move_mode)
+            print(f"[SceneExit] {label}绕圈找出口 {step + 1}/{self.EXIT_SEARCH_MAX_STEPS}")
+            self._move_exit_search_step(w, move_mode)
             if self._is_out_of_house(w):
-                print("[SceneExit] 左上滑动时意外出房，出房成功")
+                print(f"[SceneExit] {label}滑动时意外出房，出房成功")
                 return True
 
             button_state = self._door_button_state(w)
@@ -766,17 +781,35 @@ class HouseSceneSearchManager(HouseSearchManager):
             if window and self._exit_via_window_by_scene(w, window):
                 return True
 
-            print(f"[SceneExit] 左上后向右调整视角 {self.EXIT_SEARCH_TURN_DEGREES}° 继续绕圈")
-            self._turn(w, self.EXIT_SEARCH_TURN_DEGREES)
+            scene = self._get_house_scene(w)
+            if scene in self.HOUSE_NEAR_ENTRY_SCENES:
+                wall_hit_count += 1
+                print(
+                    f"[SceneExit] 累计撞墙/门 {wall_hit_count}/"
+                    f"{self.ROTATE_SEARCH_HIT_SWITCH_COUNT}, mode={move_mode}"
+                )
+                if wall_hit_count >= self.ROTATE_SEARCH_HIT_SWITCH_COUNT:
+                    move_mode = self._opposite_move_mode(move_mode)
+                    wall_hit_count = 0
+                    label = self._move_mode_label(move_mode)
+                    print(f"[SceneExit] 撞墙/门达到阈值，切换为{label}逆向绕圈")
+
+            turn_sign = self._move_mode_turn_sign(move_mode)
+            turn_label = "向右" if turn_sign > 0 else "向左"
+            print(
+                f"[SceneExit] {self._move_mode_label(move_mode)}后{turn_label}调整视角 "
+                f"{self.EXIT_SEARCH_TURN_DEGREES}° 继续绕圈"
+            )
+            self._turn(w, turn_sign * self.EXIT_SEARCH_TURN_DEGREES)
             w.refresh_frame()
 
         print("[SceneExit] 多路径出房策略达到步数上限，仍未确认出房")
         return self._is_out_of_house(w)
 
-    def _move_exit_search_left_up(self, w: "FrameWorker"):
+    def _move_exit_search_step(self, w: "FrameWorker", move_mode: str):
         w.tap_single(
             "摇杆",
-            x_bias=-self.ROTATE_SEARCH_X_BIAS,
+            x_bias=self._rotate_move_x_bias(move_mode),
             y_bias=self.ROTATE_SEARCH_Y_BIAS,
             dura=self.EXIT_SEARCH_LEFT_UP_DURA,
             wait=self.EXIT_SEARCH_LEFT_UP_DURA + self.ROTATE_SEARCH_MOVE_WAIT_PAD,

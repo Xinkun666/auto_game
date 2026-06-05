@@ -1664,6 +1664,24 @@ class Controller:
                 cmd = f"hdc shell uinput -T -m {x} {y} {x + x_bias} {y + y_bias} -k {wait} {dura}"
                 self._run_hdc(cmd)
 
+    def uinput_tap_single(self, btn, wait=100, dura=500, x_bias=0, y_bias=1):
+        original_backend = self.backend
+        try:
+            self.backend = "uinput"
+            pos, label = self._resolve_pos(btn)
+            end_pos, _ = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias)
+        finally:
+            self.backend = original_backend
+
+        if not pos or not end_pos:
+            return
+
+        x, y = pos
+        end_x, end_y = end_pos
+        print(f"执行 uinput 单指操作: {label} @({x},{y})")
+        cmd = f"hdc shell uinput -T -m {x} {y} {end_x} {end_y} -k {wait} {dura}"
+        self._run_hdc(cmd)
+
     def click_down(self, btn, x_bias=0, y_bias=0, dura=0, finger_id=0,
                    trajectory=None, max_step_px=None):
         pos, label = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias)
@@ -1808,6 +1826,7 @@ class FrameWorker(threading.Thread):
         self.click_down = self._wrap_control_action("click_down", self.controller.click_down)
         self.tap_single = self._wrap_control_action("tap_single", self.controller.tap_single)
         self.tap_double = self._wrap_control_action("tap_double", self.controller.tap_double)
+        self.uinput_tap_single = self._wrap_control_action("uinput_tap_single", self.controller.uinput_tap_single)
         self.move_press = self._wrap_control_action("move_press", self.controller.move_press)
         self.move_to = self._wrap_control_action("move_to", self.controller.move_to)
         self.move_up = self._wrap_control_action("move_up", self.controller.move_up)

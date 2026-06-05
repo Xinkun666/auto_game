@@ -408,6 +408,16 @@ class RunningManager:
     CAR_VISUAL_FORWARD_DURA = 320
     CAR_VISUAL_FORWARD_WAIT = 600
     CAR_VISUAL_SEARCH_MAX_STEPS = 4
+    # 新方案：sendevent 持续前推摇杆，同时用 uinput 调整视角；原始方案保留在 _approach_visible_car_legacy。
+    CAR_APPROACH_USE_SENDEVENT_UINPUT = True
+    CAR_APPROACH_FALLBACK_TO_LEGACY = True
+    CAR_APPROACH_MIXED_MAX_STEPS = 10
+    CAR_APPROACH_MIXED_MOVE_DURA = 80
+    CAR_APPROACH_MIXED_CENTER_THRESHOLD = 45
+    CAR_APPROACH_MIXED_VIEW_STEP_RATIO = 0.28
+    CAR_APPROACH_MIXED_MAX_VIEW_BIAS = 260
+    CAR_APPROACH_MIXED_VIEW_DURA = 120
+    CAR_APPROACH_MIXED_VIEW_WAIT = 20
     CAR_VISUAL_DYNAMIC_FAR_AREA_RATIO = 0.0015
     CAR_VISUAL_DYNAMIC_MID_AREA_RATIO = 0.012
     CAR_VISUAL_DYNAMIC_CLOSE_AREA_RATIO = 0.030
@@ -2991,7 +3001,7 @@ class RunningManager:
         except Exception:
             return None
 
-    def _align_to_visible_car(self, w: "FrameWorker") -> Optional[bool]:
+    def _get_visible_car_center_offset(self, w: "FrameWorker") -> Optional[float]:
         car = self._find_largest_car(w)
         if not car:
             return None
@@ -3015,6 +3025,12 @@ class RunningManager:
         car_center_x = (float(car[0]) + float(car[2])) / 2.0
         offset_real = (car_center_x - (frame_w / 2.0)) * (float(screen_w) / float(frame_w))
         print(f"[Running] 检测到车辆，视觉中心偏移 {offset_real:.2f}px")
+        return offset_real
+
+    def _align_to_visible_car(self, w: "FrameWorker") -> Optional[bool]:
+        offset_real = self._get_visible_car_center_offset(w)
+        if offset_real is None:
+            return None
 
         if abs(offset_real) <= self.CAR_ALIGN_CENTER_THRESHOLD:
             return True
@@ -3027,6 +3043,83 @@ class RunningManager:
         return False
 
     def _approach_visible_car(self, w: "FrameWorker") -> bool:
+        if self.CAR_APPROACH_USE_SENDEVENT_UINPUT:
+            if self._approach_visible_car_mixed_control(w):
+                return True
+            if not self.CAR_APPROACH_FALLBACK_TO_LEGACY:
+                return False
+            print("[Running] sendevent+uinput 视觉靠车未成功，回退原始单次前推方案")
+
+        return self._approach_visible_car_legacy(w)
+
+    def _approach_visible_car_mixed_control(self, w: "FrameWorker") -> bool:
+        controller = getattr(w, "controller", None)
+        if getattr(controller, "backend", None) != "sendevent":
+            print("[Running] 当前触控后端不是 sendevent，跳过 sendevent+uinput 视觉靠车方案")
+            return False
+
+        joystick_pressed = False
+        try:
+            for step in range(self.CAR_APPROACH_MIXED_MAX_STEPS):
+                step_text = f"{step + 1}/{self.CAR_APPROACH_MIXED_MAX_STEPS}"
+                if self._attempt_drive_after_move(w, f"sendevent+uinput 靠车前检查驾驶按钮 {step_text}"):
+                    return True
+
+                offset_real = self._get_visible_car_center_offset(w)
+                if offset_real is None:
+                    print("[Running] sendevent+uinput 靠车时未检测到车辆，停止新方案")
+                    return False
+
+                forward_bias_y, _, _ = self._get_dynamic_car_forward_motion()
+                print(
+                    f"[Running] sendevent 按住摇杆靠车 {step_text}: "
+                    f"y_bias={forward_bias_y}, car_area_ratio={self.roadside_car_last_area_ratio}"
+                )
+
+                if not joystick_pressed:
+                    w.move_press(0, "摇杆")
+                    joystick_pressed = True
+                w.move_to(
+                    0,
+                    "摇杆",
+                    y_bias=forward_bias_y,
+                    duration_ms=self.CAR_APPROACH_MIXED_MOVE_DURA,
+                )
+
+                if abs(offset_real) > self.CAR_APPROACH_MIXED_CENTER_THRESHOLD:
+                    view_bias = int(offset_real * self.CAR_APPROACH_MIXED_VIEW_STEP_RATIO)
+                    view_bias = max(
+                        -self.CAR_APPROACH_MIXED_MAX_VIEW_BIAS,
+                        min(self.CAR_APPROACH_MIXED_MAX_VIEW_BIAS, view_bias),
+                    )
+                    print(f"[Running] uinput 同步调整视角靠车 {step_text}: x_bias={view_bias}")
+                    w.uinput_tap_single(
+                        "视角",
+                        x_bias=view_bias,
+                        dura=self.CAR_APPROACH_MIXED_VIEW_DURA,
+                        wait=self.CAR_APPROACH_MIXED_VIEW_WAIT,
+                    )
+
+                w.refresh_frame()
+                if w.get_info("驾驶"):
+                    print("[Running] sendevent+uinput 靠车检测到驾驶按钮，松开摇杆后点击上车")
+                    w.move_up(0)
+                    joystick_pressed = False
+                    return self._attempt_drive_after_move(w, f"sendevent+uinput 靠车后点击驾驶 {step_text}")
+
+            print("[Running] sendevent+uinput 靠车达到步数上限，未检测到驾驶按钮")
+            return False
+        except Exception as exc:
+            print(f"[Running] sendevent+uinput 靠车异常，准备回退原始方案: {exc}")
+            return False
+        finally:
+            if joystick_pressed:
+                try:
+                    w.move_up(0)
+                except Exception as exc:
+                    print(f"[Running] sendevent+uinput 靠车松开摇杆失败: {exc}")
+
+    def _approach_visible_car_legacy(self, w: "FrameWorker") -> bool:
         for step in range(self.CAR_VISUAL_SEARCH_MAX_STEPS):
             if self._attempt_drive_after_move(w, f"视觉寻车前检查驾驶按钮 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}"):
                 return True

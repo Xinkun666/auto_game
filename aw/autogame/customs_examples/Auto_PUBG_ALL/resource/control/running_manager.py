@@ -408,8 +408,9 @@ class RunningManager:
     CAR_VISUAL_FORWARD_DURA = 320
     CAR_VISUAL_FORWARD_WAIT = 600
     CAR_VISUAL_SEARCH_MAX_STEPS = 4
-    # 新方案：sendevent 持续前推摇杆，同时用 uinput 调整视角；原始方案保留在 _approach_visible_car_legacy。
-    CAR_APPROACH_USE_SENDEVENT_UINPUT = True
+    # 可切换实验方案：sendevent 持续前推摇杆，同时用 uinput 调整视角。
+    # 默认回到原始视觉靠车前推方案；需要专项验证时再打开。
+    CAR_APPROACH_USE_SENDEVENT_UINPUT = False
     CAR_APPROACH_FALLBACK_TO_LEGACY = True
     CAR_APPROACH_MIXED_MAX_STEPS = 10
     CAR_APPROACH_MIXED_MOVE_DURA = 80
@@ -439,6 +440,9 @@ class RunningManager:
     CAR_VISUAL_DYNAMIC_NEAR_BIAS_Y = -130
     CAR_VISUAL_DYNAMIC_CLOSE_BIAS_Y = -175
     CAR_VISUAL_DYNAMIC_FAR_BIAS_Y = -220
+    CAR_FORWARD_LOST_BACKOFF_Y_BIAS = 360
+    CAR_FORWARD_LOST_BACKOFF_DURA = 300
+    CAR_FORWARD_LOST_BACKOFF_WAIT = 500
     # 单轮寻车超过该时间仍未上车，则结束当前局；计时从进入/恢复寻车模式开始。
     CAR_SEARCH_TIMEOUT = 5 * 60
     # 路边发现远车后，允许跨帧追车，避免车辆框短暂丢失后又回头追原道路点。
@@ -2258,6 +2262,24 @@ class RunningManager:
         )
         w.refresh_frame()
 
+        if self._attempt_drive_after_move(
+            w,
+            f"路边追车靠近后检查驾驶按钮 {self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}",
+        ):
+            return True
+
+        if not self._find_largest_car(w):
+            recover_result = self._recover_car_lost_after_forward_push(
+                w,
+                f"路边追车前推后车辆消失 {self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}",
+            )
+            if recover_result in {"entered", "visible"}:
+                self.roadside_car_lost_rounds = 0
+                self.roadside_car_lost_after_forward_pushes = 0
+                return True
+            self.roadside_car_lost_after_forward_pushes += 1
+            return True
+
         if self._click_drive_directly_after_move(
             w,
             f"路边追车靠近后直接点击驾驶 {self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}",
@@ -3146,10 +3168,52 @@ class RunningManager:
             )
             w.refresh_frame()
 
+            if self._attempt_drive_after_move(w, f"视觉对车后检查驾驶按钮 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}"):
+                return True
+
+            if not self._find_largest_car(w):
+                recover_result = self._recover_car_lost_after_forward_push(
+                    w,
+                    f"视觉对车前推后车辆消失 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}",
+                )
+                if recover_result == "entered":
+                    return True
+                if recover_result == "visible":
+                    continue
+                return False
+
             if self._click_drive_directly_after_move(w, f"视觉对车后直接点击驾驶 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}"):
                 return True
 
         return False
+
+    def _recover_car_lost_after_forward_push(self, w: "FrameWorker", reason: str) -> str:
+        print(
+            f"[Running] {reason}，后拉 {self.CAR_FORWARD_LOST_BACKOFF_WAIT}ms "
+            "复核驾驶按钮和车辆位置"
+        )
+        w.tap_single(
+            "摇杆",
+            y_bias=self.CAR_FORWARD_LOST_BACKOFF_Y_BIAS,
+            dura=self.CAR_FORWARD_LOST_BACKOFF_DURA,
+            wait=self.CAR_FORWARD_LOST_BACKOFF_WAIT,
+        )
+        w.refresh_frame()
+
+        if self._attempt_drive_after_move(w, f"{reason}后拉后检查驾驶按钮"):
+            return "entered"
+
+        car = self._find_largest_car(w)
+        if car:
+            area_ratio = self._get_detection_area_ratio(w, car)
+            if area_ratio is not None:
+                self.roadside_car_last_area_ratio = area_ratio
+                self.roadside_car_peak_area_ratio = max(self.roadside_car_peak_area_ratio or 0.0, area_ratio)
+            print(f"[Running] {reason}后拉后重新发现车辆，area_ratio={area_ratio}")
+            return "visible"
+
+        print(f"[Running] {reason}后拉后仍未发现车辆")
+        return "lost"
 
     def _align_to_point(
         self,

@@ -228,6 +228,7 @@ class DrivingManager:
     TRAPPED_RADIUS_MAX = 2.0
     # 已经进入不可通行区域后，连续多少次“没有朝安全点靠近”才结束当前局
     FORBIDDEN_ESCAPE_FAIL_LIMIT = 16
+    FORBIDDEN_ESCAPE_OBSTACLE_REVERSE_AFTER = 2
     # 黑区脱离时，只要到最近安全点的距离缩短超过这个值，就认为本轮有进展
     FORBIDDEN_ESCAPE_PROGRESS_EPS = 1.0
     # 前方黑区检测距离：基础值，以及速度 2/3 时更远的提前量
@@ -239,9 +240,9 @@ class DrivingManager:
 
     # 速度 2 时自动刹车的冷却时间，避免频繁点刹
     BRAKE_COOLDOWN_SPEED2 = 2.0
-    # 前方无障碍直行时，不长按油门，改为分段推进：按 3s，松开停 0.5s。
-    STRAIGHT_PULSE_FORWARD_MS = 3000
-    STRAIGHT_PULSE_PAUSE_S = 0.5
+    # 前方无障碍直行时，点自动前进开/关，避免长按油门期间错过新障碍物。
+    STRAIGHT_AUTO_FORWARD_ON_S = 2.0
+    STRAIGHT_AUTO_FORWARD_PAUSE_S = 1.0
 
     # 驾驶结束时，停车和下车前的操作时长
     TIME_BRAKE = 3000
@@ -257,8 +258,10 @@ class DrivingManager:
 
     # 默认整段开车阶段的最大时长，单位秒
     DEFAULT_MAX_DRIVING_TIME = 10 * 60
-    # 车前方障碍物识别使用的画面 ROI 区域
+    # 车前方障碍物识别使用的画面 ROI 外接矩形；实际视觉避障会在该矩形内再收窄为透视梯形。
     DRIVE_VIEW_RECT = (0.2797, 0.2826, 0.7203, 0.6175)
+    DRIVE_VIEW_TRAPEZOID_TOP_Y = 0.18
+    DRIVE_VIEW_TRAPEZOID_TOP_WIDTH_SCALE = 0.45
     # 第三人称驾驶时，自车常从 ROI 底部进入画面，并且横向覆盖会从中部向两侧扩散。
     # 因此只有 car 检测框满足“触底 + 横向跨过中线且左右两侧都有一定覆盖”时，才视为自车。
     SELF_VEHICLE_CLASS_IDS = {7}
@@ -321,6 +324,8 @@ class DrivingManager:
         self.trapped = False
         self.forbidden_escape_failures = 0
         self.forbidden_escape_last_distance: Optional[float] = None
+        self.forbidden_escape_last_action: Optional[str] = None
+        self.forbidden_escape_action_repeats = 0
 
         self.last_motion_mode: Optional[str] = None
         self.last_motion_steer: Optional[str] = None
@@ -379,6 +384,8 @@ class DrivingManager:
         self.trapped = False
         self.forbidden_escape_failures = 0
         self.forbidden_escape_last_distance = None
+        self.forbidden_escape_last_action = None
+        self.forbidden_escape_action_repeats = 0
 
         self.last_motion_mode = None
         self.last_motion_steer = None
@@ -841,6 +848,7 @@ class DrivingManager:
         if self.map_tool.is_walkable(context.location):
             self.forbidden_escape_failures = 0
             self.forbidden_escape_last_distance = None
+            self._reset_forbidden_escape_action_state()
             return False
 
         self._record_local_avoidance(context, "已进入不可通行区域")
@@ -855,9 +863,11 @@ class DrivingManager:
             safe_distance = get_distance(context.location, safe_point)
             if self.forbidden_escape_last_distance is None:
                 self.forbidden_escape_failures = 0
+                self._reset_forbidden_escape_action_state()
                 progress_text = f"safe_dist={safe_distance:.2f}, first_track"
             elif safe_distance <= self.forbidden_escape_last_distance - self.FORBIDDEN_ESCAPE_PROGRESS_EPS:
                 self.forbidden_escape_failures = 0
+                self._reset_forbidden_escape_action_state()
                 progress_text = (
                     f"safe_dist={safe_distance:.2f}, "
                     f"prev={self.forbidden_escape_last_distance:.2f}, progress"
@@ -883,6 +893,7 @@ class DrivingManager:
         if safe_point is None:
             print("[Driving] 黑区内未找到安全点，先执行保守倒车脱离")
             self._log_drive_state("已进入不可通行区域", context, "backward(900ms)", self.stable_circle_angle)
+            self._record_forbidden_escape_action("backward")
             self._tap_single_control(w, "down", wait=900, dura=100)
             return True
 
@@ -898,6 +909,7 @@ class DrivingManager:
                     f"diff={diff:.2f}, action={action_text}"
                 )
                 self._log_drive_state("已进入不可通行区域", context, action_text, target_direction)
+                self._record_forbidden_escape_action("backward")
                 self._tap_single_control(w, "down", wait=900, dura=100)
                 return True
 
@@ -911,8 +923,27 @@ class DrivingManager:
                     f"[Driving] 黑区脱离: safe_point={safe_point}, target={target_direction:.1f}, "
                     f"diff={diff:.2f}, action={action_text}"
                 )
+                action = "forward"
+                duration = 700
+                recovery_action = self._forbidden_escape_obstacle_recovery_action(context, action)
+                if recovery_action:
+                    duration = self.FORWARD_BLOCK_BACKWARD_TURN_MS
+                    action_text = f"{recovery_action}({duration}ms)"
+                    print(f"[Driving] 黑区脱离前进受阻，切换倒车语义避障: {action_text}")
+                    self._log_drive_state("黑区脱离前进受阻", context, action_text, target_direction)
+                    self._record_forbidden_escape_action(recovery_action)
+                    self._execute_maneuver(
+                        w,
+                        recovery_action,
+                        speed=context.speed,
+                        duration=duration,
+                        brake_with_steer=True,
+                    )
+                    return True
+
                 self._log_drive_state("已进入不可通行区域", context, action_text, target_direction)
-                self._tap_single_control(w, "up", wait=700, dura=100)
+                self._record_forbidden_escape_action(action)
+                self._tap_single_control(w, "up", wait=duration, dura=100)
                 return True
 
             action = f"forward_turn_{turn_dir}"
@@ -926,6 +957,15 @@ class DrivingManager:
             fallback_duration,
             max_duration,
         )
+        recovery_action = self._forbidden_escape_obstacle_recovery_action(context, action)
+        if recovery_action:
+            print(
+                f"[Driving] 黑区脱离连续 {action} 未摆脱前方障碍，"
+                f"切换为语义 {recovery_action}"
+            )
+            action = recovery_action
+            duration = self.FORWARD_BLOCK_BACKWARD_TURN_MS
+            max_duration = self.FORBIDDEN_TURN_MAX_DURATION_MS
 
         action_text = f"{action}({duration}ms)"
         self._log_drive_state(
@@ -938,6 +978,7 @@ class DrivingManager:
             f"[Driving] 黑区脱离: safe_point={safe_point}, target={target_direction:.1f}, "
             f"diff={diff:.2f}, action={action}, duration={duration}, mode={'backward' if use_backward else 'forward'}"
         )
+        self._record_forbidden_escape_action(action)
         self._execute_calibrated_turn(
             w,
             context,
@@ -1599,6 +1640,56 @@ class DrivingManager:
     def _get_opposite_steer(self, steer: Optional[str]) -> str:
         return "left" if steer == "right" else "right"
 
+    def _reset_forbidden_escape_action_state(self):
+        self.forbidden_escape_last_action = None
+        self.forbidden_escape_action_repeats = 0
+
+    def _record_forbidden_escape_action(self, action: str):
+        action = str(action or "")
+        if action == self.forbidden_escape_last_action:
+            self.forbidden_escape_action_repeats += 1
+        else:
+            self.forbidden_escape_last_action = action
+            self.forbidden_escape_action_repeats = 1
+
+    def _forbidden_escape_obstacle_recovery_action(self, context: DriveContext, action: str) -> Optional[str]:
+        if self.forbidden_escape_failures < self.FORBIDDEN_ESCAPE_OBSTACLE_REVERSE_AFTER:
+            return None
+        if not self._has_visual_front_obstacle(context):
+            return None
+        if not action.startswith("forward"):
+            return None
+        if action == "forward":
+            steer = self._decision_to_steer(context.decision) or self.last_motion_steer or self._get_default_steer()
+        elif action.endswith("_left"):
+            steer = "left"
+        elif action.endswith("_right"):
+            steer = "right"
+        else:
+            steer = self._get_default_steer()
+
+        if self.forbidden_escape_last_action != action:
+            return None
+        if self.forbidden_escape_action_repeats < self.FORBIDDEN_ESCAPE_OBSTACLE_REVERSE_AFTER:
+            return None
+        return f"backward_turn_{steer}"
+
+    @staticmethod
+    def _has_visual_front_obstacle(context: DriveContext) -> bool:
+        obstacle_count = int(context.obstacle_info.get("obstacles_count", 0) or 0)
+        hard_obstacle_count = int(context.obstacle_info.get("hard_obstacles_count", 0) or 0)
+        coverage_ratio = float(context.obstacle_info.get("coverage_ratio", 0.0) or 0.0)
+        center_blocked = bool(context.obstacle_info.get("center_blocked"))
+        near_center_bottom_blocked = bool(context.obstacle_info.get("near_center_bottom_blocked"))
+        return (
+            obstacle_count > 0
+            or hard_obstacle_count > 0
+            or coverage_ratio >= 0.20
+            or center_blocked
+            or near_center_bottom_blocked
+            or (context.decision or "straight") != "straight"
+        )
+
     def _handle_motion_block(self, w: "FrameWorker", context: DriveContext):
         if self._try_house_exit_when_indoor(w, "连续多帧位置不变"):
             return
@@ -1799,11 +1890,13 @@ class DrivingManager:
 
     def _drive_straight_pulse(self, w: "FrameWorker"):
         print(
-            f"[Driving] 前方无障碍，分段直行: "
-            f"forward={self.STRAIGHT_PULSE_FORWARD_MS}ms, pause={self.STRAIGHT_PULSE_PAUSE_S:.1f}s"
+            f"[Driving] 前方无障碍，自动前进分段直行: "
+            f"on={self.STRAIGHT_AUTO_FORWARD_ON_S:.1f}s, pause={self.STRAIGHT_AUTO_FORWARD_PAUSE_S:.1f}s"
         )
-        self._tap_single_control(w, "up", wait=self.STRAIGHT_PULSE_FORWARD_MS, dura=100)
-        time.sleep(self.STRAIGHT_PULSE_PAUSE_S)
+        self._click_control(w, "auto_forward")
+        time.sleep(self.STRAIGHT_AUTO_FORWARD_ON_S)
+        self._click_control(w, "auto_forward")
+        time.sleep(self.STRAIGHT_AUTO_FORWARD_PAUSE_S)
 
     def _needs_pre_brake(self, action: str, speed: Optional[int]) -> bool:
         if speed != 3:
@@ -1972,13 +2065,13 @@ class DrivingManager:
             return {"decision": "straight", "obstacles_count": 0}
 
         frame_h, frame_w = frame.shape[:2]
-        rx1, ry1, rx2, ry2 = self.DRIVE_VIEW_RECT
-        roi_x = int(frame_w * rx1)
-        roi_y = int(frame_h * ry1)
-        roi_w = max(1, int(frame_w * (rx2 - rx1)))
-        roi_h = max(1, int(frame_h * (ry2 - ry1)))
+        roi_x, roi_y, roi_w, roi_h, trapezoid = self._get_drive_obstacle_roi(frame_w, frame_h)
 
-        if self.obstacle_analyzer is None:
+        if (
+            self.obstacle_analyzer is None
+            or getattr(self.obstacle_analyzer, "W", None) != roi_w
+            or getattr(self.obstacle_analyzer, "H", None) != roi_h
+        ):
             self.obstacle_analyzer = ObstacleAvoidanceAnalyzer(width=roi_w, height=roi_h)
 
         local_dets = []
@@ -1992,6 +2085,12 @@ class DrivingManager:
             inter_y2 = min(float(y2), float(roi_y + roi_h))
 
             if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+                continue
+
+            trap_x1, trap_x2 = self._drive_trapezoid_x_bounds(trapezoid, inter_y2)
+            inter_x1 = max(inter_x1, trap_x1)
+            inter_x2 = min(inter_x2, trap_x2)
+            if inter_x2 <= inter_x1:
                 continue
 
             local_det = [
@@ -2013,6 +2112,49 @@ class DrivingManager:
         obstacle_info = self.obstacle_analyzer.analyze(local_dets)
         self._attach_close_obstacle_metrics(obstacle_info, local_dets, roi_w, roi_h)
         return obstacle_info
+
+    def _get_drive_obstacle_roi(self, frame_w: int, frame_h: int):
+        rx1, ry1, rx2, ry2 = self.DRIVE_VIEW_RECT
+        top_y = min(float(ry1), float(self.DRIVE_VIEW_TRAPEZOID_TOP_Y))
+        bottom_y = float(ry2)
+        bottom_left_x = float(rx1)
+        bottom_right_x = float(rx2)
+        center_x = (bottom_left_x + bottom_right_x) * 0.5
+        bottom_width = max(0.0, bottom_right_x - bottom_left_x)
+        top_width = bottom_width * float(self.DRIVE_VIEW_TRAPEZOID_TOP_WIDTH_SCALE)
+        top_left_x = center_x - top_width * 0.5
+        top_right_x = center_x + top_width * 0.5
+
+        roi_x = int(frame_w * min(top_left_x, bottom_left_x))
+        roi_y = int(frame_h * top_y)
+        roi_x2 = int(frame_w * max(top_right_x, bottom_right_x))
+        roi_y2 = int(frame_h * bottom_y)
+        roi_w = max(1, roi_x2 - roi_x)
+        roi_h = max(1, roi_y2 - roi_y)
+
+        trapezoid = {
+            "top_y": float(frame_h) * top_y,
+            "bottom_y": float(frame_h) * bottom_y,
+            "top_left_x": float(frame_w) * top_left_x,
+            "top_right_x": float(frame_w) * top_right_x,
+            "bottom_left_x": float(frame_w) * bottom_left_x,
+            "bottom_right_x": float(frame_w) * bottom_right_x,
+        }
+        return roi_x, roi_y, roi_w, roi_h, trapezoid
+
+    @staticmethod
+    def _drive_trapezoid_x_bounds(trapezoid: Dict[str, float], y: float):
+        top_y = float(trapezoid["top_y"])
+        bottom_y = float(trapezoid["bottom_y"])
+        progress = (float(y) - top_y) / max(1.0, bottom_y - top_y)
+        progress = max(0.0, min(1.0, progress))
+        left = trapezoid["top_left_x"] + (
+            trapezoid["bottom_left_x"] - trapezoid["top_left_x"]
+        ) * progress
+        right = trapezoid["top_right_x"] + (
+            trapezoid["bottom_right_x"] - trapezoid["top_right_x"]
+        ) * progress
+        return left, right
 
     def _attach_close_obstacle_metrics(self, obstacle_info: Dict[str, Any], local_dets, roi_w: int, roi_h: int):
         max_bottom_ratio = 0.0

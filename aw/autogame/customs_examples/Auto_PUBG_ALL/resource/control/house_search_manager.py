@@ -1050,7 +1050,7 @@ class HouseSearchManager:
             dist_val = max(0.0, float(dist))
         except (TypeError, ValueError):
             dist_val = 0.0
-        fallback_y_bias = -300 if mode == "fast" else -100
+        fallback_y_bias = -500 if mode == "fast" else -100
         fallback_dura = 300
         fallback_wait = int(max(
             180,

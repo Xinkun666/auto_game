@@ -3158,6 +3158,7 @@ class RunningManager:
         direction: float,
         target: Tuple[int, int],
         threshold: int = 5,
+        max_steps: int = 1,
     ) -> bool:
         target_dir = calculate_angle(location, target)
         return execute_view_turn(
@@ -3165,7 +3166,7 @@ class RunningManager:
             direction,
             target_dir,
             threshold=threshold,
-            max_steps=1,
+            max_steps=max_steps,
             wait=250,
             log_prefix="[RunningAlign]",
         )
@@ -3206,9 +3207,25 @@ class RunningManager:
             self._log_running_state("精确逼近朝向无效", location, None, "等待下一帧", target, dist)
             return
 
-        aligned = self._align_to_point(w, location, direction, target, threshold=5)
+        align_threshold = 2 if dist < 5 else 5
+        align_max_steps = 3 if dist < 5 else 1
+        aligned = self._align_to_point(
+            w,
+            location,
+            direction,
+            target,
+            threshold=align_threshold,
+            max_steps=align_max_steps,
+        )
         if not aligned:
-            self._log_running_state("精确逼近调方向", location, direction, "先对齐目标点", target, dist)
+            self._log_running_state(
+                "精确逼近调方向",
+                location,
+                direction,
+                f"先对齐目标点 threshold={align_threshold}",
+                target,
+                dist,
+            )
             return
 
         mode = self._forward_model_mode(dist)
@@ -3241,7 +3258,7 @@ class RunningManager:
         return int(max(180, min(7000, dist_val * 60 + 300)))
 
     def _get_distance_forward_motion(self, mode: str, dist: float):
-        fallback_y_bias = -300 if mode == "fast" else -100
+        fallback_y_bias = -500 if mode == "fast" else -100
         fallback_dura = 300
         fallback_wait = self._forward_model_fallback_wait(mode, dist)
         return get_adaptive_forward_motion(

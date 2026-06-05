@@ -320,7 +320,20 @@ class HouseSceneSearchManager(HouseSearchManager):
         if diff is None or turn_dir is None:
             return False
 
-        self.align_direction(w, target_loc, threshold=5, max_steps=1)
+        align_threshold = 2 if dist < 5 else 5
+        align_max_steps = 3 if dist < 5 else 1
+        aligned = self.align_direction(
+            w,
+            target_loc,
+            threshold=align_threshold,
+            max_steps=align_max_steps,
+        )
+        if not aligned:
+            print(
+                f"[SceneSearch] 距离进门点 {dist:.2f}，角度未对准 "
+                f"threshold={align_threshold}，本轮不前推"
+            )
+            return True
         mode = self._entry_forward_mode(dist)
         y_bias, dura, wait = self._get_entry_move_params(dist)
         print(

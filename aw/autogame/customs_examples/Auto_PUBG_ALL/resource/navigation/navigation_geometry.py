@@ -231,8 +231,7 @@ def calculate_move_count(current_dir, target_angle):
     计算从 current_dir 转到 target_angle 所需的:
     1. 转向方向 ('left' 或 'right')
     2. 滑动像素
-       - 小角度(<20°): 使用经验查表，避免线性模型过冲
-       - 大角度(>=20°): 使用线性回归模型: px = 5.31 * angle + 49
+       - 使用初始线性建模: px = 5.31 * angle + 49
     3. 角度差值
     """
     if current_dir is None or target_angle is None:
@@ -255,37 +254,8 @@ def calculate_move_count(current_dir, target_angle):
     if diff < 1.0:
         return turn_dir, 0, diff
 
-    # 3. 小角度使用查表，大角度使用线性拟合
-    if diff < 20:
-        pixel_angle = {
-            5: 38,
-            10: 70,
-            15: 105,
-            20: 145,
-            25: 183,
-            30: 220,
-            35: 250,
-            40: 290,
-            45: 330,
-            55: 405,
-            65: 485,
-            90: 580,
-            105: 660,
-            120: 699,
-            150: 821,
-        }
-        angle_list = sorted(pixel_angle.keys())
-
-        matched_angle = 0
-        for angle in angle_list:
-            if diff >= angle:
-                matched_angle = angle
-            else:
-                break
-
-        pixel = pixel_angle[matched_angle] if matched_angle > 0 else 0
-    else:
-        pixel = int(diff * 5.31 + 49)
+    # 3. 回退到初始线性拟合模型，不再走经验查表
+    pixel = int(diff * 5.31 + 49)
 
     return turn_dir, pixel, diff
 
@@ -620,7 +590,9 @@ def plan_view_turn_motion(
     if fallback_dura is None:
         fallback_dura = max(250, int((fallback_px or 0) * 1.5))
 
-    used_px, used_dura, angle_key = get_adaptive_turn_motion(turn_dir, diff, fallback_px, fallback_dura)
+    used_px = fallback_px
+    used_dura = fallback_dura
+    angle_key = "linear"
     if max_px is not None:
         used_px = min(int(max_px), int(used_px or 0))
     if min_dura is not None:
@@ -675,18 +647,9 @@ def execute_view_turn(
             f"diff={motion['diff']:.1f}, bin={motion['angle_key']}, "
             f"x_bias={motion['x_bias']}, dura={motion['dura']}"
         )
-        before_angle = current_angle
         w.tap_single("视角", x_bias=motion["x_bias"], dura=motion["dura"], wait=wait)
         w.refresh_frame()
         current_angle = w.get_info("direction")
-        update_adaptive_turn_motion(
-            motion["turn_dir"],
-            motion["diff"],
-            before_angle,
-            current_angle,
-            motion["px"],
-            motion["dura"],
-        )
         if current_angle is None:
             return False
     return False

@@ -241,8 +241,9 @@ class DrivingManager:
     # 速度 2 时自动刹车的冷却时间，避免频繁点刹
     BRAKE_COOLDOWN_SPEED2 = 2.0
     # 前方无障碍直行时，点自动前进开/关，避免长按油门期间错过新障碍物。
-    STRAIGHT_AUTO_FORWARD_ON_S = 2.0
+    STRAIGHT_AUTO_FORWARD_ON_S = 4.0
     STRAIGHT_AUTO_FORWARD_PAUSE_S = 1.0
+    STRAIGHT_AUTO_FORWARD_OBSTACLE_POLL_S = 0.25
 
     # 驾驶结束时，停车和下车前的操作时长
     TIME_BRAKE = 3000
@@ -338,6 +339,8 @@ class DrivingManager:
         self.pause_sp_callback: Optional[Callable] = None
         self.next_running_finding_car: Optional[bool] = None
         self.horn_missing_frames = 0
+        self.drive_auto_forward_active = False
+        self.drive_auto_forward_started_at: Optional[float] = None
 
         self._frame_action_executed = False
 
@@ -398,6 +401,8 @@ class DrivingManager:
         self.allow_running_fallback = True
         self.next_running_finding_car = None
         self.horn_missing_frames = 0
+        self.drive_auto_forward_active = False
+        self.drive_auto_forward_started_at = None
 
         self._frame_action_executed = False
         self.house_exit_manager.reset()
@@ -1857,6 +1862,9 @@ class DrivingManager:
         action = self._normalize_motion_action(action)
         steer_key = "left" if "left" in action else ("right" if "right" in action else None)
 
+        if action != "straight":
+            self._cancel_drive_auto_forward(w, "执行非直行动作前取消自动前进")
+
         if self._needs_pre_brake(action, speed):
             brake_wait = 1000 if speed == 2 else 2000
             if brake_with_steer and steer_key is not None:
@@ -1891,12 +1899,89 @@ class DrivingManager:
     def _drive_straight_pulse(self, w: "FrameWorker"):
         print(
             f"[Driving] 前方无障碍，自动前进分段直行: "
-            f"on={self.STRAIGHT_AUTO_FORWARD_ON_S:.1f}s, pause={self.STRAIGHT_AUTO_FORWARD_PAUSE_S:.1f}s"
+            f"on={self.STRAIGHT_AUTO_FORWARD_ON_S:.1f}s, pause={self.STRAIGHT_AUTO_FORWARD_PAUSE_S:.1f}s, "
+            f"poll={self.STRAIGHT_AUTO_FORWARD_OBSTACLE_POLL_S:.2f}s"
         )
+        self._start_drive_auto_forward(w, "前方无障碍，点击自动前进")
+
+        if self._monitor_drive_auto_forward_for_obstacles(w):
+            return
+
+        self._cancel_drive_auto_forward(w, "自动前进4s到时，点击取消")
+        if self._wait_drive_auto_forward_pause(w):
+            return
+
+        if not self._auto_forward_detected_obstacle(w):
+            self._start_drive_auto_forward(w, "空1s后再次点击自动前进")
+
+    def _start_drive_auto_forward(self, w: "FrameWorker", reason: str):
+        if self.drive_auto_forward_active:
+            return
+        print(f"[Driving] {reason}")
         self._click_control(w, "auto_forward")
-        time.sleep(self.STRAIGHT_AUTO_FORWARD_ON_S)
+        self.drive_auto_forward_active = True
+        self.drive_auto_forward_started_at = time.monotonic()
+
+    def _cancel_drive_auto_forward(self, w: "FrameWorker", reason: str):
+        if not self.drive_auto_forward_active:
+            return
+        print(f"[Driving] {reason}")
         self._click_control(w, "auto_forward")
-        time.sleep(self.STRAIGHT_AUTO_FORWARD_PAUSE_S)
+        self.drive_auto_forward_active = False
+        self.drive_auto_forward_started_at = None
+
+    def _monitor_drive_auto_forward_for_obstacles(self, w: "FrameWorker") -> bool:
+        while self.drive_auto_forward_active:
+            started_at = self.drive_auto_forward_started_at or time.monotonic()
+            elapsed = time.monotonic() - started_at
+            remaining = self.STRAIGHT_AUTO_FORWARD_ON_S - elapsed
+            if remaining <= 0:
+                return False
+
+            time.sleep(min(self.STRAIGHT_AUTO_FORWARD_OBSTACLE_POLL_S, remaining))
+            if self._auto_forward_detected_obstacle(w):
+                self._cancel_drive_auto_forward(w, "自动前进中实时检测到障碍物，立即取消并交给避障")
+                return True
+
+        return False
+
+    def _wait_drive_auto_forward_pause(self, w: "FrameWorker") -> bool:
+        deadline = time.monotonic() + self.STRAIGHT_AUTO_FORWARD_PAUSE_S
+        while time.monotonic() < deadline:
+            time.sleep(min(self.STRAIGHT_AUTO_FORWARD_OBSTACLE_POLL_S, max(0.0, deadline - time.monotonic())))
+            if self._auto_forward_detected_obstacle(w):
+                print("[Driving] 自动前进暂停期间检测到障碍物，暂不重新开启自动前进")
+                return True
+        return False
+
+    def _auto_forward_detected_obstacle(self, w: "FrameWorker") -> bool:
+        if not w.refresh_frame():
+            return False
+
+        obstacle_info = self._analyze_obstacles(w)
+        decision = obstacle_info.get("decision", "straight")
+        obstacle_count = int(obstacle_info.get("obstacles_count", 0) or 0)
+        hard_obstacle_count = int(obstacle_info.get("hard_obstacles_count", 0) or 0)
+        coverage_ratio = float(obstacle_info.get("coverage_ratio", 0.0) or 0.0)
+        center_blocked = bool(obstacle_info.get("center_blocked"))
+        near_center_bottom_blocked = bool(obstacle_info.get("near_center_bottom_blocked"))
+
+        blocked = (
+            decision != "straight"
+            or obstacle_count > 0
+            or hard_obstacle_count > 0
+            or coverage_ratio >= 0.20
+            or center_blocked
+            or near_center_bottom_blocked
+        )
+        if blocked:
+            print(
+                f"[Driving] 自动前进轮询发现障碍: decision={decision}, "
+                f"obstacles={obstacle_count}, hard={hard_obstacle_count}, "
+                f"coverage={coverage_ratio:.2f}, center={center_blocked}, "
+                f"near_bottom={near_center_bottom_blocked}"
+            )
+        return blocked
 
     def _needs_pre_brake(self, action: str, speed: Optional[int]) -> bool:
         if speed != 3:

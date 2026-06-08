@@ -112,6 +112,15 @@ class HouseSceneSearchManager(HouseSearchManager):
     R_CITY_ENTRY_BLIND_FORWARD_Y_BIAS = -320
     R_CITY_ENTRY_BLIND_FORWARD_DURA = 420
     R_CITY_ENTRY_BLIND_FORWARD_WAIT = 300
+    R_CITY_ENTRY_WINDOW_FORWARD_Y_BIAS = -220
+    R_CITY_ENTRY_WINDOW_FORWARD_DURA = 260
+    R_CITY_ENTRY_WINDOW_FORWARD_WAIT = 220
+    R_CITY_ENTRY_WINDOW_WALL_SWEEP_X_BIAS = 140
+    R_CITY_ENTRY_WINDOW_WALL_SWEEP_DURA = 180
+    R_CITY_ENTRY_STONE_WALL_FORWARD_Y_BIAS = -300
+    R_CITY_ENTRY_STONE_WALL_FORWARD_DURA = 360
+    R_CITY_ENTRY_STONE_WALL_FORWARD_WAIT = 260
+    R_CITY_ENTRY_STONE_WALL_JUMP_SETTLE_SECONDS = 0.2
     R_CITY_ENTRY_TARGET_ALIGN_TOLERANCE = 8
     ENTRY_WINDOW_JUMP_SETTLE_SECONDS = 0.25
     OPEN_DOOR_SETTLE_SECONDS = 0.8
@@ -164,6 +173,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     EXIT_DOOR_CLASS_IDS = {0, 4}
     EXIT_WINDOW_CLASS_IDS = {2}
+    STONE_WALL_CLASS_IDS = {9}
     EXIT_SEARCH_MAX_STEPS = 36
     EXIT_SEARCH_LEFT_UP_DURA = 1000
     EXIT_SEARCH_TURN_DEGREES = 60
@@ -1776,6 +1786,10 @@ class HouseSceneSearchManager(HouseSearchManager):
         if button_state:
             return self._handle_r_city_door_button_then_forward(w, button_state)
 
+        stone_wall = self._find_largest_forward_target(w, self.STONE_WALL_CLASS_IDS)
+        if stone_wall is not None:
+            return self._handle_r_city_stone_wall_entry(w)
+
         if w.get_info("跳跃"):
             print("[RCityEntry] 看到跳跃按钮，按翻窗/越障逻辑进房")
             self.handle_jump_logic(w)
@@ -1797,20 +1811,65 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         window = self._find_largest_forward_target(w, self.EXIT_WINDOW_CLASS_IDS)
         if window is not None:
-            print("[RCityEntry] 画面中发现窗，先对窗再前推找跳跃")
+            print("[RCityEntry] 画面中发现窗，先对窗再短前推找跳跃")
             self._align_to_r_city_forward_target(w, window, "窗")
-            if self._push_r_city_entry_forward_and_check_indoor(w, "对窗后前推"):
+            if self._push_r_city_entry_forward_and_check_indoor(
+                w,
+                "对窗后短前推",
+                y_bias=self.R_CITY_ENTRY_WINDOW_FORWARD_Y_BIAS,
+                dura=self.R_CITY_ENTRY_WINDOW_FORWARD_DURA,
+                wait=self.R_CITY_ENTRY_WINDOW_FORWARD_WAIT,
+            ):
                 return True
-            if w.get_info("跳跃"):
-                print("[RCityEntry] 贴窗后出现跳跃，点击跳跃进房")
-                self.handle_jump_logic(w)
-                w.refresh_frame()
-                return self._is_indoor(w) or self._push_r_city_entry_forward_and_check_indoor(
-                    w,
-                    "贴窗跳跃后继续前推确认",
-                )
+            if self._handle_r_city_immediate_entry_opportunity(w):
+                return True
+            if self._get_house_scene(w) in self.HOUSE_NEAR_ENTRY_SCENES:
+                print("[RCityEntry] 对窗短前推后仍贴墙，使用小幅左右微调重新贴窗")
+                return self._sweep_r_city_wall_for_entry(w, small=True, immediate_only=True)
 
         return False
+
+    def _handle_r_city_immediate_entry_opportunity(self, w: "FrameWorker") -> bool:
+        if self._is_indoor(w):
+            return True
+
+        button_state = self._door_button_state(w)
+        if button_state:
+            return self._handle_r_city_door_button_then_forward(w, button_state)
+
+        if w.get_info("跳跃"):
+            print("[RCityEntry] 看到跳跃按钮，点击跳跃后前推确认")
+            self.handle_jump_logic(w)
+            w.refresh_frame()
+            return self._is_indoor(w) or self._push_r_city_entry_forward_and_check_indoor(
+                w,
+                "跳跃后继续前推确认",
+            )
+
+        return False
+
+    def _handle_r_city_stone_wall_entry(self, w: "FrameWorker") -> bool:
+        print("[RCityEntry] 前方识别到 stone_wall，前推、跳跃、再前推")
+        if self._push_r_city_entry_forward_and_check_indoor(
+            w,
+            "stone_wall 前第一次前推",
+            y_bias=self.R_CITY_ENTRY_STONE_WALL_FORWARD_Y_BIAS,
+            dura=self.R_CITY_ENTRY_STONE_WALL_FORWARD_DURA,
+            wait=self.R_CITY_ENTRY_STONE_WALL_FORWARD_WAIT,
+        ):
+            return True
+
+        w.click("跳跃")
+        time.sleep(self.R_CITY_ENTRY_STONE_WALL_JUMP_SETTLE_SECONDS)
+        w.refresh_frame()
+
+        return self._push_r_city_entry_forward_and_check_indoor(
+            w,
+            "stone_wall 跳跃后第二次前推",
+            y_bias=self.R_CITY_ENTRY_STONE_WALL_FORWARD_Y_BIAS,
+            dura=self.R_CITY_ENTRY_STONE_WALL_FORWARD_DURA,
+            wait=self.R_CITY_ENTRY_STONE_WALL_FORWARD_WAIT,
+        )
 
     def _handle_r_city_door_button_then_forward(self, w: "FrameWorker", button_state: str) -> bool:
         self.stop_auto_forward(w)
@@ -1837,13 +1896,20 @@ class HouseSceneSearchManager(HouseSearchManager):
         w.refresh_frame()
         return True
 
-    def _push_r_city_entry_forward_and_check_indoor(self, w: "FrameWorker", reason: str) -> bool:
+    def _push_r_city_entry_forward_and_check_indoor(
+        self,
+        w: "FrameWorker",
+        reason: str,
+        y_bias: Optional[int] = None,
+        dura: Optional[int] = None,
+        wait: Optional[int] = None,
+    ) -> bool:
         print(f"[RCityEntry] {reason}")
         w.tap_single(
             "摇杆",
-            y_bias=self.R_CITY_ENTRY_BLIND_FORWARD_Y_BIAS,
-            dura=self.R_CITY_ENTRY_BLIND_FORWARD_DURA,
-            wait=self.R_CITY_ENTRY_BLIND_FORWARD_WAIT,
+            y_bias=self.R_CITY_ENTRY_BLIND_FORWARD_Y_BIAS if y_bias is None else y_bias,
+            dura=self.R_CITY_ENTRY_BLIND_FORWARD_DURA if dura is None else dura,
+            wait=self.R_CITY_ENTRY_BLIND_FORWARD_WAIT if wait is None else wait,
         )
         w.refresh_frame()
 
@@ -1856,11 +1922,28 @@ class HouseSceneSearchManager(HouseSearchManager):
             print("[RCityEntry] 前推后出现跳跃按钮，下一轮立即处理")
         return False
 
-    def _sweep_r_city_wall_for_entry(self, w: "FrameWorker") -> bool:
-        print("[RCityEntry] 贴墙/门但未见按钮，左右交替短等待查找门窗/跳跃/开关门")
+    def _sweep_r_city_wall_for_entry(
+        self,
+        w: "FrameWorker",
+        small: bool = False,
+        immediate_only: bool = False,
+    ) -> bool:
+        if small:
+            print("[RCityEntry] 贴窗撞墙，左右小幅交替查找跳跃/开关门")
+        else:
+            print("[RCityEntry] 贴墙/门但未见按钮，左右交替短等待查找门窗/跳跃/开关门")
+
+        x_bias_base = (
+            self.R_CITY_ENTRY_WINDOW_WALL_SWEEP_X_BIAS
+            if small else self.R_CITY_ENTRY_WALL_SWEEP_X_BIAS
+        )
+        dura = (
+            self.R_CITY_ENTRY_WINDOW_WALL_SWEEP_DURA
+            if small else self.R_CITY_ENTRY_WALL_SWEEP_DURA
+        )
         for step in range(self.R_CITY_ENTRY_WALL_SWEEP_STEPS):
             side = "right" if step % 2 == 0 else "left"
-            x_bias = self.R_CITY_ENTRY_WALL_SWEEP_X_BIAS if side == "right" else -self.R_CITY_ENTRY_WALL_SWEEP_X_BIAS
+            x_bias = x_bias_base if side == "right" else -x_bias_base
             side_label = self._side_label(side)
             wait = self.R_CITY_ENTRY_WALL_SWEEP_WAIT + step * self.R_CITY_ENTRY_WALL_SWEEP_WAIT_STEP
             if self._should_abort(w):
@@ -1873,14 +1956,18 @@ class HouseSceneSearchManager(HouseSearchManager):
                 "摇杆",
                 x_bias=x_bias,
                 y_bias=0,
-                dura=self.R_CITY_ENTRY_WALL_SWEEP_DURA,
+                dura=dura,
                 wait=wait,
             )
             w.refresh_frame()
             if self._is_indoor(w):
                 print("[RCityEntry] 侧移后已进房")
                 return True
-            if self._handle_r_city_visible_entry_opportunity(w):
+            if immediate_only:
+                entry_handled = self._handle_r_city_immediate_entry_opportunity(w)
+            else:
+                entry_handled = self._handle_r_city_visible_entry_opportunity(w)
+            if entry_handled:
                 return True
 
             scene = self._get_house_scene(w)

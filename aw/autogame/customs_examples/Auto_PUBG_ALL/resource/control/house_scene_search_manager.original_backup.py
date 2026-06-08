@@ -1,5 +1,3 @@
-import json
-import os
 import time
 from typing import TYPE_CHECKING, Optional
 
@@ -39,25 +37,6 @@ class HouseSceneSearchManager(HouseSearchManager):
     HOUSE_NEAR_ENTRY_SCENES = {HOUSE_NEAR_DOOR, HOUSE_NEAR_WALL}
     HOUSE_EXIT_SCENES = {HOUSE_OUTDOOR, HOUSE_ROOFTOP}
 
-    R_CITY_AREA_CONFIG_PATH = os.path.join(
-        "aw",
-        "autogame",
-        "customs_examples",
-        "Auto_PUBG_ALL",
-        "resource",
-        "house_entry",
-        "r_city_house_area.json",
-    )
-    R_CITY_FALLBACK_CENTER = (1036, 745)
-    R_CITY_DEFAULT_NEAR_DISTANCE = 30.0
-    R_CITY_DEFAULT_HOUSE_ARRIVAL_DISTANCE = 2.0
-    R_CITY_DEFAULT_EARLY_ENTRY_SCENE_DISTANCE = 8.0
-    R_CITY_ROUTE_WAYPOINT_DISTANCE = 3.0
-    R_CITY_ROUTE_REPLAN_STUCK_CYCLES = 2
-    R_CITY_FAILED_TARGET_LIMIT = 2
-    R_CITY_FORWARD_HOUSE_BYPASS_DISTANCE = 10.0
-
-    STATUS_ROUTE_TO_R_CITY = "ROUTE_TO_R_CITY"
     STATUS_SCENE_ENTRY = "SCENE_ENTRY"
     ROTATE_RESULT_FINISHED = "finished"
     ROTATE_RESULT_EXITED = "exited"
@@ -103,15 +82,6 @@ class HouseSceneSearchManager(HouseSearchManager):
     ENTRY_INDOOR_CONFIRM_FORWARD_Y_BIAS = -420
     ENTRY_INDOOR_CONFIRM_FORWARD_DURA = 650
     ENTRY_INDOOR_CONFIRM_FORWARD_WAIT = 850
-    R_CITY_ENTRY_FREE_SEARCH_MAX_STEPS = 8
-    R_CITY_ENTRY_WALL_SWEEP_STEPS = 8
-    R_CITY_ENTRY_WALL_SWEEP_X_BIAS = 260
-    R_CITY_ENTRY_WALL_SWEEP_DURA = 260
-    R_CITY_ENTRY_WALL_SWEEP_WAIT = 360
-    R_CITY_ENTRY_BLIND_FORWARD_Y_BIAS = -320
-    R_CITY_ENTRY_BLIND_FORWARD_DURA = 420
-    R_CITY_ENTRY_BLIND_FORWARD_WAIT = 620
-    R_CITY_ENTRY_TARGET_ALIGN_TOLERANCE = 8
     ENTRY_WINDOW_JUMP_SETTLE_SECONDS = 0.25
     OPEN_DOOR_SETTLE_SECONDS = 0.8
     ENTRY_OPEN_DOOR_SHORT_PUSH_RATIO = 1.0 / 3.0
@@ -149,12 +119,6 @@ class HouseSceneSearchManager(HouseSearchManager):
     ROTATE_SEARCH_RECOVER_STEP_MS = 300
     ROTATE_SEARCH_RECOVER_MAX_MS = 1800
     ROTATE_SEARCH_RECOVER_X_BIAS = 330
-    ROTATE_SEARCH_SWEEP_MOVE_DURA = 3000
-    ROTATE_SEARCH_SWEEP_MOVE_WAIT = 10
-    ROTATE_SEARCH_SWEEP_TURN_PX = 500
-    ROTATE_SEARCH_SWEEP_TURN_DURA = 300
-    ROTATE_SEARCH_SWEEP_TURN_WAIT = 10
-    ROTATE_SEARCH_SWEEP_CYCLES_PER_DIRECTION = 6
     ROTATE_FRAME_COMPARE_SIZE = (160, 90)
     ROTATE_FRAME_COMPARE_ROI = (0.18, 0.16, 0.82, 0.78)
     ROTATE_FRAME_MEAN_DIFF_THRESHOLD = 3.5
@@ -178,102 +142,43 @@ class HouseSceneSearchManager(HouseSearchManager):
     EXIT_WINDOW_JUMP_FORWARD_DURA = 650
     EXIT_WINDOW_JUMP_FORWARD_WAIT = 850
 
-    WATER_FLOAT_DURA = 2000
-    WATER_BACK_DURA = 650
-    WATER_BACK_WAIT = 900
-    WATER_SIDE_X_BIAS = 320
-    WATER_SIDE_DURA = 900
-    WATER_SIDE_WAIT = 1500
-    WATER_FORWARD_Y_BIAS = -300
-    WATER_FORWARD_DURA = 850
-    WATER_FORWARD_WAIT = 1500
-    WATER_ESCAPE_STUCK_DISTANCE = 0.6
-    WATER_ESCAPE_SIDE_SWITCH_ATTEMPTS = 3
-    WATER_ESCAPE_MAX_ATTEMPTS = 5
-    FORBIDDEN_ESCAPE_SEARCH_RADIUS = 120
-    FORBIDDEN_ESCAPE_ARRIVAL_DISTANCE = 3.0
-    FORBIDDEN_ESCAPE_FORWARD_DURA = 700
-    FORBIDDEN_ESCAPE_FORWARD_WAIT = 900
-
-    def __init__(self):
-        super().__init__()
-        self.r_city_config = self._load_r_city_area_config()
-        self.r_city_center = self._load_r_city_center()
-        self.r_city_near_distance = self._load_r_city_threshold(
-            "near_region_distance",
-            self.R_CITY_DEFAULT_NEAR_DISTANCE,
-        )
-        self.r_city_house_arrival_distance = self._load_r_city_threshold(
-            "house_arrival_distance",
-            self.R_CITY_DEFAULT_HOUSE_ARRIVAL_DISTANCE,
-        )
-        self.r_city_early_entry_scene_distance = self._load_r_city_threshold(
-            "early_entry_scene_distance",
-            self.R_CITY_DEFAULT_EARLY_ENTRY_SCENE_DISTANCE,
-        )
-        self.r_city_side_candidate_ids = (
-            self.r_city_config.get("route_entry_strategy", {})
-            .get("side_candidate_ids", {})
-        )
-        self.r_city_targets = self._build_r_city_targets()
-        self._reset_r_city_runtime()
-
-    def reset(self):
-        super().reset()
-        self._reset_r_city_runtime()
-
     def searching_logic(self, w: "FrameWorker", current_loc, current_direction):
         if self._should_abort(w):
             return
 
         house_scene = self._get_house_scene(w)
-        if self._finish_callback_configured() and self._can_finish_searching(w):
-            self._continue_searching_until_timer(w, "R城搜房计时已满")
-            return
-
-        if self._is_in_water(w):
-            self._handle_water_escape(w, current_loc, current_direction)
-            return
-
         if house_scene == self.HOUSE_INDOOR:
-            self._adopt_r_city_target_from_location(current_loc)
             self._handle_indoor_during_entry_route(w, current_loc, "导航/进门过程中检测到 indoor")
+            return
+
+        if self.searching_number == 5:
+            self._continue_searching_until_timer(w, "已经搜满5个房间")
             return
 
         self.indoor_stuck_frames = 0
 
-        if self.initial_target_pending:
-            stable_loc = self._get_stable_initial_location(current_loc)
-            if stable_loc is None:
-                self.stop_auto_forward(w)
-                w.refresh_frame()
-                return
-            current_loc = stable_loc
-            self.initial_target_pending = False
-
-        distance_to_r_city, _ = self._distance_to_r_city(current_loc)
-        if (
-            distance_to_r_city is not None
-            and distance_to_r_city > self.r_city_near_distance
-        ):
-            if not self._is_walkable(current_loc):
-                self._handle_forbidden_escape(w, current_loc, current_direction)
-                return
-            self._handle_route_to_r_city(w, current_loc, current_direction)
-            return
-
         if self.current_house_id is None:
-            self._select_next_r_city_house(current_loc, current_direction)
+            if self.initial_target_pending:
+                stable_loc = self._get_stable_initial_location(current_loc)
+                if stable_loc is None:
+                    self.stop_auto_forward(w)
+                    w.refresh_frame()
+                    return
+                current_loc = stable_loc
+                self.select_nearest_entry(current_loc)
+                self.initial_target_pending = False
+            else:
+                self.select_smart_target(current_loc, current_direction)
 
             if not self.current_house_id:
-                self._finish_r_city_searching(w, "R城房点已全部处理或均不可进入")
+                self._continue_searching_until_timer(w, "当前区域无合适目标或已搜完")
                 return
 
             self.status = "FAST_NAV"
             target_dist = get_distance(current_loc, self.active_entry["location"])
             print(
-                f"[RCitySearch] 锁定目标: {self.current_house_id} | "
-                f"靠近点={self.active_entry['location']} | 距离={target_dist:.2f}"
+                f"[SceneSearch] 锁定目标: {self.current_house_id} | "
+                f"入口={self.active_entry['location']} | 距离={target_dist:.2f}"
             )
             self.history_locations = []
 
@@ -284,18 +189,15 @@ class HouseSceneSearchManager(HouseSearchManager):
             if self.update_and_check_stuck(current_loc):
                 print("[SceneSearch] 快速导航检测到卡住，启动避障")
                 if not self.execute_unstuck_logic(w, current_loc):
-                    self._mark_current_r_city_target_failed("快速导航卡住避障失败")
+                    self.handle_failed_entry_logic(self.active_entry["direction"])
                     self.status = "IDLE"
                 self.history_locations = []
                 return
 
             if dist <= self.ENTRY_AUTO_FORWARD_DISTANCE:
-                print(f"[RCitySearch] 进入摇杆分段导航范围 (距离 {dist:.2f})")
+                print(f"[SceneSearch] 进入摇杆分段导航范围 (距离 {dist:.2f})")
                 self.stop_auto_forward(w)
                 self.status = "PRECISE_NAV"
-                return
-
-            if self._maybe_switch_to_front_r_city_house(w, current_loc):
                 return
 
             if self._maybe_bypass_front_house_on_route(w, current_loc, target_loc, dist, "FAST_NAV"):
@@ -314,21 +216,15 @@ class HouseSceneSearchManager(HouseSearchManager):
             if self.update_and_check_stuck(current_loc):
                 print("[SceneSearch] 精细导航检测到卡住，启动避障")
                 if not self.execute_unstuck_logic(w, current_loc):
-                    self._mark_current_r_city_target_failed("精细导航卡住避障失败")
+                    self.handle_failed_entry_logic(self.active_entry["direction"])
                     self.status = "IDLE"
                 self.history_locations = []
                 return
 
-            if self._should_start_r_city_entry(current_loc, house_scene, dist):
-                print(
-                    f"[RCitySearch] 已到达房点/墙门附近 "
-                    f"(dist={dist:.2f}, house_scene={house_scene})，进入 house_scene 进门流程"
-                )
+            if dist <= self.ENTRY_ARRIVAL_DISTANCE:
+                print(f"[SceneSearch] 已到达进门点 (距离 {dist:.2f})，进入 house_scene 进门流程")
                 self.stop_auto_forward(w)
                 self.status = self.STATUS_SCENE_ENTRY
-                return
-
-            if self._maybe_switch_to_front_r_city_house(w, current_loc):
                 return
 
             if self._maybe_bypass_front_house_on_route(w, current_loc, target_loc, dist, "PRECISE_NAV"):
@@ -354,539 +250,24 @@ class HouseSceneSearchManager(HouseSearchManager):
             if not entry_result:
                 if self._should_abort(w):
                     return
-                print("[RCitySearch] house_scene 进门失败，临时跳过当前R城房点")
-                self._mark_current_r_city_target_failed("house_scene 进门失败")
+                print("[SceneSearch] house_scene 进门失败，舍弃当前进门点")
+                if self.active_entry:
+                    self.handle_failed_entry_logic(self.active_entry["direction"])
+                else:
+                    self.current_house_id = None
                 self.status = "IDLE"
                 return
 
             self._complete_current_house_search(w, "house_scene 进门成功")
-
-    def _load_r_city_area_config(self):
-        try:
-            with open(self.R_CITY_AREA_CONFIG_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (OSError, json.JSONDecodeError) as exc:
-            print(f"[RCitySearch] R城配置读取失败，使用空配置: {exc}")
-            return {}
-
-    def _load_r_city_center(self):
-        center = self.r_city_config.get("geometry", {}).get("center")
-        if isinstance(center, (list, tuple)) and len(center) >= 2:
-            try:
-                return (int(center[0]), int(center[1]))
-            except (TypeError, ValueError):
-                pass
-        return self.R_CITY_FALLBACK_CENTER
-
-    def _load_r_city_threshold(self, name: str, default: float) -> float:
-        value = (
-            self.r_city_config.get("geometry", {})
-            .get("thresholds", {})
-            .get(name, default)
-        )
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return float(default)
-
-    def _build_r_city_targets(self):
-        targets = []
-        for index, point in enumerate(self.r_city_config.get("points", []), start=1):
-            loc = self._location_tuple(point.get("location") or point.get("raw_location"))
-            if loc is None:
-                continue
-            approach_loc = self._resolve_r_city_approach_location(loc)
-            nearest_entry = point.get("nearest_existing_entry") or {}
-            entry_direction = self._resolve_r_city_entry_direction(
-                approach_loc,
-                nearest_entry.get("direction"),
-            )
-            target = {
-                "id": str(point.get("id") or f"r_city_{index:03d}"),
-                "location": loc,
-                "approach_location": approach_loc,
-                "side": str(point.get("side") or self._side_from_location(loc)),
-                "quality": str(point.get("quality") or "accepted"),
-                "existing_house_id": nearest_entry.get("house_id"),
-                "entry_direction": entry_direction,
-                "nearest_existing_entry": nearest_entry,
-            }
-            targets.append(target)
-        return targets
-
-    def _resolve_r_city_approach_location(self, loc):
-        if self._is_walkable(loc):
-            return loc
-        finder = getattr(self.map_tool, "nearest_walkable_within_radius", None)
-        if callable(finder):
-            safe_point, _ = finder(loc, 12)
-            safe_loc = self._location_tuple(safe_point)
-            if safe_loc is not None:
-                return safe_loc
-        return loc
-
-    def _resolve_r_city_entry_direction(self, approach_loc, configured_direction):
-        try:
-            return int(float(configured_direction)) % 360
-        except (TypeError, ValueError):
-            angle = calculate_angle(approach_loc, self.r_city_center)
-            return int(angle or 0) % 360
-
-    def _reset_r_city_runtime(self):
-        self.r_city_completed_targets = set()
-        self.r_city_failed_counts = {}
-        self.current_r_city_target = None
-        self.r_city_route_target = None
-        self.r_city_route_path = []
-        self.r_city_route_index = 0
-        self.r_city_route_stuck_cycles = 0
-        self.forbidden_escape_target = None
-        self.water_escape_side = None
-        self.water_escape_side_attempts = 0
-        self.water_escape_total_attempts = 0
-        self.water_escape_last_loc = None
-
-    def _finish_callback_configured(self) -> bool:
-        return getattr(self, "can_finish_callback", None) is not None
-
-    @staticmethod
-    def _location_tuple(value):
-        if value is None:
-            return None
-        if isinstance(value, (list, tuple)) and value and isinstance(value[0], (list, tuple)):
-            value = value[0]
-        if not isinstance(value, (list, tuple)) or len(value) < 2:
-            return None
-        try:
-            return (int(round(float(value[0]))), int(round(float(value[1]))))
-        except (TypeError, ValueError):
-            return None
-
-    def _is_walkable(self, loc) -> bool:
-        checker = getattr(self.map_tool, "is_walkable", None)
-        if not callable(checker):
-            return True
-        try:
-            return bool(checker(loc))
-        except Exception as exc:
-            print(f"[RCitySearch] 地图可通行检查失败，按可通行处理: {exc}")
-            return True
-
-    def _distance_to_r_city(self, current_loc):
-        loc = self._location_tuple(current_loc)
-        if loc is None or not self.r_city_targets:
-            return None, None
-        best = min(
-            self.r_city_targets,
-            key=lambda item: get_distance(loc, item["location"]),
-        )
-        return get_distance(loc, best["location"]), best
-
-    def _side_from_location(self, loc):
-        x, y = loc
-        cx, cy = self.r_city_center
-        dx = x - cx
-        dy = y - cy
-        if abs(dx) >= abs(dy):
-            return "east" if dx > 0 else "west"
-        return "south" if dy > 0 else "north"
-
-    def _approach_side_from_current_location(self, current_loc):
-        loc = self._location_tuple(current_loc)
-        if loc is None:
-            return "west"
-        x, y = loc
-        cx, cy = self.r_city_center
-        dx = x - cx
-        dy = y - cy
-        if abs(dx) >= abs(dy):
-            return "west" if dx < 0 else "east"
-        return "north" if dy < 0 else "south"
-
-    def _select_r_city_route_target(self, current_loc):
-        side = self._approach_side_from_current_location(current_loc)
-        side_ids = set(self.r_city_side_candidate_ids.get(side, []))
-        candidates = [
-            item for item in self.r_city_targets
-            if item["id"] in side_ids or item["side"] == side
-        ]
-        if not candidates:
-            candidates = list(self.r_city_targets)
-
-        loc = self._location_tuple(current_loc)
-        if loc is None:
-            return candidates[0] if candidates else None
-
-        reachable = []
-        for target in candidates:
-            path = self._plan_path_safe(loc, target["approach_location"])
-            if path:
-                reachable.append((self._path_length(path), target, path))
-        if not reachable:
-            for target in self.r_city_targets:
-                path = self._plan_path_safe(loc, target["approach_location"])
-                if path:
-                    reachable.append((self._path_length(path), target, path))
-        if reachable:
-            _, target, path = min(reachable, key=lambda item: item[0])
-            self.r_city_route_path = path
-            self.r_city_route_index = 0
-            return target
-
-        return min(candidates, key=lambda item: get_distance(loc, item["approach_location"]))
-
-    def _plan_path_safe(self, start_loc, target_loc):
-        planner = getattr(self.map_tool, "plan_path", None)
-        if not callable(planner):
-            return [tuple(start_loc), tuple(target_loc)]
-        try:
-            path = planner(start_loc, target_loc)
-        except Exception as exc:
-            print(f"[RCitySearch] 规划路径失败: start={start_loc}, target={target_loc}, err={exc}")
-            return []
-        if not path:
-            return []
-        result = []
-        for point in path:
-            loc = self._location_tuple(point)
-            if loc is not None:
-                result.append(loc)
-        return result
-
-    @staticmethod
-    def _path_length(path) -> float:
-        if len(path) < 2:
-            return 0.0
-        return sum(get_distance(path[i - 1], path[i]) for i in range(1, len(path)))
-
-    def _handle_route_to_r_city(self, w: "FrameWorker", current_loc, current_direction):
-        self.current_house_id = None
-        self.current_r_city_target = None
-        self.active_entry = None
-        self.status = self.STATUS_ROUTE_TO_R_CITY
-
-        distance_to_r_city, nearest = self._distance_to_r_city(current_loc)
-        if distance_to_r_city is not None and distance_to_r_city <= self.r_city_near_distance:
-            print(f"[RCityRoute] 已进入R城附近 dist={distance_to_r_city:.2f}，开始选房")
-            self.stop_auto_forward(w)
-            self.status = "IDLE"
-            self.r_city_route_target = None
-            self.r_city_route_path = []
-            self.r_city_route_index = 0
-            return
-
-        if not self.r_city_route_target or not self.r_city_route_path:
-            self.r_city_route_target = self._select_r_city_route_target(current_loc)
-            if not self.r_city_route_target and nearest:
-                self.r_city_route_target = nearest
-            if not self.r_city_route_target:
-                self._finish_r_city_searching(w, "无法选择R城接入点")
-                return
-            if not self.r_city_route_path:
-                self.r_city_route_path = self._plan_path_safe(
-                    current_loc,
-                    self.r_city_route_target["approach_location"],
-                )
-                self.r_city_route_index = 0
-            print(
-                f"[RCityRoute] 规划去R城: side={self.r_city_route_target['side']}, "
-                f"target={self.r_city_route_target['approach_location']}, "
-                f"path_points={len(self.r_city_route_path)}"
-            )
-
-        waypoint = self._current_r_city_route_waypoint(current_loc)
-        if waypoint is None:
-            self.r_city_route_target = None
-            self.r_city_route_path = []
-            self.status = "IDLE"
-            return
-
-        if self.update_and_check_stuck(current_loc):
-            self.r_city_route_stuck_cycles += 1
-            print(
-                f"[RCityRoute] 前往R城卡住 "
-                f"{self.r_city_route_stuck_cycles}/{self.R_CITY_ROUTE_REPLAN_STUCK_CYCLES}"
-            )
-            self.stop_auto_forward(w)
-            if self.r_city_route_stuck_cycles >= self.R_CITY_ROUTE_REPLAN_STUCK_CYCLES:
-                self.r_city_route_target = None
-                self.r_city_route_path = []
-                self.r_city_route_stuck_cycles = 0
-            self.active_entry = {
-                "location": waypoint,
-                "direction": int(calculate_angle(current_loc, waypoint) or current_direction or 0),
-            }
-            self.execute_unstuck_logic(w, current_loc)
-            self.active_entry = None
-            self.history_locations = []
-            return
-
-        self.align_direction(w, waypoint)
-        if not self.auto_forward:
-            w.click("自动前进")
-            self.auto_forward = True
-        self.handle_jump_logic(w)
-
-    def _current_r_city_route_waypoint(self, current_loc):
-        if not self.r_city_route_path:
-            return None
-        while self.r_city_route_index < len(self.r_city_route_path):
-            waypoint = self.r_city_route_path[self.r_city_route_index]
-            if get_distance(current_loc, waypoint) > self.R_CITY_ROUTE_WAYPOINT_DISTANCE:
-                return waypoint
-            self.r_city_route_index += 1
-        return None
-
-    def _handle_forbidden_escape(self, w: "FrameWorker", current_loc, current_direction):
-        safe_target = self.forbidden_escape_target
-        if safe_target is None or get_distance(current_loc, safe_target) <= self.FORBIDDEN_ESCAPE_ARRIVAL_DISTANCE:
-            finder = getattr(self.map_tool, "nearest_walkable_within_radius", None)
-            if callable(finder):
-                safe_target, _ = finder(current_loc, self.FORBIDDEN_ESCAPE_SEARCH_RADIUS)
-            safe_target = self._location_tuple(safe_target)
-            self.forbidden_escape_target = safe_target
-
-        if safe_target is None:
-            print("[RCityRoute] 当前不可通行且未找到安全点，短后退后刷新")
-            self.stop_auto_forward(w)
-            w.tap_single("摇杆", y_bias=300, dura=450, wait=850)
-            w.refresh_frame()
-            return
-
-        print(f"[RCityRoute] 当前不在可通行区域，先脱离到安全点 {safe_target}")
-        self.stop_auto_forward(w)
-        self.align_direction(w, safe_target)
-        w.tap_single(
-            "摇杆",
-            y_bias=-300,
-            dura=self.FORBIDDEN_ESCAPE_FORWARD_DURA,
-            wait=self.FORBIDDEN_ESCAPE_FORWARD_WAIT,
-        )
-        w.refresh_frame()
-
-    def _is_in_water(self, w: "FrameWorker") -> bool:
-        return bool(w.get_info("上浮"))
-
-    def _current_navigation_target_location(self, current_loc=None):
-        if self.current_r_city_target:
-            return self.current_r_city_target["approach_location"]
-        if self.r_city_route_target:
-            return self.r_city_route_target["approach_location"]
-        if current_loc is not None:
-            _, nearest = self._distance_to_r_city(current_loc)
-            if nearest:
-                return nearest["approach_location"]
-        return self.r_city_center
-
-    def _handle_water_escape(self, w: "FrameWorker", current_loc, current_direction):
-        target_loc = self._current_navigation_target_location(current_loc)
-        side = self._choose_water_escape_side(current_loc, target_loc, current_direction)
-        side_label = self._side_label(side)
-        x_bias = -self.WATER_SIDE_X_BIAS if side == "left" else self.WATER_SIDE_X_BIAS
-
-        self.stop_auto_forward(w)
-        before_loc = self._location_tuple(current_loc)
-        print(
-            f"[RCityWater] 落水/水边受阻，沿{side_label}侧岸线脱困 "
-            f"attempt={self.water_escape_total_attempts + 1}, target={target_loc}"
-        )
-
-        if w.get_info("上浮"):
-            w.click("上浮")
-            time.sleep(self.WATER_FLOAT_DURA / 1000.0)
-            w.refresh_frame()
-
-        w.tap_single("摇杆", y_bias=320, dura=self.WATER_BACK_DURA, wait=self.WATER_BACK_WAIT)
-        w.refresh_frame()
-        w.tap_single(
-            "摇杆",
-            x_bias=x_bias,
-            y_bias=0,
-            dura=self.WATER_SIDE_DURA,
-            wait=self.WATER_SIDE_WAIT,
-        )
-        w.refresh_frame()
-        self.align_direction(w, target_loc)
-        w.tap_single(
-            "摇杆",
-            y_bias=self.WATER_FORWARD_Y_BIAS,
-            dura=self.WATER_FORWARD_DURA,
-            wait=self.WATER_FORWARD_WAIT,
-        )
-        w.refresh_frame()
-
-        after_loc = self._get_current_location(w) or before_loc
-        self._record_water_escape_attempt(before_loc, after_loc)
-        if self.water_escape_total_attempts >= self.WATER_ESCAPE_MAX_ATTEMPTS and self._finish_callback_configured():
-            print("[RCityWater] 水边脱困多次失败，交给跑图阶段继续处理")
-            self._finish_searching_phase(w, "R城搜房水边脱困失败")
-
-    def _choose_water_escape_side(self, current_loc, target_loc, current_direction):
-        if (
-            self.water_escape_side
-            and self.water_escape_side_attempts < self.WATER_ESCAPE_SIDE_SWITCH_ATTEMPTS
-        ):
-            return self.water_escape_side
-
-        if self.water_escape_side and self.water_escape_side_attempts >= self.WATER_ESCAPE_SIDE_SWITCH_ATTEMPTS:
-            self.water_escape_side = "right" if self.water_escape_side == "left" else "left"
-            self.water_escape_side_attempts = 0
-            return self.water_escape_side
-
-        target_angle = calculate_angle(current_loc, target_loc)
-        turn_dir, _, _ = calculate_move_count(current_direction, target_angle)
-        self.water_escape_side = "left" if turn_dir == "left" else "right"
-        self.water_escape_side_attempts = 0
-        return self.water_escape_side
-
-    def _record_water_escape_attempt(self, before_loc, after_loc):
-        before = self._location_tuple(before_loc)
-        after = self._location_tuple(after_loc)
-        moved = 0.0 if before is None or after is None else get_distance(before, after)
-        self.water_escape_total_attempts += 1
-        self.water_escape_side_attempts += 1
-        self.water_escape_last_loc = after
-        print(
-            f"[RCityWater] 水边脱困反馈: side={self.water_escape_side}, "
-            f"moved={moved:.2f}, same_side_attempts={self.water_escape_side_attempts}"
-        )
-        if moved >= self.WATER_ESCAPE_STUCK_DISTANCE:
-            return
-        if self.water_escape_side_attempts >= self.WATER_ESCAPE_SIDE_SWITCH_ATTEMPTS:
-            print("[RCityWater] 同方向多次几乎无位移，下轮换另一侧沿岸尝试")
-
-    def _select_next_r_city_house(self, current_loc, current_direction):
-        loc = self._location_tuple(current_loc)
-        candidates = [
-            item for item in self.r_city_targets
-            if item["id"] not in self.r_city_completed_targets
-            and self.r_city_failed_counts.get(item["id"], 0) < self.R_CITY_FAILED_TARGET_LIMIT
-        ]
-        if not candidates or loc is None:
-            self.current_house_id = None
-            self.current_r_city_target = None
-            self.active_entry = None
-            return
-
-        def score(target):
-            dist = get_distance(loc, target["approach_location"])
-            angle_penalty = 0.0
-            target_angle = calculate_angle(loc, target["approach_location"])
-            _, _, diff = calculate_move_count(current_direction, target_angle)
-            if diff is not None:
-                angle_penalty = diff / 18.0
-            failure_penalty = self.r_city_failed_counts.get(target["id"], 0) * 15.0
-            return dist + angle_penalty + failure_penalty
-
-        target = min(candidates, key=score)
-        self._lock_r_city_target(target)
-
-    def _lock_r_city_target(self, target):
-        self.current_r_city_target = target
-        self.current_house_id = target["id"]
-        self.active_entry = {
-            "location": target["approach_location"],
-            "direction": target["entry_direction"],
-            "r_city_target_id": target["id"],
-        }
-        self.r_city_route_target = None
-        self.r_city_route_path = []
-        self.r_city_route_index = 0
-
-    def _mark_current_r_city_target_failed(self, reason: str):
-        if self.current_r_city_target:
-            target_id = self.current_r_city_target["id"]
-            self.r_city_failed_counts[target_id] = self.r_city_failed_counts.get(target_id, 0) + 1
-            print(
-                f"[RCitySearch] {reason}: {target_id} "
-                f"fail={self.r_city_failed_counts[target_id]}/{self.R_CITY_FAILED_TARGET_LIMIT}"
-            )
-        elif self.current_house_id:
-            print(f"[RCitySearch] {reason}: {self.current_house_id}")
-        self.temp_skip_houses.add(self.current_house_id)
-        self.current_house_id = None
-        self.current_r_city_target = None
-        self.active_entry = None
-        self.history_locations = []
-
-    def _should_start_r_city_entry(self, current_loc, house_scene, dist: float) -> bool:
-        if dist <= self.r_city_house_arrival_distance:
-            return True
-        if (
-            house_scene in self.HOUSE_NEAR_ENTRY_SCENES
-            and self.current_r_city_target
-            and get_distance(current_loc, self.current_r_city_target["location"])
-            <= self.r_city_early_entry_scene_distance
-        ):
-            return True
-        return False
-
-    def _maybe_switch_to_front_r_city_house(self, w: "FrameWorker", current_loc) -> bool:
-        scene = self._get_house_scene(w)
-        if scene not in self.HOUSE_NEAR_ENTRY_SCENES:
-            return False
-        loc = self._location_tuple(current_loc)
-        if loc is None:
-            return False
-        candidates = [
-            item for item in self.r_city_targets
-            if item["id"] not in self.r_city_completed_targets
-            and item["id"] != self.current_house_id
-            and self.r_city_failed_counts.get(item["id"], 0) < self.R_CITY_FAILED_TARGET_LIMIT
-            and get_distance(loc, item["location"]) <= self.R_CITY_FORWARD_HOUSE_BYPASS_DISTANCE
-        ]
-        if not candidates:
-            return False
-        target = min(candidates, key=lambda item: get_distance(loc, item["location"]))
-        current_dist = (
-            get_distance(loc, self.current_r_city_target["location"])
-            if self.current_r_city_target else float("inf")
-        )
-        next_dist = get_distance(loc, target["location"])
-        if current_dist <= 5 and next_dist >= current_dist:
-            return False
-        print(
-            f"[RCitySearch] 途中已贴近另一栋R城房子，临时改搜 "
-            f"{target['id']} dist={next_dist:.2f}"
-        )
-        self._lock_r_city_target(target)
-        self.status = self.STATUS_SCENE_ENTRY
-        self.stop_auto_forward(w)
-        return True
-
-    def _adopt_r_city_target_from_location(self, current_loc):
-        if self.current_r_city_target or self.current_house_id:
-            return
-        loc = self._location_tuple(current_loc)
-        if loc is None:
-            return
-        candidates = [
-            item for item in self.r_city_targets
-            if item["id"] not in self.r_city_completed_targets
-            and get_distance(loc, item["location"]) <= self.r_city_early_entry_scene_distance
-        ]
-        if not candidates:
-            return
-        target = min(candidates, key=lambda item: get_distance(loc, item["location"]))
-        print(f"[RCitySearch] 室内状态下匹配到R城房点 {target['id']}")
-        self._lock_r_city_target(target)
-
-    def _finish_r_city_searching(self, w: "FrameWorker", reason: str):
-        self.stop_auto_forward(w)
-        print(f"[RCitySearch] {reason}，切换到跑图阶段")
-        self.current_house_id = None
-        self.current_r_city_target = None
-        self.active_entry = None
-        self.status = "IDLE"
-        return self._finish_searching_phase(w, reason)
 
     def _is_entry_approach_status(self):
         return super()._is_entry_approach_status() or self.status == self.STATUS_SCENE_ENTRY
 
     def _should_start_search_from_indoor(self) -> bool:
         return (
-            self.current_house_id is not None
-            and self.current_house_id not in self.r_city_completed_targets
+            self.searching_number < 5
+            and self.current_house_id is not None
+            and self.current_house_id not in self.completed_houses
         )
 
     def _confirm_indoor_before_search(self, w: "FrameWorker", reason: str) -> bool:
@@ -918,17 +299,12 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         if self.current_house_id is not None:
             self.completed_houses.add(self.current_house_id)
-            self.r_city_completed_targets.add(self.current_house_id)
         self.searching_number += 1
-        print(
-            f"[RCitySearch] 房屋 {self.current_house_id} 完成，"
-            f"已搜 {len(self.r_city_completed_targets)}/{len(self.r_city_targets)}"
-        )
+        print(f"[SceneSearch] 房屋 {self.current_house_id} 完成，已搜 {self.searching_number}/5")
         w.refresh_frame()
         exit_direction = w.get_info("direction")
         self.prepare_next_target_logic(exit_direction)
         self.current_house_id = None
-        self.current_r_city_target = None
         self.active_entry = None
         self.status = "IDLE"
         self.history_locations = []
@@ -1185,62 +561,86 @@ class HouseSceneSearchManager(HouseSearchManager):
         return False
 
     def _rotate_search_inside_house(self, w: "FrameWorker"):
-        self.stop_auto_forward(w)
-        print("[SceneRotate] 室内搜房改为固定推进转向：顺时针 6 次，逆时针 6 次")
+        self._ensure_rotate_auto_forward(w, "进入房屋后启动自动前进搜房")
+        start_time = time.monotonic()
+        turn_sign = 1
+        wall_hit_count = 0
+        similar_frame_count = 0
+        previous_frame = None
+        step = 0
 
-        search_plan = (
-            ("顺时针", "left_up", self.ROTATE_SEARCH_SWEEP_TURN_PX),
-            ("逆时针", "right_up", -self.ROTATE_SEARCH_SWEEP_TURN_PX),
-        )
-        step_index = 0
-        for phase_label, move_mode, turn_px in search_plan:
-            for phase_step in range(self.ROTATE_SEARCH_SWEEP_CYCLES_PER_DIRECTION):
-                if self._should_abort(w):
-                    self.stop_auto_forward(w)
-                    return self.ROTATE_RESULT_FINISHED
+        while True:
+            if self._should_abort(w):
+                break
 
-                w.refresh_frame()
-                scene = self._get_house_scene(w)
-                if scene in self.HOUSE_EXIT_SCENES:
-                    print(f"[SceneRotate] {phase_label}推进前已出房 house_scene={scene}")
-                    self.stop_auto_forward(w)
-                    return self.ROTATE_RESULT_EXITED
-                if scene is not None and scene not in {
-                    self.HOUSE_INDOOR,
-                    self.HOUSE_NEAR_DOOR,
-                    self.HOUSE_NEAR_WALL,
-                }:
-                    print(f"[SceneRotate] 当前 house_scene={scene}，停止室内旋转搜房")
-                    self.stop_auto_forward(w)
-                    return self.ROTATE_RESULT_FINISHED
-
-                step_index += 1
+            if time.monotonic() - start_time >= self.ROTATE_SEARCH_AUTO_TIMEOUT_SECONDS:
                 print(
-                    f"[SceneRotate] {phase_label}推进 {phase_step + 1}/"
-                    f"{self.ROTATE_SEARCH_SWEEP_CYCLES_PER_DIRECTION}，全局步数={step_index}"
+                    f"[SceneRotate] 自动前进搜房超过 "
+                    f"{self.ROTATE_SEARCH_AUTO_TIMEOUT_SECONDS}s 仍未出房，切出房策略"
                 )
-                self._move_rotate_search_sweep_step(w, move_mode, phase_label)
+                self.stop_auto_forward(w)
+                return self.ROTATE_RESULT_FALLBACK_EXIT
 
-                w.refresh_frame()
-                scene = self._get_house_scene(w)
-                if scene in self.HOUSE_EXIT_SCENES:
-                    print(f"[SceneRotate] {phase_label}推进后判定出房 house_scene={scene}")
-                    self.stop_auto_forward(w)
-                    return self.ROTATE_RESULT_EXITED
+            step += 1
+            time.sleep(self.ROTATE_SEARCH_AUTO_POLL_SECONDS)
+            w.refresh_frame()
+            scene = self._get_house_scene(w)
+            current_frame = self._copy_current_frame(w)
+            similar = False
+            mean_diff = 0.0
+            changed_ratio = 0.0
+            if previous_frame is not None and current_frame is not None:
+                similar, mean_diff, changed_ratio = self._frames_are_similar(previous_frame, current_frame)
+                similar_frame_count = similar_frame_count + 1 if similar else 0
+            previous_frame = current_frame
 
-                print(f"[SceneRotate] {phase_label}推进后原地转视角 {turn_px}px")
-                self._turn_raw_pixels(w, turn_px)
+            turn_label = "右" if turn_sign > 0 else "左"
+            print(
+                f"[SceneRotate] auto_step={step}, turn={turn_label}, "
+                f"house_scene={scene}, wall_hits={wall_hit_count}, "
+                f"same_frames={similar_frame_count}/{self.ROTATE_SEARCH_STUCK_SIMILAR_FRAMES}, "
+                f"frame_mean={mean_diff:.2f}, changed={changed_ratio:.3f}"
+            )
 
-                w.refresh_frame()
-                scene = self._get_house_scene(w)
-                if scene in self.HOUSE_EXIT_SCENES:
-                    print(f"[SceneRotate] {phase_label}转向后判定出房 house_scene={scene}")
-                    self.stop_auto_forward(w)
-                    return self.ROTATE_RESULT_EXITED
+            if scene in self.HOUSE_EXIT_SCENES:
+                print(f"[SceneRotate] 自动前进搜房中判定出房 house_scene={scene}")
+                self.stop_auto_forward(w)
+                return self.ROTATE_RESULT_EXITED
+
+            if scene is not None and scene not in {
+                self.HOUSE_INDOOR,
+                self.HOUSE_NEAR_DOOR,
+                self.HOUSE_NEAR_WALL,
+            }:
+                print(f"[SceneRotate] 当前 house_scene={scene}，停止室内旋转搜房")
+                self.stop_auto_forward(w)
+                return self.ROTATE_RESULT_FINISHED
+
+            if scene in self.HOUSE_NEAR_ENTRY_SCENES:
+                wall_hit_count += 1
+                if wall_hit_count > self.ROTATE_SEARCH_HIT_SWITCH_COUNT:
+                    turn_sign = -1
+                    turn_label = "左"
+                print(
+                    f"[SceneRotate] 自动前进撞墙/门累计 {wall_hit_count}，"
+                    f"向{turn_label}滑视角 {self.ROTATE_SEARCH_WALL_TURN_DEGREES}°"
+                )
+                self._turn_with_direction_correction(
+                    w,
+                    turn_sign * self.ROTATE_SEARCH_WALL_TURN_DEGREES,
+                )
+                previous_frame = self._copy_current_frame(w)
+                similar_frame_count = 0
+                continue
+
+            if similar_frame_count >= self.ROTATE_SEARCH_STUCK_SIMILAR_FRAMES:
+                self._recover_rotate_auto_forward_stuck(w, turn_sign)
+                self._ensure_rotate_auto_forward(w, "卡住横拉后恢复自动前进")
+                previous_frame = self._copy_current_frame(w)
+                similar_frame_count = 0
 
         self.stop_auto_forward(w)
-        print("[SceneRotate] 顺时针+逆时针各一圈后仍未出房，切出房策略")
-        return self.ROTATE_RESULT_FALLBACK_EXIT
+        return self.ROTATE_RESULT_FINISHED
 
     def _ensure_rotate_auto_forward(self, w: "FrameWorker", reason: str):
         if self.auto_forward:
@@ -1284,30 +684,6 @@ class HouseSceneSearchManager(HouseSearchManager):
             wait=self.ROTATE_SEARCH_MOVE_DURA + self.ROTATE_SEARCH_MOVE_WAIT_PAD,
         )
         w.refresh_frame()
-
-    def _move_rotate_search_sweep_step(self, w: "FrameWorker", move_mode: str, phase_label: str):
-        x_bias = self._rotate_move_x_bias(move_mode)
-        label = self._move_mode_label(move_mode)
-        print(
-            f"[SceneRotate] {phase_label}: 向{label}推进 "
-            f"{self.ROTATE_SEARCH_SWEEP_MOVE_DURA}ms"
-        )
-        w.tap_single(
-            "摇杆",
-            x_bias=x_bias,
-            y_bias=self.ROTATE_SEARCH_Y_BIAS,
-            dura=self.ROTATE_SEARCH_SWEEP_MOVE_DURA,
-            wait=self.ROTATE_SEARCH_SWEEP_MOVE_WAIT,
-        )
-        w.refresh_frame()
-
-    def _turn_raw_pixels(self, w: "FrameWorker", signed_px: int):
-        w.tap_single(
-            "视角",
-            x_bias=int(signed_px),
-            dura=self.ROTATE_SEARCH_SWEEP_TURN_DURA,
-            wait=self.ROTATE_SEARCH_SWEEP_TURN_WAIT,
-        )
 
     def _move_mode_turn_sign(self, move_mode: str) -> int:
         return 1 if move_mode == "left_up" else -1
@@ -1712,185 +1088,8 @@ class HouseSceneSearchManager(HouseSearchManager):
         crop = gray[y1:y2, x1:x2]
         return cv2.resize(crop, self.ROTATE_FRAME_COMPARE_SIZE, interpolation=cv2.INTER_AREA)
 
-    def _enter_r_city_house_by_free_search(self, w: "FrameWorker") -> Optional[bool]:
-        self.stop_auto_forward(w)
-        print("[RCityEntry] R城房点是房体坐标，启用自由找门/窗/按钮进房")
-
-        for step in range(self.R_CITY_ENTRY_FREE_SEARCH_MAX_STEPS):
-            if self._should_abort(w):
-                return False
-
-            w.refresh_frame()
-            if self._is_indoor(w):
-                print("[RCityEntry] 已是 indoor，直接开始屋内搜索")
-                return True
-
-            if self._handle_r_city_visible_entry_opportunity(w):
-                return True
-
-            self._align_to_r_city_house_point(w)
-            scene = self._get_house_scene(w)
-            print(f"[RCityEntry] 自由进房轮次 {step + 1}: house_scene={scene}")
-
-            if scene in self.HOUSE_NEAR_ENTRY_SCENES:
-                if self._sweep_r_city_wall_for_entry(w):
-                    return True
-                continue
-
-            if self._push_r_city_entry_forward_and_check_indoor(w, "未见门窗按钮，朝房体盲前推"):
-                return True
-
-            scene = self._get_house_scene(w)
-            if scene in self.HOUSE_NEAR_ENTRY_SCENES and self._sweep_r_city_wall_for_entry(w):
-                return True
-
-        print("[RCityEntry] 多轮自由找门/窗/按钮仍未进房")
-        return self._is_indoor(w)
-
-    def _align_to_r_city_house_point(self, w: "FrameWorker") -> bool:
-        target_loc = self._r_city_house_body_location()
-        if target_loc is None:
-            print("[RCityEntry] 当前R城房点缺少坐标，跳过朝房体对齐")
-            return False
-        print(f"[RCityEntry] 朝房体坐标对齐: {target_loc}")
-        return self.align_direction(
-            w,
-            target_loc,
-            threshold=self.R_CITY_ENTRY_TARGET_ALIGN_TOLERANCE,
-            max_steps=2,
-        )
-
-    def _r_city_house_body_location(self):
-        if self.current_r_city_target:
-            return self.current_r_city_target.get("location")
-        if self.active_entry:
-            return self.active_entry.get("location")
-        return None
-
-    def _handle_r_city_visible_entry_opportunity(self, w: "FrameWorker") -> bool:
-        if self._is_indoor(w):
-            return True
-
-        button_state = self._door_button_state(w)
-        if button_state:
-            return self._handle_r_city_door_button_then_forward(w, button_state)
-
-        if w.get_info("跳跃"):
-            print("[RCityEntry] 看到跳跃按钮，按翻窗/越障逻辑进房")
-            self.handle_jump_logic(w)
-            w.refresh_frame()
-            return self._is_indoor(w) or self._push_r_city_entry_forward_and_check_indoor(
-                w,
-                "跳跃后继续前推确认",
-            )
-
-        door = self.find_largest_door(w)
-        if door is not None:
-            print("[RCityEntry] 画面中发现门，先对门再前推找按钮")
-            self._align_to_r_city_forward_target(w, door, "门")
-            if self._push_r_city_entry_forward_and_check_indoor(w, "对门后前推"):
-                return True
-            button_state = self._door_button_state(w)
-            if button_state:
-                return self._handle_r_city_door_button_then_forward(w, button_state)
-
-        window = self._find_largest_forward_target(w, self.EXIT_WINDOW_CLASS_IDS)
-        if window is not None:
-            print("[RCityEntry] 画面中发现窗，先对窗再前推找跳跃")
-            self._align_to_r_city_forward_target(w, window, "窗")
-            if self._push_r_city_entry_forward_and_check_indoor(w, "对窗后前推"):
-                return True
-            if w.get_info("跳跃"):
-                print("[RCityEntry] 贴窗后出现跳跃，点击跳跃进房")
-                self.handle_jump_logic(w)
-                w.refresh_frame()
-                return self._is_indoor(w) or self._push_r_city_entry_forward_and_check_indoor(
-                    w,
-                    "贴窗跳跃后继续前推确认",
-                )
-
-        return False
-
-    def _handle_r_city_door_button_then_forward(self, w: "FrameWorker", button_state: str) -> bool:
-        self.stop_auto_forward(w)
-        if button_state == "open":
-            print("[RCityEntry] 看到开门按钮，点击开门后前推")
-            self._click_open_door(w)
-        else:
-            print("[RCityEntry] 看到关门按钮，说明门已打开，不点击关门，直接前推")
-        return self._push_r_city_entry_forward_and_check_indoor(w, "门按钮处理后前推")
-
-    def _align_to_r_city_forward_target(self, w: "FrameWorker", target, label: str) -> bool:
-        relative_angle = self._target_relative_angle(target)
-        if relative_angle is None:
-            print(f"[RCityEntry] {label}目标角度无效，跳过视觉对齐")
-            return False
-        if abs(relative_angle) <= self.R_CITY_ENTRY_TARGET_ALIGN_TOLERANCE:
-            print(f"[RCityEntry] {label}已在视野中央附近")
-            return True
-
-        limited_angle = max(-25.0, min(25.0, relative_angle))
-        print(f"[RCityEntry] {label}偏移 {relative_angle:.1f}°，微调 {limited_angle:.1f}°")
-        self._turn(w, limited_angle)
-        time.sleep(0.12)
-        w.refresh_frame()
-        return True
-
-    def _push_r_city_entry_forward_and_check_indoor(self, w: "FrameWorker", reason: str) -> bool:
-        print(f"[RCityEntry] {reason}")
-        w.tap_single(
-            "摇杆",
-            y_bias=self.R_CITY_ENTRY_BLIND_FORWARD_Y_BIAS,
-            dura=self.R_CITY_ENTRY_BLIND_FORWARD_DURA,
-            wait=self.R_CITY_ENTRY_BLIND_FORWARD_WAIT,
-        )
-        w.refresh_frame()
-
-        if self._is_indoor(w):
-            print("[RCityEntry] 前推后 house_scene=indoor，进房成功")
-            return True
-        if self._door_button_state(w):
-            print("[RCityEntry] 前推后出现门按钮，下一轮立即处理")
-        if w.get_info("跳跃"):
-            print("[RCityEntry] 前推后出现跳跃按钮，下一轮立即处理")
-        return False
-
-    def _sweep_r_city_wall_for_entry(self, w: "FrameWorker") -> bool:
-        print("[RCityEntry] 贴墙/门但未见按钮，先右扫再左扫查找门窗/跳跃/开关门")
-        for side in ("right", "left"):
-            x_bias = self.R_CITY_ENTRY_WALL_SWEEP_X_BIAS if side == "right" else -self.R_CITY_ENTRY_WALL_SWEEP_X_BIAS
-            side_label = self._side_label(side)
-            for step in range(self.R_CITY_ENTRY_WALL_SWEEP_STEPS):
-                if self._should_abort(w):
-                    return False
-                print(
-                    f"[RCityEntry] 贴墙向{side_label}侧移 "
-                    f"{step + 1}/{self.R_CITY_ENTRY_WALL_SWEEP_STEPS}"
-                )
-                w.tap_single(
-                    "摇杆",
-                    x_bias=x_bias,
-                    y_bias=0,
-                    dura=self.R_CITY_ENTRY_WALL_SWEEP_DURA,
-                    wait=self.R_CITY_ENTRY_WALL_SWEEP_WAIT,
-                )
-                w.refresh_frame()
-                if self._is_indoor(w):
-                    print("[RCityEntry] 侧移后已进房")
-                    return True
-                if self._handle_r_city_visible_entry_opportunity(w):
-                    return True
-                scene = self._get_house_scene(w)
-                if scene in self.HOUSE_EXIT_SCENES:
-                    print("[RCityEntry] 侧移后视野变为室外，换另一面墙/另一方向继续找入口")
-                    break
-        return False
-
     def _enter_house_by_scene(self, w: "FrameWorker") -> Optional[bool]:
         self.stop_auto_forward(w)
-        if self.current_r_city_target:
-            return self._enter_r_city_house_by_free_search(w)
-
         if self.active_entry:
             ideal_angle = self.active_entry["direction"]
             print(f"[SceneEntry] 调整至进门方向: {ideal_angle}")

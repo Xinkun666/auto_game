@@ -1435,7 +1435,22 @@ class HouseSceneSearchManager(HouseSearchManager):
         w.refresh_frame()
 
     def _exit_house(self, w: "FrameWorker") -> bool:
-        return self._exit_house_by_scene_strategy(w)
+        print("[SceneExit] 统一委托 HouseExitManager 执行出房")
+        self.stop_auto_forward(w)
+        self.house_exit_manager.reset()
+        for attempt in range(self.EXIT_SEARCH_MAX_STEPS):
+            if self._should_abort(w):
+                return False
+            if self.house_exit_manager.process(w):
+                print(f"[SceneExit] HouseExitManager 出房成功 attempt={attempt + 1}")
+                return True
+            w.refresh_frame()
+            if self._is_out_of_house(w):
+                print(f"[SceneExit] HouseExitManager 后确认已出房 attempt={attempt + 1}")
+                self.house_exit_manager.reset()
+                return True
+        print("[SceneExit] HouseExitManager 达到尝试上限，仍未确认出房")
+        return self._is_out_of_house(w)
 
     def _exit_house_by_scene_strategy(self, w: "FrameWorker") -> bool:
         print("[SceneExit] 启动 house_scene 多路径出房策略")

@@ -2310,18 +2310,31 @@ class DrivingManager:
                     return alias
         return aliases[0]
 
+    def _mark_drive_auto_forward_cancelled_by_manual_control(self, *keys: str):
+        if not self.drive_auto_forward_active:
+            return
+        if keys and all(key == "auto_forward" for key in keys):
+            return
+        print("[Driving] 检测到其他驾驶按键，标记自动前进已取消")
+        self.drive_auto_forward_active = False
+        self.drive_auto_forward_started_at = None
+
     def _tap_single_control(self, w: "FrameWorker", key: str, **kwargs):
+        self._mark_drive_auto_forward_cancelled_by_manual_control(key)
         self._frame_action_executed = True
         w.tap_single(self._resolve_control_name(w, key), **kwargs)
 
     def _tap_double_control(self, w: "FrameWorker", key1: str, key2: str, **kwargs):
+        self._mark_drive_auto_forward_cancelled_by_manual_control(key1, key2)
         self._frame_action_executed = True
         w.tap_double(self._resolve_control_name(w, key1), self._resolve_control_name(w, key2), **kwargs)
 
     def _click_control(self, w: "FrameWorker", key: str, **kwargs):
+        self._mark_drive_auto_forward_cancelled_by_manual_control(key)
         self._frame_action_executed = True
         w.click(self._resolve_control_name(w, key), **kwargs)
 
     def _click_down_control(self, w: "FrameWorker", key: str, **kwargs):
+        self._mark_drive_auto_forward_cancelled_by_manual_control(key)
         self._frame_action_executed = True
         w.click_down(self._resolve_control_name(w, key), **kwargs)

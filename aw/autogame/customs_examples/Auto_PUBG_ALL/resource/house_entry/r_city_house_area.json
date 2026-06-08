@@ -21,7 +21,7 @@
       "near_region_distance": 30.0,
       "route_arrival_distance": 30.0,
       "house_arrival_distance": 2.0,
-      "early_entry_scene_distance": 8.0,
+      "early_entry_scene_distance": 5.0,
       "existing_entry_match_review_distance": 12.0
     }
   },

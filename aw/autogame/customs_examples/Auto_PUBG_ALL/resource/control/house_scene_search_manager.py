@@ -51,7 +51,7 @@ class HouseSceneSearchManager(HouseSearchManager):
     R_CITY_FALLBACK_CENTER = (1036, 745)
     R_CITY_DEFAULT_NEAR_DISTANCE = 30.0
     R_CITY_DEFAULT_HOUSE_ARRIVAL_DISTANCE = 2.0
-    R_CITY_DEFAULT_EARLY_ENTRY_SCENE_DISTANCE = 8.0
+    R_CITY_DEFAULT_EARLY_ENTRY_SCENE_DISTANCE = 5.0
     R_CITY_ROUTE_WAYPOINT_DISTANCE = 3.0
     R_CITY_ROUTE_REPLAN_STUCK_CYCLES = 2
     R_CITY_FAILED_TARGET_LIMIT = 2
@@ -107,10 +107,11 @@ class HouseSceneSearchManager(HouseSearchManager):
     R_CITY_ENTRY_WALL_SWEEP_STEPS = 8
     R_CITY_ENTRY_WALL_SWEEP_X_BIAS = 260
     R_CITY_ENTRY_WALL_SWEEP_DURA = 260
-    R_CITY_ENTRY_WALL_SWEEP_WAIT = 360
+    R_CITY_ENTRY_WALL_SWEEP_WAIT = 50
+    R_CITY_ENTRY_WALL_SWEEP_WAIT_STEP = 50
     R_CITY_ENTRY_BLIND_FORWARD_Y_BIAS = -320
     R_CITY_ENTRY_BLIND_FORWARD_DURA = 420
-    R_CITY_ENTRY_BLIND_FORWARD_WAIT = 620
+    R_CITY_ENTRY_BLIND_FORWARD_WAIT = 300
     R_CITY_ENTRY_TARGET_ALIGN_TOLERANCE = 8
     ENTRY_WINDOW_JUMP_SETTLE_SECONDS = 0.25
     OPEN_DOOR_SETTLE_SECONDS = 0.8
@@ -1856,34 +1857,36 @@ class HouseSceneSearchManager(HouseSearchManager):
         return False
 
     def _sweep_r_city_wall_for_entry(self, w: "FrameWorker") -> bool:
-        print("[RCityEntry] 贴墙/门但未见按钮，先右扫再左扫查找门窗/跳跃/开关门")
-        for side in ("right", "left"):
+        print("[RCityEntry] 贴墙/门但未见按钮，左右交替短等待查找门窗/跳跃/开关门")
+        for step in range(self.R_CITY_ENTRY_WALL_SWEEP_STEPS):
+            side = "right" if step % 2 == 0 else "left"
             x_bias = self.R_CITY_ENTRY_WALL_SWEEP_X_BIAS if side == "right" else -self.R_CITY_ENTRY_WALL_SWEEP_X_BIAS
             side_label = self._side_label(side)
-            for step in range(self.R_CITY_ENTRY_WALL_SWEEP_STEPS):
-                if self._should_abort(w):
-                    return False
-                print(
-                    f"[RCityEntry] 贴墙向{side_label}侧移 "
-                    f"{step + 1}/{self.R_CITY_ENTRY_WALL_SWEEP_STEPS}"
-                )
-                w.tap_single(
-                    "摇杆",
-                    x_bias=x_bias,
-                    y_bias=0,
-                    dura=self.R_CITY_ENTRY_WALL_SWEEP_DURA,
-                    wait=self.R_CITY_ENTRY_WALL_SWEEP_WAIT,
-                )
-                w.refresh_frame()
-                if self._is_indoor(w):
-                    print("[RCityEntry] 侧移后已进房")
-                    return True
-                if self._handle_r_city_visible_entry_opportunity(w):
-                    return True
-                scene = self._get_house_scene(w)
-                if scene in self.HOUSE_EXIT_SCENES:
-                    print("[RCityEntry] 侧移后视野变为室外，换另一面墙/另一方向继续找入口")
-                    break
+            wait = self.R_CITY_ENTRY_WALL_SWEEP_WAIT + step * self.R_CITY_ENTRY_WALL_SWEEP_WAIT_STEP
+            if self._should_abort(w):
+                return False
+            print(
+                f"[RCityEntry] 贴墙向{side_label}侧移 "
+                f"{step + 1}/{self.R_CITY_ENTRY_WALL_SWEEP_STEPS}, wait={wait}"
+            )
+            w.tap_single(
+                "摇杆",
+                x_bias=x_bias,
+                y_bias=0,
+                dura=self.R_CITY_ENTRY_WALL_SWEEP_DURA,
+                wait=wait,
+            )
+            w.refresh_frame()
+            if self._is_indoor(w):
+                print("[RCityEntry] 侧移后已进房")
+                return True
+            if self._handle_r_city_visible_entry_opportunity(w):
+                return True
+
+            scene = self._get_house_scene(w)
+            if scene not in self.HOUSE_NEAR_ENTRY_SCENES:
+                print(f"[RCityEntry] 侧移后 house_scene={scene}，停止本轮贴墙交替侧移")
+                return False
         return False
 
     def _enter_house_by_scene(self, w: "FrameWorker") -> Optional[bool]:

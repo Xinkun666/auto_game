@@ -14,8 +14,8 @@ import traceback
 from pathlib import Path
 from typing import Dict, Optional
 
-from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt, QTimer
-from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap, QTextCursor
+from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt, QTimer, QUrl
+from PyQt6.QtGui import QColor, QDesktopServices, QPainter, QPen, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -33,6 +33,9 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QSpinBox,
+    QStackedWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -44,6 +47,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 TESTCASES_DIR = ROOT_DIR / "testcases"
 CUSTOMS_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_examples"
 CUSTOMS_GAME_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_game_examples"
+TEMP_DIR = ROOT_DIR / "aw" / "autogame" / "temp"
 PREVIEW_DIR = ROOT_DIR / "aw" / "autogame" / "temp" / "logs" / "process_temp_logs"
 LOG_DIR = ROOT_DIR / "aw" / "autogame" / "temp" / "logs"
 LAUNCHER_LOG_FILE = LOG_DIR / "launcher_debug.log"
@@ -177,6 +181,118 @@ def extract_package_names(py_file: Path) -> list[str]:
             if PACKAGE_NAME_RE.fullmatch(value):
                 packages.add(value)
     return sorted(packages)
+
+
+def resolve_label_project_dir(project_case: str) -> Optional[Path]:
+    project_case = str(project_case or "").strip()
+    if not project_case:
+        return None
+
+    project_dir = CUSTOMS_EXAMPLES_DIR / project_case
+    if (project_dir / "info.py").exists():
+        return project_dir
+    return None
+
+
+def get_testcase_button_texts(has_selection: bool) -> tuple[str, str]:
+    return ("已选择" if has_selection else "选择用例", "重选")
+
+
+def _count_files(path: Path) -> int:
+    if not path.exists() or not path.is_dir():
+        return 0
+    return sum(1 for child in path.rglob("*") if child.is_file())
+
+
+def _read_history_text(path: Path, max_chars: int = 200000) -> str:
+    if not path.exists() or not path.is_file():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    if len(text) > max_chars:
+        return text[-max_chars:]
+    return text
+
+
+def discover_history_outputs(temp_dir: Path = TEMP_DIR) -> list[dict]:
+    temp_dir = Path(temp_dir)
+    if not temp_dir.exists():
+        return []
+
+    records = []
+    for info_path in sorted(temp_dir.rglob("archive_info.json")):
+        archive_dir = info_path.parent
+        try:
+            metadata = json.loads(info_path.read_text(encoding="utf-8"))
+            if not isinstance(metadata, dict):
+                metadata = {}
+        except Exception:
+            metadata = {}
+
+        logs_dir = archive_dir / "logs"
+        launcher_output = _read_history_text(logs_dir / "launcher_output.txt")
+        if not launcher_output:
+            launcher_output = _read_history_text(logs_dir / "launcher_output_partial.txt")
+
+        preview_video = archive_dir / "preview_10fps.mp4"
+        record = {
+            "archive_dir": archive_dir,
+            "batch_dir": archive_dir.parent,
+            "archive_info_path": info_path,
+            "archive_time": str(metadata.get("archive_time") or ""),
+            "run_index": metadata.get("run_index", ""),
+            "mode": metadata.get("mode", ""),
+            "project_case": metadata.get("project_case", ""),
+            "target_case": metadata.get("target_case", ""),
+            "testcase_label": metadata.get("testcase_label", ""),
+            "exit_code": metadata.get("exit_code", ""),
+            "timed_out": metadata.get("timed_out", ""),
+            "stream_disconnected": metadata.get("stream_disconnected", ""),
+            "stream_disconnect_startup": metadata.get("stream_disconnect_startup", ""),
+            "archive_metadata": metadata,
+            "launcher_output": launcher_output,
+            "log_file_count": _count_files(logs_dir),
+            "process_temp_file_count": _count_files(archive_dir / "process_temp_logs"),
+            "process_save_frame_count": _count_files(archive_dir / "process_save_frames"),
+            "preview_video_path": preview_video,
+            "preview_video_exists": preview_video.exists() and preview_video.is_file(),
+            "mtime": info_path.stat().st_mtime,
+        }
+        records.append(record)
+
+    records.sort(key=lambda item: (str(item.get("archive_time") or ""), float(item.get("mtime") or 0)), reverse=True)
+    return records
+
+
+def format_history_record_summary(record: dict) -> str:
+    def value(name: str, fallback: str = "-") -> str:
+        current = record.get(name)
+        if current is None or current == "":
+            return fallback
+        return str(current)
+
+    archive_dir = record.get("archive_dir")
+    preview_text = "有" if record.get("preview_video_exists") else "无"
+    lines = [
+        f"archive_time: {value('archive_time')}",
+        f"run_index: {value('run_index')}",
+        f"mode: {value('mode')}",
+        f"project_case: {value('project_case')}",
+        f"target_case: {value('target_case')}",
+        f"testcase_label: {value('testcase_label')}",
+        f"exit_code: {value('exit_code')}",
+        f"timed_out: {value('timed_out')}",
+        f"stream_disconnected: {value('stream_disconnected')}",
+        f"stream_disconnect_startup: {value('stream_disconnect_startup')}",
+        f"log_file_count: {value('log_file_count', '0')}",
+        f"process_temp_file_count: {value('process_temp_file_count', '0')}",
+        f"process_save_frame_count: {value('process_save_frame_count', '0')}",
+        f"preview_10fps.mp4: {preview_text}",
+        f"archive_dir: {archive_dir}",
+    ]
+    return "\n".join(lines)
 
 
 def discover_project_cases() -> list[str]:
@@ -363,6 +479,11 @@ class LauncherWindow(QWidget):
         self._adjusting_preview_splitter = False
         self.preset_buttons: list[QPushButton] = []
         self.theme_mode = "light"
+        self.inputs_enabled = True
+        self.label_tool = None
+        self.label_tool_project_dir: Optional[Path] = None
+        self.history_records: list[dict] = []
+        self.selected_history_record: Optional[dict] = None
 
         self.setWindowTitle("Auto Game 启动器")
         self.resize(1260, 860)
@@ -378,7 +499,8 @@ class LauncherWindow(QWidget):
         self.testcase_path_edit.setPlaceholderText("未选择 testcases 用例文件")
 
         self.browse_button = QPushButton("选择用例")
-        self.clear_button = QPushButton("清空")
+        self.clear_button = QPushButton("重选")
+        self.open_label_tool_button = QPushButton("打开标注工具")
         self.refresh_button = QPushButton("刷新配置")
 
         self.project_combo = QComboBox()
@@ -452,6 +574,7 @@ class LauncherWindow(QWidget):
         self.stop_button = QPushButton("停止")
         self.stop_button.setProperty("dangerButton", True)
         self.stop_button.setEnabled(False)
+        self.open_history_button = QPushButton("历史输出")
         self.keep_process_on_manual_stop_button = QPushButton("停止保活")
         self.keep_process_on_manual_stop_button.setCheckable(True)
         self.keep_process_on_manual_stop_button.setChecked(False)
@@ -983,7 +1106,15 @@ class LauncherWindow(QWidget):
         return container
 
     def _build_ui(self):
-        main_layout = QVBoxLayout(self)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        self.page_stack = QStackedWidget()
+        root_layout.addWidget(self.page_stack)
+
+        self.launcher_page = QWidget()
+        main_layout = QVBoxLayout(self.launcher_page)
         main_layout.setContentsMargins(14, 12, 14, 14)
         main_layout.setSpacing(10)
 
@@ -1039,6 +1170,7 @@ class LauncherWindow(QWidget):
         testcase_layout.addWidget(self.testcase_path_edit, 1)
         testcase_layout.addWidget(self.browse_button)
         testcase_layout.addWidget(self.clear_button)
+        testcase_layout.addWidget(self.open_label_tool_button)
         launch_row.addWidget(testcase_group, 2)
         controls_layout.addLayout(launch_row)
 
@@ -1078,6 +1210,7 @@ class LauncherWindow(QWidget):
         action_layout.setSpacing(8)
         action_layout.addWidget(self.start_button)
         action_layout.addWidget(self.stop_button)
+        action_layout.addWidget(self.open_history_button)
         action_layout.addWidget(self.keep_process_on_manual_stop_button)
         action_layout.addWidget(self.preview_overlay_button)
         action_layout.addWidget(self.preview_points_button)
@@ -1123,16 +1256,149 @@ class LauncherWindow(QWidget):
         content_splitter.setStretchFactor(1, 2)
 
         main_layout.addWidget(content_splitter, 1)
+        self.page_stack.addWidget(self.launcher_page)
+        self.label_tool_page = self._build_label_tool_page()
+        self.page_stack.addWidget(self.label_tool_page)
+        self.history_page = self._build_history_page()
+        self.page_stack.addWidget(self.history_page)
         self._update_header_badges()
+
+    def _build_label_tool_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setSpacing(10)
+
+        header_bar = QWidget()
+        header_bar.setObjectName("headerBar")
+        header_layout = QHBoxLayout(header_bar)
+        header_layout.setContentsMargins(18, 13, 18, 13)
+        header_layout.setSpacing(14)
+
+        title_column = QVBoxLayout()
+        title_column.setContentsMargins(0, 0, 0, 0)
+        title_column.setSpacing(3)
+        title_label = QLabel("Auto Game Label Tool")
+        title_label.setObjectName("launcherTitle")
+        self.label_tool_project_label = QLabel("未加载标注项目")
+        self.label_tool_project_label.setObjectName("launcherSubtitle")
+        self.label_tool_project_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        title_column.addWidget(title_label)
+        title_column.addWidget(self.label_tool_project_label)
+        header_layout.addLayout(title_column, 1)
+
+        self.back_to_launcher_button = QPushButton("返回启动器")
+        header_layout.addWidget(self.back_to_launcher_button)
+        layout.addWidget(header_bar, 0)
+
+        self.label_tool_host = QWidget()
+        self.label_tool_host_layout = QVBoxLayout(self.label_tool_host)
+        self.label_tool_host_layout.setContentsMargins(0, 0, 0, 0)
+        self.label_tool_host_layout.setSpacing(0)
+        self.label_tool_empty_label = QLabel("请选择 testcases 用例后打开标注工具")
+        self.label_tool_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label_tool_empty_label.setObjectName("previewSurface")
+        self.label_tool_host_layout.addWidget(self.label_tool_empty_label)
+        layout.addWidget(self.label_tool_host, 1)
+        return page
+
+    def _build_history_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setSpacing(10)
+
+        header_bar = QWidget()
+        header_bar.setObjectName("headerBar")
+        header_layout = QHBoxLayout(header_bar)
+        header_layout.setContentsMargins(18, 13, 18, 13)
+        header_layout.setSpacing(14)
+
+        title_column = QVBoxLayout()
+        title_column.setContentsMargins(0, 0, 0, 0)
+        title_column.setSpacing(3)
+        title_label = QLabel("历史输出管理")
+        title_label.setObjectName("launcherTitle")
+        self.history_status_label = QLabel("读取 aw/autogame/temp 下的历史运行归档")
+        self.history_status_label.setObjectName("launcherSubtitle")
+        self.history_status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        title_column.addWidget(title_label)
+        title_column.addWidget(self.history_status_label)
+        header_layout.addLayout(title_column, 1)
+
+        self.history_refresh_button = QPushButton("刷新")
+        self.history_open_dir_button = QPushButton("打开目录")
+        self.history_open_dir_button.setEnabled(False)
+        self.history_delete_button = QPushButton("删除选中")
+        self.history_delete_button.setProperty("dangerButton", True)
+        self.history_delete_button.setEnabled(False)
+        self.history_back_button = QPushButton("返回启动器")
+        header_layout.addWidget(self.history_refresh_button)
+        header_layout.addWidget(self.history_open_dir_button)
+        header_layout.addWidget(self.history_delete_button)
+        header_layout.addWidget(self.history_back_button)
+        layout.addWidget(header_bar, 0)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(8)
+
+        left_group = QGroupBox("历史记录")
+        left_layout = QVBoxLayout(left_group)
+        left_layout.setContentsMargins(12, 10, 12, 12)
+        self.history_tree = QTreeWidget()
+        self.history_tree.setHeaderLabels(["批次 / 轮次", "状态", "路径"])
+        self.history_tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        left_layout.addWidget(self.history_tree)
+
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(10)
+
+        summary_group = QGroupBox("摘要")
+        summary_layout = QVBoxLayout(summary_group)
+        summary_layout.setContentsMargins(12, 10, 12, 12)
+        self.history_summary_edit = QPlainTextEdit()
+        self.history_summary_edit.setReadOnly(True)
+        self.history_summary_edit.setMinimumHeight(190)
+        self.history_summary_edit.setPlaceholderText("选择一条历史输出后显示摘要...")
+        summary_layout.addWidget(self.history_summary_edit)
+
+        output_group = QGroupBox("launcher 输出")
+        output_layout = QVBoxLayout(output_group)
+        output_layout.setContentsMargins(12, 10, 12, 12)
+        self.history_output_edit = QPlainTextEdit()
+        self.history_output_edit.setReadOnly(True)
+        self.history_output_edit.setPlaceholderText("选择一条历史输出后显示 logs/launcher_output.txt...")
+        output_layout.addWidget(self.history_output_edit)
+
+        right_layout.addWidget(summary_group, 0)
+        right_layout.addWidget(output_group, 1)
+
+        splitter.addWidget(left_group)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+        layout.addWidget(splitter, 1)
+        return page
 
     def _bind_signals(self):
         self.mode_testcase.toggled.connect(self._sync_mode_ui)
         self.browse_button.clicked.connect(self._choose_testcase_file)
-        self.clear_button.clicked.connect(self._clear_testcase_file)
+        self.clear_button.clicked.connect(self._reselect_testcase_file)
+        self.open_label_tool_button.clicked.connect(self._open_label_tool_for_selected_case)
+        self.back_to_launcher_button.clicked.connect(self._show_launcher_page)
         self.refresh_button.clicked.connect(self._refresh_config_choices)
         self.project_combo.currentTextChanged.connect(self._on_project_changed)
         self.start_button.clicked.connect(self._start_run)
         self.stop_button.clicked.connect(self._stop_run)
+        self.open_history_button.clicked.connect(self._show_history_page)
+        self.history_refresh_button.clicked.connect(self._refresh_history_outputs)
+        self.history_open_dir_button.clicked.connect(self._open_selected_history_dir)
+        self.history_delete_button.clicked.connect(self._delete_selected_history_output)
+        self.history_back_button.clicked.connect(self._show_launcher_page)
+        self.history_tree.itemSelectionChanged.connect(self._on_history_selection_changed)
         self.keep_process_on_manual_stop_button.toggled.connect(self._toggle_keep_process_on_manual_stop)
         self.preview_overlay_button.toggled.connect(self._toggle_preview_overlay)
         self.preview_points_button.toggled.connect(self._toggle_preview_points)
@@ -1230,11 +1496,29 @@ class LauncherWindow(QWidget):
         self._refresh_preview_pixmap()
 
     def _sync_mode_ui(self):
+        LOGGER.debug("sync_mode_ui: testcase_mode=%s", self.mode_testcase.isChecked())
+        self._sync_testcase_controls_state()
+
+    def _can_open_label_tool_for_selection(self) -> bool:
+        if self.selected_testcase_file is None:
+            return False
+        project_case = self.project_combo.currentText().strip()
+        return resolve_label_project_dir(project_case) is not None
+
+    def _sync_testcase_controls_state(self):
         testcase_mode = self.mode_testcase.isChecked()
-        LOGGER.debug("sync_mode_ui: testcase_mode=%s", testcase_mode)
-        self.testcase_path_edit.setEnabled(testcase_mode)
-        self.browse_button.setEnabled(testcase_mode)
-        self.clear_button.setEnabled(testcase_mode)
+        has_selection = self.selected_testcase_file is not None
+        choose_text, reselect_text = get_testcase_button_texts(has_selection)
+        can_use_testcase_controls = self.inputs_enabled and testcase_mode
+
+        self.testcase_path_edit.setEnabled(can_use_testcase_controls)
+        self.browse_button.setText(choose_text)
+        self.browse_button.setEnabled(can_use_testcase_controls and not has_selection)
+        self.clear_button.setText(reselect_text)
+        self.clear_button.setEnabled(can_use_testcase_controls and has_selection)
+        self.open_label_tool_button.setEnabled(
+            can_use_testcase_controls and self._can_open_label_tool_for_selection()
+        )
 
     def _set_combo_value(self, combo: QComboBox, value: str):
         if not value:
@@ -1284,6 +1568,7 @@ class LauncherWindow(QWidget):
         LOGGER.info("refresh_config_choices: project=%s target=%s", project, target)
         self._load_project_cases(preferred=project)
         self._load_target_cases(preferred=target)
+        self._sync_testcase_controls_state()
         self._set_status("已刷新 project_case 和 target_case 列表。")
 
     def _on_project_changed(self, project_case: str):
@@ -1293,9 +1578,10 @@ class LauncherWindow(QWidget):
         self._load_target_cases(preferred=None)
         if project_case:
             self._set_status(f"已选择 project_case={project_case}，请确认 target_case。")
+        self._sync_testcase_controls_state()
         self._refresh_preview_pixmap()
 
-    def _choose_testcase_file(self):
+    def _choose_testcase_file(self) -> bool:
         LOGGER.info("choose_testcase_file dialog open")
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -1305,7 +1591,7 @@ class LauncherWindow(QWidget):
         )
         if not file_path:
             LOGGER.info("choose_testcase_file canceled")
-            return
+            return False
 
         py_file = Path(file_path).resolve()
         try:
@@ -1314,19 +1600,228 @@ class LauncherWindow(QWidget):
         except ValueError:
             LOGGER.warning("choose_testcase_file invalid path: %s", py_file)
             QMessageBox.warning(self, "路径错误", "请选择当前项目 testcases 目录下的用例文件。")
-            return
+            return False
 
         self.selected_testcase_file = py_file
         LOGGER.info("choose_testcase_file selected: %s", py_file)
         self.testcase_path_edit.setText(rel_path.as_posix())
         self.mode_testcase.setChecked(True)
         self._apply_parsed_testcase(py_file)
+        self._sync_testcase_controls_state()
+        return True
+
+    def _reselect_testcase_file(self):
+        LOGGER.info("reselect_testcase_file")
+        self._choose_testcase_file()
 
     def _clear_testcase_file(self):
         LOGGER.info("clear_testcase_file")
         self.selected_testcase_file = None
         self.testcase_path_edit.clear()
+        self._sync_testcase_controls_state()
         self._set_status("已清空 testcases 选择。可以直接指定 project_case / target_case 启动。")
+
+    def _ensure_label_tool(self):
+        if self.label_tool is not None:
+            return
+
+        LOGGER.info("initializing embedded label tool")
+        from aw.autogame.tools.Label import AutoStudioWindow
+
+        self.label_tool_empty_label.hide()
+        self.label_tool = AutoStudioWindow()
+        self.label_tool.setWindowFlags(Qt.WindowType.Widget)
+        self.label_tool_host_layout.addWidget(self.label_tool)
+
+    def _open_label_tool_for_selected_case(self):
+        LOGGER.info(
+            "open_label_tool_for_selected_case: testcase=%s project=%s",
+            self.selected_testcase_file,
+            self.project_combo.currentText().strip(),
+        )
+        if self.selected_testcase_file is None:
+            QMessageBox.warning(self, "缺少用例", "请先选择一个 testcases 用例。")
+            return
+
+        project_case = self.project_combo.currentText().strip()
+        project_dir = resolve_label_project_dir(project_case)
+        if project_dir is None:
+            QMessageBox.warning(
+                self,
+                "缺少标注资源",
+                f"未找到 project_case={project_case} 对应的标注资源目录或 info.py。",
+            )
+            self._sync_testcase_controls_state()
+            return
+
+        try:
+            self._ensure_label_tool()
+            self.label_tool.load_project_from_dir(str(project_dir))
+        except Exception as exc:
+            log_exception(f"open label tool failed: project_dir={project_dir}")
+            QMessageBox.critical(self, "打开失败", f"无法打开标注工具：\n{exc}")
+            return
+
+        self.label_tool_project_dir = project_dir
+        self.label_tool_project_label.setText(
+            f"当前标注项目：{project_case}    {project_dir}"
+        )
+        self.page_stack.setCurrentWidget(self.label_tool_page)
+        self._set_status(f"已打开标注工具：{project_case}")
+
+    def _show_launcher_page(self):
+        LOGGER.info("show launcher page")
+        project = self.project_combo.currentText().strip()
+        target = self.target_combo.currentText().strip()
+        self.page_stack.setCurrentWidget(self.launcher_page)
+        self._load_project_cases(preferred=project)
+        self._load_target_cases(preferred=target)
+        self._sync_testcase_controls_state()
+        self._set_status("已返回启动器。标注项目如已导出，可直接继续运行或刷新配置。")
+
+    def _show_history_page(self):
+        LOGGER.info("show history page")
+        self.page_stack.setCurrentWidget(self.history_page)
+        self._refresh_history_outputs()
+
+    def _history_record_title(self, record: dict) -> str:
+        run_index = record.get("run_index")
+        archive_time = str(record.get("archive_time") or "").strip()
+        target_case = str(record.get("target_case") or "").strip()
+        dir_name = Path(record.get("archive_dir")).name if record.get("archive_dir") else "历史输出"
+        run_text = f"第{run_index}次" if run_index not in (None, "") else dir_name
+        if target_case:
+            run_text = f"{run_text} {target_case}"
+        if archive_time:
+            run_text = f"{run_text}  {archive_time}"
+        return run_text
+
+    def _history_record_status(self, record: dict) -> str:
+        parts = []
+        exit_code = record.get("exit_code")
+        if exit_code not in (None, ""):
+            parts.append(f"exit={exit_code}")
+        if record.get("timed_out") is True:
+            parts.append("超时")
+        if record.get("stream_disconnected") is True:
+            parts.append("断流")
+        if not parts:
+            parts.append("已归档")
+        return " / ".join(parts)
+
+    def _set_selected_history_record(self, record: Optional[dict]):
+        self.selected_history_record = record
+        has_record = record is not None
+        self.history_open_dir_button.setEnabled(has_record)
+        self.history_delete_button.setEnabled(has_record)
+        if not has_record:
+            self.history_summary_edit.clear()
+            self.history_output_edit.clear()
+            return
+
+        self.history_summary_edit.setPlainText(format_history_record_summary(record))
+        launcher_output = str(record.get("launcher_output") or "").strip()
+        if launcher_output:
+            self.history_output_edit.setPlainText(launcher_output)
+        else:
+            self.history_output_edit.setPlainText("未找到 logs/launcher_output.txt。")
+
+    def _refresh_history_outputs(self):
+        LOGGER.info("refresh_history_outputs")
+        self.history_records = discover_history_outputs(TEMP_DIR)
+        self.history_tree.clear()
+        self._set_selected_history_record(None)
+
+        if not self.history_records:
+            self.history_status_label.setText(f"未发现历史归档：{TEMP_DIR}")
+            self.history_summary_edit.setPlainText(
+                f"未发现历史输出归档。\n\n运行完成后，launcher 会把每轮产物归档到：\n{TEMP_DIR}"
+            )
+            return
+
+        group_items: dict[str, QTreeWidgetItem] = {}
+        for index, record in enumerate(self.history_records):
+            batch_dir = Path(record["batch_dir"])
+            batch_key = str(batch_dir)
+            group_item = group_items.get(batch_key)
+            if group_item is None:
+                group_item = QTreeWidgetItem(self.history_tree)
+                group_item.setText(0, batch_dir.name)
+                group_item.setText(1, "批次")
+                group_item.setText(2, str(batch_dir))
+                group_item.setData(0, Qt.ItemDataRole.UserRole, None)
+                group_items[batch_key] = group_item
+
+            child = QTreeWidgetItem(group_item)
+            child.setText(0, self._history_record_title(record))
+            child.setText(1, self._history_record_status(record))
+            child.setText(2, str(record["archive_dir"]))
+            child.setData(0, Qt.ItemDataRole.UserRole, index)
+
+        self.history_tree.expandAll()
+        for column in range(3):
+            self.history_tree.resizeColumnToContents(column)
+
+        self.history_status_label.setText(f"发现 {len(self.history_records)} 条历史输出：{TEMP_DIR}")
+        first_group = self.history_tree.topLevelItem(0)
+        if first_group and first_group.childCount() > 0:
+            self.history_tree.setCurrentItem(first_group.child(0))
+
+    def _on_history_selection_changed(self):
+        items = self.history_tree.selectedItems()
+        if not items:
+            self._set_selected_history_record(None)
+            return
+
+        index = items[0].data(0, Qt.ItemDataRole.UserRole)
+        if index is None:
+            self._set_selected_history_record(None)
+            return
+        try:
+            record = self.history_records[int(index)]
+        except (IndexError, TypeError, ValueError):
+            record = None
+        self._set_selected_history_record(record)
+
+    def _open_selected_history_dir(self):
+        if not self.selected_history_record:
+            return
+        archive_dir = Path(self.selected_history_record["archive_dir"])
+        if not archive_dir.exists():
+            QMessageBox.warning(self, "目录不存在", f"历史输出目录不存在：\n{archive_dir}")
+            self._refresh_history_outputs()
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(archive_dir)))
+
+    def _delete_selected_history_output(self):
+        if not self.selected_history_record:
+            return
+        archive_dir = Path(self.selected_history_record["archive_dir"]).resolve()
+        try:
+            archive_dir.relative_to(TEMP_DIR.resolve())
+        except ValueError:
+            QMessageBox.warning(self, "拒绝删除", f"只能删除 temp 目录下的历史输出：\n{archive_dir}")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "确认删除",
+            f"确定删除这条历史输出吗？\n\n{archive_dir}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            shutil.rmtree(archive_dir)
+        except Exception as exc:
+            log_exception(f"delete history output failed: archive_dir={archive_dir}")
+            QMessageBox.critical(self, "删除失败", f"删除失败：\n{exc}")
+            return
+
+        self._set_status(f"已删除历史输出：{archive_dir.name}")
+        self._refresh_history_outputs()
 
     def _apply_parsed_testcase(self, py_file: Path):
         LOGGER.info("apply_parsed_testcase: %s", py_file)
@@ -1358,6 +1853,7 @@ class LauncherWindow(QWidget):
         else:
             messages.append("未解析到 target_case，请手动选择")
 
+        self._sync_testcase_controls_state()
         self._set_status("；".join(messages))
 
     def _build_process_environment(self, project_case: str, target_case: str, run_no: int) -> QProcessEnvironment:
@@ -1407,12 +1903,11 @@ class LauncherWindow(QWidget):
         return env
 
     def _set_inputs_enabled(self, enabled: bool):
+        self.inputs_enabled = enabled
         self.mode_testcase.setEnabled(enabled)
         self.mode_direct.setEnabled(enabled)
-        self.testcase_path_edit.setEnabled(enabled and self.mode_testcase.isChecked())
-        self.browse_button.setEnabled(enabled and self.mode_testcase.isChecked())
-        self.clear_button.setEnabled(enabled and self.mode_testcase.isChecked())
         self.refresh_button.setEnabled(enabled)
+        self.open_history_button.setEnabled(enabled)
         self.project_combo.setEnabled(enabled)
         self.target_combo.setEnabled(enabled)
         self.run_count_spin.setEnabled(enabled)
@@ -1422,6 +1917,7 @@ class LauncherWindow(QWidget):
         self.inactivity_timeout_spin.setEnabled(enabled)
         for button in self.preset_buttons:
             button.setEnabled(enabled)
+        self._sync_testcase_controls_state()
 
     def _clear_preview_files(self):
         LOGGER.debug("clear_preview_files: dir=%s", PREVIEW_DIR)

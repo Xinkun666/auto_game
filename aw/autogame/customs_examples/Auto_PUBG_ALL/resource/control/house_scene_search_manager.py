@@ -56,6 +56,8 @@ class HouseSceneSearchManager(HouseSearchManager):
     R_CITY_ROUTE_REPLAN_STUCK_CYCLES = 2
     R_CITY_FAILED_TARGET_LIMIT = 2
     R_CITY_FORWARD_HOUSE_BYPASS_DISTANCE = 10.0
+    R_CITY_BODY_ENTRY_DISTANCE = 4.0
+    R_CITY_BODY_ENTRY_ALIGN_WAIT = 30
 
     STATUS_ROUTE_TO_R_CITY = "ROUTE_TO_R_CITY"
     STATUS_SCENE_ENTRY = "SCENE_ENTRY"
@@ -117,6 +119,9 @@ class HouseSceneSearchManager(HouseSearchManager):
     R_CITY_ENTRY_WINDOW_FORWARD_WAIT = 220
     R_CITY_ENTRY_WINDOW_WALL_SWEEP_X_BIAS = 140
     R_CITY_ENTRY_WINDOW_WALL_SWEEP_DURA = 180
+    R_CITY_ENTRY_JUMP_WALL_BACKOFF_Y_BIAS = 400
+    R_CITY_ENTRY_JUMP_WALL_BACKOFF_DURA = 100
+    R_CITY_ENTRY_JUMP_WALL_BACKOFF_WAIT = 500
     R_CITY_ENTRY_WALL_RELOCK_BACKOFF_Y_BIAS = 300
     R_CITY_ENTRY_WALL_RELOCK_BACKOFF_DURA = 320
     R_CITY_ENTRY_WALL_RELOCK_BACKOFF_WAIT = 450
@@ -297,6 +302,9 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         target_loc = self.active_entry["location"]
         dist = get_distance(current_loc, target_loc)
+
+        if self._maybe_start_entry_for_nearby_r_city_body(w, current_loc):
+            return
 
         if self.status == "FAST_NAV":
             if self.update_and_check_stuck(current_loc):
@@ -810,6 +818,59 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_route_target = None
         self.r_city_route_path = []
         self.r_city_route_index = 0
+
+    def _maybe_start_entry_for_nearby_r_city_body(self, w: "FrameWorker", current_loc) -> bool:
+        target, distance = self._nearest_r_city_body_target(
+            current_loc,
+            self.R_CITY_BODY_ENTRY_DISTANCE,
+        )
+        if target is None:
+            return False
+
+        if self.current_house_id != target["id"]:
+            print(
+                f"[RCitySearch] 人物已贴近另一栋R城房体，改锁 {target['id']} "
+                f"body_dist={distance:.2f}"
+            )
+            self._lock_r_city_target(target)
+        else:
+            print(
+                f"[RCitySearch] 人物已贴近当前R城房体 {target['id']} "
+                f"body_dist={distance:.2f}"
+            )
+
+        self.stop_auto_forward(w)
+        self.align_direction(
+            w,
+            target["location"],
+            threshold=self.R_CITY_ENTRY_TARGET_ALIGN_TOLERANCE,
+            max_steps=2,
+            wait=self.R_CITY_BODY_ENTRY_ALIGN_WAIT,
+        )
+        self.status = self.STATUS_SCENE_ENTRY
+        self.history_locations = []
+        return True
+
+    def _nearest_r_city_body_target(self, current_loc, max_distance: float):
+        loc = self._location_tuple(current_loc)
+        if loc is None:
+            return None, None
+
+        candidates = []
+        for target in self.r_city_targets:
+            target_id = target["id"]
+            if target_id in self.r_city_completed_targets:
+                continue
+            if self.r_city_failed_counts.get(target_id, 0) >= self.R_CITY_FAILED_TARGET_LIMIT:
+                continue
+            distance = get_distance(loc, target["location"])
+            if distance <= max_distance:
+                candidates.append((distance, target))
+
+        if not candidates:
+            return None, None
+        distance, target = min(candidates, key=lambda item: item[0])
+        return target, distance
 
     def _mark_current_r_city_target_failed(self, reason: str):
         if self.current_r_city_target:
@@ -1896,6 +1957,46 @@ class HouseSceneSearchManager(HouseSearchManager):
         if self._is_indoor(w):
             print("[RCityEntry] 点击跳跃后 house_scene=indoor，进房成功")
             return True
+        if self._get_house_scene(w) == self.HOUSE_NEAR_WALL:
+            return self._recover_r_city_near_wall_after_jump(w)
+        return False
+
+    def _recover_r_city_near_wall_after_jump(self, w: "FrameWorker") -> bool:
+        print("[RCityEntry] 跳跃后仍 near_wall，先后拉离墙再重新查看门/窗/indoor")
+        w.tap_single(
+            "摇杆",
+            y_bias=self.R_CITY_ENTRY_JUMP_WALL_BACKOFF_Y_BIAS,
+            dura=self.R_CITY_ENTRY_JUMP_WALL_BACKOFF_DURA,
+            wait=self.R_CITY_ENTRY_JUMP_WALL_BACKOFF_WAIT,
+        )
+        w.refresh_frame()
+
+        if self._is_indoor(w):
+            print("[RCityEntry] 跳跃后后拉复查 house_scene=indoor，进房成功")
+            return True
+
+        button_state = self._door_button_state(w)
+        if button_state:
+            return self._handle_r_city_door_button_then_forward(w, button_state)
+
+        door = self.find_largest_door(w)
+        if door is not None:
+            print("[RCityEntry] 跳跃后后拉重新看到门，重新对门前推")
+            self._align_to_r_city_forward_target(w, door, "门")
+            return self._push_r_city_entry_forward_and_check_indoor(w, "跳跃后后拉重看门前推")
+
+        window = self._find_largest_forward_target(w, self.EXIT_WINDOW_CLASS_IDS)
+        if window is not None:
+            print("[RCityEntry] 跳跃后后拉重新看到窗，重新对窗短前推")
+            self._align_to_r_city_forward_target(w, window, "窗")
+            return self._push_r_city_entry_forward_and_check_indoor(
+                w,
+                "跳跃后后拉重看窗短前推",
+                y_bias=self.R_CITY_ENTRY_WINDOW_FORWARD_Y_BIAS,
+                dura=self.R_CITY_ENTRY_WINDOW_FORWARD_DURA,
+                wait=self.R_CITY_ENTRY_WINDOW_FORWARD_WAIT,
+            )
+
         return False
 
     def _handle_r_city_stone_wall_entry(self, w: "FrameWorker") -> bool:

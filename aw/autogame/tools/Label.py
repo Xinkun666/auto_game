@@ -2181,53 +2181,58 @@ class AutoStudioWindow(QMainWindow):
                 progress_dialog.close()
             if export_temp_dir and os.path.isdir(export_temp_dir):
                 shutil.rmtree(export_temp_dir, ignore_errors=True)
+    def load_project_from_dir(self, import_dir):
+        import_dir = os.path.abspath(os.fspath(import_dir))
+        py_path = os.path.join(import_dir, "info.py")
+        if not os.path.exists(py_path):
+            raise FileNotFoundError("未找到 info.py。")
+        data_env = {}
+        with open(py_path, "r", encoding="utf-8") as f:
+            exec(f.read(), data_env)
+        project_name = data_env.get("PROJECT_NAME") or os.path.basename(import_dir.rstrip(os.sep))
+        stage_info = data_env.get("STAGE_INFO", {})
+        if not isinstance(stage_info, dict):
+            raise ValueError("项目脚本缺少 STAGE_INFO。")
+        new_project = ProjectData(name=project_name)
+        for stage_name, stage_data in stage_info.items():
+            stage = StageData(id=str(random.randint(1000, 9999)), name=stage_name)
+            stage_control_names = {}
+            scenes = stage_data.get("scenes", {}) if isinstance(stage_data, dict) else {}
+            for scene_name, scene_data in scenes.items():
+                scene_versions = scene_data.get("resolutions", {}) if isinstance(scene_data, dict) else {}
+                if not scene_versions:
+                    scene_versions = {"": scene_data}
+                for _, scene_version_data in scene_versions.items():
+                    scene = self._import_scene_version(import_dir, stage_name, scene_name, scene_version_data, stage_control_names)
+                    stage.scenes.append(scene)
+            new_project.stages.append(stage)
+        self.project = new_project
+        resource_dir = os.path.join(import_dir, "resource")
+        self.imported_resource_dir = resource_dir if os.path.isdir(resource_dir) else None
+        self.current_stage = None
+        self.set_current_work_stage(None)
+        self.current_scene = None
+        self.update_tree_view()
+        if self.project.stages:
+            first_stage = self.project.stages[0]
+            self.current_stage = first_stage
+            self.set_current_work_stage(first_stage)
+            if first_stage.scenes:
+                first_scene = first_stage.scenes[0]
+                self.current_scene = first_scene
+                self.select_data_in_tree(first_scene)
+            else:
+                self.select_data_in_tree(first_stage)
+        self.btn_add_stage.setEnabled(True)
+        self.status_label.setText(f"工程 {project_name} 已导入。")
+        return project_name
+
     def import_project(self):
         import_dir = QFileDialog.getExistingDirectory(self, "选择导入目录")
         if not import_dir:
             return
         try:
-            py_path = os.path.join(import_dir, "info.py")
-            if not os.path.exists(py_path):
-                raise FileNotFoundError("未找到 info.py。")
-            data_env = {}
-            with open(py_path, "r", encoding="utf-8") as f:
-                exec(f.read(), data_env)
-            project_name = data_env.get("PROJECT_NAME") or os.path.basename(import_dir.rstrip(os.sep))
-            stage_info = data_env.get("STAGE_INFO", {})
-            if not isinstance(stage_info, dict):
-                raise ValueError("项目脚本缺少 STAGE_INFO。")
-            new_project = ProjectData(name=project_name)
-            for stage_name, stage_data in stage_info.items():
-                stage = StageData(id=str(random.randint(1000, 9999)), name=stage_name)
-                stage_control_names = {}
-                scenes = stage_data.get("scenes", {}) if isinstance(stage_data, dict) else {}
-                for scene_name, scene_data in scenes.items():
-                    scene_versions = scene_data.get("resolutions", {}) if isinstance(scene_data, dict) else {}
-                    if not scene_versions:
-                        scene_versions = {"": scene_data}
-                    for _, scene_version_data in scene_versions.items():
-                        scene = self._import_scene_version(import_dir, stage_name, scene_name, scene_version_data, stage_control_names)
-                        stage.scenes.append(scene)
-                new_project.stages.append(stage)
-            self.project = new_project
-            resource_dir = os.path.join(import_dir, "resource")
-            self.imported_resource_dir = resource_dir if os.path.isdir(resource_dir) else None
-            self.current_stage = None
-            self.set_current_work_stage(None)
-            self.current_scene = None
-            self.update_tree_view()
-            if self.project.stages:
-                first_stage = self.project.stages[0]
-                self.current_stage = first_stage
-                self.set_current_work_stage(first_stage)
-                if first_stage.scenes:
-                    first_scene = first_stage.scenes[0]
-                    self.current_scene = first_scene
-                    self.select_data_in_tree(first_scene)
-                else:
-                    self.select_data_in_tree(first_stage)
-            self.btn_add_stage.setEnabled(True)
-            self.status_label.setText(f"工程 {project_name} 已导入。")
+            self.load_project_from_dir(import_dir)
         except Exception as exc:
             QMessageBox.critical(self, "导入失败", f"无法导入项目：\n{exc}")
 

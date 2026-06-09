@@ -1359,7 +1359,7 @@ class HouseSearchManager:
             self.stop_auto_forward(w)
             w.click('跳跃')
             time.sleep(0.2)
-            w.tap_single('摇杆', y_bias=-400, dura=600)
+            w.tap_single('摇杆', y_bias=-400, dura=100, wait=300)
             w.refresh_frame()
 
     def select_nearest_entry(self, current_loc):
@@ -1466,7 +1466,7 @@ class HouseSearchManager:
             log_prefix="[NavAlign]",
         )
 
-    def align_direction(self, w, tar_loc, threshold=8, max_steps=1):
+    def align_direction(self, w, tar_loc, threshold=8, max_steps=1, wait=None):
         location_raw = w.get_info('location')
         if location_raw is None:
             return False
@@ -1483,7 +1483,7 @@ class HouseSearchManager:
             target_angle,
             threshold=threshold,
             max_steps=max_steps,
-            wait=self.ALIGN_WAIT,
+            wait=self.ALIGN_WAIT if wait is None else wait,
             min_dura=self.ALIGN_MIN_DURA,
             max_dura=self.ALIGN_MAX_DURA,
             max_px=self.ALIGN_MAX_BIAS,

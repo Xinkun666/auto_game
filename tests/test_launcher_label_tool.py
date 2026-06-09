@@ -9,6 +9,7 @@ from launcher import (
     format_history_record_summary,
     get_testcase_button_texts,
     is_multiprocessing_child,
+    resolve_app_paths,
     resolve_label_project_dir,
 )
 
@@ -47,6 +48,47 @@ class LauncherLabelToolTests(unittest.TestCase):
                 ]
             )
         )
+
+    def test_resolve_app_paths_non_frozen_uses_source_file_parent(self):
+        paths = resolve_app_paths(
+            frozen=False,
+            file_path=Path("/repo/launcher.py"),
+        )
+
+        self.assertEqual(Path("/repo"), paths.app_dir)
+        self.assertEqual(Path("/repo"), paths.internal_dir)
+        self.assertEqual(Path("/repo"), paths.root_dir)
+
+    def test_resolve_app_paths_frozen_prefers_internal_dir_when_present(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app_dir = (Path(temp_dir) / "AutoGameLauncherDebug").resolve()
+            internal_dir = app_dir / "_internal"
+            internal_dir.mkdir(parents=True)
+            exe_path = app_dir / "AutoGameLauncherDebug.exe"
+
+            paths = resolve_app_paths(
+                frozen=True,
+                executable=exe_path,
+            )
+
+            self.assertEqual(app_dir, paths.app_dir)
+            self.assertEqual(internal_dir, paths.internal_dir)
+            self.assertEqual(internal_dir, paths.root_dir)
+
+    def test_resolve_app_paths_frozen_falls_back_to_app_dir_without_internal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app_dir = (Path(temp_dir) / "AutoGameLauncherDebug").resolve()
+            app_dir.mkdir()
+            exe_path = app_dir / "AutoGameLauncherDebug.exe"
+
+            paths = resolve_app_paths(
+                frozen=True,
+                executable=exe_path,
+            )
+
+            self.assertEqual(app_dir, paths.app_dir)
+            self.assertEqual(app_dir / "_internal", paths.internal_dir)
+            self.assertEqual(app_dir, paths.root_dir)
 
     def test_discover_history_outputs_reads_archive_metadata_and_counts_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:

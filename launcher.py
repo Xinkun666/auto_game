@@ -13,7 +13,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, NamedTuple, Optional
 
 from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt, QTimer, QUrl
 from PyQt6.QtGui import QColor, QDesktopServices, QPainter, QPen, QPixmap, QTextCursor
@@ -44,8 +44,35 @@ from PyQt6.QtWidgets import (
 from aw.autogame.tools.Utils import archive_run_artifacts, get_resolution, resolve_run_archive_dir, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 
-ROOT_DIR = Path(__file__).resolve().parent
-TESTCASES_DIR = ROOT_DIR / "testcases"
+class AppPaths(NamedTuple):
+    app_dir: Path
+    internal_dir: Path
+    root_dir: Path
+
+
+def resolve_app_paths(
+    frozen: Optional[bool] = None,
+    executable: Optional[Path] = None,
+    file_path: Optional[Path] = None,
+) -> AppPaths:
+    if frozen is None:
+        frozen = bool(getattr(sys, "frozen", False))
+
+    if frozen:
+        app_dir = Path(executable or sys.executable).resolve().parent
+        internal_dir = app_dir / "_internal"
+        root_dir = internal_dir if internal_dir.exists() else app_dir
+        return AppPaths(app_dir=app_dir, internal_dir=internal_dir, root_dir=root_dir)
+
+    app_dir = Path(file_path or __file__).resolve().parent
+    return AppPaths(app_dir=app_dir, internal_dir=app_dir, root_dir=app_dir)
+
+
+APP_PATHS = resolve_app_paths()
+APP_DIR = APP_PATHS.app_dir
+INTERNAL_DIR = APP_PATHS.internal_dir
+ROOT_DIR = APP_PATHS.root_dir
+TESTCASES_DIR = APP_DIR / "testcases"
 CUSTOMS_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_examples"
 CUSTOMS_GAME_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_game_examples"
 TEMP_DIR = ROOT_DIR / "aw" / "autogame" / "temp"
@@ -1602,7 +1629,7 @@ class LauncherWindow(QWidget):
         py_file = Path(file_path).resolve()
         try:
             py_file.relative_to(TESTCASES_DIR)
-            rel_path = py_file.relative_to(ROOT_DIR)
+            rel_path = py_file.relative_to(APP_DIR)
         except ValueError:
             LOGGER.warning("choose_testcase_file invalid path: %s", py_file)
             QMessageBox.warning(self, "路径错误", "请选择当前项目 testcases 目录下的用例文件。")
@@ -2244,7 +2271,7 @@ class LauncherWindow(QWidget):
             if self.selected_testcase_file is None:
                 QMessageBox.warning(self, "缺少用例", "testcases 模式下请先选择一个用例文件。")
                 return None
-            testcase_label = self.selected_testcase_file.relative_to(ROOT_DIR).with_suffix("").as_posix()
+            testcase_label = self.selected_testcase_file.relative_to(APP_DIR).with_suffix("").as_posix()
             mode = "testcase"
 
         cleanup_apps = set()
@@ -2451,7 +2478,7 @@ class LauncherWindow(QWidget):
 
         self.process = QProcess(self)
         self.process.setProgram(sys.executable)
-        self.process.setWorkingDirectory(str(ROOT_DIR))
+        self.process.setWorkingDirectory(str(APP_DIR))
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.process.setProcessEnvironment(self._build_process_environment(project_case, target_case, run_no))
         self.process.readyReadStandardOutput.connect(self._read_process_output)
@@ -2490,7 +2517,7 @@ class LauncherWindow(QWidget):
             "starting child process: program=%s args=%s workdir=%s",
             sys.executable,
             args,
-            ROOT_DIR,
+            APP_DIR,
         )
         self.process.start()
         started = self.process.waitForStarted(3000)
@@ -3138,7 +3165,7 @@ class LauncherWindow(QWidget):
                 cmd = ["bash", str(RESTART_BAT_PATH)]
             result = subprocess.run(
                 cmd,
-                cwd=str(ROOT_DIR),
+                cwd=str(APP_DIR),
                 capture_output=True,
                 text=True,
                 timeout=360,
@@ -3345,8 +3372,27 @@ def _run_helper_command(args: argparse.Namespace) -> int:
 
 
 def main():
+    old_cwd = Path.cwd()
+    chdir_error = ""
+    try:
+        os.chdir(APP_DIR)
+    except Exception as exc:
+        chdir_error = str(exc)
+
     setup_logging()
     install_global_exception_hooks()
+    LOGGER.info(
+        "path context: frozen=%s sys_executable=%s __file__=%s APP_DIR=%s INTERNAL_DIR=%s ROOT_DIR=%s old_cwd=%s new_cwd=%s chdir_error=%s",
+        bool(getattr(sys, "frozen", False)),
+        sys.executable,
+        __file__,
+        APP_DIR,
+        INTERNAL_DIR,
+        ROOT_DIR,
+        old_cwd,
+        Path.cwd(),
+        chdir_error,
+    )
     if is_multiprocessing_child():
         LOGGER.info("detected multiprocessing fork argv=%s", sys.argv)
         multiprocessing.freeze_support()

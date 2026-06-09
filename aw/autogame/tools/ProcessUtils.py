@@ -1,7 +1,10 @@
+import logging
 import os
 import shutil
 import subprocess
 from typing import Any, Dict, Optional
+
+LOGGER = logging.getLogger(__name__)
 
 
 def hidden_subprocess_kwargs(
@@ -28,26 +31,5 @@ def install_hidden_subprocess_patch(
     os_name: Optional[str] = None,
     subprocess_module=subprocess,
 ) -> bool:
-    if (os_name or os.name) != "nt":
-        return False
-    if getattr(subprocess_module, "_autogame_hidden_popen_patch", False):
-        return False
-
-    original_popen = subprocess_module.Popen
-
-    def hidden_popen(*args, **kwargs):
-        startupinfo = kwargs.get("startupinfo")
-        if startupinfo is None:
-            startupinfo = subprocess_module.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess_module.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = 0
-        kwargs["startupinfo"] = startupinfo
-        kwargs["creationflags"] = (
-            (kwargs.get("creationflags") or 0)
-            | subprocess_module.CREATE_NO_WINDOW
-        )
-        return original_popen(*args, **kwargs)
-
-    subprocess_module.Popen = hidden_popen
-    subprocess_module._autogame_hidden_popen_patch = True
-    return True
+    LOGGER.info("global subprocess patch disabled")
+    return False

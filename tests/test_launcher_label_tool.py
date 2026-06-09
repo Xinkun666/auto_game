@@ -26,10 +26,15 @@ class FakeStartupInfo:
         self.wShowWindow = None
 
 
+class FakePopen:
+    pass
+
+
 class FakeSubprocessModule:
     STARTF_USESHOWWINDOW = 0x01
     CREATE_NO_WINDOW = 0x08000000
     STARTUPINFO = FakeStartupInfo
+    Popen = FakePopen
 
 
 class LauncherLabelToolTests(unittest.TestCase):
@@ -126,6 +131,25 @@ class LauncherLabelToolTests(unittest.TestCase):
 
     def test_install_hidden_subprocess_patch_is_noop_for_non_windows(self):
         self.assertFalse(install_hidden_subprocess_patch(os_name="posix"))
+
+    def test_install_hidden_subprocess_patch_does_not_replace_popen_on_windows(self):
+        class WindowsSubprocessModule(FakeSubprocessModule):
+            Popen = FakePopen
+
+        original_popen = WindowsSubprocessModule.Popen
+
+        self.assertFalse(
+            install_hidden_subprocess_patch(
+                os_name="nt",
+                subprocess_module=WindowsSubprocessModule,
+            )
+        )
+        self.assertIs(original_popen, WindowsSubprocessModule.Popen)
+
+        class InheritedPopen(WindowsSubprocessModule.Popen):
+            pass
+
+        self.assertTrue(issubclass(InheritedPopen, original_popen))
 
     def test_restart_device_commands_run_hdc_directly_without_cmd_or_bat(self):
         commands = build_restart_device_commands("hdc")

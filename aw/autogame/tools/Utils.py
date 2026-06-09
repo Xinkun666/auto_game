@@ -6,6 +6,7 @@ import math
 import json
 import shutil
 import subprocess
+import sys
 import numpy as np
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -15,7 +16,8 @@ from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
 
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
-TEMP_DIR = ROOT_DIR / "aw" / "autogame" / "temp"
+APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else ROOT_DIR
+TEMP_DIR = APP_DIR / "aw" / "autogame" / "temp"
 LOG_DIR = TEMP_DIR / "logs"
 PROCESS_TEMP_LOGS_DIR = LOG_DIR / "process_temp_logs"
 PROCESS_SAVE_FRAMES_DIR = LOG_DIR / "process_save_frames"
@@ -824,9 +826,9 @@ def visualizer_process(queue, visual=True):
     show_window = visual and vis_mode != "launcher"
     print(f"[Visualizer] 显示进程已启动, 可视化状态: {visual}, mode: {vis_mode}")
     window_name = "Frame Monitor"
-    log_dir = "aw/autogame/temp/logs/process_temp_logs"
+    log_dir = str(PROCESS_TEMP_LOGS_DIR)
     if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
+        os.makedirs(log_dir, exist_ok=True)
 
     # 统一显示尺寸 (826 * 2) * (384 * 2) = 1652 * 768
     target_width = 826 * 2

@@ -7,11 +7,14 @@ from launcher import (
     build_restart_device_commands,
     CUSTOMS_EXAMPLES_DIR,
     discover_history_outputs,
+    find_latest_preview_frame,
     format_history_record_summary,
     get_testcase_button_texts,
     is_multiprocessing_child,
     resolve_app_paths,
+    resolve_preview_frame_dir,
     resolve_label_project_dir,
+    resolve_runtime_temp_dir,
 )
 from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
 from aw.autogame.tools.ProcessUtils import install_hidden_subprocess_patch
@@ -139,6 +142,34 @@ class LauncherLabelToolTests(unittest.TestCase):
         flattened = " ".join(" ".join(command) for command in commands)
         self.assertNotIn("cmd", flattened)
         self.assertNotIn("restart.bat", flattened)
+
+    def test_runtime_preview_dir_uses_app_dir_even_when_internal_exists(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app_dir = (Path(temp_dir) / "AutoGameLauncher").resolve()
+            internal_dir = app_dir / "_internal"
+            internal_dir.mkdir(parents=True)
+
+            self.assertEqual(
+                app_dir / "aw" / "autogame" / "temp",
+                resolve_runtime_temp_dir(app_dir),
+            )
+            self.assertEqual(
+                app_dir / "aw" / "autogame" / "temp" / "logs" / "process_temp_logs",
+                resolve_preview_frame_dir(app_dir),
+            )
+
+    def test_find_latest_preview_frame_supports_common_image_suffixes_by_sequence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            preview_dir = Path(temp_dir)
+            (preview_dir / "frame_00007.jpg").write_text("old", encoding="utf-8")
+            (preview_dir / "frame_00009.png").write_text("new", encoding="utf-8")
+            (preview_dir / "frame_00008.jpeg").write_text("middle", encoding="utf-8")
+            (preview_dir / "frame_00010.json").write_text("metadata", encoding="utf-8")
+
+            self.assertEqual(
+                preview_dir / "frame_00009.png",
+                find_latest_preview_frame(preview_dir),
+            )
 
     def test_discover_history_outputs_reads_archive_metadata_and_counts_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:

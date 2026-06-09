@@ -69,6 +69,14 @@ def resolve_app_paths(
     return AppPaths(app_dir=app_dir, internal_dir=app_dir, root_dir=app_dir)
 
 
+def resolve_runtime_temp_dir(app_dir: Optional[Path] = None) -> Path:
+    return Path(app_dir or APP_DIR).resolve() / "aw" / "autogame" / "temp"
+
+
+def resolve_preview_frame_dir(app_dir: Optional[Path] = None) -> Path:
+    return resolve_runtime_temp_dir(app_dir) / "logs" / "process_temp_logs"
+
+
 APP_PATHS = resolve_app_paths()
 APP_DIR = APP_PATHS.app_dir
 INTERNAL_DIR = APP_PATHS.internal_dir
@@ -76,12 +84,13 @@ ROOT_DIR = APP_PATHS.root_dir
 TESTCASES_DIR = APP_DIR / "testcases"
 CUSTOMS_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_examples"
 CUSTOMS_GAME_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_game_examples"
-TEMP_DIR = ROOT_DIR / "aw" / "autogame" / "temp"
-PREVIEW_DIR = ROOT_DIR / "aw" / "autogame" / "temp" / "logs" / "process_temp_logs"
-LOG_DIR = ROOT_DIR / "aw" / "autogame" / "temp" / "logs"
+TEMP_DIR = resolve_runtime_temp_dir(APP_DIR)
+PREVIEW_DIR = resolve_preview_frame_dir(APP_DIR)
+LOG_DIR = TEMP_DIR / "logs"
 LAUNCHER_LOG_FILE = LOG_DIR / "launcher_debug.log"
 PACKAGE_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+){2,}")
 LOGGER = logging.getLogger("launcher")
+PREVIEW_FRAME_SUFFIXES = {".jpg", ".jpeg", ".png"}
 STREAM_CONNECTED_MARKERS = (
     "[Stream] Start receiving...",
 )
@@ -326,6 +335,40 @@ def format_history_record_summary(record: dict) -> str:
         f"archive_dir: {archive_dir}",
     ]
     return "\n".join(lines)
+
+
+def _preview_frame_sequence(path: Path) -> int:
+    match = re.search(r"frame_(\d+)", path.stem)
+    if not match:
+        return -1
+    return int(match.group(1))
+
+
+def _preview_frame_sort_key(path: Path):
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = -1.0
+    return (_preview_frame_sequence(path), mtime, path.name)
+
+
+def find_latest_preview_frame(preview_dir: Path) -> Optional[Path]:
+    if not preview_dir.exists():
+        return None
+
+    candidates = []
+    for path in preview_dir.iterdir():
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in PREVIEW_FRAME_SUFFIXES:
+            continue
+        if not path.stem.startswith("frame_"):
+            continue
+        candidates.append(path)
+
+    if not candidates:
+        return None
+    return max(candidates, key=_preview_frame_sort_key)
 
 
 def discover_project_cases() -> list[str]:
@@ -1966,6 +2009,7 @@ class LauncherWindow(QWidget):
         self._sync_testcase_controls_state()
 
     def _clear_preview_files(self):
+        LOGGER.info("preview frame dir=%s", PREVIEW_DIR)
         LOGGER.debug("clear_preview_files: dir=%s", PREVIEW_DIR)
         self.latest_preview_file = None
         self.latest_preview_pixmap = None
@@ -2065,17 +2109,38 @@ class LauncherWindow(QWidget):
         finally:
             self._adjusting_preview_splitter = False
 
-    def _refresh_preview_pixmap(self):
+    def _refresh_preview_pixmap(self) -> bool:
         if self.latest_preview_pixmap is None:
-            return
+            LOGGER.debug("render preview fail: no latest preview pixmap")
+            return False
         display_pixmap = self._build_preview_display_pixmap()
+        if display_pixmap.isNull():
+            LOGGER.warning(
+                "render preview fail: display pixmap is null latest_frame=%s",
+                self.latest_preview_file,
+            )
+            return False
         self._adjust_preview_splitter_sizes()
         scaled = display_pixmap.scaled(
             self.preview_image_label.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
+        if scaled.isNull():
+            LOGGER.warning(
+                "render preview fail: scaled pixmap is null latest_frame=%s label_size=%s",
+                self.latest_preview_file,
+                self.preview_image_label.size(),
+            )
+            return False
         self.preview_image_label.setPixmap(scaled)
+        LOGGER.debug(
+            "render preview success: latest_frame=%s label_size=%s scaled_size=%s",
+            self.latest_preview_file,
+            self.preview_image_label.size(),
+            scaled.size(),
+        )
+        return True
 
     def _get_preview_project_case(self) -> str:
         if self.current_plan is not None:
@@ -2208,44 +2273,59 @@ class LauncherWindow(QWidget):
         return pixmap
 
     def _poll_preview_frame(self):
+        LOGGER.debug("preview frame dir=%s exists=%s", PREVIEW_DIR, PREVIEW_DIR.exists())
         if not PREVIEW_DIR.exists():
             return
 
-        latest_image = None
-        latest_mtime = -1.0
-        for path in PREVIEW_DIR.glob("frame_*.jpg"):
-            try:
-                mtime = path.stat().st_mtime
-            except OSError:
-                continue
-            if mtime > latest_mtime:
-                latest_mtime = mtime
-                latest_image = path
+        latest_image = find_latest_preview_frame(PREVIEW_DIR)
+        LOGGER.debug(
+            "latest frame path=%s latest frame exists=%s",
+            latest_image,
+            bool(latest_image and latest_image.exists()),
+        )
 
         if latest_image is None or latest_image == self.latest_preview_file:
             return
 
         json_path = latest_image.with_suffix(".json")
-        if not json_path.exists():
-            return
+        LOGGER.info(
+            "latest frame path=%s latest frame exists=%s preview frame dir=%s",
+            latest_image,
+            latest_image.exists(),
+            PREVIEW_DIR,
+        )
 
         pixmap = QPixmap(str(latest_image))
         if pixmap.isNull():
-            LOGGER.warning("preview pixmap is null: %s", latest_image)
+            LOGGER.warning("QPixmap load fail: latest_frame=%s", latest_image)
             return
+        LOGGER.info(
+            "QPixmap load success: latest_frame=%s size=%sx%s",
+            latest_image,
+            pixmap.width(),
+            pixmap.height(),
+        )
 
-        try:
-            payload = json.loads(json_path.read_text(encoding="utf-8"))
-        except Exception:
-            log_exception(f"preview json load failed: {json_path}")
-            payload = {"error": "json 读取失败"}
+        if json_path.exists():
+            try:
+                payload = json.loads(json_path.read_text(encoding="utf-8"))
+            except Exception:
+                log_exception(f"preview json load failed: {json_path}")
+                payload = {"error": "json 读取失败", "frame": latest_image.name}
+        else:
+            payload = {"frame": latest_image.name, "preview_json": "missing"}
 
         self.latest_preview_file = latest_image
         self.latest_preview_pixmap = pixmap
         self.latest_preview_payload = payload if isinstance(payload, dict) else {"raw": payload}
         self.preview_image_label.setText("")
         self._adjust_preview_splitter_sizes()
-        self._refresh_preview_pixmap()
+        render_success = self._refresh_preview_pixmap()
+        LOGGER.info(
+            "render preview %s: latest_frame=%s",
+            "success" if render_success else "fail",
+            latest_image,
+        )
         self.preview_info_edit.setPlainText(
             json.dumps(payload, ensure_ascii=False, indent=2)
         )
@@ -3391,13 +3471,16 @@ def main():
     install_global_exception_hooks()
     hidden_patch_installed = install_hidden_subprocess_patch()
     LOGGER.info(
-        "path context: frozen=%s sys_executable=%s __file__=%s APP_DIR=%s INTERNAL_DIR=%s ROOT_DIR=%s old_cwd=%s new_cwd=%s chdir_error=%s hidden_subprocess_patch=%s",
+        "path context: frozen=%s sys_executable=%s __file__=%s APP_DIR=%s INTERNAL_DIR=%s ROOT_DIR=%s TEMP_DIR=%s LOG_DIR=%s PREVIEW_DIR=%s old_cwd=%s new_cwd=%s chdir_error=%s hidden_subprocess_patch=%s",
         bool(getattr(sys, "frozen", False)),
         sys.executable,
         __file__,
         APP_DIR,
         INTERNAL_DIR,
         ROOT_DIR,
+        TEMP_DIR,
+        LOG_DIR,
+        PREVIEW_DIR,
         old_cwd,
         Path.cwd(),
         chdir_error,

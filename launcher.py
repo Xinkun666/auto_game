@@ -3317,41 +3317,69 @@ class LauncherWindow(QWidget):
 
 def _run_helper_command(args: argparse.Namespace) -> int:
     LOGGER.info("run_helper_command: args=%s", args)
+    exit_code = 0
     try:
         if args.run_testcase:
             run_testcase_entry(args.run_testcase)
-            return 0
+            return exit_code
 
         if args.run_direct:
             project_case, target_case = args.run_direct
             run_direct_entry(project_case, target_case)
-            return 0
+            return exit_code
 
-        return 0
+        return exit_code
     except Exception:
         log_exception("helper command failed")
         traceback.print_exc()
-        return 1
+        exit_code = 1
+        return exit_code
+    finally:
+        LOGGER.info("helper exit_code=%s", exit_code)
 
 
 def main():
     setup_logging()
     install_global_exception_hooks()
-    LOGGER.info("main start: argv=%s cwd=%s", sys.argv, os.getcwd())
+    LOGGER.info(
+        "main start: argv=%s cwd=%s executable=%s frozen=%s meipass=%s",
+        sys.argv,
+        os.getcwd(),
+        sys.executable,
+        bool(getattr(sys, "frozen", False)),
+        getattr(sys, "_MEIPASS", None),
+    )
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--run-testcase")
     parser.add_argument("--run-direct", nargs=2, metavar=("PROJECT_CASE", "TARGET_CASE"))
-    args, _ = parser.parse_known_args()
-    LOGGER.info("parsed args: %s", args)
+    args, unknown_args = parser.parse_known_args()
+    is_helper = bool(args.run_testcase or args.run_direct)
+    LOGGER.info(
+        "parsed args: %s unknown_args=%s is_helper=%s",
+        args,
+        unknown_args,
+        is_helper,
+    )
 
-    if args.run_testcase or args.run_direct:
-        LOGGER.info("enter helper mode")
+    if is_helper:
+        LOGGER.info(
+            "enter helper mode before QApplication: qapp_exists=%s",
+            QApplication.instance() is not None,
+        )
         install_helper_signal_handlers()
-        raise SystemExit(_run_helper_command(args))
+        exit_code = _run_helper_command(args)
+        LOGGER.info("helper mode exiting via SystemExit: exit_code=%s", exit_code)
+        raise SystemExit(exit_code)
 
+    LOGGER.info(
+        "before QApplication: argv=%s qapp_exists=%s",
+        sys.argv,
+        QApplication.instance() is not None,
+    )
     ensure_pyqt6_platform_plugin_path()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    LOGGER.info("before LauncherWindow: qapp_exists=%s", QApplication.instance() is not None)
     window = LauncherWindow()
     window.show()
     LOGGER.info("launcher window shown")

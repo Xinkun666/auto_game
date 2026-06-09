@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 
 from launcher import (
+    build_restart_device_commands,
     CUSTOMS_EXAMPLES_DIR,
     discover_history_outputs,
     format_history_record_summary,
@@ -12,6 +13,20 @@ from launcher import (
     resolve_app_paths,
     resolve_label_project_dir,
 )
+from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
+from aw.autogame.tools.ProcessUtils import install_hidden_subprocess_patch
+
+
+class FakeStartupInfo:
+    def __init__(self):
+        self.dwFlags = 0
+        self.wShowWindow = None
+
+
+class FakeSubprocessModule:
+    STARTF_USESHOWWINDOW = 0x01
+    CREATE_NO_WINDOW = 0x08000000
+    STARTUPINFO = FakeStartupInfo
 
 
 class LauncherLabelToolTests(unittest.TestCase):
@@ -89,6 +104,41 @@ class LauncherLabelToolTests(unittest.TestCase):
             self.assertEqual(app_dir, paths.app_dir)
             self.assertEqual(app_dir / "_internal", paths.internal_dir)
             self.assertEqual(app_dir, paths.root_dir)
+
+    def test_hidden_subprocess_kwargs_returns_create_no_window_for_windows(self):
+        kwargs = hidden_subprocess_kwargs(
+            os_name="nt",
+            subprocess_module=FakeSubprocessModule,
+        )
+
+        self.assertEqual(FakeSubprocessModule.CREATE_NO_WINDOW, kwargs["creationflags"])
+        self.assertEqual(
+            FakeSubprocessModule.STARTF_USESHOWWINDOW,
+            kwargs["startupinfo"].dwFlags,
+        )
+        self.assertEqual(0, kwargs["startupinfo"].wShowWindow)
+
+    def test_hidden_subprocess_kwargs_is_empty_for_non_windows(self):
+        self.assertEqual({}, hidden_subprocess_kwargs(os_name="posix"))
+
+    def test_install_hidden_subprocess_patch_is_noop_for_non_windows(self):
+        self.assertFalse(install_hidden_subprocess_patch(os_name="posix"))
+
+    def test_restart_device_commands_run_hdc_directly_without_cmd_or_bat(self):
+        commands = build_restart_device_commands("hdc")
+
+        self.assertEqual(
+            [
+                ["hdc", "shell", "reboot", "-D"],
+                ["hdc", "wait"],
+                ["hdc", "shell", "setenforce", "0"],
+                ["hdc", "fport", "tcp:12345", "tcp:12345"],
+            ],
+            commands,
+        )
+        flattened = " ".join(" ".join(command) for command in commands)
+        self.assertNotIn("cmd", flattened)
+        self.assertNotIn("restart.bat", flattened)
 
     def test_discover_history_outputs_reads_archive_metadata_and_counts_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:

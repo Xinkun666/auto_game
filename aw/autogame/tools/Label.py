@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import Qt, QRectF, QPointF, QEvent
 from PyQt6.QtGui import QAction, QPixmap, QColor, QPen, QBrush, QImage, QPainter, QGuiApplication, QFontMetricsF
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
+from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
 # ==========================================
 # 1. 数据模型 (Data Structure)
 # ==========================================
@@ -1117,9 +1118,11 @@ class AutoStudioWindow(QMainWindow):
             local_path = os.path.join(local_dir, f"screenCasting_{source_scene.id}_{random.randint(1000, 9999)}.jpeg")
             try:
                 subprocess.run(["hdc", "shell", "snapshot_display", "-f", remote_path],
-                               check=True, capture_output=True, text=True)
+                               check=True, capture_output=True, text=True,
+                               **hidden_subprocess_kwargs())
                 subprocess.run(["hdc", "file", "recv", remote_path, local_path],
-                               check=True, capture_output=True, text=True)
+                               check=True, capture_output=True, text=True,
+                               **hidden_subprocess_kwargs())
             except subprocess.CalledProcessError as exc:
                 QMessageBox.critical(self, "抓图失败", f"HDc 命令执行失败：\n{exc.stderr or exc.stdout}")
                 return None, None
@@ -1201,9 +1204,11 @@ class AutoStudioWindow(QMainWindow):
         local_path = os.path.join(local_dir, f"screenCasting_{scene_data.id}.jpeg")
         try:
             subprocess.run(["hdc", "shell", "snapshot_display", "-f", remote_path],
-                           check=True, capture_output=True, text=True)
+                           check=True, capture_output=True, text=True,
+                           **hidden_subprocess_kwargs())
             subprocess.run(["hdc", "file", "recv", remote_path, local_path],
-                           check=True, capture_output=True, text=True)
+                           check=True, capture_output=True, text=True,
+                           **hidden_subprocess_kwargs())
         except subprocess.CalledProcessError as exc:
             QMessageBox.critical(self, "抓图失败", f"HDc 命令执行失败：\n{exc.stderr or exc.stdout}")
             return

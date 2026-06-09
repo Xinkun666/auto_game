@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs, install_hidden_subprocess_patch, resolve_hdc_executable
 from aw.autogame.tools.Utils import archive_run_artifacts, get_resolution, resolve_run_archive_dir, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 
@@ -81,7 +82,6 @@ LOG_DIR = ROOT_DIR / "aw" / "autogame" / "temp" / "logs"
 LAUNCHER_LOG_FILE = LOG_DIR / "launcher_debug.log"
 PACKAGE_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+){2,}")
 LOGGER = logging.getLogger("launcher")
-RESTART_BAT_PATH = ROOT_DIR / "aw" / "autogame" / "restart.bat"
 STREAM_CONNECTED_MARKERS = (
     "[Stream] Start receiving...",
 )
@@ -355,6 +355,7 @@ def discover_target_cases(project_case: str) -> list[str]:
 
 
 def run_testcase_entry(testcase_label: str):
+    install_hidden_subprocess_patch()
     LOGGER.info("run_testcase_entry: testcase_label=%s", testcase_label)
     from xdevice.__main__ import main_process
 
@@ -362,6 +363,7 @@ def run_testcase_entry(testcase_label: str):
 
 
 def run_direct_entry(project_case: str, target_case: str):
+    install_hidden_subprocess_patch()
     LOGGER.info(
         "run_direct_entry: project_case=%s target_case=%s",
         project_case,
@@ -377,7 +379,7 @@ def run_direct_entry(project_case: str, target_case: str):
 
 
 def run_hdc_shell(command: str) -> Optional[str]:
-    hdc_executable = shutil.which("hdc") or shutil.which("hdc.exe") or "hdc"
+    hdc_executable = resolve_hdc_executable()
     cmd = [hdc_executable, "shell", command]
     LOGGER.debug("run_hdc_shell: cmd=%s", cmd)
     try:
@@ -389,6 +391,7 @@ def run_hdc_shell(command: str) -> Optional[str]:
             text=True,
             encoding="utf-8",
             timeout=20,
+            **hidden_subprocess_kwargs(),
         )
     except FileNotFoundError:
         LOGGER.warning(
@@ -412,6 +415,16 @@ def run_hdc_shell(command: str) -> Optional[str]:
     output = result.stdout.strip()
     LOGGER.debug("run_hdc_shell success: command=%s output=%s", cmd, output)
     return output
+
+
+def build_restart_device_commands(hdc_executable: Optional[str] = None):
+    hdc = hdc_executable or resolve_hdc_executable()
+    return [
+        [hdc, "shell", "reboot", "-D"],
+        [hdc, "wait"],
+        [hdc, "shell", "setenforce", "0"],
+        [hdc, "fport", "tcp:12345", "tcp:12345"],
+    ]
 
 
 def install_helper_signal_handlers():
@@ -2745,6 +2758,7 @@ class LauncherWindow(QWidget):
                 text=True,
                 encoding="utf-8",
                 timeout=10,
+                **hidden_subprocess_kwargs(),
             )
             if snap_result.returncode != 0:
                 raise RuntimeError(snap_result.stderr.strip() or snap_result.stdout.strip())
@@ -2756,6 +2770,7 @@ class LauncherWindow(QWidget):
                 text=True,
                 encoding="utf-8",
                 timeout=10,
+                **hidden_subprocess_kwargs(),
             )
             if recv_result.returncode != 0:
                 raise RuntimeError(recv_result.stderr.strip() or recv_result.stdout.strip())
@@ -2773,6 +2788,7 @@ class LauncherWindow(QWidget):
                         text=True,
                         encoding="utf-8",
                         timeout=5,
+                        **hidden_subprocess_kwargs(),
                     )
                 except Exception:
                     pass
@@ -3145,55 +3161,47 @@ class LauncherWindow(QWidget):
         )
 
     def _restart_device_for_stream_disconnect(self) -> bool:
-        if not RESTART_BAT_PATH.exists():
-            self._log_message(
-                f"[Launcher] 未找到重启脚本：{RESTART_BAT_PATH}\n",
-                level=logging.ERROR,
-            )
-            return False
-
-        self._log_message(
-            f"[Launcher] 开始执行断流恢复脚本：{RESTART_BAT_PATH}\n"
-        )
+        self._log_message("[Launcher] 开始执行断流恢复命令。\n")
         self._set_runtime("运行信息：检测到断流，正在重启手机并等待开机。")
         QApplication.processEvents()
 
-        try:
-            if os.name == "nt":
-                cmd = ["cmd", "/c", str(RESTART_BAT_PATH)]
-            else:
-                cmd = ["bash", str(RESTART_BAT_PATH)]
-            result = subprocess.run(
-                cmd,
-                cwd=str(APP_DIR),
-                capture_output=True,
-                text=True,
-                timeout=360,
-            )
-        except subprocess.TimeoutExpired as exc:
-            self._log_message(
-                f"[Launcher] 执行 restart.bat 超时：{exc}\n",
-                level=logging.ERROR,
-            )
-            return False
-        except Exception:
-            log_exception("restart device after stream disconnect failed")
-            self._log_message(
-                "[Launcher] 执行 restart.bat 失败，请查看 launcher_debug.log。\n",
-                level=logging.ERROR,
-            )
-            return False
+        for command in build_restart_device_commands():
+            LOGGER.info("restart recovery command start: %s", command)
+            try:
+                result = subprocess.run(
+                    command,
+                    cwd=str(APP_DIR),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="ignore",
+                    timeout=360,
+                    **hidden_subprocess_kwargs(),
+                )
+            except subprocess.TimeoutExpired as exc:
+                self._log_message(
+                    f"[Launcher] 执行断流恢复命令超时：{command}，detail={exc}\n",
+                    level=logging.ERROR,
+                )
+                return False
+            except Exception:
+                log_exception("restart device after stream disconnect failed")
+                self._log_message(
+                    f"[Launcher] 执行断流恢复命令失败：{command}，请查看 launcher_debug.log。\n",
+                    level=logging.ERROR,
+                )
+                return False
 
-        output = (result.stdout or "") + (result.stderr or "")
-        if output.strip():
-            self._log_message(f"[Launcher][restart.bat]\n{output.rstrip()}\n")
+            output = (result.stdout or "") + (result.stderr or "")
+            if output.strip():
+                self._log_message(f"[Launcher][restart]\n{output.rstrip()}\n")
 
-        if result.returncode != 0:
-            self._log_message(
-                f"[Launcher] restart.bat 执行失败，returncode={result.returncode}\n",
-                level=logging.ERROR,
-            )
-            return False
+            if result.returncode != 0:
+                self._log_message(
+                    f"[Launcher] 断流恢复命令失败：{command}，returncode={result.returncode}\n",
+                    level=logging.ERROR,
+                )
+                return False
 
         self._log_message("[Launcher] 手机重启与端口恢复完成。\n")
         self._log_message(
@@ -3381,8 +3389,9 @@ def main():
 
     setup_logging()
     install_global_exception_hooks()
+    hidden_patch_installed = install_hidden_subprocess_patch()
     LOGGER.info(
-        "path context: frozen=%s sys_executable=%s __file__=%s APP_DIR=%s INTERNAL_DIR=%s ROOT_DIR=%s old_cwd=%s new_cwd=%s chdir_error=%s",
+        "path context: frozen=%s sys_executable=%s __file__=%s APP_DIR=%s INTERNAL_DIR=%s ROOT_DIR=%s old_cwd=%s new_cwd=%s chdir_error=%s hidden_subprocess_patch=%s",
         bool(getattr(sys, "frozen", False)),
         sys.executable,
         __file__,
@@ -3392,6 +3401,7 @@ def main():
         old_cwd,
         Path.cwd(),
         chdir_error,
+        hidden_patch_installed,
     )
     if is_multiprocessing_child():
         LOGGER.info("detected multiprocessing fork argv=%s", sys.argv)

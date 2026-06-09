@@ -17,6 +17,7 @@ from aw.autogame.tools.Utils import *
 from aw.autogame.tools.Utils import _parse_display_rotation
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 from aw.autogame.tools.GameSceneHandler import StageLogicController
+from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -55,7 +56,13 @@ class HdcDut:
 
     def run_cmd_with_ret(self, shell_cmd):
         cmd = self._build_cmd("shell", shell_cmd)
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            **hidden_subprocess_kwargs(),
+        )
 
         if result.returncode != 0:
             raise RuntimeError(
@@ -69,7 +76,13 @@ class HdcDut:
 
     def push_file(self, source_path, dest_path):
         cmd = self._build_cmd("file", "send", source_path, dest_path)
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            **hidden_subprocess_kwargs(),
+        )
 
         if result.returncode != 0:
             raise RuntimeError(
@@ -1339,6 +1352,7 @@ class Controller:
             shell=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            **hidden_subprocess_kwargs(),
         )
         proc.wait()
 
@@ -1915,6 +1929,7 @@ class FrameWorker(threading.Thread):
                 text=True,
                 encoding="utf-8",
                 timeout=10,
+                **hidden_subprocess_kwargs(),
             )
             if snap_result.returncode != 0:
                 raise RuntimeError(snap_result.stderr.strip() or snap_result.stdout.strip())
@@ -1926,6 +1941,7 @@ class FrameWorker(threading.Thread):
                 text=True,
                 encoding="utf-8",
                 timeout=10,
+                **hidden_subprocess_kwargs(),
             )
             if recv_result.returncode != 0:
                 raise RuntimeError(recv_result.stderr.strip() or recv_result.stdout.strip())
@@ -1944,6 +1960,7 @@ class FrameWorker(threading.Thread):
                         text=True,
                         encoding="utf-8",
                         timeout=5,
+                        **hidden_subprocess_kwargs(),
                     )
                 except Exception:
                     pass

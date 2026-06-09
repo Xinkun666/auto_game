@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from PIL import Image, ImageDraw, ImageFont
+from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
 
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -376,6 +377,7 @@ def run_shell(cmd: str, r = False):
                 text=True,
                 encoding="utf-8",
                 errors="ignore",
+                **hidden_subprocess_kwargs(),
             )
             output = "\n".join(
                 part.strip()
@@ -386,7 +388,7 @@ def run_shell(cmd: str, r = False):
                 print(f"命令执行失败: {cmd}\nreturncode={result.returncode}")
                 return None
             return output or None
-        subprocess.run(cmd, shell=True, check=True)
+        subprocess.run(cmd, shell=True, check=True, **hidden_subprocess_kwargs())
     except Exception as e:
         print(f"命令执行失败: {cmd}\n{e}")
         if r:
@@ -1161,7 +1163,8 @@ def get_display_rotation():
                 text=True,
                 encoding="utf-8",
                 errors="ignore",
-                timeout=5
+                timeout=5,
+                **hidden_subprocess_kwargs(),
             )
             output = "\n".join(
                 part.strip()

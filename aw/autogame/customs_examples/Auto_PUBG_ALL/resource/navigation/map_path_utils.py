@@ -7,6 +7,7 @@ import subprocess
 import numpy as np
 from sklearn.cluster import DBSCAN
 from typing import Dict, List, Optional, Any, Tuple
+from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
 
 def hex_to_rgb(hex_str: str):
     """'#00a2e8' → (0, 162, 232)"""
@@ -115,7 +116,8 @@ def get_dms_rotation_mode():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=5  # 防止命令卡住
+            timeout=5,  # 防止命令卡住
+            **hidden_subprocess_kwargs(),
         )
 
         # 匹配第一个 Rotation: 后的数字，排除 ScreenRotation
@@ -155,6 +157,7 @@ def run_shell(cmd: str, r = False):
                 text=True,
                 encoding="utf-8",
                 errors="ignore",
+                **hidden_subprocess_kwargs(),
             )
             output = "\n".join(
                 part.strip()
@@ -165,7 +168,7 @@ def run_shell(cmd: str, r = False):
                 print(f"命令执行失败: {cmd}\nreturncode={result.returncode}")
                 return None
             return output or None
-        subprocess.run(cmd, shell=True, check=True)
+        subprocess.run(cmd, shell=True, check=True, **hidden_subprocess_kwargs())
     except Exception as e:
         print(f"命令执行失败: {cmd}\n{e}")
         if r:

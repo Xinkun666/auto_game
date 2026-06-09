@@ -3,6 +3,7 @@ import ast
 import importlib
 import json
 import logging
+import multiprocessing
 import os
 import re
 import shutil
@@ -196,6 +197,11 @@ def resolve_label_project_dir(project_case: str) -> Optional[Path]:
 
 def get_testcase_button_texts(has_selection: bool) -> tuple[str, str]:
     return ("已选择" if has_selection else "选择用例", "重选")
+
+
+def is_multiprocessing_child(argv: Optional[list[str]] = None) -> bool:
+    argv = argv or sys.argv
+    return any(str(arg) == "--multiprocessing-fork" for arg in argv)
 
 
 def _count_files(path: Path) -> int:
@@ -3341,6 +3347,12 @@ def _run_helper_command(args: argparse.Namespace) -> int:
 def main():
     setup_logging()
     install_global_exception_hooks()
+    if is_multiprocessing_child():
+        LOGGER.info("detected multiprocessing fork argv=%s", sys.argv)
+        multiprocessing.freeze_support()
+        LOGGER.info("skip LauncherWindow for multiprocessing child")
+        return 0
+
     LOGGER.info(
         "main start: argv=%s cwd=%s executable=%s frozen=%s meipass=%s",
         sys.argv,
@@ -3387,4 +3399,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    multiprocessing.freeze_support()
+    raise SystemExit(main() or 0)

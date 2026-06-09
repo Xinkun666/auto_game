@@ -8,6 +8,7 @@ from launcher import (
     discover_history_outputs,
     format_history_record_summary,
     get_testcase_button_texts,
+    is_multiprocessing_child,
     resolve_label_project_dir,
 )
 
@@ -25,6 +26,27 @@ class LauncherLabelToolTests(unittest.TestCase):
     def test_testcase_button_texts_reflect_selection_state(self):
         self.assertEqual(("选择用例", "重选"), get_testcase_button_texts(False))
         self.assertEqual(("已选择", "重选"), get_testcase_button_texts(True))
+
+    def test_is_multiprocessing_child_detects_pyinstaller_worker_argv(self):
+        self.assertTrue(
+            is_multiprocessing_child(
+                [
+                    "AutoGameLauncherDebug.exe",
+                    "--multiprocessing-fork",
+                    "parent_pid=5424",
+                    "pipe_handle=2036",
+                ]
+            )
+        )
+        self.assertFalse(
+            is_multiprocessing_child(
+                [
+                    "AutoGameLauncherDebug.exe",
+                    "--run-testcase",
+                    "testcases/pubg/pubg_full_flow/auto_pubg",
+                ]
+            )
+        )
 
     def test_discover_history_outputs_reads_archive_metadata_and_counts_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:

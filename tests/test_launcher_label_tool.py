@@ -1,15 +1,19 @@
 import unittest
 import json
+import subprocess
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 from launcher import (
+    apply_pyinstaller_splash_suppression,
     build_restart_device_commands,
     CUSTOMS_EXAMPLES_DIR,
     discover_history_outputs,
     find_latest_preview_frame,
     format_history_record_summary,
     get_testcase_button_texts,
+    HiddenSubprocess,
     is_multiprocessing_child,
     resolve_app_paths,
     resolve_preview_frame_dir,
@@ -35,6 +39,31 @@ class FakeSubprocessModule:
     CREATE_NO_WINDOW = 0x08000000
     STARTUPINFO = FakeStartupInfo
     Popen = FakePopen
+
+
+class FakeProcessEnvironment:
+    def __init__(self):
+        self.values = {}
+
+    def insert(self, key, value):
+        self.values[key] = value
+
+
+class FakeStdout:
+    def read(self, _size):
+        return b""
+
+
+class FakeProcess:
+    pid = 1234
+    stdout = FakeStdout()
+    returncode = 0
+
+    def poll(self):
+        return None
+
+    def wait(self):
+        return 0
 
 
 class LauncherLabelToolTests(unittest.TestCase):
@@ -71,6 +100,37 @@ class LauncherLabelToolTests(unittest.TestCase):
                 ]
             )
         )
+
+    def test_apply_pyinstaller_splash_suppression_disables_child_splash(self):
+        env = FakeProcessEnvironment()
+
+        apply_pyinstaller_splash_suppression(env)
+
+        self.assertEqual("1", env.values["PYINSTALLER_SUPPRESS_SPLASH_SCREEN"])
+        self.assertEqual("0", env.values["_PYI_SPLASH_IPC"])
+
+    def test_hidden_subprocess_starts_with_hidden_kwargs(self):
+        process = HiddenSubprocess()
+        process.setProgram("AutoGameLauncher.exe")
+        process.setArguments(["--run-testcase", "case"])
+
+        with mock.patch(
+            "launcher.hidden_subprocess_kwargs",
+            return_value={"creationflags": 123},
+        ), mock.patch(
+            "launcher.subprocess.Popen",
+            return_value=FakeProcess(),
+        ) as popen:
+            process.start()
+
+        self.assertEqual(
+            ["AutoGameLauncher.exe", "--run-testcase", "case"],
+            popen.call_args.args[0],
+        )
+        self.assertEqual(123, popen.call_args.kwargs["creationflags"])
+        self.assertEqual(subprocess.DEVNULL, popen.call_args.kwargs["stdin"])
+        self.assertEqual(subprocess.PIPE, popen.call_args.kwargs["stdout"])
+        self.assertEqual(subprocess.STDOUT, popen.call_args.kwargs["stderr"])
 
     def test_resolve_app_paths_non_frozen_uses_source_file_parent(self):
         paths = resolve_app_paths(

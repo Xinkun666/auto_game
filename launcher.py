@@ -10,12 +10,13 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
 from typing import Dict, NamedTuple, Optional
 
-from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt, QTimer, QUrl
+from PyQt6.QtCore import QByteArray, QObject, QProcess, QProcessEnvironment, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QPainter, QPen, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
@@ -91,6 +92,8 @@ LAUNCHER_LOG_FILE = LOG_DIR / "launcher_debug.log"
 PACKAGE_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+){2,}")
 LOGGER = logging.getLogger("launcher")
 PREVIEW_FRAME_SUFFIXES = {".jpg", ".jpeg", ".png"}
+PYINSTALLER_SUPPRESS_SPLASH_ENV = "PYINSTALLER_SUPPRESS_SPLASH_SCREEN"
+PYINSTALLER_SPLASH_IPC_ENV = "_PYI_SPLASH_IPC"
 STREAM_CONNECTED_MARKERS = (
     "[Stream] Start receiving...",
 )
@@ -238,6 +241,158 @@ def get_testcase_button_texts(has_selection: bool) -> tuple[str, str]:
 def is_multiprocessing_child(argv: Optional[list[str]] = None) -> bool:
     argv = argv or sys.argv
     return any(str(arg) == "--multiprocessing-fork" for arg in argv)
+
+
+def apply_pyinstaller_splash_suppression(env) -> None:
+    env.insert(PYINSTALLER_SUPPRESS_SPLASH_ENV, "1")
+    env.insert(PYINSTALLER_SPLASH_IPC_ENV, "0")
+
+
+def close_pyinstaller_splash(context: str) -> bool:
+    try:
+        import pyi_splash
+    except Exception:
+        return False
+
+    try:
+        pyi_splash.close()
+        LOGGER.info("pyinstaller splash closed: context=%s", context)
+        return True
+    except Exception:
+        LOGGER.debug("pyinstaller splash close failed: context=%s", context, exc_info=True)
+        return False
+
+
+class HiddenSubprocess(QObject):
+    readyReadStandardOutput = pyqtSignal()
+    finished = pyqtSignal(int, object)
+    errorOccurred = pyqtSignal(object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._program = ""
+        self._arguments: list[str] = []
+        self._working_directory = None
+        self._environment = None
+        self._proc: Optional[subprocess.Popen] = None
+        self._state = QProcess.ProcessState.NotRunning
+        self._error = QProcess.ProcessError.UnknownError
+        self._error_string = ""
+        self._output_buffer = bytearray()
+        self._output_lock = threading.Lock()
+
+    def setProgram(self, program: str):
+        self._program = str(program)
+
+    def setWorkingDirectory(self, working_directory: str):
+        self._working_directory = str(working_directory)
+
+    def setProcessChannelMode(self, _mode):
+        pass
+
+    def setProcessEnvironment(self, environment):
+        self._environment = environment
+
+    def setArguments(self, arguments):
+        self._arguments = [str(arg) for arg in arguments]
+
+    def start(self):
+        self._state = QProcess.ProcessState.Starting
+        command = [self._program, *self._arguments]
+        try:
+            self._proc = subprocess.Popen(
+                command,
+                cwd=self._working_directory,
+                env=self._environment_to_dict(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                **hidden_subprocess_kwargs(),
+            )
+        except Exception as exc:
+            self._proc = None
+            self._state = QProcess.ProcessState.NotRunning
+            self._error = QProcess.ProcessError.FailedToStart
+            self._error_string = str(exc)
+            self.errorOccurred.emit(self._error)
+            return
+
+        self._state = QProcess.ProcessState.Running
+        reader = threading.Thread(target=self._read_process_output, daemon=True)
+        reader.start()
+
+    def waitForStarted(self, _msecs: int) -> bool:
+        return self._proc is not None
+
+    def state(self):
+        if self._proc is not None and self._state == QProcess.ProcessState.Running:
+            if self._proc.poll() is not None:
+                self._state = QProcess.ProcessState.NotRunning
+        return self._state
+
+    def processId(self) -> int:
+        if self._proc is None or self._proc.pid is None:
+            return 0
+        return int(self._proc.pid)
+
+    def error(self):
+        return self._error
+
+    def errorString(self) -> str:
+        return self._error_string
+
+    def terminate(self):
+        if self._proc is not None and self._proc.poll() is None:
+            self._proc.terminate()
+
+    def kill(self):
+        if self._proc is not None and self._proc.poll() is None:
+            self._proc.kill()
+
+    def readAllStandardOutput(self) -> QByteArray:
+        with self._output_lock:
+            data = bytes(self._output_buffer)
+            self._output_buffer.clear()
+        return QByteArray(data)
+
+    def _environment_to_dict(self) -> Optional[dict]:
+        if self._environment is None:
+            return None
+        if hasattr(self._environment, "keys") and hasattr(self._environment, "value"):
+            return {
+                str(key): self._environment.value(str(key))
+                for key in self._environment.keys()
+            }
+        if isinstance(self._environment, dict):
+            return {str(key): str(value) for key, value in self._environment.items()}
+        return None
+
+    def _read_process_output(self):
+        assert self._proc is not None
+        try:
+            if self._proc.stdout is not None:
+                while True:
+                    chunk = self._proc.stdout.read(4096)
+                    if not chunk:
+                        break
+                    with self._output_lock:
+                        self._output_buffer.extend(chunk)
+                    self.readyReadStandardOutput.emit()
+            exit_code = self._proc.wait()
+            self._state = QProcess.ProcessState.NotRunning
+            self.finished.emit(
+                int(exit_code),
+                QProcess.ExitStatus.NormalExit,
+            )
+        except Exception as exc:
+            self._state = QProcess.ProcessState.NotRunning
+            self._error = QProcess.ProcessError.Crashed
+            self._error_string = str(exc)
+            self.errorOccurred.emit(self._error)
+            self.finished.emit(
+                self._proc.returncode if self._proc.returncode is not None else 1,
+                QProcess.ExitStatus.CrashExit,
+            )
 
 
 def _count_files(path: Path) -> int:
@@ -1947,6 +2102,7 @@ class LauncherWindow(QWidget):
 
     def _build_process_environment(self, project_case: str, target_case: str, run_no: int) -> QProcessEnvironment:
         env = QProcessEnvironment.systemEnvironment()
+        apply_pyinstaller_splash_suppression(env)
         env.insert("TARGET_PROJECT_CASE", project_case)
         env.insert("TARGET_GAME_CASE", target_case)
         env.insert("AUTOGAME_VIS_MODE", "launcher")
@@ -2569,7 +2725,7 @@ class LauncherWindow(QWidget):
         project_case = self.current_plan["project_case"]
         target_case = self.current_plan["target_case"]
 
-        self.process = QProcess(self)
+        self.process = HiddenSubprocess(self)
         self.process.setProgram(sys.executable)
         self.process.setWorkingDirectory(str(APP_DIR))
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
@@ -3488,6 +3644,7 @@ def main():
     )
     if is_multiprocessing_child():
         LOGGER.info("detected multiprocessing fork argv=%s", sys.argv)
+        close_pyinstaller_splash("multiprocessing-child")
         multiprocessing.freeze_support()
         LOGGER.info("skip LauncherWindow for multiprocessing child")
         return 0
@@ -3517,6 +3674,7 @@ def main():
             "enter helper mode before QApplication: qapp_exists=%s",
             QApplication.instance() is not None,
         )
+        close_pyinstaller_splash("helper")
         install_helper_signal_handlers()
         exit_code = _run_helper_command(args)
         LOGGER.info("helper mode exiting via SystemExit: exit_code=%s", exit_code)
@@ -3533,6 +3691,7 @@ def main():
     LOGGER.info("before LauncherWindow: qapp_exists=%s", QApplication.instance() is not None)
     window = LauncherWindow()
     window.show()
+    close_pyinstaller_splash("launcher-window-shown")
     LOGGER.info("launcher window shown")
     raise SystemExit(app.exec())
 

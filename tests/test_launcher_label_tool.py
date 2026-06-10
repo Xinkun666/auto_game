@@ -26,6 +26,7 @@ from launcher import (
 )
 from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
 from aw.autogame.tools.ProcessUtils import hidden_subprocess_context
+from aw.autogame.tools.ProcessUtils import hdc_command_args
 from aw.autogame.tools.ProcessUtils import install_hidden_subprocess_patch
 
 
@@ -45,6 +46,7 @@ class FakePopen:
 class FakeSubprocessModule:
     STARTF_USESHOWWINDOW = 0x01
     CREATE_NO_WINDOW = 0x08000000
+    DETACHED_PROCESS = 0x00000008
     STARTUPINFO = FakeStartupInfo
     Popen = FakePopen
     DEVNULL = subprocess.DEVNULL
@@ -250,7 +252,10 @@ class LauncherLabelToolTests(unittest.TestCase):
             subprocess_module=FakeSubprocessModule,
         )
 
-        self.assertEqual(FakeSubprocessModule.CREATE_NO_WINDOW, kwargs["creationflags"])
+        self.assertEqual(
+            FakeSubprocessModule.CREATE_NO_WINDOW | FakeSubprocessModule.DETACHED_PROCESS,
+            kwargs["creationflags"],
+        )
         self.assertEqual(
             FakeSubprocessModule.STARTF_USESHOWWINDOW,
             kwargs["startupinfo"].dwFlags,
@@ -301,7 +306,10 @@ class LauncherLabelToolTests(unittest.TestCase):
         self.assertIs(original_popen, WindowsSubprocessModule.Popen)
         args, kwargs = original_popen.calls[-1]
         self.assertEqual((command,), args)
-        self.assertEqual(FakeSubprocessModule.CREATE_NO_WINDOW, kwargs["creationflags"])
+        self.assertEqual(
+            FakeSubprocessModule.CREATE_NO_WINDOW | FakeSubprocessModule.DETACHED_PROCESS,
+            kwargs["creationflags"],
+        )
         self.assertEqual(
             FakeSubprocessModule.STARTF_USESHOWWINDOW,
             kwargs["startupinfo"].dwFlags,
@@ -343,7 +351,10 @@ class LauncherLabelToolTests(unittest.TestCase):
 
         args, kwargs = original_popen.calls[-1]
         self.assertEqual((["hdc", "list", "targets"],), args)
-        self.assertEqual(FakeSubprocessModule.CREATE_NO_WINDOW, kwargs["creationflags"])
+        self.assertEqual(
+            FakeSubprocessModule.CREATE_NO_WINDOW | FakeSubprocessModule.DETACHED_PROCESS,
+            kwargs["creationflags"],
+        )
         self.assertEqual(
             FakeSubprocessModule.STARTF_USESHOWWINDOW,
             kwargs["startupinfo"].dwFlags,
@@ -374,10 +385,47 @@ class LauncherLabelToolTests(unittest.TestCase):
         self.assertEqual("hdc list targets", WindowsSubprocessModule.call.call_args.args[0])
         self.assertTrue(WindowsSubprocessModule.call.call_args.kwargs["shell"])
         self.assertEqual(
-            FakeSubprocessModule.CREATE_NO_WINDOW,
+            FakeSubprocessModule.CREATE_NO_WINDOW | FakeSubprocessModule.DETACHED_PROCESS,
             WindowsSubprocessModule.call.call_args.kwargs["creationflags"],
         )
         self.assertIs(original_system, WindowsOsModule.system)
+
+    def test_hdc_command_args_converts_shell_command_without_local_cmd(self):
+        self.assertEqual(
+            ["D:/tools/hdc.exe", "shell", "echo 1 > /sys/class/hiz"],
+            hdc_command_args(
+                'hdc shell "echo 1 > /sys/class/hiz"',
+                hdc_executable="D:/tools/hdc.exe",
+            ),
+        )
+
+    def test_hdc_command_args_preserves_target_selector(self):
+        self.assertEqual(
+            ["hdc", "-t", "SERIAL", "shell", "uinput -T -c 2290 204"],
+            hdc_command_args(
+                "hdc -t SERIAL shell uinput -T -c 2290 204",
+                hdc_executable="hdc",
+            ),
+        )
+
+    def test_run_shell_uses_direct_hdc_args_without_shell_true(self):
+        from aw.autogame.tools import Utils
+
+        with mock.patch(
+            "aw.autogame.tools.Utils.hdc_command_args",
+            return_value=["hdc", "shell", "uinput -T -c 1 2"],
+        ), mock.patch(
+            "aw.autogame.tools.Utils.hidden_subprocess_kwargs",
+            return_value={"creationflags": 123},
+        ), mock.patch(
+            "aw.autogame.tools.Utils.subprocess.run",
+        ) as run:
+            Utils.run_shell("hdc shell uinput -T -c 1 2")
+
+        run.assert_called_once()
+        self.assertEqual(["hdc", "shell", "uinput -T -c 1 2"], run.call_args.args[0])
+        self.assertNotIn("shell", run.call_args.kwargs)
+        self.assertEqual(123, run.call_args.kwargs["creationflags"])
 
     def test_run_testcase_entry_wraps_xdevice_with_icpm_xdc_hidden_context(self):
         xdevice_module = types.ModuleType("xdevice")

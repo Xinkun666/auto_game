@@ -9,7 +9,7 @@ import subprocess
 import grpc
 import numpy as np
 from PIL import Image
-from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
+from aw.autogame.tools.ProcessUtils import hdc_command_args, hidden_subprocess_kwargs
 
 # 假设这些是你的本地 proto 生成文件
 PROTO_IMPORT_ERROR = None
@@ -661,14 +661,20 @@ class HDCSnapshotClient:
 
             try:
                 # 1. 截图与接收 (同步阻塞执行)
-                r_snap = subprocess.run("hdc shell snapshot_display -f %s" % remote_path, shell=True,
-                                        capture_output=True, timeout=5,
-                                        **hidden_subprocess_kwargs())
+                r_snap = subprocess.run(
+                    hdc_command_args("hdc shell snapshot_display -f %s" % remote_path),
+                    capture_output=True,
+                    timeout=5,
+                    **hidden_subprocess_kwargs(),
+                )
                 if r_snap.returncode == 0:
                     need_remote_rm = True
-                    r_recv = subprocess.run("hdc file recv %s %s" % (remote_path, local_path), shell=True,
-                                            capture_output=True, timeout=5,
-                                            **hidden_subprocess_kwargs())
+                    r_recv = subprocess.run(
+                        hdc_command_args("hdc file recv %s %s" % (remote_path, local_path)),
+                        capture_output=True,
+                        timeout=5,
+                        **hidden_subprocess_kwargs(),
+                    )
 
                     if r_recv.returncode == 0:
                         # 2. 核心改动：尝试拿取图片，拿不到就直接跳过
@@ -693,8 +699,12 @@ class HDCSnapshotClient:
             finally:
                 # 4. 无论如何都清理环境，保证下一帧开始时是干净的
                 if need_remote_rm:
-                    subprocess.run("hdc shell rm %s" % remote_path, shell=True, capture_output=True, timeout=2,
-                                   **hidden_subprocess_kwargs())
+                    subprocess.run(
+                        hdc_command_args("hdc shell rm %s" % remote_path),
+                        capture_output=True,
+                        timeout=2,
+                        **hidden_subprocess_kwargs(),
+                    )
                 if os.path.exists(local_path):
                     try:
                         os.remove(local_path)

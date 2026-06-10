@@ -7,7 +7,7 @@ import subprocess
 import numpy as np
 from sklearn.cluster import DBSCAN
 from typing import Dict, List, Optional, Any, Tuple
-from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
+from aw.autogame.tools.ProcessUtils import hdc_command_args, hidden_subprocess_kwargs
 
 def hex_to_rgb(hex_str: str):
     """'#00a2e8' → (0, 162, 232)"""
@@ -147,10 +147,11 @@ def parse_tuple_str(s):
 
 def run_shell(cmd: str, r = False):
     try:
+        hdc_args = hdc_command_args(cmd)
         if r:
             result = subprocess.run(
-                cmd,
-                shell=True,
+                hdc_args or cmd,
+                shell=hdc_args is None,
                 check=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -168,6 +169,15 @@ def run_shell(cmd: str, r = False):
                 print(f"命令执行失败: {cmd}\nreturncode={result.returncode}")
                 return None
             return output or None
+        if hdc_args is not None:
+            subprocess.run(
+                hdc_args,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **hidden_subprocess_kwargs(),
+            )
+            return None
         subprocess.run(cmd, shell=True, check=True, **hidden_subprocess_kwargs())
     except Exception as e:
         print(f"命令执行失败: {cmd}\n{e}")

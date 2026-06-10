@@ -1,9 +1,10 @@
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 from contextlib import contextmanager
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 LOGGER = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ def hidden_subprocess_kwargs(
     startupinfo.wShowWindow = 0
     return {
         "startupinfo": startupinfo,
-        "creationflags": subprocess_module.CREATE_NO_WINDOW,
+        "creationflags": _hidden_creationflags(subprocess_module),
     }
 
 
@@ -28,10 +29,56 @@ def resolve_hdc_executable() -> str:
     return shutil.which("hdc") or shutil.which("hdc.exe") or "hdc"
 
 
+def hdc_command_args(command: str, hdc_executable: Optional[str] = None) -> Optional[List[str]]:
+    text = str(command or "").strip()
+    if not text:
+        return None
+
+    try:
+        parts = shlex.split(text, posix=False)
+    except ValueError:
+        return None
+    if not parts:
+        return None
+
+    executable = str(parts[0]).strip("\"'")
+    executable_name = os.path.basename(executable).lower()
+    if executable_name not in {"hdc", "hdc.exe"}:
+        return None
+
+    hdc = hdc_executable or resolve_hdc_executable()
+    args = [hdc]
+    remaining = [_strip_wrapping_quotes(part) for part in parts[1:]]
+    shell_index = next((index for index, part in enumerate(remaining) if part.lower() == "shell"), None)
+    if shell_index is None:
+        args.extend(remaining)
+        return args
+
+    args.extend(remaining[:shell_index])
+    args.append("shell")
+    remote_command = " ".join(remaining[shell_index + 1 :]).strip()
+    if remote_command:
+        args.append(remote_command)
+    return args
+
+
+def _strip_wrapping_quotes(value: Any) -> str:
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1]
+    return text
+
+
 def _command_text(command: Any) -> str:
     if isinstance(command, (list, tuple)):
         return " ".join(str(part) for part in command)
     return str(command or "")
+
+
+def _hidden_creationflags(subprocess_module=subprocess) -> int:
+    flags = getattr(subprocess_module, "CREATE_NO_WINDOW", 0)
+    flags |= getattr(subprocess_module, "DETACHED_PROCESS", 0)
+    return flags
 
 
 def _should_hide_command(command: Any, target_executables: Iterable[str]) -> bool:
@@ -56,7 +103,7 @@ def _with_hidden_kwargs(
         next_kwargs["startupinfo"] = startupinfo
     next_kwargs["creationflags"] = (
         (next_kwargs.get("creationflags") or 0)
-        | subprocess_module.CREATE_NO_WINDOW
+        | _hidden_creationflags(subprocess_module)
     )
     return next_kwargs
 

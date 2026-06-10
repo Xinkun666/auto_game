@@ -17,7 +17,7 @@ from aw.autogame.tools.Utils import *
 from aw.autogame.tools.Utils import _parse_display_rotation
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 from aw.autogame.tools.GameSceneHandler import StageLogicController
-from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
+from aw.autogame.tools.ProcessUtils import hdc_command_args, hidden_subprocess_kwargs
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -1347,9 +1347,10 @@ class Controller:
             raise ValueError(f"不支持的触控后端: {self.backend}")
 
     def _run_hdc(self, cmd):
+        hdc_args = hdc_command_args(cmd)
         proc = subprocess.Popen(
-            cmd,
-            shell=True,
+            hdc_args or cmd,
+            shell=hdc_args is None,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             **hidden_subprocess_kwargs(),

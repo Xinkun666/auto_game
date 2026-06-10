@@ -30,6 +30,7 @@ from aw.autogame.tools.ProcessUtils import hidden_subprocess_context
 from aw.autogame.tools.ProcessUtils import hdc_command_args
 from aw.autogame.tools.ProcessUtils import install_hidden_subprocess_patch
 from aw.autogame.tools.ProcessUtils import start_hidden_subprocess_window_suppressor
+from aw.autogame.tools.ProcessUtils import WindowsSubprocessWindowSuppressor
 
 
 class FakeStartupInfo:
@@ -273,6 +274,38 @@ class LauncherLabelToolTests(unittest.TestCase):
     def test_window_suppression_is_disabled_off_windows(self):
         self.assertFalse(is_window_suppression_enabled(os_name="posix"))
         self.assertFalse(start_hidden_subprocess_window_suppressor(os_name="posix"))
+
+    def test_window_suppressor_hides_any_descendant_window(self):
+        suppressor = WindowsSubprocessWindowSuppressor(root_pid=100, os_name="nt")
+        suppressor._process_snapshot = {
+            100: (1, "autogamelauncher.exe"),
+            200: (100, "workerhelper.exe"),
+            300: (200, "unknownpopup.exe"),
+        }
+
+        self.assertEqual((False, "root"), suppressor._should_hide_process(100, "autogamelauncher.exe"))
+        self.assertEqual((True, "descendant"), suppressor._should_hide_process(300, "unknownpopup.exe"))
+
+    def test_window_suppressor_hides_direct_hdc_without_parent_chain(self):
+        suppressor = WindowsSubprocessWindowSuppressor(root_pid=100, os_name="nt")
+        suppressor._process_snapshot = {
+            400: (4, "hdc.exe"),
+        }
+
+        self.assertEqual((True, "direct"), suppressor._should_hide_process(400, "hdc.exe"))
+
+    def test_window_suppressor_respects_excluded_process(self):
+        suppressor = WindowsSubprocessWindowSuppressor(
+            root_pid=100,
+            os_name="nt",
+            excluded_processes=("keep.exe",),
+        )
+        suppressor._process_snapshot = {
+            100: (1, "autogamelauncher.exe"),
+            500: (100, "keep.exe"),
+        }
+
+        self.assertEqual((False, "excluded"), suppressor._should_hide_process(500, "keep.exe"))
 
     def test_install_hidden_subprocess_patch_does_not_replace_popen_on_windows(self):
         class WindowsSubprocessModule(FakeSubprocessModule):

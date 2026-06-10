@@ -103,13 +103,17 @@ class WindowsSubprocessWindowSuppressor:
             "openconsole.exe",
         ),
         direct_hide_processes: Sequence[str] = ("icpm_xdc.exe", "hdc.exe"),
+        excluded_processes: Sequence[str] = (),
+        hide_descendant_windows: bool = True,
         interval_seconds: float = 0.02,
-        snapshot_interval_seconds: float = 0.10,
+        snapshot_interval_seconds: float = 0.02,
         os_name: Optional[str] = None,
     ):
         self.root_pid = int(root_pid or os.getpid())
         self.target_processes = {str(name).lower() for name in target_processes}
         self.direct_hide_processes = {str(name).lower() for name in direct_hide_processes}
+        self.excluded_processes = {str(name).lower() for name in excluded_processes}
+        self.hide_descendant_windows = bool(hide_descendant_windows)
         self.interval_seconds = float(interval_seconds)
         self.snapshot_interval_seconds = float(snapshot_interval_seconds)
         self.os_name = os_name
@@ -137,10 +141,12 @@ class WindowsSubprocessWindowSuppressor:
         )
         self._thread.start()
         LOGGER.info(
-            "subprocess window suppression started: root_pid=%s targets=%s direct=%s interval=%.3f",
+            "subprocess window suppression started: root_pid=%s targets=%s direct=%s hide_descendants=%s excluded=%s interval=%.3f",
             self.root_pid,
             sorted(self.target_processes),
             sorted(self.direct_hide_processes),
+            self.hide_descendant_windows,
+            sorted(self.excluded_processes),
             self.interval_seconds,
         )
         return True
@@ -175,6 +181,8 @@ class WindowsSubprocessWindowSuppressor:
         user32.GetWindowTextLengthW.restype = ctypes.c_int
         user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
         user32.GetWindowTextW.restype = ctypes.c_int
+        user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetClassNameW.restype = ctypes.c_int
         user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
         user32.ShowWindow.restype = wintypes.BOOL
         kernel32.GetCurrentProcess.restype = wintypes.HANDLE
@@ -200,23 +208,25 @@ class WindowsSubprocessWindowSuppressor:
                 return True
 
             process_name = self._process_name(pid)
-            if process_name not in self.target_processes:
-                return True
-            if not self._should_hide_process(pid, process_name):
+            should_hide, reason = self._should_hide_process(pid, process_name)
+            if not should_hide:
                 return True
 
             title = self._window_title(user32, hwnd)
+            class_name = self._window_class(user32, hwnd)
             user32.ShowWindow(hwnd, SW_HIDE)
             key = (int(hwnd), pid)
             if key not in self._hidden_windows:
                 self._hidden_windows.add(key)
                 LOGGER.info(
-                    "subprocess window hidden: hwnd=%s pid=%s name=%s title=%s root_pid=%s",
+                    "subprocess window hidden: hwnd=%s pid=%s name=%s class=%s title=%s root_pid=%s reason=%s",
                     int(hwnd),
                     pid,
                     process_name,
+                    class_name,
                     title,
                     self.root_pid,
+                    reason,
                 )
             return True
 
@@ -245,15 +255,33 @@ class WindowsSubprocessWindowSuppressor:
         except Exception:
             return ""
 
+    def _window_class(self, user32, hwnd) -> str:
+        try:
+            import ctypes
+
+            buffer = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(hwnd, buffer, 256)
+            return buffer.value
+        except Exception:
+            return ""
+
     def _process_name(self, pid: int) -> str:
         item = self._process_snapshot.get(int(pid))
         return item[1] if item else ""
 
-    def _should_hide_process(self, pid: int, process_name: str) -> bool:
+    def _should_hide_process(self, pid: int, process_name: str) -> Tuple[bool, str]:
         process_name = process_name.lower()
+        if int(pid) == self.root_pid:
+            return False, "root"
+        if process_name in self.excluded_processes:
+            return False, "excluded"
         if process_name in self.direct_hide_processes:
-            return True
-        return self._is_descendant_of_root(pid)
+            return True, "direct"
+        if self.hide_descendant_windows and self._is_descendant_of_root(pid):
+            return True, "descendant"
+        if process_name in self.target_processes and self._is_descendant_of_root(pid):
+            return True, "target-descendant"
+        return False, "not-matched"
 
     def _is_descendant_of_root(self, pid: int) -> bool:
         current = int(pid)

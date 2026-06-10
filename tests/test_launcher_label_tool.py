@@ -256,7 +256,7 @@ class LauncherLabelToolTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            FakeSubprocessModule.CREATE_NO_WINDOW | FakeSubprocessModule.DETACHED_PROCESS,
+            FakeSubprocessModule.CREATE_NO_WINDOW,
             kwargs["creationflags"],
         )
         self.assertEqual(
@@ -438,7 +438,7 @@ class LauncherLabelToolTests(unittest.TestCase):
         args, kwargs = original_popen.calls[-1]
         self.assertEqual((command,), args)
         self.assertEqual(
-            FakeSubprocessModule.CREATE_NO_WINDOW | FakeSubprocessModule.DETACHED_PROCESS,
+            FakeSubprocessModule.CREATE_NO_WINDOW,
             kwargs["creationflags"],
         )
         self.assertEqual(
@@ -483,7 +483,7 @@ class LauncherLabelToolTests(unittest.TestCase):
         args, kwargs = original_popen.calls[-1]
         self.assertEqual((["hdc", "list", "targets"],), args)
         self.assertEqual(
-            FakeSubprocessModule.CREATE_NO_WINDOW | FakeSubprocessModule.DETACHED_PROCESS,
+            FakeSubprocessModule.CREATE_NO_WINDOW,
             kwargs["creationflags"],
         )
         self.assertEqual(
@@ -516,7 +516,7 @@ class LauncherLabelToolTests(unittest.TestCase):
         self.assertEqual("hdc list targets", WindowsSubprocessModule.call.call_args.args[0])
         self.assertTrue(WindowsSubprocessModule.call.call_args.kwargs["shell"])
         self.assertEqual(
-            FakeSubprocessModule.CREATE_NO_WINDOW | FakeSubprocessModule.DETACHED_PROCESS,
+            FakeSubprocessModule.CREATE_NO_WINDOW,
             WindowsSubprocessModule.call.call_args.kwargs["creationflags"],
         )
         self.assertIs(original_system, WindowsOsModule.system)

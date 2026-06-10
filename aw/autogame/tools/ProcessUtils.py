@@ -79,9 +79,7 @@ def _command_text(command: Any) -> str:
 
 
 def _hidden_creationflags(subprocess_module=subprocess) -> int:
-    flags = getattr(subprocess_module, "CREATE_NO_WINDOW", 0)
-    flags |= getattr(subprocess_module, "DETACHED_PROCESS", 0)
-    return flags
+    return getattr(subprocess_module, "CREATE_NO_WINDOW", 0)
 
 
 def is_window_suppression_enabled(os_name: Optional[str] = None) -> bool:

@@ -104,15 +104,17 @@ class WindowsSubprocessWindowSuppressor:
         ),
         direct_hide_processes: Sequence[str] = ("icpm_xdc.exe", "hdc.exe"),
         excluded_processes: Sequence[str] = (),
+        xdc_temp_path_markers: Sequence[str] = ("\\temp\\xdc\\",),
         hide_descendant_windows: bool = True,
-        interval_seconds: float = 0.02,
-        snapshot_interval_seconds: float = 0.02,
+        interval_seconds: float = 0.01,
+        snapshot_interval_seconds: float = 0.01,
         os_name: Optional[str] = None,
     ):
         self.root_pid = int(root_pid or os.getpid())
         self.target_processes = {str(name).lower() for name in target_processes}
         self.direct_hide_processes = {str(name).lower() for name in direct_hide_processes}
         self.excluded_processes = {str(name).lower() for name in excluded_processes}
+        self.xdc_temp_path_markers = tuple(str(marker).lower() for marker in xdc_temp_path_markers)
         self.hide_descendant_windows = bool(hide_descendant_windows)
         self.interval_seconds = float(interval_seconds)
         self.snapshot_interval_seconds = float(snapshot_interval_seconds)
@@ -142,10 +144,11 @@ class WindowsSubprocessWindowSuppressor:
         )
         self._thread.start()
         LOGGER.info(
-            "subprocess window suppression started: root_pid=%s targets=%s direct=%s hide_descendants=%s excluded=%s interval=%.3f",
+            "subprocess window suppression started: root_pid=%s targets=%s direct=%s xdc_temp_markers=%s hide_descendants=%s excluded=%s interval=%.3f",
             self.root_pid,
             sorted(self.target_processes),
             sorted(self.direct_hide_processes),
+            list(self.xdc_temp_path_markers),
             self.hide_descendant_windows,
             sorted(self.excluded_processes),
             self.interval_seconds,
@@ -209,7 +212,8 @@ class WindowsSubprocessWindowSuppressor:
                 return True
 
             process_name = self._process_name(pid)
-            should_hide, reason = self._should_hide_process(pid, process_name)
+            process_path = self._process_path(pid)
+            should_hide, reason = self._should_hide_process(pid, process_name, process_path)
             if not should_hide:
                 return True
 
@@ -220,10 +224,11 @@ class WindowsSubprocessWindowSuppressor:
             if key not in self._hidden_windows:
                 self._hidden_windows.add(key)
                 LOGGER.info(
-                    "subprocess window hidden: hwnd=%s pid=%s name=%s class=%s title=%s root_pid=%s reason=%s",
+                    "subprocess window hidden: hwnd=%s pid=%s name=%s path=%s class=%s title=%s root_pid=%s reason=%s",
                     int(hwnd),
                     pid,
                     process_name,
+                    process_path,
                     class_name,
                     title,
                     self.root_pid,
@@ -270,7 +275,50 @@ class WindowsSubprocessWindowSuppressor:
         item = self._process_snapshot.get(int(pid))
         return item[1] if item else ""
 
-    def _should_hide_process(self, pid: int, process_name: str) -> Tuple[bool, str]:
+    def _process_path(self, pid: int) -> str:
+        try:
+            import ctypes
+            from ctypes import wintypes
+        except Exception:
+            return ""
+
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        except Exception:
+            return ""
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not handle:
+            return ""
+        try:
+            size = wintypes.DWORD(32768)
+            buffer = ctypes.create_unicode_buffer(size.value)
+            if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+                return ""
+            return buffer.value
+        except Exception:
+            return ""
+        finally:
+            kernel32.CloseHandle(handle)
+
+    def _is_xdc_temp_path(self, process_path: str) -> bool:
+        normalized = str(process_path or "").replace("/", "\\").lower()
+        return any(marker in normalized for marker in self.xdc_temp_path_markers)
+
+    def _should_hide_process(self, pid: int, process_name: str, process_path: str = "") -> Tuple[bool, str]:
         process_name = process_name.lower()
         if int(pid) == self.root_pid:
             return False, "root"
@@ -278,6 +326,8 @@ class WindowsSubprocessWindowSuppressor:
             return False, "excluded"
         if process_name in self.direct_hide_processes:
             return True, "direct"
+        if self._is_xdc_temp_path(process_path):
+            return True, "xdc-temp-path"
         if self.hide_descendant_windows and self._is_descendant_of_root(pid):
             return True, "descendant"
         if process_name in self.target_processes and self._is_descendant_of_root(pid):
@@ -298,18 +348,20 @@ class WindowsSubprocessWindowSuppressor:
 
         for pid in sorted(set(next_snapshot) - previous_seen):
             parent_pid, process_name = next_snapshot[pid]
-            should_trace, reason = self._should_trace_process(pid, process_name)
+            process_path = self._process_path(pid)
+            should_trace, reason = self._should_trace_process(pid, process_name, process_path)
             if should_trace:
                 LOGGER.info(
-                    "subprocess process create: pid=%s ppid=%s name=%s reason=%s root_pid=%s",
+                    "subprocess process create: pid=%s ppid=%s name=%s path=%s reason=%s root_pid=%s",
                     pid,
                     parent_pid,
                     process_name,
+                    process_path,
                     reason,
                     self.root_pid,
                 )
 
-    def _should_trace_process(self, pid: int, process_name: str) -> Tuple[bool, str]:
+    def _should_trace_process(self, pid: int, process_name: str, process_path: str = "") -> Tuple[bool, str]:
         process_name = process_name.lower()
         if int(pid) == self.root_pid:
             return False, "root"
@@ -317,6 +369,8 @@ class WindowsSubprocessWindowSuppressor:
             return False, "excluded"
         if process_name in self.direct_hide_processes:
             return True, "direct"
+        if self._is_xdc_temp_path(process_path):
+            return True, "xdc-temp-path"
         if self._is_descendant_of_root(pid):
             return True, "descendant"
         return False, "not-matched"

@@ -294,6 +294,15 @@ class LauncherLabelToolTests(unittest.TestCase):
 
         self.assertEqual((True, "direct"), suppressor._should_hide_process(400, "hdc.exe"))
 
+    def test_window_suppressor_hides_xdc_temp_path_without_parent_chain(self):
+        suppressor = WindowsSubprocessWindowSuppressor(root_pid=100, os_name="nt")
+        process_path = r"C:\Temp\XDC\abc\unknownpopup.exe"
+
+        self.assertEqual(
+            (True, "xdc-temp-path"),
+            suppressor._should_hide_process(500, "unknownpopup.exe", process_path),
+        )
+
     def test_window_suppressor_respects_excluded_process(self):
         suppressor = WindowsSubprocessWindowSuppressor(
             root_pid=100,
@@ -327,7 +336,8 @@ class LauncherLabelToolTests(unittest.TestCase):
         self.assertEqual(300, logger.info.call_args.args[1])
         self.assertEqual(200, logger.info.call_args.args[2])
         self.assertEqual("unknownpopup.exe", logger.info.call_args.args[3])
-        self.assertEqual("descendant", logger.info.call_args.args[4])
+        self.assertEqual("", logger.info.call_args.args[4])
+        self.assertEqual("descendant", logger.info.call_args.args[5])
 
     def test_window_suppressor_logs_direct_hdc_without_parent_chain(self):
         suppressor = WindowsSubprocessWindowSuppressor(root_pid=100, os_name="nt")
@@ -343,7 +353,41 @@ class LauncherLabelToolTests(unittest.TestCase):
         self.assertEqual(400, logger.info.call_args.args[1])
         self.assertEqual(4, logger.info.call_args.args[2])
         self.assertEqual("hdc.exe", logger.info.call_args.args[3])
-        self.assertEqual("direct", logger.info.call_args.args[4])
+        self.assertEqual("", logger.info.call_args.args[4])
+        self.assertEqual("direct", logger.info.call_args.args[5])
+
+    def test_window_suppressor_logs_new_process_path(self):
+        suppressor = WindowsSubprocessWindowSuppressor(root_pid=100, os_name="nt")
+        suppressor._process_path = mock.Mock(return_value=r"C:\Temp\XDC\abc\hdc.lnk")
+
+        suppressor._update_process_snapshot({100: (1, "autogamelauncher.exe")})
+        with mock.patch("aw.autogame.tools.ProcessUtils.LOGGER") as logger:
+            suppressor._update_process_snapshot({
+                100: (1, "autogamelauncher.exe"),
+                400: (4, "hdc.exe"),
+            })
+
+        logger.info.assert_called()
+        self.assertIn("path=%s", logger.info.call_args.args[0])
+        self.assertEqual(r"C:\Temp\XDC\abc\hdc.lnk", logger.info.call_args.args[4])
+
+    def test_window_suppressor_logs_xdc_temp_process_without_parent_chain(self):
+        suppressor = WindowsSubprocessWindowSuppressor(root_pid=100, os_name="nt")
+        suppressor._process_path = mock.Mock(return_value=r"C:\Temp\XDC\abc\unknownpopup.exe")
+
+        suppressor._update_process_snapshot({100: (1, "autogamelauncher.exe")})
+        with mock.patch("aw.autogame.tools.ProcessUtils.LOGGER") as logger:
+            suppressor._update_process_snapshot({
+                100: (1, "autogamelauncher.exe"),
+                500: (4, "unknownpopup.exe"),
+            })
+
+        logger.info.assert_called()
+        self.assertEqual(500, logger.info.call_args.args[1])
+        self.assertEqual(4, logger.info.call_args.args[2])
+        self.assertEqual("unknownpopup.exe", logger.info.call_args.args[3])
+        self.assertEqual(r"C:\Temp\XDC\abc\unknownpopup.exe", logger.info.call_args.args[4])
+        self.assertEqual("xdc-temp-path", logger.info.call_args.args[5])
 
     def test_install_hidden_subprocess_patch_does_not_replace_popen_on_windows(self):
         class WindowsSubprocessModule(FakeSubprocessModule):

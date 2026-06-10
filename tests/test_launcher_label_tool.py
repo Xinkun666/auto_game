@@ -47,6 +47,15 @@ class FakeSubprocessModule:
     CREATE_NO_WINDOW = 0x08000000
     STARTUPINFO = FakeStartupInfo
     Popen = FakePopen
+    DEVNULL = subprocess.DEVNULL
+    PIPE = subprocess.PIPE
+    STDOUT = subprocess.STDOUT
+    call = mock.Mock(return_value=0)
+
+
+class FakeOsModule:
+    name = "nt"
+    system = mock.Mock(return_value=99)
 
 
 class FakeProcessEnvironment:
@@ -318,6 +327,58 @@ class LauncherLabelToolTests(unittest.TestCase):
         self.assertNotIn("creationflags", kwargs)
         self.assertNotIn("startupinfo", kwargs)
 
+    def test_hidden_subprocess_context_hide_all_hides_hdc_command(self):
+        class WindowsSubprocessModule(FakeSubprocessModule):
+            class Popen(FakePopen):
+                calls = []
+
+        original_popen = WindowsSubprocessModule.Popen
+
+        with hidden_subprocess_context(
+            os_name="nt",
+            subprocess_module=WindowsSubprocessModule,
+            hide_all=True,
+        ):
+            WindowsSubprocessModule.Popen(["hdc", "list", "targets"])
+
+        args, kwargs = original_popen.calls[-1]
+        self.assertEqual((["hdc", "list", "targets"],), args)
+        self.assertEqual(FakeSubprocessModule.CREATE_NO_WINDOW, kwargs["creationflags"])
+        self.assertEqual(
+            FakeSubprocessModule.STARTF_USESHOWWINDOW,
+            kwargs["startupinfo"].dwFlags,
+        )
+
+    def test_hidden_subprocess_context_routes_os_system_through_hidden_call(self):
+        class WindowsSubprocessModule(FakeSubprocessModule):
+            class Popen(FakePopen):
+                calls = []
+            call = mock.Mock(return_value=7)
+
+        class WindowsOsModule:
+            name = "nt"
+            system = mock.Mock(return_value=99)
+
+        original_system = WindowsOsModule.system
+
+        with hidden_subprocess_context(
+            os_name="nt",
+            subprocess_module=WindowsSubprocessModule,
+            os_module=WindowsOsModule,
+            hide_all=True,
+        ):
+            result = WindowsOsModule.system("hdc list targets")
+
+        self.assertEqual(7, result)
+        WindowsSubprocessModule.call.assert_called_once()
+        self.assertEqual("hdc list targets", WindowsSubprocessModule.call.call_args.args[0])
+        self.assertTrue(WindowsSubprocessModule.call.call_args.kwargs["shell"])
+        self.assertEqual(
+            FakeSubprocessModule.CREATE_NO_WINDOW,
+            WindowsSubprocessModule.call.call_args.kwargs["creationflags"],
+        )
+        self.assertIs(original_system, WindowsOsModule.system)
+
     def test_run_testcase_entry_wraps_xdevice_with_icpm_xdc_hidden_context(self):
         xdevice_module = types.ModuleType("xdevice")
         xdevice_main_module = types.ModuleType("xdevice.__main__")
@@ -336,7 +397,10 @@ class LauncherLabelToolTests(unittest.TestCase):
         ) as hidden_context:
             run_testcase_entry("testcases/pubg/pubg_full_flow/auto_pubg")
 
-        hidden_context.assert_called_once_with(target_executables=("icpm_xdc.exe",))
+        hidden_context.assert_called_once_with(
+            target_executables=("icpm_xdc.exe", "hdc.exe", "hdc"),
+            hide_all=True,
+        )
         context.__enter__.assert_called_once_with()
         context.__exit__.assert_called_once()
         xdevice_main_module.main_process.assert_called_once_with(

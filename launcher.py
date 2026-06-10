@@ -738,7 +738,10 @@ def run_testcase_entry(testcase_label: str):
     LOGGER.info("run_testcase_entry: testcase_label=%s", testcase_label)
     from xdevice.__main__ import main_process
 
-    with hidden_subprocess_context(target_executables=("icpm_xdc.exe",)):
+    with hidden_subprocess_context(
+        target_executables=("icpm_xdc.exe", "hdc.exe", "hdc"),
+        hide_all=True,
+    ):
         main_process(f"run -l {testcase_label}")
 
 

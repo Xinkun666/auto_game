@@ -121,6 +121,7 @@ class WindowsSubprocessWindowSuppressor:
         self._thread: Optional[threading.Thread] = None
         self._hidden_windows: Set[Tuple[int, int]] = set()
         self._process_snapshot: Dict[int, Tuple[int, str]] = {}
+        self._seen_processes: Set[int] = set()
         self._last_snapshot_time = 0.0
 
     def start(self) -> bool:
@@ -234,7 +235,7 @@ class WindowsSubprocessWindowSuppressor:
         while not self._stop_event.is_set():
             now = time.monotonic()
             if now - self._last_snapshot_time >= self.snapshot_interval_seconds:
-                self._process_snapshot = self._snapshot_processes()
+                self._update_process_snapshot(self._snapshot_processes())
                 self._last_snapshot_time = now
             try:
                 user32.EnumWindows(callback, 0)
@@ -281,6 +282,43 @@ class WindowsSubprocessWindowSuppressor:
             return True, "descendant"
         if process_name in self.target_processes and self._is_descendant_of_root(pid):
             return True, "target-descendant"
+        return False, "not-matched"
+
+    def _update_process_snapshot(self, snapshot: Dict[int, Tuple[int, str]]) -> None:
+        next_snapshot = {
+            int(pid): (int(parent_pid), str(process_name).lower())
+            for pid, (parent_pid, process_name) in snapshot.items()
+        }
+        previous_seen = set(self._seen_processes)
+        self._process_snapshot = next_snapshot
+        self._seen_processes.update(next_snapshot.keys())
+
+        if not previous_seen:
+            return
+
+        for pid in sorted(set(next_snapshot) - previous_seen):
+            parent_pid, process_name = next_snapshot[pid]
+            should_trace, reason = self._should_trace_process(pid, process_name)
+            if should_trace:
+                LOGGER.info(
+                    "subprocess process create: pid=%s ppid=%s name=%s reason=%s root_pid=%s",
+                    pid,
+                    parent_pid,
+                    process_name,
+                    reason,
+                    self.root_pid,
+                )
+
+    def _should_trace_process(self, pid: int, process_name: str) -> Tuple[bool, str]:
+        process_name = process_name.lower()
+        if int(pid) == self.root_pid:
+            return False, "root"
+        if process_name in self.excluded_processes:
+            return False, "excluded"
+        if process_name in self.direct_hide_processes:
+            return True, "direct"
+        if self._is_descendant_of_root(pid):
+            return True, "descendant"
         return False, "not-matched"
 
     def _is_descendant_of_root(self, pid: int) -> bool:

@@ -307,6 +307,44 @@ class LauncherLabelToolTests(unittest.TestCase):
 
         self.assertEqual((False, "excluded"), suppressor._should_hide_process(500, "keep.exe"))
 
+    def test_window_suppressor_logs_new_descendant_processes(self):
+        suppressor = WindowsSubprocessWindowSuppressor(root_pid=100, os_name="nt")
+
+        suppressor._update_process_snapshot({
+            100: (1, "autogamelauncher.exe"),
+            200: (100, "workerhelper.exe"),
+        })
+        with mock.patch("aw.autogame.tools.ProcessUtils.LOGGER") as logger:
+            suppressor._update_process_snapshot({
+                100: (1, "autogamelauncher.exe"),
+                200: (100, "workerhelper.exe"),
+                300: (200, "unknownpopup.exe"),
+            })
+
+        logger.info.assert_called()
+        message = logger.info.call_args.args[0]
+        self.assertIn("subprocess process create", message)
+        self.assertEqual(300, logger.info.call_args.args[1])
+        self.assertEqual(200, logger.info.call_args.args[2])
+        self.assertEqual("unknownpopup.exe", logger.info.call_args.args[3])
+        self.assertEqual("descendant", logger.info.call_args.args[4])
+
+    def test_window_suppressor_logs_direct_hdc_without_parent_chain(self):
+        suppressor = WindowsSubprocessWindowSuppressor(root_pid=100, os_name="nt")
+
+        suppressor._update_process_snapshot({100: (1, "autogamelauncher.exe")})
+        with mock.patch("aw.autogame.tools.ProcessUtils.LOGGER") as logger:
+            suppressor._update_process_snapshot({
+                100: (1, "autogamelauncher.exe"),
+                400: (4, "hdc.exe"),
+            })
+
+        logger.info.assert_called()
+        self.assertEqual(400, logger.info.call_args.args[1])
+        self.assertEqual(4, logger.info.call_args.args[2])
+        self.assertEqual("hdc.exe", logger.info.call_args.args[3])
+        self.assertEqual("direct", logger.info.call_args.args[4])
+
     def test_install_hidden_subprocess_patch_does_not_replace_popen_on_windows(self):
         class WindowsSubprocessModule(FakeSubprocessModule):
             Popen = FakePopen

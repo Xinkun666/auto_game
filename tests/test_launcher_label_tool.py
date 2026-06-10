@@ -19,6 +19,7 @@ from launcher import (
     resolve_preview_frame_dir,
     resolve_label_project_dir,
     resolve_runtime_temp_dir,
+    WindowsProcessLaunchTracer,
 )
 from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
 from aw.autogame.tools.ProcessUtils import install_hidden_subprocess_patch
@@ -131,6 +132,45 @@ class LauncherLabelToolTests(unittest.TestCase):
         self.assertEqual(subprocess.DEVNULL, popen.call_args.kwargs["stdin"])
         self.assertEqual(subprocess.PIPE, popen.call_args.kwargs["stdout"])
         self.assertEqual(subprocess.STDOUT, popen.call_args.kwargs["stderr"])
+
+    def test_process_launch_tracer_is_disabled_off_windows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tracer = WindowsProcessLaunchTracer(
+                log_dir=Path(temp_dir),
+                os_name="posix",
+            )
+
+            self.assertIsNone(tracer.start("test"))
+
+    def test_process_launch_tracer_starts_hidden_powershell_on_windows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fake_process = mock.Mock()
+            fake_process.pid = 4321
+            fake_process.poll.return_value = None
+            tracer = WindowsProcessLaunchTracer(
+                log_dir=Path(temp_dir),
+                os_name="nt",
+                root_pid=1234,
+            )
+
+            with mock.patch(
+                "launcher.hidden_subprocess_kwargs",
+                return_value={"creationflags": 123},
+            ), mock.patch(
+                "launcher.subprocess.Popen",
+                return_value=fake_process,
+            ) as popen:
+                log_path = tracer.start("testcase")
+
+            self.assertIsNotNone(log_path)
+            self.assertEqual(Path(temp_dir), log_path.parent)
+            self.assertIn("process_launch_trace_", log_path.name)
+            self.assertEqual("powershell.exe", popen.call_args.args[0][0])
+            self.assertIn("-EncodedCommand", popen.call_args.args[0])
+            self.assertEqual(123, popen.call_args.kwargs["creationflags"])
+            self.assertEqual(subprocess.DEVNULL, popen.call_args.kwargs["stdin"])
+            self.assertEqual(subprocess.DEVNULL, popen.call_args.kwargs["stdout"])
+            self.assertEqual(subprocess.DEVNULL, popen.call_args.kwargs["stderr"])
 
     def test_resolve_app_paths_non_frozen_uses_source_file_parent(self):
         paths = resolve_app_paths(

@@ -1,5 +1,6 @@
 import argparse
 import ast
+import base64
 import importlib
 import json
 import logging
@@ -94,6 +95,7 @@ LOGGER = logging.getLogger("launcher")
 PREVIEW_FRAME_SUFFIXES = {".jpg", ".jpeg", ".png"}
 PYINSTALLER_SUPPRESS_SPLASH_ENV = "PYINSTALLER_SUPPRESS_SPLASH_SCREEN"
 PYINSTALLER_SPLASH_IPC_ENV = "_PYI_SPLASH_IPC"
+PROCESS_TRACE_ENV = "AUTOGAME_PROCESS_TRACE"
 STREAM_CONNECTED_MARKERS = (
     "[Stream] Start receiving...",
 )
@@ -261,6 +263,149 @@ def close_pyinstaller_splash(context: str) -> bool:
     except Exception:
         LOGGER.debug("pyinstaller splash close failed: context=%s", context, exc_info=True)
         return False
+
+
+def _powershell_single_quote(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def is_process_trace_enabled(os_name: Optional[str] = None) -> bool:
+    if (os_name or os.name) != "nt":
+        return False
+
+    value = os.environ.get(PROCESS_TRACE_ENV, "").strip().lower()
+    if value in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return True
+
+
+class WindowsProcessLaunchTracer:
+    def __init__(
+        self,
+        log_dir: Path = LOG_DIR,
+        os_name: Optional[str] = None,
+        root_pid: Optional[int] = None,
+    ):
+        self.log_dir = Path(log_dir)
+        self.os_name = os_name
+        self.root_pid = int(root_pid or os.getpid())
+        self.log_path: Optional[Path] = None
+        self._proc: Optional[subprocess.Popen] = None
+
+    def start(self, label: str) -> Optional[Path]:
+        if self._proc is not None:
+            return self.log_path
+        if not is_process_trace_enabled(self.os_name):
+            LOGGER.info(
+                "process launch trace disabled: os_name=%s env=%s",
+                self.os_name or os.name,
+                os.environ.get(PROCESS_TRACE_ENV),
+            )
+            return None
+
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d%H%M%S")
+        self.log_path = self.log_dir / f"process_launch_trace_{timestamp}_{self.root_pid}.log"
+        script = self._build_powershell_script(self.log_path, label)
+        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        command = [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-EncodedCommand",
+            encoded,
+        ]
+
+        try:
+            self._proc = subprocess.Popen(
+                command,
+                cwd=str(APP_DIR),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **hidden_subprocess_kwargs(os_name=self.os_name),
+            )
+            LOGGER.info(
+                "process launch trace started: pid=%s log_path=%s label=%s root_pid=%s",
+                self._proc.pid,
+                self.log_path,
+                label,
+                self.root_pid,
+            )
+            return self.log_path
+        except Exception:
+            log_exception("process launch trace start failed")
+            self._proc = None
+            return None
+
+    def stop(self) -> Optional[Path]:
+        proc = self._proc
+        self._proc = None
+        if proc is None:
+            return self.log_path
+
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            LOGGER.info(
+                "process launch trace stopped: pid=%s returncode=%s log_path=%s",
+                proc.pid,
+                proc.returncode,
+                self.log_path,
+            )
+        except Exception:
+            log_exception("process launch trace stop failed")
+        return self.log_path
+
+    def _build_powershell_script(self, log_path: Path, label: str) -> str:
+        log_path_literal = _powershell_single_quote(str(log_path))
+        label_literal = _powershell_single_quote(label)
+        return f"""
+$ErrorActionPreference = 'SilentlyContinue'
+$global:AutoGameTraceLogPath = {log_path_literal}
+$global:AutoGameTraceRootPid = {self.root_pid}
+$global:AutoGameTraceLabel = {label_literal}
+
+Add-Content -LiteralPath $global:AutoGameTraceLogPath -Encoding UTF8 -Value ("{{0:o}}`tTRACE_START`tRootPID={{1}}`tLabel={{2}}" -f (Get-Date), $global:AutoGameTraceRootPid, $global:AutoGameTraceLabel)
+
+Register-WmiEvent -Class Win32_ProcessStartTrace -SourceIdentifier AutoGameProcessTrace -Action {{
+    $e = $Event.SourceEventArgs.NewEvent
+    $pidValue = [int]$e.ProcessID
+    $parentPidValue = [int]$e.ParentProcessID
+    $proc = Get-CimInstance Win32_Process -Filter ("ProcessId={{0}}" -f $pidValue)
+    if (-not $proc) {{ $proc = Get-WmiObject Win32_Process -Filter ("ProcessId={{0}}" -f $pidValue) }}
+    $parent = Get-CimInstance Win32_Process -Filter ("ProcessId={{0}}" -f $parentPidValue)
+    if (-not $parent) {{ $parent = Get-WmiObject Win32_Process -Filter ("ProcessId={{0}}" -f $parentPidValue) }}
+
+    $nameValue = [string]$e.ProcessName
+    $pathValue = ""
+    $cmdValue = ""
+    $parentNameValue = ""
+    $parentCmdValue = ""
+    if ($proc) {{
+        if ($proc.Name) {{ $nameValue = [string]$proc.Name }}
+        if ($proc.ExecutablePath) {{ $pathValue = [string]$proc.ExecutablePath }}
+        if ($proc.CommandLine) {{ $cmdValue = [string]$proc.CommandLine }}
+    }}
+    if ($parent) {{
+        if ($parent.Name) {{ $parentNameValue = [string]$parent.Name }}
+        if ($parent.CommandLine) {{ $parentCmdValue = [string]$parent.CommandLine }}
+    }}
+
+    Add-Content -LiteralPath $global:AutoGameTraceLogPath -Encoding UTF8 -Value ("{{0:o}}`tPROCESS_CREATE`tPID={{1}}`tPPID={{2}}`tName={{3}}`tPath={{4}}`tCmd={{5}}`tParentName={{6}}`tParentCmd={{7}}" -f (Get-Date), $pidValue, $parentPidValue, $nameValue, $pathValue, $cmdValue, $parentNameValue, $parentCmdValue)
+}} | Out-Null
+
+while ($true) {{
+    Wait-Event -Timeout 1 | Out-Null
+}}
+"""
 
 
 class HiddenSubprocess(QObject):
@@ -728,6 +873,7 @@ class LauncherWindow(QWidget):
         self.label_tool_project_dir: Optional[Path] = None
         self.history_records: list[dict] = []
         self.selected_history_record: Optional[dict] = None
+        self.process_launch_tracer = WindowsProcessLaunchTracer(LOG_DIR)
 
         self.setWindowTitle("Auto Game 启动器")
         self.resize(1260, 860)
@@ -2575,17 +2721,27 @@ class LauncherWindow(QWidget):
         self._set_inputs_enabled(False)
         self._set_status("已开始批量执行，准备进行安全检查。")
         self._set_runtime(f"运行信息：共 {plan['run_count']} 次，等待第 1 次启动。")
+        trace_label = f"{plan['mode']}:{plan['project_case']}:{plan['target_case']}"
+        trace_path = self.process_launch_tracer.start(trace_label)
         self._log_message(
             f"[Launcher] 批量运行开始，mode={plan['mode']}, runs={plan['run_count']}, "
             f"safe_temp={plan['safe_temp']}°C, safe_battery={plan['safe_battery']}%, "
             f"safe_time={plan['safe_minutes']}分钟, inactivity_timeout={plan['inactivity_timeout_minutes']}分钟, "
             f"cleanup_apps={plan['cleanup_apps']}\n"
         )
+        if trace_path is not None:
+            self._log_message(f"[Launcher] 进程创建追踪日志：{trace_path}\n")
+        else:
+            self._log_message("[Launcher] 当前环境未启用 Windows 进程创建追踪。\n")
         self._cleanup_apps_between_runs("批次启动前预清理")
         self._check_and_start_if_safe()
 
     def _finish_batch(self, message: str):
         LOGGER.info("finish_batch: %s", message)
+        trace_path = self.process_launch_tracer.stop()
+        if trace_path is not None:
+            LOGGER.info("process launch trace log available: %s", trace_path)
+            self._log_message(f"[Launcher] 进程创建追踪已停止：{trace_path}\n")
         self.batch_active = False
         self.stop_requested = False
         self.current_plan = None

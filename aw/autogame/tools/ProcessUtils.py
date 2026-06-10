@@ -213,12 +213,12 @@ class WindowsSubprocessWindowSuppressor:
 
             process_name = self._process_name(pid)
             process_path = self._process_path(pid)
-            should_hide, reason = self._should_hide_process(pid, process_name, process_path)
+            title = self._window_title(user32, hwnd)
+            class_name = self._window_class(user32, hwnd)
+            should_hide, reason = self._should_hide_process(pid, process_name, process_path, title)
             if not should_hide:
                 return True
 
-            title = self._window_title(user32, hwnd)
-            class_name = self._window_class(user32, hwnd)
             user32.ShowWindow(hwnd, SW_HIDE)
             key = (int(hwnd), pid)
             if key not in self._hidden_windows:
@@ -314,11 +314,17 @@ class WindowsSubprocessWindowSuppressor:
         finally:
             kernel32.CloseHandle(handle)
 
-    def _is_xdc_temp_path(self, process_path: str) -> bool:
-        normalized = str(process_path or "").replace("/", "\\").lower()
+    def _contains_xdc_temp_marker(self, text: str) -> bool:
+        normalized = str(text or "").replace("/", "\\").lower()
         return any(marker in normalized for marker in self.xdc_temp_path_markers)
 
-    def _should_hide_process(self, pid: int, process_name: str, process_path: str = "") -> Tuple[bool, str]:
+    def _should_hide_process(
+        self,
+        pid: int,
+        process_name: str,
+        process_path: str = "",
+        window_title: str = "",
+    ) -> Tuple[bool, str]:
         process_name = process_name.lower()
         if int(pid) == self.root_pid:
             return False, "root"
@@ -326,8 +332,10 @@ class WindowsSubprocessWindowSuppressor:
             return False, "excluded"
         if process_name in self.direct_hide_processes:
             return True, "direct"
-        if self._is_xdc_temp_path(process_path):
+        if self._contains_xdc_temp_marker(process_path):
             return True, "xdc-temp-path"
+        if self._contains_xdc_temp_marker(window_title):
+            return True, "xdc-temp-title"
         if self.hide_descendant_windows and self._is_descendant_of_root(pid):
             return True, "descendant"
         if process_name in self.target_processes and self._is_descendant_of_root(pid):
@@ -369,7 +377,7 @@ class WindowsSubprocessWindowSuppressor:
             return False, "excluded"
         if process_name in self.direct_hide_processes:
             return True, "direct"
-        if self._is_xdc_temp_path(process_path):
+        if self._contains_xdc_temp_marker(process_path):
             return True, "xdc-temp-path"
         if self._is_descendant_of_root(pid):
             return True, "descendant"

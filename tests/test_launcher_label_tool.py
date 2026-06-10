@@ -303,6 +303,16 @@ class LauncherLabelToolTests(unittest.TestCase):
             suppressor._should_hide_process(500, "unknownpopup.exe", process_path),
         )
 
+    def test_window_suppressor_hides_xdc_temp_title_without_parent_chain(self):
+        suppressor = WindowsSubprocessWindowSuppressor(root_pid=100, os_name="nt")
+        process_path = r"C:\Windows\System32\conhost.exe"
+        window_title = r"C:\Temp\XDC\76d836f2xxxx\hdc.lnk"
+
+        self.assertEqual(
+            (True, "xdc-temp-title"),
+            suppressor._should_hide_process(501, "conhost.exe", process_path, window_title),
+        )
+
     def test_window_suppressor_respects_excluded_process(self):
         suppressor = WindowsSubprocessWindowSuppressor(
             root_pid=100,

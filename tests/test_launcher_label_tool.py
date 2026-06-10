@@ -1,7 +1,9 @@
 import unittest
 import json
 import subprocess
+import sys
 import tempfile
+import types
 from pathlib import Path
 from unittest import mock
 
@@ -19,9 +21,11 @@ from launcher import (
     resolve_preview_frame_dir,
     resolve_label_project_dir,
     resolve_runtime_temp_dir,
+    run_testcase_entry,
     WindowsProcessLaunchTracer,
 )
 from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
+from aw.autogame.tools.ProcessUtils import hidden_subprocess_context
 from aw.autogame.tools.ProcessUtils import install_hidden_subprocess_patch
 
 
@@ -32,7 +36,10 @@ class FakeStartupInfo:
 
 
 class FakePopen:
-    pass
+    calls = []
+
+    def __init__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
 
 
 class FakeSubprocessModule:
@@ -172,6 +179,21 @@ class LauncherLabelToolTests(unittest.TestCase):
             self.assertEqual(subprocess.DEVNULL, popen.call_args.kwargs["stdout"])
             self.assertEqual(subprocess.DEVNULL, popen.call_args.kwargs["stderr"])
 
+    def test_process_launch_tracer_script_includes_polling_fallback(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tracer = WindowsProcessLaunchTracer(
+                log_dir=Path(temp_dir),
+                os_name="nt",
+                root_pid=1234,
+            )
+
+            script = tracer._build_powershell_script(Path(temp_dir) / "trace.log", "test")
+
+        self.assertIn("EVENT_CREATE", script)
+        self.assertIn("POLL_CREATE", script)
+        self.assertIn("Get-AutoGameProcesses", script)
+        self.assertIn("Start-Sleep -Milliseconds 200", script)
+
     def test_resolve_app_paths_non_frozen_uses_source_file_parent(self):
         paths = resolve_app_paths(
             frozen=False,
@@ -250,6 +272,76 @@ class LauncherLabelToolTests(unittest.TestCase):
             pass
 
         self.assertTrue(issubclass(InheritedPopen, original_popen))
+
+    def test_hidden_subprocess_context_hides_target_command_and_restores_popen(self):
+        class WindowsSubprocessModule(FakeSubprocessModule):
+            class Popen(FakePopen):
+                calls = []
+
+        original_popen = WindowsSubprocessModule.Popen
+        command = r"C:\Program Files (x86)\ISEP\bin\icpm_xdc.exe --version"
+
+        with hidden_subprocess_context(
+            os_name="nt",
+            subprocess_module=WindowsSubprocessModule,
+            target_executables=("icpm_xdc.exe",),
+        ):
+            self.assertTrue(issubclass(WindowsSubprocessModule.Popen, original_popen))
+            WindowsSubprocessModule.Popen(command)
+
+        self.assertIs(original_popen, WindowsSubprocessModule.Popen)
+        args, kwargs = original_popen.calls[-1]
+        self.assertEqual((command,), args)
+        self.assertEqual(FakeSubprocessModule.CREATE_NO_WINDOW, kwargs["creationflags"])
+        self.assertEqual(
+            FakeSubprocessModule.STARTF_USESHOWWINDOW,
+            kwargs["startupinfo"].dwFlags,
+        )
+        self.assertEqual(0, kwargs["startupinfo"].wShowWindow)
+
+    def test_hidden_subprocess_context_leaves_non_target_command_unchanged(self):
+        class WindowsSubprocessModule(FakeSubprocessModule):
+            class Popen(FakePopen):
+                calls = []
+
+        original_popen = WindowsSubprocessModule.Popen
+
+        with hidden_subprocess_context(
+            os_name="nt",
+            subprocess_module=WindowsSubprocessModule,
+            target_executables=("icpm_xdc.exe",),
+        ):
+            WindowsSubprocessModule.Popen(["hdc", "list", "targets"])
+
+        args, kwargs = original_popen.calls[-1]
+        self.assertEqual((["hdc", "list", "targets"],), args)
+        self.assertNotIn("creationflags", kwargs)
+        self.assertNotIn("startupinfo", kwargs)
+
+    def test_run_testcase_entry_wraps_xdevice_with_icpm_xdc_hidden_context(self):
+        xdevice_module = types.ModuleType("xdevice")
+        xdevice_main_module = types.ModuleType("xdevice.__main__")
+        xdevice_main_module.main_process = mock.Mock()
+        context = mock.MagicMock()
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "xdevice": xdevice_module,
+                "xdevice.__main__": xdevice_main_module,
+            },
+        ), mock.patch(
+            "launcher.hidden_subprocess_context",
+            return_value=context,
+        ) as hidden_context:
+            run_testcase_entry("testcases/pubg/pubg_full_flow/auto_pubg")
+
+        hidden_context.assert_called_once_with(target_executables=("icpm_xdc.exe",))
+        context.__enter__.assert_called_once_with()
+        context.__exit__.assert_called_once()
+        xdevice_main_module.main_process.assert_called_once_with(
+            "run -l testcases/pubg/pubg_full_flow/auto_pubg"
+        )
 
     def test_restart_device_commands_run_hdc_directly_without_cmd_or_bat(self):
         commands = build_restart_device_commands("hdc")

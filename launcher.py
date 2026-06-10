@@ -43,7 +43,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs, install_hidden_subprocess_patch, resolve_hdc_executable
+from aw.autogame.tools.ProcessUtils import hidden_subprocess_context, hidden_subprocess_kwargs, install_hidden_subprocess_patch, resolve_hdc_executable
 from aw.autogame.tools.Utils import archive_run_artifacts, get_resolution, resolve_run_archive_dir, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 
@@ -375,16 +375,23 @@ $global:AutoGameTraceLabel = {label_literal}
 
 Add-Content -LiteralPath $global:AutoGameTraceLogPath -Encoding UTF8 -Value ("{{0:o}}`tTRACE_START`tRootPID={{1}}`tLabel={{2}}" -f (Get-Date), $global:AutoGameTraceRootPid, $global:AutoGameTraceLabel)
 
-Register-WmiEvent -Class Win32_ProcessStartTrace -SourceIdentifier AutoGameProcessTrace -Action {{
-    $e = $Event.SourceEventArgs.NewEvent
-    $pidValue = [int]$e.ProcessID
-    $parentPidValue = [int]$e.ParentProcessID
-    $proc = Get-CimInstance Win32_Process -Filter ("ProcessId={{0}}" -f $pidValue)
-    if (-not $proc) {{ $proc = Get-WmiObject Win32_Process -Filter ("ProcessId={{0}}" -f $pidValue) }}
-    $parent = Get-CimInstance Win32_Process -Filter ("ProcessId={{0}}" -f $parentPidValue)
-    if (-not $parent) {{ $parent = Get-WmiObject Win32_Process -Filter ("ProcessId={{0}}" -f $parentPidValue) }}
+function Get-AutoGameProcesses {{
+    $items = Get-CimInstance Win32_Process
+    if (-not $items) {{ $items = Get-WmiObject Win32_Process }}
+    return $items
+}}
 
-    $nameValue = [string]$e.ProcessName
+function Get-AutoGameProcessById([int]$ProcessIdValue) {{
+    $item = Get-CimInstance Win32_Process -Filter ("ProcessId={{0}}" -f $ProcessIdValue)
+    if (-not $item) {{ $item = Get-WmiObject Win32_Process -Filter ("ProcessId={{0}}" -f $ProcessIdValue) }}
+    return $item
+}}
+
+function Write-AutoGameProcessLine([string]$Kind, [int]$ProcessIdValue, [int]$ParentProcessIdValue, [string]$FallbackName) {{
+    $proc = Get-AutoGameProcessById $ProcessIdValue
+    $parent = Get-AutoGameProcessById $ParentProcessIdValue
+
+    $nameValue = $FallbackName
     $pathValue = ""
     $cmdValue = ""
     $parentNameValue = ""
@@ -399,11 +406,40 @@ Register-WmiEvent -Class Win32_ProcessStartTrace -SourceIdentifier AutoGameProce
         if ($parent.CommandLine) {{ $parentCmdValue = [string]$parent.CommandLine }}
     }}
 
-    Add-Content -LiteralPath $global:AutoGameTraceLogPath -Encoding UTF8 -Value ("{{0:o}}`tPROCESS_CREATE`tPID={{1}}`tPPID={{2}}`tName={{3}}`tPath={{4}}`tCmd={{5}}`tParentName={{6}}`tParentCmd={{7}}" -f (Get-Date), $pidValue, $parentPidValue, $nameValue, $pathValue, $cmdValue, $parentNameValue, $parentCmdValue)
-}} | Out-Null
+    Add-Content -LiteralPath $global:AutoGameTraceLogPath -Encoding UTF8 -Value ("{{0:o}}`t{{1}}`tPID={{2}}`tPPID={{3}}`tName={{4}}`tPath={{5}}`tCmd={{6}}`tParentName={{7}}`tParentCmd={{8}}" -f (Get-Date), $Kind, $ProcessIdValue, $ParentProcessIdValue, $nameValue, $pathValue, $cmdValue, $parentNameValue, $parentCmdValue)
+}}
+
+$seen = @{{}}
+foreach ($proc in Get-AutoGameProcesses) {{
+    $seen[[int]$proc.ProcessId] = $true
+}}
+
+try {{
+    Register-WmiEvent -Class Win32_ProcessStartTrace -SourceIdentifier AutoGameProcessTrace | Out-Null
+    Add-Content -LiteralPath $global:AutoGameTraceLogPath -Encoding UTF8 -Value ("{{0:o}}`tTRACE_READY`tMode=event+poll" -f (Get-Date))
+}} catch {{
+    Add-Content -LiteralPath $global:AutoGameTraceLogPath -Encoding UTF8 -Value ("{{0:o}}`tTRACE_READY`tMode=poll`tRegisterError={{1}}" -f (Get-Date), $_.Exception.Message)
+}}
 
 while ($true) {{
-    Wait-Event -Timeout 1 | Out-Null
+    foreach ($eventItem in Get-Event -SourceIdentifier AutoGameProcessTrace) {{
+        $e = $eventItem.SourceEventArgs.NewEvent
+        $pidValue = [int]$e.ProcessID
+        $parentPidValue = [int]$e.ParentProcessID
+        $seen[$pidValue] = $true
+        Write-AutoGameProcessLine "EVENT_CREATE" $pidValue $parentPidValue ([string]$e.ProcessName)
+        Remove-Event -EventIdentifier $eventItem.EventIdentifier
+    }}
+
+    foreach ($proc in Get-AutoGameProcesses) {{
+        $pidValue = [int]$proc.ProcessId
+        if (-not $seen.ContainsKey($pidValue)) {{
+            $seen[$pidValue] = $true
+            Write-AutoGameProcessLine "POLL_CREATE" $pidValue ([int]$proc.ParentProcessId) ([string]$proc.Name)
+        }}
+    }}
+
+    Start-Sleep -Milliseconds 200
 }}
 """
 
@@ -702,7 +738,8 @@ def run_testcase_entry(testcase_label: str):
     LOGGER.info("run_testcase_entry: testcase_label=%s", testcase_label)
     from xdevice.__main__ import main_process
 
-    main_process(f"run -l {testcase_label}")
+    with hidden_subprocess_context(target_executables=("icpm_xdc.exe",)):
+        main_process(f"run -l {testcase_label}")
 
 
 def run_direct_entry(project_case: str, target_case: str):

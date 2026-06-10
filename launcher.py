@@ -43,7 +43,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from aw.autogame.tools.ProcessUtils import hidden_subprocess_context, hidden_subprocess_kwargs, install_hidden_subprocess_patch, resolve_hdc_executable
+from aw.autogame.tools.ProcessUtils import hidden_subprocess_context, hidden_subprocess_kwargs, install_hidden_subprocess_patch, resolve_hdc_executable, start_hidden_subprocess_window_suppressor
 from aw.autogame.tools.Utils import archive_run_artifacts, get_resolution, resolve_run_archive_dir, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 
@@ -735,6 +735,7 @@ def discover_target_cases(project_case: str) -> list[str]:
 
 def run_testcase_entry(testcase_label: str):
     install_hidden_subprocess_patch()
+    start_hidden_subprocess_window_suppressor()
     LOGGER.info("run_testcase_entry: testcase_label=%s", testcase_label)
     from xdevice.__main__ import main_process
 
@@ -747,6 +748,7 @@ def run_testcase_entry(testcase_label: str):
 
 def run_direct_entry(project_case: str, target_case: str):
     install_hidden_subprocess_patch()
+    start_hidden_subprocess_window_suppressor()
     LOGGER.info(
         "run_direct_entry: project_case=%s target_case=%s",
         project_case,
@@ -3822,8 +3824,9 @@ def main():
     setup_logging()
     install_global_exception_hooks()
     hidden_patch_installed = install_hidden_subprocess_patch()
+    hidden_window_suppressor_started = start_hidden_subprocess_window_suppressor()
     LOGGER.info(
-        "path context: frozen=%s sys_executable=%s __file__=%s APP_DIR=%s INTERNAL_DIR=%s ROOT_DIR=%s TEMP_DIR=%s LOG_DIR=%s PREVIEW_DIR=%s old_cwd=%s new_cwd=%s chdir_error=%s hidden_subprocess_patch=%s",
+        "path context: frozen=%s sys_executable=%s __file__=%s APP_DIR=%s INTERNAL_DIR=%s ROOT_DIR=%s TEMP_DIR=%s LOG_DIR=%s PREVIEW_DIR=%s old_cwd=%s new_cwd=%s chdir_error=%s hidden_subprocess_patch=%s hidden_window_suppressor=%s",
         bool(getattr(sys, "frozen", False)),
         sys.executable,
         __file__,
@@ -3837,6 +3840,7 @@ def main():
         Path.cwd(),
         chdir_error,
         hidden_patch_installed,
+        hidden_window_suppressor_started,
     )
     if is_multiprocessing_child():
         LOGGER.info("detected multiprocessing fork argv=%s", sys.argv)

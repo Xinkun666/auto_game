@@ -24,10 +24,12 @@ from launcher import (
     run_testcase_entry,
     WindowsProcessLaunchTracer,
 )
+from aw.autogame.tools.ProcessUtils import is_window_suppression_enabled
 from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
 from aw.autogame.tools.ProcessUtils import hidden_subprocess_context
 from aw.autogame.tools.ProcessUtils import hdc_command_args
 from aw.autogame.tools.ProcessUtils import install_hidden_subprocess_patch
+from aw.autogame.tools.ProcessUtils import start_hidden_subprocess_window_suppressor
 
 
 class FakeStartupInfo:
@@ -268,6 +270,10 @@ class LauncherLabelToolTests(unittest.TestCase):
     def test_install_hidden_subprocess_patch_is_noop_for_non_windows(self):
         self.assertFalse(install_hidden_subprocess_patch(os_name="posix"))
 
+    def test_window_suppression_is_disabled_off_windows(self):
+        self.assertFalse(is_window_suppression_enabled(os_name="posix"))
+        self.assertFalse(start_hidden_subprocess_window_suppressor(os_name="posix"))
+
     def test_install_hidden_subprocess_patch_does_not_replace_popen_on_windows(self):
         class WindowsSubprocessModule(FakeSubprocessModule):
             Popen = FakePopen
@@ -443,14 +449,44 @@ class LauncherLabelToolTests(unittest.TestCase):
             "launcher.hidden_subprocess_context",
             return_value=context,
         ) as hidden_context:
-            run_testcase_entry("testcases/pubg/pubg_full_flow/auto_pubg")
+            with mock.patch(
+                "launcher.start_hidden_subprocess_window_suppressor",
+                return_value=True,
+            ) as suppressor:
+                run_testcase_entry("testcases/pubg/pubg_full_flow/auto_pubg")
 
+        suppressor.assert_called_once_with()
         hidden_context.assert_called_once_with(
             target_executables=("icpm_xdc.exe", "hdc.exe", "hdc"),
             hide_all=True,
         )
         context.__enter__.assert_called_once_with()
         context.__exit__.assert_called_once()
+        xdevice_main_module.main_process.assert_called_once_with(
+            "run -l testcases/pubg/pubg_full_flow/auto_pubg"
+        )
+
+    def test_run_testcase_entry_wraps_xdevice_with_icpm_xdc_hidden_context_without_window_suppressor_patch(self):
+        xdevice_module = types.ModuleType("xdevice")
+        xdevice_main_module = types.ModuleType("xdevice.__main__")
+        xdevice_main_module.main_process = mock.Mock()
+        context = mock.MagicMock()
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "xdevice": xdevice_module,
+                "xdevice.__main__": xdevice_main_module,
+            },
+        ), mock.patch(
+            "launcher.hidden_subprocess_context",
+            return_value=context,
+        ), mock.patch(
+            "launcher.start_hidden_subprocess_window_suppressor",
+            return_value=False,
+        ):
+            run_testcase_entry("testcases/pubg/pubg_full_flow/auto_pubg")
+
         xdevice_main_module.main_process.assert_called_once_with(
             "run -l testcases/pubg/pubg_full_flow/auto_pubg"
         )

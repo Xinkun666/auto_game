@@ -3,10 +3,13 @@ import os
 import shlex
 import shutil
 import subprocess
+import threading
+import time
 from contextlib import contextmanager
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger("launcher")
+WINDOW_SUPPRESS_ENV = "AUTOGAME_HIDE_SUBPROCESS_WINDOWS"
 
 
 def hidden_subprocess_kwargs(
@@ -79,6 +82,261 @@ def _hidden_creationflags(subprocess_module=subprocess) -> int:
     flags = getattr(subprocess_module, "CREATE_NO_WINDOW", 0)
     flags |= getattr(subprocess_module, "DETACHED_PROCESS", 0)
     return flags
+
+
+def is_window_suppression_enabled(os_name: Optional[str] = None) -> bool:
+    if (os_name or os.name) != "nt":
+        return False
+    value = os.environ.get(WINDOW_SUPPRESS_ENV, "").strip().lower()
+    return value not in {"0", "false", "no", "off", "disabled"}
+
+
+class WindowsSubprocessWindowSuppressor:
+    def __init__(
+        self,
+        root_pid: Optional[int] = None,
+        target_processes: Sequence[str] = (
+            "icpm_xdc.exe",
+            "hdc.exe",
+            "cmd.exe",
+            "conhost.exe",
+            "openconsole.exe",
+        ),
+        direct_hide_processes: Sequence[str] = ("icpm_xdc.exe", "hdc.exe"),
+        interval_seconds: float = 0.02,
+        snapshot_interval_seconds: float = 0.10,
+        os_name: Optional[str] = None,
+    ):
+        self.root_pid = int(root_pid or os.getpid())
+        self.target_processes = {str(name).lower() for name in target_processes}
+        self.direct_hide_processes = {str(name).lower() for name in direct_hide_processes}
+        self.interval_seconds = float(interval_seconds)
+        self.snapshot_interval_seconds = float(snapshot_interval_seconds)
+        self.os_name = os_name
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._hidden_windows: Set[Tuple[int, int]] = set()
+        self._process_snapshot: Dict[int, Tuple[int, str]] = {}
+        self._last_snapshot_time = 0.0
+
+    def start(self) -> bool:
+        if not is_window_suppression_enabled(self.os_name):
+            LOGGER.info(
+                "subprocess window suppression disabled: os_name=%s env=%s",
+                self.os_name or os.name,
+                os.environ.get(WINDOW_SUPPRESS_ENV),
+            )
+            return False
+        if self._thread is not None:
+            return True
+
+        self._thread = threading.Thread(
+            target=self._run,
+            name="autogame-window-suppressor",
+            daemon=True,
+        )
+        self._thread.start()
+        LOGGER.info(
+            "subprocess window suppression started: root_pid=%s targets=%s direct=%s interval=%.3f",
+            self.root_pid,
+            sorted(self.target_processes),
+            sorted(self.direct_hide_processes),
+            self.interval_seconds,
+        )
+        return True
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        thread = self._thread
+        self._thread = None
+        if thread is not None:
+            thread.join(timeout=1.0)
+
+    def _run(self) -> None:
+        try:
+            import ctypes
+            from ctypes import wintypes
+        except Exception:
+            LOGGER.debug("subprocess window suppression unavailable", exc_info=True)
+            return
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+        user32.EnumWindows.restype = wintypes.BOOL
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        user32.GetWindowTextLengthW.restype = ctypes.c_int
+        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetWindowTextW.restype = ctypes.c_int
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindow.restype = wintypes.BOOL
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        psapi.GetModuleFileNameExW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.HMODULE,
+            wintypes.LPWSTR,
+            wintypes.DWORD,
+        ]
+        psapi.GetModuleFileNameExW.restype = wintypes.DWORD
+
+        SW_HIDE = 0
+
+        def enum_callback(hwnd, _lparam):
+            if self._stop_event.is_set():
+                return False
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            pid_value = wintypes.DWORD(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid_value))
+            pid = int(pid_value.value)
+            if pid <= 0:
+                return True
+
+            process_name = self._process_name(pid)
+            if process_name not in self.target_processes:
+                return True
+            if not self._should_hide_process(pid, process_name):
+                return True
+
+            title = self._window_title(user32, hwnd)
+            user32.ShowWindow(hwnd, SW_HIDE)
+            key = (int(hwnd), pid)
+            if key not in self._hidden_windows:
+                self._hidden_windows.add(key)
+                LOGGER.info(
+                    "subprocess window hidden: hwnd=%s pid=%s name=%s title=%s root_pid=%s",
+                    int(hwnd),
+                    pid,
+                    process_name,
+                    title,
+                    self.root_pid,
+                )
+            return True
+
+        callback = callback_type(enum_callback)
+        while not self._stop_event.is_set():
+            now = time.monotonic()
+            if now - self._last_snapshot_time >= self.snapshot_interval_seconds:
+                self._process_snapshot = self._snapshot_processes()
+                self._last_snapshot_time = now
+            try:
+                user32.EnumWindows(callback, 0)
+            except Exception:
+                LOGGER.debug("subprocess window enumeration failed", exc_info=True)
+            self._stop_event.wait(self.interval_seconds)
+
+    def _window_title(self, user32, hwnd) -> str:
+        try:
+            length = int(user32.GetWindowTextLengthW(hwnd))
+            if length <= 0:
+                return ""
+            import ctypes
+
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buffer, length + 1)
+            return buffer.value
+        except Exception:
+            return ""
+
+    def _process_name(self, pid: int) -> str:
+        item = self._process_snapshot.get(int(pid))
+        return item[1] if item else ""
+
+    def _should_hide_process(self, pid: int, process_name: str) -> bool:
+        process_name = process_name.lower()
+        if process_name in self.direct_hide_processes:
+            return True
+        return self._is_descendant_of_root(pid)
+
+    def _is_descendant_of_root(self, pid: int) -> bool:
+        current = int(pid)
+        seen: Set[int] = set()
+        while current and current not in seen:
+            if current == self.root_pid:
+                return True
+            seen.add(current)
+            parent = self._process_snapshot.get(current)
+            if not parent:
+                return False
+            current = int(parent[0])
+        return False
+
+    def _snapshot_processes(self) -> Dict[int, Tuple[int, str]]:
+        try:
+            import ctypes
+            from ctypes import wintypes
+        except Exception:
+            return {}
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        TH32CS_SNAPPROCESS = 0x00000002
+        INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.POINTER(wintypes.ULONG)),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if snapshot == INVALID_HANDLE_VALUE:
+            return self._process_snapshot
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            result: Dict[int, Tuple[int, str]] = {}
+            if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+                return result
+            while True:
+                result[int(entry.th32ProcessID)] = (
+                    int(entry.th32ParentProcessID),
+                    str(entry.szExeFile).lower(),
+                )
+                if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                    break
+            return result
+        finally:
+            kernel32.CloseHandle(snapshot)
+
+
+_window_suppressor: Optional[WindowsSubprocessWindowSuppressor] = None
+
+
+def start_hidden_subprocess_window_suppressor(
+    root_pid: Optional[int] = None,
+    os_name: Optional[str] = None,
+) -> bool:
+    global _window_suppressor
+    if _window_suppressor is None:
+        _window_suppressor = WindowsSubprocessWindowSuppressor(
+            root_pid=root_pid,
+            os_name=os_name,
+        )
+    return _window_suppressor.start()
 
 
 def _should_hide_command(command: Any, target_executables: Iterable[str]) -> bool:

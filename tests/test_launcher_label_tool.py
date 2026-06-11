@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 from pathlib import Path
 from unittest import mock
@@ -91,6 +92,43 @@ class FakeProcess:
 
     def wait(self):
         return 0
+
+
+class BlockingStdout:
+    def __init__(self):
+        self.closed = False
+        self.read_started = threading.Event()
+        self.release_read = threading.Event()
+
+    def read(self, _size):
+        self.read_started.set()
+        self.release_read.wait(timeout=5)
+        return b""
+
+    def close(self):
+        self.closed = True
+        self.release_read.set()
+
+
+class KillableFakeProcess:
+    pid = 987654321
+
+    def __init__(self):
+        self.stdout = BlockingStdout()
+        self.returncode = None
+        self.killed = False
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+    def wait(self, timeout=None):
+        if self.returncode is None:
+            self.returncode = -9
+        return self.returncode
 
 
 class LauncherLabelToolTests(unittest.TestCase):
@@ -230,6 +268,25 @@ class LauncherLabelToolTests(unittest.TestCase):
         self.assertEqual(subprocess.DEVNULL, popen.call_args.kwargs["stdin"])
         self.assertEqual(subprocess.PIPE, popen.call_args.kwargs["stdout"])
         self.assertEqual(subprocess.STDOUT, popen.call_args.kwargs["stderr"])
+
+    def test_hidden_subprocess_kill_closes_stdout_pipe_to_unblock_reader(self):
+        process = HiddenSubprocess()
+        process.setProgram("AutoGameLauncher.exe")
+        fake_process = KillableFakeProcess()
+
+        with mock.patch(
+            "launcher.hidden_subprocess_kwargs",
+            return_value={},
+        ), mock.patch(
+            "launcher.subprocess.Popen",
+            return_value=fake_process,
+        ):
+            process.start()
+            self.assertTrue(fake_process.stdout.read_started.wait(timeout=1))
+            process.kill()
+
+        self.assertTrue(fake_process.killed)
+        self.assertTrue(fake_process.stdout.closed)
 
     def test_process_launch_tracer_is_disabled_off_windows(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -597,6 +597,7 @@ class HiddenSubprocess(QObject):
     readyReadStandardOutput = pyqtSignal()
     finished = pyqtSignal(int, object)
     errorOccurred = pyqtSignal(object)
+    FORCED_STOP_FINISH_TIMEOUT_SECONDS = 5.0
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -610,6 +611,10 @@ class HiddenSubprocess(QObject):
         self._error_string = ""
         self._output_buffer = bytearray()
         self._output_lock = threading.Lock()
+        self._finish_lock = threading.Lock()
+        self._finished_emitted = False
+        self._forced_stop_watcher_started = False
+        self._forced_stop_requested = False
 
     def setProgram(self, program: str):
         self._program = str(program)
@@ -629,6 +634,14 @@ class HiddenSubprocess(QObject):
     def start(self):
         self._state = QProcess.ProcessState.Starting
         command = [self._program, *self._arguments]
+        popen_kwargs = hidden_subprocess_kwargs()
+        if os.name == "nt":
+            create_new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            if create_new_group:
+                popen_kwargs["creationflags"] = int(popen_kwargs.get("creationflags", 0)) | create_new_group
+        else:
+            popen_kwargs["start_new_session"] = True
+
         try:
             self._proc = subprocess.Popen(
                 command,
@@ -637,7 +650,7 @@ class HiddenSubprocess(QObject):
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                **hidden_subprocess_kwargs(),
+                **popen_kwargs,
             )
         except Exception as exc:
             self._proc = None
@@ -648,6 +661,9 @@ class HiddenSubprocess(QObject):
             return
 
         self._state = QProcess.ProcessState.Running
+        self._finished_emitted = False
+        self._forced_stop_watcher_started = False
+        self._forced_stop_requested = False
         reader = threading.Thread(target=self._read_process_output, daemon=True)
         reader.start()
 
@@ -673,11 +689,105 @@ class HiddenSubprocess(QObject):
 
     def terminate(self):
         if self._proc is not None and self._proc.poll() is None:
-            self._proc.terminate()
+            self._terminate_process_tree(force=False)
 
     def kill(self):
-        if self._proc is not None and self._proc.poll() is None:
-            self._proc.kill()
+        if self._proc is None:
+            return
+        self._forced_stop_requested = True
+        if self._proc.poll() is None:
+            self._terminate_process_tree(force=True)
+        self._close_stdout_pipe()
+        self._start_forced_stop_watcher()
+
+    def _terminate_process_tree(self, force: bool):
+        proc = self._proc
+        if proc is None:
+            return
+
+        if os.name == "nt":
+            command = ["taskkill", "/PID", str(int(proc.pid)), "/T"]
+            if force:
+                command.append("/F")
+            try:
+                subprocess.run(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    **hidden_subprocess_kwargs(),
+                )
+                return
+            except Exception:
+                pass
+
+        elif getattr(proc, "pid", None):
+            try:
+                pgid = os.getpgid(int(proc.pid))
+                os.killpg(pgid, signal.SIGKILL if force else signal.SIGTERM)
+                return
+            except Exception:
+                pass
+
+        try:
+            if force:
+                proc.kill()
+            else:
+                proc.terminate()
+        except Exception:
+            pass
+
+    def _close_stdout_pipe(self):
+        proc = self._proc
+        stdout = getattr(proc, "stdout", None) if proc is not None else None
+        if stdout is None:
+            return
+        try:
+            stdout.close()
+        except Exception:
+            pass
+
+    def _start_forced_stop_watcher(self):
+        if self._forced_stop_watcher_started:
+            return
+        self._forced_stop_watcher_started = True
+        watcher = threading.Thread(
+            target=self._finish_after_forced_stop,
+            name="hidden-subprocess-forced-stop",
+            daemon=True,
+        )
+        watcher.start()
+
+    def _finish_after_forced_stop(self):
+        proc = self._proc
+        if proc is None:
+            return
+
+        try:
+            exit_code = proc.wait(timeout=self.FORCED_STOP_FINISH_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            self._terminate_process_tree(force=True)
+            try:
+                exit_code = proc.wait(timeout=1)
+            except Exception:
+                exit_code = proc.returncode if proc.returncode is not None else -9
+        except Exception:
+            exit_code = proc.returncode if proc.returncode is not None else 1
+
+        self._close_stdout_pipe()
+        self._emit_finished_once(
+            int(exit_code if exit_code is not None else -9),
+            QProcess.ExitStatus.CrashExit,
+        )
+
+    def _emit_finished_once(self, exit_code: int, exit_status):
+        with self._finish_lock:
+            if self._finished_emitted:
+                return
+            self._finished_emitted = True
+            self._state = QProcess.ProcessState.NotRunning
+        self.finished.emit(int(exit_code), exit_status)
 
     def readAllStandardOutput(self) -> QByteArray:
         with self._output_lock:
@@ -709,17 +819,16 @@ class HiddenSubprocess(QObject):
                         self._output_buffer.extend(chunk)
                     self.readyReadStandardOutput.emit()
             exit_code = self._proc.wait()
-            self._state = QProcess.ProcessState.NotRunning
-            self.finished.emit(
+            self._emit_finished_once(
                 int(exit_code),
                 QProcess.ExitStatus.NormalExit,
             )
         except Exception as exc:
-            self._state = QProcess.ProcessState.NotRunning
             self._error = QProcess.ProcessError.Crashed
             self._error_string = str(exc)
-            self.errorOccurred.emit(self._error)
-            self.finished.emit(
+            if not self._forced_stop_requested:
+                self.errorOccurred.emit(self._error)
+            self._emit_finished_once(
                 self._proc.returncode if self._proc.returncode is not None else 1,
                 QProcess.ExitStatus.CrashExit,
             )

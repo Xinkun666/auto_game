@@ -131,6 +131,7 @@ class RCityEntryLogicTests(unittest.TestCase):
         self.manager.r_city_side_probe_target = None
         self.manager.r_city_side_probe_count = 0
         self.manager.find_largest_door = lambda w: "door"
+        self.manager._find_largest_forward_target = lambda w, class_ids: None
         self.manager._nearest_r_city_body_target = lambda loc, max_distance: (target, 2.0)
         self.manager.stop_auto_forward = lambda w: events.append("stop")
         self.manager._handle_r_city_door_entry_step = (
@@ -144,6 +145,40 @@ class RCityEntryLogicTests(unittest.TestCase):
         self.assertEqual(self.manager.status, self.manager.STATUS_SCENE_ENTRY)
         self.assertEqual(self.manager.history_locations, [])
         self.assertEqual(events, ["stop", ("door_step", "door")])
+
+    def test_visible_window_in_r_city_interrupts_navigation_and_enters_window_flow(self):
+        events = []
+        target = {
+            "id": "r_city_near",
+            "location": (102, 100),
+            "approach_location": (102, 100),
+            "entry_direction": 90,
+        }
+        self.manager.current_house_id = "r_city_old"
+        self.manager.status = "FAST_NAV"
+        self.manager.r_city_near_distance = 30.0
+        self.manager.history_locations = [(100, 100)]
+        self.manager.r_city_route_target = "route"
+        self.manager.r_city_route_path = [(100, 100)]
+        self.manager.r_city_route_index = 1
+        self.manager.r_city_entry_large_backoff_count = 2
+        self.manager.r_city_side_probe_target = None
+        self.manager.r_city_side_probe_count = 0
+        self.manager.find_largest_door = lambda w: None
+        self.manager._find_largest_forward_target = lambda w, class_ids: "window"
+        self.manager._nearest_r_city_body_target = lambda loc, max_distance: (target, 2.0)
+        self.manager.stop_auto_forward = lambda w: events.append("stop")
+        self.manager._handle_r_city_window_entry_step = (
+            lambda w, window: events.append(("window_step", window)) or "retry"
+        )
+
+        handled = self.manager._maybe_enter_visible_r_city_door(object(), (100, 100))
+
+        self.assertTrue(handled)
+        self.assertEqual(self.manager.current_house_id, "r_city_near")
+        self.assertEqual(self.manager.status, self.manager.STATUS_SCENE_ENTRY)
+        self.assertEqual(self.manager.history_locations, [])
+        self.assertEqual(events, ["stop", ("window_step", "window")])
 
     def test_visual_alignment_refreshes_through_blocking_refresh_before_next_step(self):
         events = []

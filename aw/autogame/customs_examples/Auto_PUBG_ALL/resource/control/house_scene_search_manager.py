@@ -342,7 +342,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         if (
             self.status != self.STATUS_SCENE_ENTRY
-            and self._maybe_enter_visible_r_city_door(w, current_loc)
+            and self._maybe_enter_visible_r_city_entry_target(w, current_loc)
         ):
             return
 
@@ -905,36 +905,59 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.history_locations = []
         return True
 
-    def _maybe_enter_visible_r_city_door(self, w: "FrameWorker", current_loc) -> bool:
-        door = self.find_largest_door(w)
-        if door is None:
+    def _maybe_enter_visible_r_city_entry_target(self, w: "FrameWorker", current_loc) -> bool:
+        door, window = self._find_r_city_entry_visual_targets(w)
+        label, visual_target = self._choose_r_city_entry_visual_target(door, window)
+        if label is None:
             return False
 
+        return self._enter_visible_r_city_entry_target(w, current_loc, label, visual_target)
+
+    def _maybe_enter_visible_r_city_door(self, w: "FrameWorker", current_loc) -> bool:
+        return self._maybe_enter_visible_r_city_entry_target(w, current_loc)
+
+    def _enter_visible_r_city_entry_target(
+        self,
+        w: "FrameWorker",
+        current_loc,
+        label: str,
+        visual_target,
+    ) -> bool:
         target, distance = self._nearest_r_city_body_target(
             current_loc,
             max(self.r_city_near_distance, self.R_CITY_BODY_ENTRY_DISTANCE),
         )
         if target is None and not self.current_r_city_target:
             return False
+
+        label_text = "门" if label == "door" else "窗"
         if target is not None and self.current_house_id != target["id"]:
             print(
-                f"[RCityEntry] R城内视野已见门，就近改锁 {target['id']} "
+                f"[RCityEntry] R城内视野已见{label_text}，就近改锁 {target['id']} "
                 f"body_dist={distance:.2f}"
             )
             self._lock_r_city_target(target)
         else:
-            print("[RCityEntry] R城内视野已见门，停止导航并直接对门前推")
+            print(f"[RCityEntry] R城内视野已见{label_text}，停止导航并直接进房")
 
         self.stop_auto_forward(w)
         self.status = self.STATUS_SCENE_ENTRY
         self.history_locations = []
 
-        result = self._handle_r_city_door_entry_step(w, door)
+        if label == "door":
+            result = self._handle_r_city_door_entry_step(w, visual_target)
+            success_reason = "R城视野见门直接进房"
+            fail_reason = "R城视野见门进房失败"
+        else:
+            result = self._handle_r_city_window_entry_step(w, visual_target)
+            success_reason = "R城视野见窗直接进房"
+            fail_reason = "R城视野见窗进房失败"
+
         if result == "success":
-            self._complete_current_house_search(w, "R城视野见门直接进房")
+            self._complete_current_house_search(w, success_reason)
         elif result == "large_backoff":
             if not self._perform_r_city_large_backoff_and_realign(w):
-                self._mark_current_r_city_target_failed("R城视野见门进房失败")
+                self._mark_current_r_city_target_failed(fail_reason)
                 self.status = "IDLE"
         return True
 

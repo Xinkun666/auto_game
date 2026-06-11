@@ -21,6 +21,7 @@ from PyQt6.QtCore import QByteArray, QObject, QProcess, QProcessEnvironment, Qt,
 from PyQt6.QtGui import QColor, QDesktopServices, QPainter, QPen, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -281,6 +282,12 @@ def close_pyinstaller_splash(context: str) -> bool:
 def resolve_screen_mode_for_test_profile(test_profile: str) -> str:
     profile = str(test_profile or "").strip().lower()
     return TEST_PROFILE_SCREEN_MODES.get(profile, TEST_PROFILE_SCREEN_MODES["power"])
+
+
+def resolve_test_profile_from_radio_selection(power_checked: bool, function_checked: bool) -> str:
+    if function_checked:
+        return "function"
+    return "power"
 
 
 def write_screen_mode_config(screen_mode: str, config_path: Path = AUTOGAME_CONFIG_FILE) -> None:
@@ -1097,10 +1104,20 @@ class LauncherWindow(QWidget):
             [1, 3, 5, 8, 10],
         )
 
-        self.test_profile_combo = QComboBox()
-        self.test_profile_combo.addItem("功耗测试", "power")
-        self.test_profile_combo.addItem("功能测试", "function")
-        self.test_profile_combo.setCurrentIndex(0)
+        self.test_profile_field = QWidget()
+        self.test_profile_layout = QHBoxLayout(self.test_profile_field)
+        self.test_profile_layout.setContentsMargins(0, 0, 0, 0)
+        self.test_profile_layout.setSpacing(10)
+        self.power_test_radio = QRadioButton("功耗测试")
+        self.function_test_radio = QRadioButton("功能测试")
+        self.power_test_radio.setChecked(True)
+        self.test_profile_button_group = QButtonGroup(self)
+        self.test_profile_button_group.setExclusive(True)
+        self.test_profile_button_group.addButton(self.power_test_radio)
+        self.test_profile_button_group.addButton(self.function_test_radio)
+        self.test_profile_layout.addWidget(self.power_test_radio)
+        self.test_profile_layout.addWidget(self.function_test_radio)
+        self.test_profile_layout.addStretch(1)
 
         self.case_loop_count_spin = QSpinBox()
         self.case_loop_count_spin.setRange(1, 999)
@@ -1778,7 +1795,7 @@ class LauncherWindow(QWidget):
         add_config_item(0, 0, "project_case", self.project_combo)
         add_config_item(0, 1, "target_case", self.target_combo)
         add_config_item(1, 0, "运行次数", self.run_count_field)
-        add_config_item(1, 1, "测试类型", self.test_profile_combo)
+        add_config_item(1, 1, "测试类型", self.test_profile_field)
         add_config_item(2, 0, "单次循环", self.case_loop_count_field)
         add_config_item(2, 1, "安全温度", self.safe_temp_field)
         add_config_item(3, 0, "安全电量", self.safe_battery_field)
@@ -2503,7 +2520,7 @@ class LauncherWindow(QWidget):
         self.project_combo.setEnabled(enabled)
         self.target_combo.setEnabled(enabled)
         self.run_count_spin.setEnabled(enabled)
-        self.test_profile_combo.setEnabled(enabled)
+        self.test_profile_field.setEnabled(enabled)
         self.case_loop_count_spin.setEnabled(enabled)
         self.safe_temp_spin.setEnabled(enabled)
         self.safe_battery_spin.setEnabled(enabled)
@@ -2881,7 +2898,10 @@ class LauncherWindow(QWidget):
         )
         cleanup_apps.update(extract_package_names(target_logic_file))
 
-        test_profile = self.test_profile_combo.currentData() or "power"
+        test_profile = resolve_test_profile_from_radio_selection(
+            self.power_test_radio.isChecked(),
+            self.function_test_radio.isChecked(),
+        )
         screen_mode = resolve_screen_mode_for_test_profile(test_profile)
         plan = {
             "mode": mode,

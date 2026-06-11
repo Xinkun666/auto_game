@@ -21,6 +21,7 @@ from launcher import (
     is_multiprocessing_child,
     resolve_app_paths,
     resolve_preview_frame_dir,
+    resolve_test_profile_from_radio_selection,
     resolve_screen_mode_for_test_profile,
     resolve_label_project_dir,
     resolve_runtime_temp_dir,
@@ -138,6 +139,11 @@ class LauncherLabelToolTests(unittest.TestCase):
     def test_test_profile_maps_to_expected_screen_mode(self):
         self.assertEqual("0", resolve_screen_mode_for_test_profile("power"))
         self.assertEqual("1", resolve_screen_mode_for_test_profile("function"))
+
+    def test_test_profile_radio_selection_defaults_to_power(self):
+        self.assertEqual("power", resolve_test_profile_from_radio_selection(True, False))
+        self.assertEqual("function", resolve_test_profile_from_radio_selection(False, True))
+        self.assertEqual("power", resolve_test_profile_from_radio_selection(False, False))
 
     def test_write_screen_mode_config_preserves_other_config_values(self):
         with tempfile.TemporaryDirectory() as temp_dir:

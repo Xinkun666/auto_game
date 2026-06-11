@@ -10,6 +10,8 @@ from unittest import mock
 from launcher import (
     apply_pyinstaller_splash_suppression,
     build_restart_device_commands,
+    build_launcher_plan_env_values,
+    check_capture_stream_for_screen_mode,
     CUSTOMS_EXAMPLES_DIR,
     discover_history_outputs,
     find_latest_preview_frame,
@@ -19,9 +21,11 @@ from launcher import (
     is_multiprocessing_child,
     resolve_app_paths,
     resolve_preview_frame_dir,
+    resolve_screen_mode_for_test_profile,
     resolve_label_project_dir,
     resolve_runtime_temp_dir,
     run_testcase_entry,
+    write_screen_mode_config,
     WindowsProcessLaunchTracer,
 )
 from aw.autogame.tools.ProcessUtils import is_window_suppression_enabled
@@ -130,6 +134,73 @@ class LauncherLabelToolTests(unittest.TestCase):
 
         self.assertEqual("1", env.values["PYINSTALLER_SUPPRESS_SPLASH_SCREEN"])
         self.assertEqual("0", env.values["_PYI_SPLASH_IPC"])
+
+    def test_test_profile_maps_to_expected_screen_mode(self):
+        self.assertEqual("0", resolve_screen_mode_for_test_profile("power"))
+        self.assertEqual("1", resolve_screen_mode_for_test_profile("function"))
+
+    def test_write_screen_mode_config_preserves_other_config_values(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "screen_mode": "0",
+                        "touch_backend": "sendevent",
+                        "width": 768,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            write_screen_mode_config("1", config_path)
+
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual("1", config["screen_mode"])
+            self.assertEqual("sendevent", config["touch_backend"])
+            self.assertEqual(768, config["width"])
+
+    def test_launcher_plan_env_values_include_profile_and_case_loop_count(self):
+        env_values = build_launcher_plan_env_values(
+            {
+                "test_profile": "function",
+                "screen_mode": "1",
+                "case_loop_count": 2,
+            }
+        )
+
+        self.assertEqual("function", env_values["AUTOGAME_TEST_PROFILE"])
+        self.assertEqual("1", env_values["AUTOGAME_SCREEN_MODE"])
+        self.assertEqual("2", env_values["AUTOGAME_SINGLE_CASE_LOOPS"])
+
+    def test_capture_stream_check_for_hdc_mode_validates_snapshot_image(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            created_image = temp_root / "created.jpeg"
+
+            def fake_run(command, **_kwargs):
+                if command[:3] == ["hdc", "shell", "snapshot_display"]:
+                    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+                if command[:3] == ["hdc", "file", "recv"]:
+                    from PIL import Image
+
+                    local_path = Path(command[4])
+                    Image.new("RGB", (2, 2), color=(1, 2, 3)).save(local_path)
+                    created_image.write_text("ok", encoding="utf-8")
+                    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+                if command[:3] == ["hdc", "shell", "rm"]:
+                    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+                raise AssertionError(f"unexpected command: {command}")
+
+            with mock.patch("launcher.resolve_hdc_executable", return_value="hdc"), mock.patch(
+                "launcher.subprocess.run",
+                side_effect=fake_run,
+            ):
+                result = check_capture_stream_for_screen_mode("1", temp_root=temp_root)
+
+            self.assertTrue(result.ok, result.message)
+            self.assertTrue(created_image.exists())
 
     def test_hidden_subprocess_starts_with_hidden_kwargs(self):
         process = HiddenSubprocess()

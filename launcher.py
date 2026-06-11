@@ -83,6 +83,7 @@ APP_PATHS = resolve_app_paths()
 APP_DIR = APP_PATHS.app_dir
 INTERNAL_DIR = APP_PATHS.internal_dir
 ROOT_DIR = APP_PATHS.root_dir
+AUTOGAME_CONFIG_FILE = ROOT_DIR / "aw" / "autogame" / "config" / "config.json"
 TESTCASES_DIR = APP_DIR / "testcases"
 CUSTOMS_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_examples"
 CUSTOMS_GAME_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_game_examples"
@@ -98,6 +99,7 @@ PYINSTALLER_SPLASH_IPC_ENV = "_PYI_SPLASH_IPC"
 PROCESS_TRACE_ENV = "AUTOGAME_PROCESS_TRACE"
 STREAM_CONNECTED_MARKERS = (
     "[Stream] Start receiving...",
+    "[HDC] First frame received.",
 )
 REBOOT_RELAUNCH_DELAY_SECONDS = 10
 STREAM_DISCONNECT_SP_LONG_PRESS_MS = 3000
@@ -109,6 +111,8 @@ STREAM_DISCONNECT_PATTERNS = (
     "[Stream] Receive loop ended unexpectedly.",
     "[Stream] gRPC Error:",
     "[Stream] Runtime Error:",
+    "[HDC] Frame ready timeout.",
+    "[HDC] Consecutive capture failures exceeded.",
 )
 SP_RECORD_EVER_STARTED_MARKERS = (
     "[Timer] sp 记录已开始",
@@ -119,6 +123,15 @@ DISMISS_REBOOT_PROMPT_ENV = "AUTOGAME_DISMISS_REBOOT_PROMPT"
 DEVICE_LOG_SETTLE_TIMEOUT_SECONDS = 3.0
 DEVICE_LOG_SETTLE_INTERVAL_SECONDS = 0.2
 DEVICE_LOG_STOP_WAIT_TIMEOUT_SECONDS = 15.0
+TEST_PROFILE_SCREEN_MODES = {
+    "power": "0",
+    "function": "1",
+}
+
+
+class CaptureStreamCheckResult(NamedTuple):
+    ok: bool
+    message: str
 
 
 def setup_logging():
@@ -263,6 +276,135 @@ def close_pyinstaller_splash(context: str) -> bool:
     except Exception:
         LOGGER.debug("pyinstaller splash close failed: context=%s", context, exc_info=True)
         return False
+
+
+def resolve_screen_mode_for_test_profile(test_profile: str) -> str:
+    profile = str(test_profile or "").strip().lower()
+    return TEST_PROFILE_SCREEN_MODES.get(profile, TEST_PROFILE_SCREEN_MODES["power"])
+
+
+def write_screen_mode_config(screen_mode: str, config_path: Path = AUTOGAME_CONFIG_FILE) -> None:
+    config_path = Path(config_path)
+    screen_mode = str(screen_mode).strip()
+    if screen_mode not in {"0", "1"}:
+        raise ValueError(f"unsupported screen_mode: {screen_mode}")
+
+    config = {}
+    if config_path.exists():
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        if not isinstance(config, dict):
+            raise ValueError(f"config must be a json object: {config_path}")
+
+    config["screen_mode"] = screen_mode
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
+    tmp_path.write_text(
+        json.dumps(config, ensure_ascii=False, indent=4),
+        encoding="utf-8",
+    )
+    tmp_path.replace(config_path)
+
+
+def build_launcher_plan_env_values(plan: Optional[dict]) -> dict[str, str]:
+    plan = plan or {}
+    test_profile = str(plan.get("test_profile") or "power")
+    screen_mode = str(plan.get("screen_mode") or resolve_screen_mode_for_test_profile(test_profile))
+    case_loop_count = int(plan.get("case_loop_count") or 1)
+    return {
+        "AUTOGAME_TEST_PROFILE": test_profile,
+        "AUTOGAME_SCREEN_MODE": screen_mode,
+        "AUTOGAME_SINGLE_CASE_LOOPS": str(max(1, case_loop_count)),
+    }
+
+
+def _completed_process_text(result: subprocess.CompletedProcess) -> str:
+    stdout = result.stdout.decode("utf-8", errors="replace") if isinstance(result.stdout, bytes) else (result.stdout or "")
+    stderr = result.stderr.decode("utf-8", errors="replace") if isinstance(result.stderr, bytes) else (result.stderr or "")
+    text = (stdout + stderr).strip()
+    return text[:500]
+
+
+def check_capture_stream_for_screen_mode(
+    screen_mode: str,
+    temp_root: Path = TEMP_DIR,
+    timeout: float = 8.0,
+) -> CaptureStreamCheckResult:
+    screen_mode = str(screen_mode).strip()
+    if screen_mode == "0":
+        return CaptureStreamCheckResult(
+            True,
+            "低功耗拉流模式会在用例启动后由 launcher 监听首帧和断流信号。",
+        )
+    if screen_mode != "1":
+        return CaptureStreamCheckResult(False, f"未知 screen_mode: {screen_mode}")
+
+    from PIL import Image
+
+    temp_root = Path(temp_root)
+    check_dir = temp_root / "launcher_capture_check"
+    check_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d%H%M%S")
+    remote_path = f"/data/local/tmp/autogame_launcher_capture_check_{timestamp}.jpeg"
+    local_path = check_dir / f"capture_check_{timestamp}.jpeg"
+    hdc_executable = resolve_hdc_executable()
+
+    try:
+        snap_result = subprocess.run(
+            [hdc_executable, "shell", "snapshot_display", "-f", remote_path],
+            cwd=str(APP_DIR),
+            capture_output=True,
+            timeout=timeout,
+            **hidden_subprocess_kwargs(),
+        )
+        if snap_result.returncode != 0:
+            return CaptureStreamCheckResult(
+                False,
+                f"HDC 截图失败: {_completed_process_text(snap_result)}",
+            )
+
+        recv_result = subprocess.run(
+            [hdc_executable, "file", "recv", remote_path, str(local_path)],
+            cwd=str(APP_DIR),
+            capture_output=True,
+            timeout=timeout,
+            **hidden_subprocess_kwargs(),
+        )
+        if recv_result.returncode != 0:
+            return CaptureStreamCheckResult(
+                False,
+                f"HDC 拉取截图失败: {_completed_process_text(recv_result)}",
+            )
+
+        if not local_path.exists() or local_path.stat().st_size <= 0:
+            return CaptureStreamCheckResult(False, "HDC 截图文件为空")
+
+        with Image.open(local_path) as img:
+            img.verify()
+            width, height = img.size
+        if width <= 0 or height <= 0:
+            return CaptureStreamCheckResult(False, "HDC 截图尺寸异常")
+
+        return CaptureStreamCheckResult(True, f"HDC 截图预检通过: {width}x{height}")
+    except subprocess.TimeoutExpired as exc:
+        return CaptureStreamCheckResult(False, f"HDC 截图预检超时: {exc}")
+    except Exception as exc:
+        return CaptureStreamCheckResult(False, f"HDC 截图预检异常: {exc}")
+    finally:
+        try:
+            subprocess.run(
+                [hdc_executable, "shell", "rm", remote_path],
+                cwd=str(APP_DIR),
+                capture_output=True,
+                timeout=2,
+                **hidden_subprocess_kwargs(),
+            )
+        except Exception:
+            pass
+        try:
+            if local_path.exists():
+                local_path.unlink()
+        except Exception:
+            pass
 
 
 def _powershell_single_quote(value: str) -> str:
@@ -955,6 +1097,19 @@ class LauncherWindow(QWidget):
             [1, 3, 5, 8, 10],
         )
 
+        self.test_profile_combo = QComboBox()
+        self.test_profile_combo.addItem("功耗测试", "power")
+        self.test_profile_combo.addItem("功能测试", "function")
+        self.test_profile_combo.setCurrentIndex(0)
+
+        self.case_loop_count_spin = QSpinBox()
+        self.case_loop_count_spin.setRange(1, 999)
+        self.case_loop_count_spin.setValue(1)
+        self.case_loop_count_field = self._create_spin_with_presets(
+            self.case_loop_count_spin,
+            [1, 2, 3, 5],
+        )
+
         self.safe_temp_spin = QDoubleSpinBox()
         self.safe_temp_spin.setRange(0.0, 100.0)
         self.safe_temp_spin.setDecimals(1)
@@ -1578,7 +1733,7 @@ class LauncherWindow(QWidget):
 
         controls_widget = QWidget()
         controls_widget.setObjectName("controlsPanel")
-        controls_widget.setFixedHeight(380)
+        controls_widget.setFixedHeight(420)
         controls_layout = QVBoxLayout(controls_widget)
         controls_layout.setContentsMargins(0, 0, 4, 0)
         controls_layout.setSpacing(10)
@@ -1607,7 +1762,7 @@ class LauncherWindow(QWidget):
         controls_layout.addLayout(launch_row)
 
         config_group = QGroupBox("配置")
-        config_group.setFixedHeight(250)
+        config_group.setFixedHeight(290)
         config_layout = QGridLayout(config_group)
         config_layout.setContentsMargins(12, 8, 12, 10)
         config_layout.setHorizontalSpacing(12)
@@ -1623,11 +1778,13 @@ class LauncherWindow(QWidget):
         add_config_item(0, 0, "project_case", self.project_combo)
         add_config_item(0, 1, "target_case", self.target_combo)
         add_config_item(1, 0, "运行次数", self.run_count_field)
-        add_config_item(1, 1, "安全温度", self.safe_temp_field)
-        add_config_item(2, 0, "安全电量", self.safe_battery_field)
-        add_config_item(2, 1, "安全时间", self.safe_time_field)
-        add_config_item(3, 0, "无操控超时", self.inactivity_timeout_field)
-        config_layout.addWidget(self.refresh_button, 3, 3)
+        add_config_item(1, 1, "测试类型", self.test_profile_combo)
+        add_config_item(2, 0, "单次循环", self.case_loop_count_field)
+        add_config_item(2, 1, "安全温度", self.safe_temp_field)
+        add_config_item(3, 0, "安全电量", self.safe_battery_field)
+        add_config_item(3, 1, "安全时间", self.safe_time_field)
+        add_config_item(4, 0, "无操控超时", self.inactivity_timeout_field)
+        config_layout.addWidget(self.refresh_button, 4, 3)
 
         config_layout.setColumnStretch(1, 1)
         config_layout.setColumnStretch(3, 1)
@@ -2298,6 +2455,8 @@ class LauncherWindow(QWidget):
         env.insert("AUTOGAME_RUN_INDEX", str(int(run_no)))
         env.insert("AUTOGAME_DEVICE_LOG_PATH", str(LOG_DIR / f"{target_case}.txt"))
         env.insert("AUTOGAME_EXIT_ON_STREAM_DISCONNECT", "1")
+        for key, value in build_launcher_plan_env_values(self.current_plan).items():
+            env.insert(key, value)
         if self.dismiss_reboot_prompt_on_next_case_start:
             env.insert(DISMISS_REBOOT_PROMPT_ENV, "1")
         if self.current_batch_start_timestamp:
@@ -2344,6 +2503,8 @@ class LauncherWindow(QWidget):
         self.project_combo.setEnabled(enabled)
         self.target_combo.setEnabled(enabled)
         self.run_count_spin.setEnabled(enabled)
+        self.test_profile_combo.setEnabled(enabled)
+        self.case_loop_count_spin.setEnabled(enabled)
         self.safe_temp_spin.setEnabled(enabled)
         self.safe_battery_spin.setEnabled(enabled)
         self.safe_time_spin.setEnabled(enabled)
@@ -2720,12 +2881,17 @@ class LauncherWindow(QWidget):
         )
         cleanup_apps.update(extract_package_names(target_logic_file))
 
+        test_profile = self.test_profile_combo.currentData() or "power"
+        screen_mode = resolve_screen_mode_for_test_profile(test_profile)
         plan = {
             "mode": mode,
             "project_case": project_case,
             "target_case": target_case,
             "testcase_label": testcase_label,
             "run_count": int(self.run_count_spin.value()),
+            "test_profile": test_profile,
+            "screen_mode": screen_mode,
+            "case_loop_count": int(self.case_loop_count_spin.value()),
             "safe_temp": float(self.safe_temp_spin.value()),
             "safe_battery": int(self.safe_battery_spin.value()),
             "safe_minutes": float(self.safe_time_spin.value()),
@@ -2767,10 +2933,14 @@ class LauncherWindow(QWidget):
         trace_path = self.process_launch_tracer.start(trace_label)
         self._log_message(
             f"[Launcher] 批量运行开始，mode={plan['mode']}, runs={plan['run_count']}, "
+            f"test_profile={plan['test_profile']}, screen_mode={plan['screen_mode']}, "
+            f"case_loops={plan['case_loop_count']}, "
             f"safe_temp={plan['safe_temp']}°C, safe_battery={plan['safe_battery']}%, "
             f"safe_time={plan['safe_minutes']}分钟, inactivity_timeout={plan['inactivity_timeout_minutes']}分钟, "
             f"cleanup_apps={plan['cleanup_apps']}\n"
         )
+        if plan.get("capture_preflight_message"):
+            self._log_message(f"[Launcher] 截图流预检：{plan['capture_preflight_message']}\n")
         if trace_path is not None:
             self._log_message(f"[Launcher] 进程创建追踪日志：{trace_path}\n")
         else:
@@ -3516,6 +3686,28 @@ class LauncherWindow(QWidget):
         self._set_status("当前用例超过安全时间，正在停止本次运行。")
         self.process.kill()
 
+    def _prepare_capture_mode_for_plan(self, plan: dict) -> bool:
+        screen_mode = str(plan.get("screen_mode") or "0")
+        test_profile = str(plan.get("test_profile") or "power")
+        try:
+            write_screen_mode_config(screen_mode)
+        except Exception as exc:
+            log_exception("write screen_mode config failed")
+            QMessageBox.warning(self, "截图模式配置失败", f"写入 screen_mode={screen_mode} 失败：{exc}")
+            return False
+
+        profile_text = "功耗测试" if test_profile == "power" else "功能测试"
+        self._log_message(
+            f"[Launcher] 已切换为{profile_text}，screen_mode={screen_mode}。\n"
+        )
+        check_result = check_capture_stream_for_screen_mode(screen_mode)
+        plan["capture_preflight_message"] = check_result.message
+        self._log_message(f"[Launcher] 截图流预检：{check_result.message}\n")
+        if not check_result.ok:
+            QMessageBox.warning(self, "截图流预检失败", check_result.message)
+            return False
+        return True
+
     def _start_run(self):
         LOGGER.info(
             "start_button clicked: batch_active=%s process_exists=%s",
@@ -3529,6 +3721,10 @@ class LauncherWindow(QWidget):
         plan = self._collect_plan()
         if plan is None:
             LOGGER.info("start_run aborted because plan is None")
+            return
+
+        if not self._prepare_capture_mode_for_plan(plan):
+            LOGGER.info("start_run aborted because capture mode preflight failed")
             return
 
         self._begin_batch(plan)

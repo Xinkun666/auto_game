@@ -18,6 +18,14 @@ class PhaseState:
     completed: bool = False
 
 
+def parse_case_loop_count(value, default: int = 1) -> int:
+    try:
+        count = int(str(value).strip())
+    except (TypeError, ValueError):
+        return int(default)
+    return max(1, count)
+
+
 class PhaseTimeManager:
     def __init__(self, durations_in_minutes: Dict[str, float], stage_phase_map: Dict[str, str]):
         self.phase_states = {
@@ -39,6 +47,8 @@ class PhaseTimeManager:
         self.sp_started_ever = False
         self.sp_recording = False
         self.sp_saved = False
+        self.case_loop_count = 1
+        self.case_loop_index = 1
 
     def _write_sp_state(self, event_name: str):
         archive_dir = os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()
@@ -67,6 +77,25 @@ class PhaseTimeManager:
 
     def _phase_for_stage(self, stage_name: Optional[str]) -> Optional[str]:
         return self.stage_phase_map.get(stage_name)
+
+    def configure_case_loop_count(self, count: int):
+        self.case_loop_count = parse_case_loop_count(count)
+        if self.case_loop_index > self.case_loop_count:
+            self.case_loop_index = self.case_loop_count
+        print(f"[Timer] 单次用例循环次数: {self.case_loop_count}")
+
+    def _reset_phase_progress(self):
+        for state in self.phase_states.values():
+            state.elapsed = 0.0
+            state.completed = False
+        self.last_stage = None
+        self.active_phase = None
+        self.active_since = None
+        self.total_elapsed = 0.0
+        self.total_active_since = None
+        self.round_index = 0
+        self.landed = False
+        self.start_game_time = None
 
     def _effective_elapsed(self, phase_name: str, now: Optional[float] = None) -> float:
         state = self.phase_states[phase_name]
@@ -161,7 +190,22 @@ class PhaseTimeManager:
         self.round_index += 1
         self.landed = False
         self.start_game_time = None
-        print(f"[Timer] 开始第 {self.round_index} 局")
+        print(f"[Timer] 开始第 {self.case_loop_index}/{self.case_loop_count} 次循环，第 {self.round_index} 局")
+
+    def has_next_case_loop(self) -> bool:
+        return self.case_loop_index < self.case_loop_count
+
+    def advance_case_loop(self) -> bool:
+        if not self.has_next_case_loop():
+            return False
+
+        self._reset_phase_progress()
+        self.case_loop_index += 1
+        self.sp_recording = False
+        self.sp_saved = False
+        print(f"[Timer] 准备进入第 {self.case_loop_index}/{self.case_loop_count} 次循环")
+        self._write_sp_state("case_loop_advanced")
+        return True
 
     def get_remaining(self, phase_name: str) -> float:
         state = self.phase_states[phase_name]

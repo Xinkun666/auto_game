@@ -1,3 +1,4 @@
+import os
 import time
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.phase_time_mana
     PHASE_SEARCHING,
     PhaseTimeManager,
     PhaseTimeReporter,
+    parse_case_loop_count,
 )
 
 """
@@ -85,6 +87,9 @@ driving_manager = DrivingManager()
 searching_house_manager = HouseSceneSearchManager()
 house_exit_manager = HouseExitManager()
 phase_timer = PhaseTimeManager(PHASE_DURATIONS, PHASE_STAGE_MAP)
+phase_timer.configure_case_loop_count(
+    parse_case_loop_count(os.environ.get("AUTOGAME_SINGLE_CASE_LOOPS"))
+)
 phase_reporter = PhaseTimeReporter()
 
 
@@ -266,6 +271,23 @@ def finalize_automation(w: "FrameWorker"):
         phase_timer.mark_sp_saved()
 
     final_shutdown_pending = True
+    w.change_stage("结束阶段")
+
+
+def finish_case_loop_or_finalize(w: "FrameWorker"):
+    if not phase_timer.has_next_case_loop():
+        finalize_automation(w)
+        return
+
+    if w.current_stage == "跑图阶段":
+        running_manager.stop_auto_forward(w)
+
+    print(
+        f"[Timer] 第 {phase_timer.case_loop_index}/{phase_timer.case_loop_count} 次循环已完成，"
+        "暂停 sp，返回大厅后继续下一次循环"
+    )
+    handle_sp_stop(w)
+    phase_timer.advance_case_loop()
     w.change_stage("结束阶段")
 
 
@@ -484,7 +506,7 @@ def on_stage(w: "FrameWorker"):
         handle_sp_start(w)
 
         if phase_timer.all_done():
-            finalize_automation(w)
+            finish_case_loop_or_finalize(w)
             return
 
         running_manager.set_drive_required(phase_timer.need_drive())

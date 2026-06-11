@@ -600,6 +600,10 @@ class HDCSnapshotClient:
 
         self.local_tmp_dir = r"aw/autogame/temp/tmp_frames"
         self.save_dir = r"aw/autogame/temp/logs/process_save_frames"
+        self.first_frame_received = False
+        self.consecutive_capture_failures = 0
+        self.startup_frame_timeout = float(os.environ.get("AUTOGAME_HDC_FRAME_READY_TIMEOUT", "10"))
+        self.max_consecutive_capture_failures = int(os.environ.get("AUTOGAME_HDC_MAX_CAPTURE_FAILURES", "8"))
 
         for d in [self.local_tmp_dir, self.save_dir]:
             if not os.path.exists(d): os.makedirs(d, exist_ok=True)
@@ -651,6 +655,7 @@ class HDCSnapshotClient:
         if self.save_frame: self._start_save_worker()
 
         print("[HDC] Main loop started.")
+        loop_start_time = time.time()
         while self.running:
             start_time = time.time()
             ts = int(start_time * 1000)
@@ -690,12 +695,34 @@ class HDCSnapshotClient:
                                     pass
 
                             self.on_frame(frame)
+                            self.consecutive_capture_failures = 0
+                            if not self.first_frame_received:
+                                self.first_frame_received = True
+                                print("[HDC] First frame received.", flush=True)
                         else:
-                            # 发现坏帧，静默跳过
-                            pass
+                            self.consecutive_capture_failures += 1
+                    else:
+                        self.consecutive_capture_failures += 1
+                else:
+                    self.consecutive_capture_failures += 1
+
+                if (
+                    not self.first_frame_received
+                    and time.time() - loop_start_time >= self.startup_frame_timeout
+                ):
+                    print("[HDC] Frame ready timeout.", flush=True)
+                    break
+
+                if self.consecutive_capture_failures >= self.max_consecutive_capture_failures:
+                    print("[HDC] Consecutive capture failures exceeded.", flush=True)
+                    break
 
             except Exception as e:
+                self.consecutive_capture_failures += 1
                 print("[HDC] Run Loop Error: %s" % e)
+                if self.consecutive_capture_failures >= self.max_consecutive_capture_failures:
+                    print("[HDC] Consecutive capture failures exceeded.", flush=True)
+                    break
             finally:
                 # 4. 无论如何都清理环境，保证下一帧开始时是干净的
                 if need_remote_rm:

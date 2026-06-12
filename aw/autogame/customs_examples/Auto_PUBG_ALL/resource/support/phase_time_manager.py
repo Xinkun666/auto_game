@@ -15,6 +15,7 @@ class PhaseState:
     name: str
     duration: float
     elapsed: float = 0.0
+    started: bool = False
     completed: bool = False
 
 
@@ -49,6 +50,31 @@ class PhaseTimeManager:
         self.sp_saved = False
         self.case_loop_count = 1
         self.case_loop_index = 1
+
+    def _format_phase_minutes(self, seconds: float) -> str:
+        minutes = float(seconds) / 60.0
+        if minutes.is_integer():
+            return str(int(minutes))
+        return f"{minutes:.1f}".rstrip("0").rstrip(".")
+
+    def _phase_label(self, phase_name: str) -> str:
+        return f"{phase_name}阶段"
+
+    def _mark_phase_started(self, phase_name: str):
+        state = self.phase_states[phase_name]
+        if state.started:
+            return
+        state.started = True
+        print(f"[Timer] {self._phase_label(phase_name)}开始，计划 {self._format_phase_minutes(state.duration)} 分钟")
+
+    def _mark_phase_completed(self, phase_name: str) -> bool:
+        state = self.phase_states[phase_name]
+        if state.completed:
+            return False
+        state.completed = True
+        state.elapsed = state.duration
+        print(f"[Timer] {self._phase_label(phase_name)}结束，已累计 {self._format_phase_minutes(state.duration)} 分钟")
+        return True
 
     def _write_sp_state(self, event_name: str):
         archive_dir = os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()
@@ -87,6 +113,7 @@ class PhaseTimeManager:
     def _reset_phase_progress(self):
         for state in self.phase_states.values():
             state.elapsed = 0.0
+            state.started = False
             state.completed = False
         self.last_stage = None
         self.active_phase = None
@@ -110,9 +137,7 @@ class PhaseTimeManager:
         if state.completed:
             return False
         if self._effective_elapsed(phase_name, now=now) >= state.duration:
-            state.completed = True
-            state.elapsed = state.duration
-            return True
+            return self._mark_phase_completed(phase_name)
         return False
 
     def _pause_active_phase(self, now: Optional[float] = None) -> Set[str]:
@@ -139,7 +164,7 @@ class PhaseTimeManager:
         if not state.completed:
             state.elapsed = min(state.duration, state.elapsed + max(0.0, now - self.active_since))
             if state.elapsed >= state.duration:
-                state.completed = True
+                self._mark_phase_completed(self.active_phase)
                 events.add(f"completed_{self.active_phase}")
 
         self.active_phase = None
@@ -166,6 +191,7 @@ class PhaseTimeManager:
         if new_phase and not self.phase_states[new_phase].completed:
             self.active_phase = new_phase
             self.active_since = now
+            self._mark_phase_started(new_phase)
             events.add(f"enter_{new_phase}")
         elif new_phase:
             self.active_phase = None

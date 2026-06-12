@@ -20,6 +20,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.phase_time_mana
     PhaseTimeReporter,
     parse_case_loop_count,
 )
+from aw.autogame.tools.GameLaunchProfile import should_use_sp_recording_for_profile
 
 """
 1. w.current_stage ： 当前自动化的阶段，可以参考你标注工程导出的info.py里，对应的阶段为True，即表示当前阶段
@@ -54,6 +55,9 @@ DROP_TARGET_GARAGE = (990, 757)
 DROP_TARGET_CENTER = (990, 757)
 DROP_TARGET_RUNNING_AFTER_SEARCH = (1094, 790)
 SP_SAVE_LONG_PRESS_MS = 3000
+SP_RECORDING_ENABLED = should_use_sp_recording_for_profile(
+    os.environ.get("AUTOGAME_TEST_PROFILE")
+)
 START_GAME_VERIFY_DELAY = 5.0
 CLOSE_POPUP_SETTLE_DELAY = 1.0
 LOBBY_CONFIRM_INTERVAL = 0.7
@@ -94,6 +98,8 @@ phase_reporter = PhaseTimeReporter()
 
 
 def pause_sp_after_death(w: "FrameWorker"):
+    if not SP_RECORDING_ENABLED:
+        return
     w.click("sp")
     time.sleep(0.5)
     phase_timer.mark_sp_stopped()
@@ -144,6 +150,8 @@ def prepare_round():
 
 
 def handle_sp_start(w: "FrameWorker"):
+    if not SP_RECORDING_ENABLED:
+        return
     if not phase_timer.should_start_sp():
         return
     if phase_timer.start_game_time is not None:
@@ -155,6 +163,8 @@ def handle_sp_start(w: "FrameWorker"):
 
 
 def handle_sp_stop(w: "FrameWorker"):
+    if not SP_RECORDING_ENABLED:
+        return
     if not phase_timer.sp_recording:
         return
     w.click("sp")
@@ -264,7 +274,7 @@ def finalize_automation(w: "FrameWorker"):
     if w.current_stage == "跑图阶段":
         running_manager.stop_auto_forward(w)
 
-    if not phase_timer.sp_saved:
+    if SP_RECORDING_ENABLED and not phase_timer.sp_saved:
         w.click_down("sp", dura=SP_SAVE_LONG_PRESS_MS)
         time.sleep(1)
         phase_timer.mark_sp_stopped()
@@ -282,10 +292,12 @@ def finish_case_loop_or_finalize(w: "FrameWorker"):
     if w.current_stage == "跑图阶段":
         running_manager.stop_auto_forward(w)
 
-    print(
-        f"[Timer] 第 {phase_timer.case_loop_index}/{phase_timer.case_loop_count} 次循环已完成，"
+    next_loop_message = (
         "暂停 sp，返回大厅后继续下一次循环"
+        if SP_RECORDING_ENABLED
+        else "返回大厅后继续下一次循环"
     )
+    print(f"[Timer] 第 {phase_timer.case_loop_index}/{phase_timer.case_loop_count} 次循环已完成，{next_loop_message}")
     handle_sp_stop(w)
     phase_timer.advance_case_loop()
     w.change_stage("结束阶段")

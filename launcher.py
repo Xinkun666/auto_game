@@ -45,6 +45,7 @@ from PyQt6.QtWidgets import (
 )
 
 from aw.autogame.tools.ProcessUtils import hidden_subprocess_context, hidden_subprocess_kwargs, install_hidden_subprocess_patch, resolve_hdc_executable, start_hidden_subprocess_window_suppressor
+from aw.autogame.tools.GameLaunchProfile import DEFAULT_SP_PACKAGE, should_use_sp_recording_for_profile
 from aw.autogame.tools.Utils import archive_run_artifacts, get_resolution, resolve_run_archive_dir, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 
@@ -128,6 +129,9 @@ TEST_PROFILE_SCREEN_MODES = {
     "power": "0",
     "function": "1",
 }
+PUBG_CASE_KEYWORDS = ("和平精英", "pubg")
+PUBG_CASE_DEFAULT_LOOP_COUNT = 2
+PUBG_CASE_RUNTIME_DESCRIPTION = "和平精英用例默认10分钟搜房、10分钟开车、10分钟跑图，总测试时长60分钟，要循环2次。"
 
 
 class CaptureStreamCheckResult(NamedTuple):
@@ -239,6 +243,36 @@ def extract_package_names(py_file: Path) -> list[str]:
     return sorted(packages)
 
 
+def is_pubg_testcase_keyword_match(*values) -> bool:
+    text = "\n".join(str(value or "") for value in values)
+    lower_text = text.lower()
+    return any(keyword in text or keyword in lower_text for keyword in PUBG_CASE_KEYWORDS)
+
+
+def _read_text_for_keyword_match(path: Optional[Path]) -> str:
+    if path is None:
+        return ""
+    try:
+        if Path(path).exists():
+            return Path(path).read_text(encoding="utf-8")
+    except Exception:
+        LOGGER.debug("read testcase text for keyword match failed: %s", path, exc_info=True)
+    return ""
+
+
+def is_pubg_testcase_file(py_file: Optional[Path], parsed: Optional[dict] = None) -> bool:
+    parsed = parsed or {}
+    values = [
+        py_file,
+        py_file.name if py_file else "",
+        py_file.parent.name if py_file else "",
+        parsed.get("project_case", ""),
+        parsed.get("target_case", ""),
+        _read_text_for_keyword_match(py_file),
+    ]
+    return is_pubg_testcase_keyword_match(*values)
+
+
 def resolve_label_project_dir(project_case: str) -> Optional[Path]:
     project_case = str(project_case or "").strip()
     if not project_case:
@@ -321,6 +355,7 @@ def build_launcher_plan_env_values(plan: Optional[dict]) -> dict[str, str]:
         "AUTOGAME_TEST_PROFILE": test_profile,
         "AUTOGAME_SCREEN_MODE": screen_mode,
         "AUTOGAME_SINGLE_CASE_LOOPS": str(max(1, case_loop_count)),
+        "AUTOGAME_SP_RECORDING_ENABLED": "1" if should_use_sp_recording_for_profile(test_profile) else "0",
     }
 
 
@@ -2568,6 +2603,10 @@ class LauncherWindow(QWidget):
         else:
             messages.append("未解析到 target_case，请手动选择")
 
+        if is_pubg_testcase_file(py_file, parsed):
+            self.case_loop_count_spin.setValue(PUBG_CASE_DEFAULT_LOOP_COUNT)
+            messages.append(PUBG_CASE_RUNTIME_DESCRIPTION)
+
         self._sync_testcase_controls_state()
         self._set_status("；".join(messages))
 
@@ -3011,7 +3050,12 @@ class LauncherWindow(QWidget):
             self.power_test_radio.isChecked(),
             self.function_test_radio.isChecked(),
         )
+        if not should_use_sp_recording_for_profile(test_profile):
+            cleanup_apps.discard(DEFAULT_SP_PACKAGE)
         screen_mode = resolve_screen_mode_for_test_profile(test_profile)
+        runtime_description = ""
+        if is_pubg_testcase_keyword_match(testcase_label, project_case, target_case):
+            runtime_description = PUBG_CASE_RUNTIME_DESCRIPTION
         plan = {
             "mode": mode,
             "project_case": project_case,
@@ -3026,6 +3070,7 @@ class LauncherWindow(QWidget):
             "safe_minutes": float(self.safe_time_spin.value()),
             "inactivity_timeout_minutes": float(self.inactivity_timeout_spin.value()),
             "cleanup_apps": sorted(cleanup_apps),
+            "runtime_description": runtime_description,
         }
         LOGGER.info("collect_plan result: %s", plan)
         return plan
@@ -3068,6 +3113,8 @@ class LauncherWindow(QWidget):
             f"safe_time={plan['safe_minutes']}分钟, inactivity_timeout={plan['inactivity_timeout_minutes']}分钟, "
             f"cleanup_apps={plan['cleanup_apps']}\n"
         )
+        if plan.get("runtime_description"):
+            self._log_message(f"[Launcher] {plan['runtime_description']}\n")
         if plan.get("capture_preflight_message"):
             self._log_message(f"[Launcher] 截图流预检：{plan['capture_preflight_message']}\n")
         if trace_path is not None:
@@ -3373,11 +3420,16 @@ class LauncherWindow(QWidget):
             return False
 
     def _build_stream_disconnect_notice(self, device_log_path: Optional[Path], archived_log_name: Optional[str]) -> str:
-        phase_text = "启动阶段(SP未开始)" if self.current_run_stream_disconnect_startup else "SP记录后"
+        uses_sp_recording = self._current_plan_uses_sp_recording()
+        if self.current_run_stream_disconnect_startup:
+            phase_text = "启动阶段(SP未开始)" if uses_sp_recording else "启动阶段(首帧未到达)"
+        else:
+            phase_text = "SP记录后" if uses_sp_recording else "功能测试首帧后"
         lines = [
             "gRPC 流断连提醒",
             f"发生阶段: {phase_text}",
             f"断流信息: {self.current_run_stream_disconnect_message}",
+            f"SP记录启用: {uses_sp_recording}",
             f"SP是否已开始: {self.current_run_sp_started}",
             f"设备日志源文件: {device_log_path if device_log_path else '未定位'}",
             f"归档日志文件: logs/{archived_log_name}" if archived_log_name else "归档日志文件: 未找到设备日志源文件",
@@ -3475,6 +3527,11 @@ class LauncherWindow(QWidget):
         ):
             self._mark_current_run_sp_started("state_file", state)
 
+    def _current_plan_uses_sp_recording(self) -> bool:
+        if self.current_plan is None:
+            return True
+        return should_use_sp_recording_for_profile(self.current_plan.get("test_profile"))
+
     def _capture_stream_disconnect_screenshot(self, archive_dir: Path) -> Optional[Path]:
         screenshot_dir = archive_dir / "stream_disconnect_screenshots"
         screenshot_dir.mkdir(parents=True, exist_ok=True)
@@ -3562,6 +3619,7 @@ class LauncherWindow(QWidget):
             "run_index": self.current_run_index + 1,
             "stream_disconnect_startup": self.current_run_stream_disconnect_startup,
             "stream_disconnect_message": self.current_run_stream_disconnect_message,
+            "sp_recording_enabled": self._current_plan_uses_sp_recording(),
             "sp_started": self.current_run_sp_started,
             "sp_state": self.current_run_sp_state,
             "screenshot_path": None,
@@ -3573,7 +3631,7 @@ class LauncherWindow(QWidget):
             screenshot_path = self._capture_stream_disconnect_screenshot(archive_dir)
             preserve_result["screenshot_path"] = str(screenshot_path) if screenshot_path else None
 
-        if not self.current_run_stream_disconnect_startup:
+        if not self.current_run_stream_disconnect_startup and self._current_plan_uses_sp_recording():
             preserve_result["sp_save_attempted"] = True
             preserve_result["sp_save_ok"] = self._save_sp_on_stream_disconnect()
 
@@ -3592,18 +3650,31 @@ class LauncherWindow(QWidget):
 
         self._refresh_current_run_sp_state()
         self.current_run_stream_disconnected = True
-        self.current_run_stream_disconnect_startup = not self.current_run_sp_started
+        uses_sp_recording = self._current_plan_uses_sp_recording()
+        if uses_sp_recording:
+            self.current_run_stream_disconnect_startup = not self.current_run_sp_started
+        else:
+            self.current_run_stream_disconnect_startup = not self.current_run_stream_started
         self.current_run_stream_disconnect_message = str(message or source or "stream disconnected")
-        phase_text = "启动阶段" if self.current_run_stream_disconnect_startup else "SP记录后"
+        if self.current_run_stream_disconnect_startup:
+            phase_text = "启动阶段" if uses_sp_recording else "启动阶段(首帧未到达)"
+        else:
+            phase_text = "SP记录后" if uses_sp_recording else "功能测试首帧后"
         self._log_message(
             f"\n[Launcher] 检测到 gRPC 流断连({phase_text}, source={source})："
             f"{self.current_run_stream_disconnect_message}\n"
         )
         if self.current_run_stream_disconnect_startup:
-            self._log_message(
-                "[Launcher] SP 记录尚未开始，本次按启动阶段断流处理："
-                "不截图、不保存 SP、不归档本轮日志，直接停止当前子进程并准备重启。\n"
-            )
+            if uses_sp_recording:
+                self._log_message(
+                    "[Launcher] SP 记录尚未开始，本次按启动阶段断流处理："
+                    "不截图、不保存 SP、不归档本轮日志，直接停止当前子进程并准备重启。\n"
+                )
+            else:
+                self._log_message(
+                    "[Launcher] 功能测试首帧尚未到达，本次按启动阶段断流处理："
+                    "不截图、不归档本轮日志，直接停止当前子进程并准备重启。\n"
+                )
             self._set_status("启动阶段 gRPC 流断连，正在停止当前子进程并准备重启手机。")
             self._request_stream_disconnect_process_exit(immediate=True)
             return
@@ -3614,7 +3685,10 @@ class LauncherWindow(QWidget):
             "[Launcher] 归档时会把本次 testcases 设备日志复制到对应运行目录；"
             "子进程退出前会先触发 testcases 的 stop_device_log()。\n"
         )
-        self._set_status("SP记录后检测到 gRPC 流断连，正在保存本轮状态并等待用例收尾。")
+        if uses_sp_recording:
+            self._set_status("SP记录后检测到 gRPC 流断连，正在保存本轮状态并等待用例收尾。")
+        else:
+            self._set_status("功能测试中检测到 gRPC 流断连，正在保存本轮状态并等待用例收尾。")
         self._request_stream_disconnect_process_exit(immediate=False)
 
     def _request_stream_disconnect_process_exit(self, immediate: bool = False):

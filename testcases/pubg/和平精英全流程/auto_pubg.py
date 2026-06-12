@@ -19,7 +19,16 @@ from hypium import *
 from hypium import UiDriver
 from hypium.action.os_hypium.device_logger import DeviceLogger
 from aw.autogame.tools.GameAutomator import GameAutomator
+from aw.autogame.tools.GameLaunchProfile import (
+    DEFAULT_PUBG_GAME_PACKAGE,
+    DEFAULT_SP_PACKAGE,
+    cleanup_packages_for_test_profile,
+    should_use_sp_recording_for_profile,
+)
 from aw.autogame.tools.Utils import *
+
+GAME_PACKAGE_NAME = DEFAULT_PUBG_GAME_PACKAGE
+PERF_TOOL_PACKAGE = DEFAULT_SP_PACKAGE
 
 class auto_pubg(TestCase):
     def __init__(self, controllers):
@@ -37,7 +46,12 @@ class auto_pubg(TestCase):
         self.log_path = os.environ.get("AUTOGAME_DEVICE_LOG_PATH") or f'aw/autogame/temp/logs/{self.task_name}.txt'
         self.frame_path = f"aw/autogame/temp/logs/process_save_frames"
         self.game_display_name = '和平精英'
-        self.perf_tool_package = "com.huawei.hmsapp.hismartperf"
+        self.game_package = GAME_PACKAGE_NAME
+        self.perf_tool_package = PERF_TOOL_PACKAGE
+        self.test_profile = os.environ.get("AUTOGAME_TEST_PROFILE")
+
+    def _use_sp_recording(self) -> bool:
+        return should_use_sp_recording_for_profile(self.test_profile)
 
     def _write_device_log_state(self, event_name, stop_ok=None, error=""):
         archive_dir = os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()
@@ -185,6 +199,11 @@ class auto_pubg(TestCase):
         self.start_device_log()
         # time.sleep(30)
 
+    def start_game_package(self):
+        print(f'和平精英-通过 HAP 包直接启动: {self.game_package}')
+        self.driver.start_app(self.game_package)
+        time.sleep(10)
+
     def _wait_for_game_rotation(self, timeout=20, stable_rounds=3, interval=1.0):
         """
         等待从 sp 竖屏切到游戏横屏后，再初始化自动化。
@@ -232,7 +251,10 @@ class auto_pubg(TestCase):
             # 1. 启动本地设备日志。即使后续 gRPC 断流被 launcher 杀进程，
             #    已生成的日志文件也会被 launcher 归档到本次运行目录。
             self.start_device_log()
-            self.start_perf_tool()
+            if self._use_sp_recording():
+                self.start_perf_tool()
+            else:
+                self.start_game_package()
             self._ensure_automator()
 
             # 2. 运行自动化逻辑（现在执行完会返回了）
@@ -250,5 +272,13 @@ class auto_pubg(TestCase):
                 analyze_txt(self.log_path, self.frame_path, time_txt_path=f'aw/autogame/temp/results/{self.task_name}/time.txt', result_path=result_path)
                 print(f'分析完成, 结果保存在 aw/autogame/temp/results/{self.task_name}/results.txt 中')
 
+            cleanup_apps = cleanup_packages_for_test_profile(
+                self.test_profile,
+                game_package=self.game_package,
+                sp_package=self.perf_tool_package,
+            )
             if self.automator is not None:
-                self.automator.cleanup(('com.tencent.tmgp.pubgmhd.hw', 'com.huawei.hmsapp.hismartperf'))
+                self.automator.cleanup(cleanup_apps)
+            else:
+                for package_name in cleanup_apps:
+                    self.driver.hdc(f"shell aa force-stop {package_name}")

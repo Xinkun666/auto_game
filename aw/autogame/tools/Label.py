@@ -57,6 +57,12 @@ class StageData:
 class ProjectData:
     name: str
     stages: List[StageData] = field(default_factory=list)
+@dataclass
+class CaptureResolutionApplyResult:
+    scene: SceneData
+    action: str
+    resized_items: bool = False
+    source_scene: Optional[SceneData] = None
 # ==========================================
 # 2. 图形工作区 (Canvas / Image Workspace)
 # ==========================================
@@ -1018,6 +1024,80 @@ class AutoStudioWindow(QMainWindow):
         self.update_tree_view()
         self.select_data_in_tree(scene_data)
 
+    def _find_scene_with_image_size(self, scenes: List[SceneData], image_size: Tuple[int, int]) -> Optional[SceneData]:
+        for scene in scenes:
+            if self._get_scene_image_size(scene) == image_size:
+                return scene
+        return None
+
+    def _select_resolution_template_scene(
+        self,
+        scenes: List[SceneData],
+        preferred_scene: SceneData,
+        target_size: Tuple[int, int],
+    ) -> Optional[SceneData]:
+        preferred_size = self._get_scene_image_size(preferred_scene)
+        if preferred_size[0] > 0 and preferred_size[1] > 0 and preferred_size != target_size:
+            return preferred_scene
+
+        candidates = []
+        for scene in scenes:
+            scene_size = self._get_scene_image_size(scene)
+            if scene_size[0] <= 0 or scene_size[1] <= 0 or scene_size == target_size:
+                continue
+            candidates.append(scene)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda scene: len(scene.items))
+
+    def _apply_capture_pixmap_to_scene_resolution(
+        self,
+        scene_data: SceneData,
+        image_path: str,
+        pixmap: QPixmap,
+    ) -> CaptureResolutionApplyResult:
+        stage = self._find_stage_for_scene(scene_data)
+        new_size = (pixmap.width(), pixmap.height())
+        if not stage or new_size[0] <= 0 or new_size[1] <= 0:
+            resized_items = self._replace_scene_image(scene_data, image_path, pixmap)
+            return CaptureResolutionApplyResult(scene=scene_data, action="replaced_current", resized_items=resized_items)
+
+        same_name_scenes = [scene for scene in stage.scenes if scene.name == scene_data.name]
+        existing_scene = self._find_scene_with_image_size(same_name_scenes, new_size)
+        if existing_scene:
+            resized_items = self._replace_scene_image(existing_scene, image_path, pixmap)
+            return CaptureResolutionApplyResult(
+                scene=existing_scene,
+                action="replaced_existing" if existing_scene is not scene_data else "replaced_current",
+                resized_items=resized_items,
+            )
+
+        source_scene = self._select_resolution_template_scene(same_name_scenes, scene_data, new_size)
+        if source_scene is None:
+            resized_items = self._replace_scene_image(scene_data, image_path, pixmap)
+            return CaptureResolutionApplyResult(scene=scene_data, action="replaced_current", resized_items=resized_items)
+
+        source_size = self._get_scene_image_size(source_scene)
+        new_scene = SceneData(
+            id=str(random.randint(1000, 9999)),
+            name=scene_data.name,
+            image_path=image_path,
+            pixmap=pixmap,
+            image_width=new_size[0],
+            image_height=new_size[1],
+            items=[
+                self._clone_item_for_scene_size(item, source_size, new_size)
+                for item in source_scene.items
+            ],
+        )
+        stage.scenes.append(new_scene)
+        return CaptureResolutionApplyResult(
+            scene=new_scene,
+            action="created",
+            resized_items=bool(new_scene.items),
+            source_scene=source_scene,
+        )
+
     def _clone_item(self, item: ItemData) -> ItemData:
         return ItemData(
             id=str(random.randint(10000, 99999)),
@@ -1216,11 +1296,26 @@ class AutoStudioWindow(QMainWindow):
         if img.isNull():
             QMessageBox.critical(self, "抓图失败", "读取截图文件失败，请检查路径或权限。")
             return
-        resized_items = self._replace_scene_image(scene_data, local_path, img)
+        apply_result = self._apply_capture_pixmap_to_scene_resolution(scene_data, local_path, img)
+        target_scene = apply_result.scene
+        self.current_stage = self._find_stage_for_scene(target_scene)
+        self.set_current_work_stage(self.current_stage)
+        self.current_scene = target_scene
         self.canvas.set_image(img)
-        self.canvas.redraw_overlays(scene_data)
-        self._refresh_tree_for_scene(scene_data)
-        if resized_items:
+        self.canvas.redraw_overlays(target_scene)
+        self._refresh_tree_for_scene(target_scene)
+        if apply_result.action == "created":
+            self.status_label.setText(
+                f"抓图成功，检测到新分辨率 {target_scene.image_width} * {target_scene.image_height}，"
+                "已自动复制并转换控件。"
+            )
+            return
+        if apply_result.action == "replaced_existing" and target_scene is not scene_data:
+            self.status_label.setText(
+                f"抓图成功，已覆盖已有分辨率 {target_scene.image_width} * {target_scene.image_height} 的图片。"
+            )
+            return
+        if apply_result.resized_items:
             self.status_label.setText("抓图成功，已按新图片尺寸同步缩放已有标注。")
             return
         self.status_label.setText("抓图成功。请开始添加区域或控点。")

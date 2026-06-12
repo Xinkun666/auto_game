@@ -51,8 +51,9 @@ PHASE_DURATIONS = {
     PHASE_DRIVING: 10,
 }
 
-DROP_TARGET_GARAGE = (990, 757)
-DROP_TARGET_CENTER = (990, 757)
+DROP_TARGET_R_CITY = (990, 757)
+DROP_TARGET_GARAGE = DROP_TARGET_R_CITY
+DROP_TARGET_CENTER = DROP_TARGET_R_CITY
 DROP_TARGET_RUNNING_AFTER_SEARCH = (1094, 790)
 SP_SAVE_LONG_PRESS_MS = 3000
 SP_RECORDING_ENABLED = should_use_sp_recording_for_profile(
@@ -89,6 +90,7 @@ parachute_manager = ParachuteManager()
 running_manager = RunningManager()
 driving_manager = DrivingManager()
 searching_house_manager = HouseSceneSearchManager()
+searching_house_manager.configure_r_city_landing_target(DROP_TARGET_R_CITY)
 house_exit_manager = HouseExitManager()
 phase_timer = PhaseTimeManager(PHASE_DURATIONS, PHASE_STAGE_MAP)
 phase_timer.configure_case_loop_count(
@@ -208,6 +210,31 @@ searching_house_manager.abort_callback = should_abort_searching
 searching_house_manager.can_finish_callback = lambda w: phase_timer.is_completed(PHASE_SEARCHING)
 
 
+def recover_bad_landing_to_r_city(w: "FrameWorker", target, reason: str):
+    global searching_view_synced, searching_to_running_notified
+
+    route_target = tuple(target or DROP_TARGET_R_CITY)
+    print(
+        f"[Flow] 搜房落点异常，切到跑图阶段恢复到R城: "
+        f"reason={reason}, target={route_target}"
+    )
+    searching_house_manager.stop_auto_forward(w)
+    running_manager.start_forced_route(
+        target=route_target,
+        finish_stage="搜房阶段",
+        reason=reason,
+        arrival_distance=searching_house_manager.r_city_near_distance,
+    )
+    running_manager.set_view_mode(RunningManager.VIEW_MODE_FIRST)
+    searching_view_synced = True
+    searching_to_running_notified = True
+    w.change_stage("跑图阶段")
+    return True
+
+
+searching_house_manager.r_city_recovery_route_callback = recover_bad_landing_to_r_city
+
+
 def _should_find_car_after_searching() -> bool:
     return (
         not phase_timer.is_completed(PHASE_DRIVING)
@@ -236,7 +263,7 @@ def finish_searching_and_enter_running(w: "FrameWorker", reason: str):
     if house_scene == searching_house_manager.HOUSE_INDOOR:
         searching_exit_retry_count += 1
         print(
-            f"[Flow] 搜房结束时仍在屋内，先执行新搜房出房策略，再切跑图 "
+            f"[Flow] 搜房结束时仍在屋内，先执行搜房出房策略，再切跑图 "
             f"(retry={searching_exit_retry_count})"
         )
         exit_ok = searching_house_manager._exit_house(w)

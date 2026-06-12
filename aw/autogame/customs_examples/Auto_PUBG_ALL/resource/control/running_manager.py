@@ -505,7 +505,9 @@ class RunningManager:
     RUNNING_ROUTE_PATROL = "patrol"
     RUNNING_ROUTE_RANDOM_AROUND_CIRCLE = "random_around_circle"
     RUNNING_ROUTE_PRIORITY_CAR_SEARCH = "priority_car_search"
+    RUNNING_ROUTE_FORCED = "forced_route"
     JUMP_CLICK_COOLDOWN = 0.8
+    DEFAULT_FORCED_ROUTE_ARRIVAL_DISTANCE = 30.0
 
     def __init__(self, map_tool: Optional[MapNavigator] = None):
         self.map_tool = map_tool or MapNavigator()
@@ -568,6 +570,12 @@ class RunningManager:
         self.water_exit_stuck_frames = 0
         self.water_exit_side_sign = 1
         self.water_escape_target: Optional[Tuple[int, int]] = None
+        self.water_swim_last_location: Optional[Tuple[int, int]] = None
+        self.water_swim_stuck_frames = 0
+        self.forced_route_target: Optional[Tuple[int, int]] = None
+        self.forced_route_finish_stage: Optional[str] = None
+        self.forced_route_reason: Optional[str] = None
+        self.forced_route_arrival_distance = self.DEFAULT_FORCED_ROUTE_ARRIVAL_DISTANCE
 
     def reset(self, finding_car: bool = True):
         self.road_list = []
@@ -624,8 +632,66 @@ class RunningManager:
         self.water_exit_clock.reset()
         self.water_exit_side_sign = 1
         self.water_escape_target = None
+        self.water_swim_last_location = None
+        self.water_swim_stuck_frames = 0
+        self._clear_forced_route()
         self.house_exit_manager.reset()
         print("[Running] 状态已重置!")
+
+    def start_forced_route(
+        self,
+        target: Tuple[int, int],
+        finish_stage: str,
+        reason: str,
+        arrival_distance: float = DEFAULT_FORCED_ROUTE_ARRIVAL_DISTANCE,
+    ):
+        self.forced_route_target = tuple(map(int, target))
+        self.forced_route_finish_stage = finish_stage
+        self.forced_route_reason = reason
+        self.forced_route_arrival_distance = max(0.0, float(arrival_distance))
+        self.drive_required = False
+        self.finding_car = False
+        self.car_search_timer.reset()
+        self.priority_car_search_active = False
+        self.priority_car_search_finished = False
+        self.priority_car_search_next_index = 0
+        self.priority_car_search_road_points = []
+        self.car_search_mode = self.CAR_SEARCH_ROADSIDE
+        self.loading_road = False
+        self.road_list = []
+        self.locations = []
+        self.history_locations = []
+        self.stuck = False
+        self.trapped = False
+        self.precise_entering_car = False
+        self.precise_last_distance = None
+        self.precise_idle_rounds = 0
+        self.precise_stuck_recoveries = 0
+        self.current_road_node = None
+        self.current_segment_start = None
+        self.current_running_route_kind = self.RUNNING_ROUTE_FORCED
+        self.garage_to_roadside_route_active = False
+        self.roadside_car_pursuing = False
+        self.roadside_car_lost_rounds = 0
+        self.roadside_car_lost_after_forward_pushes = 0
+        self.roadside_car_steps = 0
+        print(
+            f"[Running] 启动临时跑图路线: reason={reason}, "
+            f"target={self.forced_route_target}, finish_stage={finish_stage}, "
+            f"arrival={self.forced_route_arrival_distance:.1f}"
+        )
+
+    def _has_forced_route(self) -> bool:
+        return (
+            self.forced_route_target is not None
+            and self.forced_route_finish_stage is not None
+        )
+
+    def _clear_forced_route(self):
+        self.forced_route_target = None
+        self.forced_route_finish_stage = None
+        self.forced_route_reason = None
+        self.forced_route_arrival_distance = self.DEFAULT_FORCED_ROUTE_ARRIVAL_DISTANCE
 
     def set_game_time(self, game_time: Optional[float] = None):
         started_at = self.match_clock.start(game_time)
@@ -646,7 +712,9 @@ class RunningManager:
 
         direction = self._get_scalar(w.get_info("direction"))
         self._update_circle_angle(w.get_info("white_angle"))
-        self._refresh_finding_car_policy(w, location, direction)
+        forced_route_active = self._has_forced_route()
+        if not forced_route_active:
+            self._refresh_finding_car_policy(w, location, direction)
 
         if self._is_dead(w):
             print("[Running] 检测到死亡!")
@@ -686,6 +754,10 @@ class RunningManager:
             return
 
         self._click_jump_if_available(w, location, direction)
+
+        if forced_route_active:
+            self._process_forced_route(w, location, direction)
+            return
 
         if self._handle_priority_car_route_finished(w, location, direction, "指定寻车路线已走完"):
             return
@@ -1194,6 +1266,13 @@ class RunningManager:
         if self.map_tool.is_walkable(location):
             return False
 
+        self._check_if_stuck(location)
+        if self.stuck:
+            print("[Running] 当前位于不可通行区域且人物卡住，先执行避障脱困")
+            self._log_running_state("不可通行区域卡住", location, direction, "调用避障脱困")
+            self._perform_unstuck_action(w, location)
+            return True
+
         safe_point = self.map_tool.get_nearest_safe_point(
             location,
             max_search_dist=self.FORBIDDEN_ESCAPE_SEARCH_DIST,
@@ -1217,6 +1296,21 @@ class RunningManager:
         dist = get_distance(location, safe_point)
         print(f"[Running] 当前位于不可通行区域，先脱离到最近安全点 {safe_point}，距离 {dist:.2f}")
         self._log_running_state("人物位于不可通行区域", location, direction, "先脱离黑区再规划路径", safe_point, dist)
+
+        if w.get_info("跳跃") and self.jump_click_cooldown.try_acquire(self.JUMP_CLICK_COOLDOWN):
+            print("[Running] 不可通行区域发现跳跃键，先跳跃并朝安全点前推")
+            w.click("跳跃")
+            time.sleep(0.15)
+            if direction is not None:
+                self._align_to_point(w, location, direction, safe_point, threshold=8)
+            w.tap_single(
+                "摇杆",
+                y_bias=-300,
+                dura=self.FORBIDDEN_ESCAPE_FORWARD_DURA,
+                wait=self.FORBIDDEN_ESCAPE_FORWARD_WAIT,
+            )
+            w.refresh_frame()
+            return True
 
         if direction is not None:
             aligned = self._align_to_point(w, location, direction, safe_point, threshold=5)
@@ -1282,6 +1376,83 @@ class RunningManager:
         self.trapped = False
         return True
 
+    def _process_forced_route(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+    ) -> bool:
+        if not self._has_forced_route():
+            return False
+
+        target = self.forced_route_target
+        finish_stage = self.forced_route_finish_stage
+        dist_to_final = get_distance(location, target)
+        print(
+            f"[Running] 临时路线前往 {target}, dist={dist_to_final:.2f}, "
+            f"reason={self.forced_route_reason}"
+        )
+        if 0 <= dist_to_final <= self.forced_route_arrival_distance:
+            print(f"[Running] 已到达临时路线目标 {target}，切回 {finish_stage}")
+            self.stop_auto_forward(w)
+            self._clear_forced_route()
+            self.loading_road = False
+            self.road_list = []
+            self.current_segment_start = None
+            self.current_running_route_kind = None
+            w.change_stage(finish_stage)
+            return True
+
+        if self._handle_location_jump(location):
+            if not self.loading_road or not self.road_list:
+                self._load_path(location)
+            if not self.road_list:
+                print("[Running] 临时路线位置跳变后重规划失败，等待下一帧")
+                return True
+
+        self._check_if_stuck(location)
+        self._check_if_trapped(location)
+
+        if self.trapped:
+            print("[Running] 临时路线人物困住，按卡住脱困处理，继续前往目标")
+            self._log_running_state("临时路线困住", location, direction, "执行脱困", target, dist_to_final)
+            self._perform_unstuck_action(w, location)
+            return True
+
+        if self.stuck:
+            print("[Running] 临时路线人物卡住，执行脱困")
+            self._log_running_state("临时路线卡住", location, direction, "执行脱困", target, dist_to_final)
+            self._perform_unstuck_action(w, location)
+            return True
+
+        if not self.loading_road or not self.road_list:
+            self._load_path(location)
+
+        if not self.road_list:
+            print("[Running] 临时路线无可执行路径，下一帧重试")
+            return True
+
+        self._advance_waypoint_by_projection(location)
+        if not self.road_list:
+            self.loading_road = False
+            return True
+
+        waypoint = self.road_list[0]
+        waypoint_dist = get_distance(location, waypoint)
+        print(f"[Running] 临时路线 waypoint={waypoint}, dist={waypoint_dist:.2f}")
+
+        if 0 <= waypoint_dist < self._get_current_waypoint_tolerance():
+            self._discard_current_road_target()
+            return True
+
+        if len(self.road_list) <= 1 and 0 <= waypoint_dist <= self.WAYPOINT_PRECISE_APPROACH_DISTANCE:
+            print(f"[Running] 临时路线距离目标点 {waypoint_dist:.2f}，切换精确逼近")
+            self._precise_approach_waypoint(w, location, direction, waypoint, waypoint_dist)
+            return True
+
+        self._move_towards_target(w, location, direction, waypoint)
+        return True
+
     def _load_path(self, location: Tuple[int, int]):
         if self.garage_to_roadside_route_active:
             print("[Running] 继续加载车库离库路线，先到路边再找车")
@@ -1289,6 +1460,8 @@ class RunningManager:
             self.current_road_node = None
             self.current_segment_start = None
             self.current_running_route_kind = None
+        elif self._has_forced_route():
+            self._load_forced_route_path(location)
         elif self.finding_car:
             if self.car_search_mode == self.CAR_SEARCH_GARAGE:
                 if self._should_skip_garage_search(location):
@@ -1315,6 +1488,20 @@ class RunningManager:
                 print(f"[Running] 绘制路径调试图失败: {exc}")
         else:
             print("[Running] 路径加载失败")
+
+    def _load_forced_route_path(self, location: Tuple[int, int]):
+        target = self.forced_route_target
+        if target is None:
+            self.road_list = []
+            return
+
+        print(f"[Running] 正在加载临时跑图路线: {location} -> {target}")
+        self._log_running_state("临时路线规划", location, None, self.forced_route_reason or "前往目标", target)
+        self.road_list = self.map_tool.plan_path(location, target) or [target]
+        if not self.road_list or tuple(map(int, self.road_list[-1])) != target:
+            self.road_list = self._merge_paths(self.road_list, [target])
+        self.current_road_node = None
+        self.current_running_route_kind = self.RUNNING_ROUTE_FORCED
 
     def _load_garage_find_path(self, location: Tuple[int, int]):
         print("[Running] 正在加载车库优先寻车路径...")
@@ -1656,6 +1843,7 @@ class RunningManager:
                 return
 
         print("[Running] 开始按目标方向长推摇杆脱离水面")
+        before_forward_location = updated_location
         w.tap_single(
             "摇杆",
             y_bias=self.WATER_FORWARD_BIAS_Y,
@@ -1672,11 +1860,69 @@ class RunningManager:
             self.water_exit_last_location = new_location
             self.water_exit_stuck_frames = 0
             self.water_exit_clock.start()
+            self.water_swim_last_location = None
+            self.water_swim_stuck_frames = 0
             self.loading_road = False
             self.current_segment_start = None
             return
 
+        after_forward_location = self._get_location(w) or before_forward_location
+        if self._handle_in_water_forward_stuck(w, after_forward_location, direction, target):
+            return
+
         print("[Running] 仍在水中，下一帧继续执行脱水流程")
+
+    def _handle_in_water_forward_stuck(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+        target: Optional[Tuple[int, int]],
+    ) -> bool:
+        if self.water_swim_last_location is None:
+            self.water_swim_last_location = location
+            self.water_swim_stuck_frames = 0
+            return False
+
+        moved = get_distance(self.water_swim_last_location, location)
+        if moved > self.WATER_EXIT_STUCK_DISTANCE:
+            self.water_swim_last_location = location
+            self.water_swim_stuck_frames = 0
+            return False
+
+        self.water_swim_stuck_frames += 1
+        if self.water_swim_stuck_frames < self.WATER_EXIT_STUCK_FRAMES:
+            return False
+
+        print("[Running] 水中朝目标前推仍无有效位移，侧移换上岸点后继续前推")
+        self._log_running_state("水中前推卡住", location, direction, "侧移换上岸点", target)
+        side_bias = 360 * self.water_exit_side_sign
+        self.water_exit_side_sign *= -1
+        w.tap_single(
+            "摇杆",
+            x_bias=side_bias,
+            dura=self.WATER_EXIT_SIDE_DURA,
+            wait=self.WATER_EXIT_SIDE_WAIT,
+        )
+        w.refresh_frame()
+
+        updated_location = self._get_location(w) or location
+        updated_direction = self._get_scalar(w.get_info("direction"))
+        if target is not None and updated_direction is not None:
+            self._align_to_point(w, updated_location, updated_direction, target, threshold=8)
+
+        w.tap_single(
+            "摇杆",
+            y_bias=self.WATER_FORWARD_BIAS_Y,
+            dura=self.WATER_FORWARD_DURA,
+            wait=self.WATER_FORWARD_WAIT,
+        )
+        w.refresh_frame()
+        self.water_swim_last_location = self._get_location(w) or updated_location
+        self.water_swim_stuck_frames = 0
+        self.loading_road = False
+        self.current_segment_start = None
+        return True
 
     def _handle_recent_water_exit_stuck(
         self,
@@ -1748,6 +1994,9 @@ class RunningManager:
         return True
 
     def _get_running_target(self, location: Tuple[int, int]) -> Optional[Tuple[int, int]]:
+        if self._has_forced_route():
+            return self.forced_route_target
+
         if self.road_list:
             return self.road_list[0]
 

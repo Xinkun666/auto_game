@@ -1455,10 +1455,12 @@ class LauncherWindow(QWidget):
         self.keep_process_on_manual_stop_button.setCheckable(True)
         self.keep_process_on_manual_stop_button.setChecked(False)
         self.keep_process_on_manual_stop_button.setProperty("toggleButton", True)
-        self.generate_preview_video_button = QPushButton("生成视频")
+        self.generate_preview_video_button = QPushButton("生成视频：关")
+        self.generate_preview_video_button.setObjectName("generatePreviewVideoButton")
         self.generate_preview_video_button.setCheckable(True)
         self.generate_preview_video_button.setChecked(False)
         self.generate_preview_video_button.setProperty("toggleButton", True)
+        self.generate_preview_video_button.setToolTip("关闭时只归档日志和图片，不生成预览视频")
         self.preview_overlay_button = QPushButton("显示标注")
         self.preview_overlay_button.setCheckable(True)
         self.preview_overlay_button.setChecked(False)
@@ -1675,6 +1677,21 @@ class LauncherWindow(QWidget):
                     background: #eafff7;
                     border-color: #34c79a;
                     color: #087f5b;
+                }
+                QPushButton#generatePreviewVideoButton {
+                    background: #fff1f2;
+                    border-color: #f43f5e;
+                    color: #be123c;
+                    font-weight: 700;
+                }
+                QPushButton#generatePreviewVideoButton:hover {
+                    background: #ffe4e6;
+                    border-color: #e11d48;
+                }
+                QPushButton#generatePreviewVideoButton:checked {
+                    background: #dcfce7;
+                    border-color: #22c55e;
+                    color: #166534;
                 }
                 QLabel {
                     background: transparent;
@@ -1904,6 +1921,21 @@ class LauncherWindow(QWidget):
                 background: #10231f;
                 border-color: #1f9d7a;
                 color: #97f5d2;
+            }
+            QPushButton#generatePreviewVideoButton {
+                background: #3a151c;
+                border-color: #e5485b;
+                color: #ffd6dc;
+                font-weight: 700;
+            }
+            QPushButton#generatePreviewVideoButton:hover {
+                background: #4a1a24;
+                border-color: #ff6b7c;
+            }
+            QPushButton#generatePreviewVideoButton:checked {
+                background: #12351f;
+                border-color: #2fbd6f;
+                color: #a7f3c1;
             }
             QLabel {
                 background: transparent;
@@ -2433,7 +2465,7 @@ class LauncherWindow(QWidget):
         LOGGER.info("keep process on manual stop toggled: %s", checked)
 
     def _toggle_generate_preview_video(self, checked: bool):
-        self.generate_preview_video_button.setText("生成视频: 开" if checked else "生成视频")
+        self.generate_preview_video_button.setText("生成视频：开" if checked else "生成视频：关")
         LOGGER.info("generate preview video toggled: %s", checked)
 
     def resizeEvent(self, event):

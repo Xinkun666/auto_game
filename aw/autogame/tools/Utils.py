@@ -212,6 +212,7 @@ def archive_run_artifacts(
     extra_log_files: Optional[dict[str, str]] = None,
     extra_metadata: Optional[dict] = None,
     reuse_existing: bool = False,
+    generate_preview_video: bool = False,
 ) -> Path:
     archive_dir = _build_archive_dir(
         run_index,
@@ -226,22 +227,24 @@ def archive_run_artifacts(
     copied_process_files = _copy_process_temp_logs(process_archive_dir)
     copied_process_save_frames = _copy_process_save_frames(save_frame_archive_dir)
     video_source = None
-    video_file = _create_preview_video(
-        process_archive_dir,
-        archive_dir / "preview_10fps.mp4",
-        fps=10,
-    )
-    if video_file:
-        video_source = "process_temp_logs"
-    elif copied_process_save_frames:
+    video_file = None
+    if generate_preview_video:
         video_file = _create_preview_video(
-            save_frame_archive_dir,
+            process_archive_dir,
             archive_dir / "preview_10fps.mp4",
             fps=10,
-            pattern="*.jpg",
         )
         if video_file:
-            video_source = "process_save_frames"
+            video_source = "process_temp_logs"
+        elif copied_process_save_frames:
+            video_file = _create_preview_video(
+                save_frame_archive_dir,
+                archive_dir / "preview_10fps.mp4",
+                fps=10,
+                pattern="*.jpg",
+            )
+            if video_file:
+                video_source = "process_save_frames"
 
     if extra_text_files:
         for name, content in extra_text_files.items():
@@ -273,6 +276,7 @@ def archive_run_artifacts(
         "copied_process_temp_logs": copied_process_files,
         "copied_process_save_frames": copied_process_save_frames,
         "copied_extra_log_files": copied_extra_log_files,
+        "generate_preview_video": bool(generate_preview_video),
         "preview_video": video_file,
         "preview_video_source": video_source,
     }

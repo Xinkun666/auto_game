@@ -339,6 +339,14 @@ class RunningManager:
     UNSTUCK_TURN_BIAS = 360
     UNSTUCK_TURN_DURA = 420
     UNSTUCK_TURN_WAIT = 300
+    UNSTUCK_REPEAT_RADIUS = 4.0
+    UNSTUCK_MAX_ESCALATION_LEVEL = 3
+    UNSTUCK_ESCALATE_BIAS_STEP = 120
+    UNSTUCK_ESCALATE_DURA_STEP = 180
+    UNSTUCK_ESCALATE_WAIT_STEP = 450
+    UNSTUCK_ESCALATE_TURN_BIAS_STEP = 180
+    UNSTUCK_ESCALATE_TURN_DURA_STEP = 160
+    UNSTUCK_ESCALATE_TURN_WAIT_STEP = 120
     WAYPOINT_PROJECTION_PASS_RATIO = 1.0
     WAYPOINT_PROJECTION_CORRIDOR = 12.0
     # 单帧位置跳变超过这个距离时，认为定位异常，需要重规划
@@ -577,6 +585,8 @@ class RunningManager:
         self.forced_route_finish_stage: Optional[str] = None
         self.forced_route_reason: Optional[str] = None
         self.forced_route_arrival_distance = self.DEFAULT_FORCED_ROUTE_ARRIVAL_DISTANCE
+        self.unstuck_reference_loc: Optional[Tuple[int, int]] = None
+        self.unstuck_area_attempts = 0
 
     def reset(self, finding_car: bool = True):
         self.road_list = []
@@ -635,6 +645,8 @@ class RunningManager:
         self.water_escape_target = None
         self.water_swim_last_location = None
         self.water_swim_stuck_frames = 0
+        self.unstuck_reference_loc = None
+        self.unstuck_area_attempts = 0
         self._clear_forced_route()
         self.house_exit_manager.reset()
         print("[Running] 状态已重置!")
@@ -2125,20 +2137,69 @@ class RunningManager:
             )
             w.refresh_frame()
 
+    def _record_unstuck_attempt_area(self, current_loc: Tuple[int, int]) -> int:
+        loc = check_location(current_loc)
+        if loc is None:
+            self.unstuck_area_attempts += 1
+            return self.unstuck_area_attempts
+
+        if (
+            self.unstuck_reference_loc is not None
+            and get_distance(self.unstuck_reference_loc, loc) <= self.UNSTUCK_REPEAT_RADIUS
+        ):
+            self.unstuck_area_attempts += 1
+        else:
+            self.unstuck_reference_loc = loc
+            self.unstuck_area_attempts = 1
+        return self.unstuck_area_attempts
+
+    def _unstuck_escalation_level(self, attempt: int) -> int:
+        return int(min(self.UNSTUCK_MAX_ESCALATION_LEVEL, max(0, attempt - 1)))
+
+    def _scaled_unstuck_bias(self, bias: int, level: int) -> int:
+        if bias == 0 or level <= 0:
+            return bias
+        sign = 1 if bias > 0 else -1
+        return bias + sign * self.UNSTUCK_ESCALATE_BIAS_STEP * level
+
+    def _unstuck_move_motion(self, x_bias: int, y_bias: int, level: int):
+        return (
+            self._scaled_unstuck_bias(x_bias, level),
+            self._scaled_unstuck_bias(y_bias, level),
+            self.UNSTUCK_STEP_DURA + self.UNSTUCK_ESCALATE_DURA_STEP * level,
+            self.UNSTUCK_STEP_WAIT + self.UNSTUCK_ESCALATE_WAIT_STEP * level,
+        )
+
+    def _unstuck_turn_motion(self, turn_bias: int, level: int):
+        if level <= 0:
+            return turn_bias, self.UNSTUCK_TURN_DURA, self.UNSTUCK_TURN_WAIT
+        sign = 1 if turn_bias > 0 else -1
+        return (
+            turn_bias + sign * self.UNSTUCK_ESCALATE_TURN_BIAS_STEP * level,
+            self.UNSTUCK_TURN_DURA + self.UNSTUCK_ESCALATE_TURN_DURA_STEP * level,
+            self.UNSTUCK_TURN_WAIT + self.UNSTUCK_ESCALATE_TURN_WAIT_STEP * level,
+        )
+
     def _perform_unstuck_action(self, w: "FrameWorker", current_loc: Tuple[int, int]):
         if self._try_house_exit_when_indoor(w, current_loc, None, "脱困前检测"):
             return
 
         self.stop_auto_forward(w)
+        attempt = self._record_unstuck_attempt_area(current_loc)
+        level = self._unstuck_escalation_level(attempt)
+        print(
+            f"[Running] 同一区域脱困 attempt={attempt}, "
+            f"escalation_level={level}, reference={self.unstuck_reference_loc}"
+        )
 
         if w.get_info("跳跃"):
             print("[Running] 尝试跳跃配合侧移脱困")
             self._log_running_state("人物卡死", current_loc, None, "跳跃后侧移/斜退脱困")
             w.click("跳跃")
             time.sleep(0.15)
-            if self._try_unstuck_move(w, current_loc, "跳跃后左侧移", -280, 0):
+            if self._try_unstuck_move(w, current_loc, "跳跃后左侧移", -280, 0, level):
                 return
-            if self._try_unstuck_move(w, current_loc, "跳跃后右侧移", 280, 0):
+            if self._try_unstuck_move(w, current_loc, "跳跃后右侧移", 280, 0, level):
                 return
 
         print("[Running] 执行侧退绕障脱困")
@@ -2150,15 +2211,19 @@ class RunningManager:
             ("右侧移", 300, 0),
             ("后撤拉开距离", 0, 300),
         ):
-            if self._try_unstuck_move(w, current_loc, label, bias_x, bias_y):
+            if self._try_unstuck_move(w, current_loc, label, bias_x, bias_y, level):
                 return
 
         for label, turn_bias in (("左转绕开", -self.UNSTUCK_TURN_BIAS), ("右转绕开", self.UNSTUCK_TURN_BIAS)):
-            print(f"[Running] {label}，避开原前方障碍后再试探前进")
+            scaled_turn_bias, turn_dura, turn_wait = self._unstuck_turn_motion(turn_bias, level)
+            print(
+                f"[Running] {label}，避开原前方障碍后再试探前进 "
+                f"x_bias={scaled_turn_bias}, dura={turn_dura}, wait={turn_wait}"
+            )
             self._log_running_state("人物卡死", current_loc, None, label)
-            w.tap_single("视角", x_bias=turn_bias, dura=self.UNSTUCK_TURN_DURA, wait=self.UNSTUCK_TURN_WAIT)
+            w.tap_single("视角", x_bias=scaled_turn_bias, dura=turn_dura, wait=turn_wait)
             w.refresh_frame()
-            if self._try_unstuck_move(w, current_loc, f"{label}后前进", 0, -260):
+            if self._try_unstuck_move(w, current_loc, f"{label}后前进", 0, -260, level):
                 return
 
         print("[Running] 本轮脱困未产生有效位移，清空路径等待下一帧重新判断")
@@ -2174,14 +2239,23 @@ class RunningManager:
         label: str,
         x_bias: int,
         y_bias: int,
+        escalation_level: int = 0,
     ) -> bool:
-        print(f"[Running] 脱困动作: {label}, x_bias={x_bias}, y_bias={y_bias}")
+        move_x_bias, move_y_bias, dura, wait = self._unstuck_move_motion(
+            x_bias,
+            y_bias,
+            escalation_level,
+        )
+        print(
+            f"[Running] 脱困动作: {label}, level={escalation_level}, "
+            f"x_bias={move_x_bias}, y_bias={move_y_bias}, dura={dura}, wait={wait}"
+        )
         w.tap_single(
             "摇杆",
-            x_bias=x_bias,
-            y_bias=y_bias,
-            dura=self.UNSTUCK_STEP_DURA,
-            wait=self.UNSTUCK_STEP_WAIT,
+            x_bias=move_x_bias,
+            y_bias=move_y_bias,
+            dura=dura,
+            wait=wait,
         )
         w.refresh_frame()
         new_loc = self._get_location(w)

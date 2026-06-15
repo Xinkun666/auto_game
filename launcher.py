@@ -1453,6 +1453,10 @@ class LauncherWindow(QWidget):
         self.keep_process_on_manual_stop_button.setCheckable(True)
         self.keep_process_on_manual_stop_button.setChecked(False)
         self.keep_process_on_manual_stop_button.setProperty("toggleButton", True)
+        self.generate_preview_video_button = QPushButton("生成视频")
+        self.generate_preview_video_button.setCheckable(True)
+        self.generate_preview_video_button.setChecked(False)
+        self.generate_preview_video_button.setProperty("toggleButton", True)
         self.preview_overlay_button = QPushButton("显示标注")
         self.preview_overlay_button.setCheckable(True)
         self.preview_overlay_button.setChecked(False)
@@ -2083,6 +2087,7 @@ class LauncherWindow(QWidget):
         add_config_item(3, 0, "安全电量", self.safe_battery_field)
         add_config_item(3, 1, "安全时间", self.safe_time_field)
         add_config_item(4, 0, "无操控超时", self.inactivity_timeout_field)
+        add_config_item(4, 1, "视频归档", self.generate_preview_video_button)
         config_layout.addWidget(self.refresh_button, 4, 3)
 
         config_layout.setColumnStretch(1, 1)
@@ -2296,6 +2301,7 @@ class LauncherWindow(QWidget):
         self.history_back_button.clicked.connect(self._show_launcher_page)
         self.history_tree.itemSelectionChanged.connect(self._on_history_selection_changed)
         self.keep_process_on_manual_stop_button.toggled.connect(self._toggle_keep_process_on_manual_stop)
+        self.generate_preview_video_button.toggled.connect(self._toggle_generate_preview_video)
         self.preview_overlay_button.toggled.connect(self._toggle_preview_overlay)
         self.preview_points_button.toggled.connect(self._toggle_preview_points)
         self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
@@ -2423,6 +2429,10 @@ class LauncherWindow(QWidget):
             "停止保活: 开" if checked else "停止保活"
         )
         LOGGER.info("keep process on manual stop toggled: %s", checked)
+
+    def _toggle_generate_preview_video(self, checked: bool):
+        self.generate_preview_video_button.setText("生成视频: 开" if checked else "生成视频")
+        LOGGER.info("generate preview video toggled: %s", checked)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2858,6 +2868,7 @@ class LauncherWindow(QWidget):
         self.safe_battery_spin.setEnabled(enabled)
         self.safe_time_spin.setEnabled(enabled)
         self.inactivity_timeout_spin.setEnabled(enabled)
+        self.generate_preview_video_button.setEnabled(enabled)
         for button in self.preset_buttons:
             button.setEnabled(enabled)
         self._sync_testcase_controls_state()
@@ -3253,6 +3264,7 @@ class LauncherWindow(QWidget):
             "safe_battery": int(self.safe_battery_spin.value()),
             "safe_minutes": float(self.safe_time_spin.value()),
             "inactivity_timeout_minutes": float(self.inactivity_timeout_spin.value()),
+            "generate_preview_video": bool(self.generate_preview_video_button.isChecked()),
             "cleanup_apps": sorted(cleanup_apps),
             "runtime_description": runtime_description,
         }
@@ -3294,6 +3306,7 @@ class LauncherWindow(QWidget):
             f"[Launcher] 批量运行开始，mode={plan['mode']}, runs={plan['run_count']}, "
             f"test_profile={plan['test_profile']}, screen_mode={plan['screen_mode']}, "
             f"case_loops={plan['case_loop_count']}, "
+            f"generate_preview_video={plan['generate_preview_video']}, "
             f"safe_temp={plan['safe_temp']}°C, safe_battery={plan['safe_battery']}%, "
             f"safe_time={plan['safe_minutes']}分钟, inactivity_timeout={plan['inactivity_timeout_minutes']}分钟, "
             f"cleanup_apps={plan['cleanup_apps']}\n"
@@ -4007,6 +4020,7 @@ class LauncherWindow(QWidget):
                 source="launcher",
                 extra_text_files=extra_text_files,
                 extra_log_files=extra_log_files or None,
+                generate_preview_video=bool(self.current_plan.get("generate_preview_video")),
                 extra_metadata={
                     "mode": self.current_plan["mode"],
                     "project_case": self.current_plan["project_case"],
@@ -4027,6 +4041,7 @@ class LauncherWindow(QWidget):
                     "batch_start_timestamp": self.current_batch_start_timestamp,
                     "run_start_timestamp": self.current_run_start_timestamp,
                     "inactivity_timeout_minutes": self.current_plan["inactivity_timeout_minutes"],
+                    "generate_preview_video": bool(self.current_plan.get("generate_preview_video")),
                 },
                 reuse_existing=True,
             )

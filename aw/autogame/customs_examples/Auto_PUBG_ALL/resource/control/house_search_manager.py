@@ -29,6 +29,11 @@ class HouseSearchManager:
     ENTRY_COARSE_DURA = 1300
     ENTRY_FINE_Y_BIAS = -220
     ENTRY_FINE_DURA = 480
+    HOUSE_INDOOR = 0
+    HOUSE_OUTDOOR = 1
+    HOUSE_ROOFTOP = 2
+    HOUSE_NEAR_DOOR = 3
+    HOUSE_NEAR_WALL = 4
     HOUSE_CLASS_IDS = {8}
     HOUSE_ENTRY_CLASS_IDS = {0, 2, 4}
     DOOR_CLASS_IDS = {0, 4}
@@ -52,6 +57,7 @@ class HouseSearchManager:
     HOUSE_OBSTACLE_FORWARD_Y_BIAS = -300
     HOUSE_OBSTACLE_FORWARD_DURA = 500
     HOUSE_OBSTACLE_FORWARD_WAIT = 3000
+    HOUSE_BYPASS_UNSTUCK_PAUSE_SECONDS = 5.0
     VISIBLE_DOOR_CENTER_MAX_STEPS = 6
     VISIBLE_DOOR_CENTER_SIDE_BIAS = 240
     VISIBLE_DOOR_CENTER_SIDE_DURA = 260
@@ -62,12 +68,45 @@ class HouseSearchManager:
     ACCIDENTAL_HOUSE_MATCH_MAX_DISTANCE = 22.0
     ROUTE_STUCK_TURN_DEGREES = 90
     ROUTE_STUCK_REPEAT_RADIUS = 4.0
+    ROUTE_STUCK_MAX_TURN_DEGREES = 150
+    ROUTE_STUCK_TURN_ESCALATE_STEP = 30
     ROUTE_STUCK_BYPASS_FORWARD_Y_BIAS = -300
     ROUTE_STUCK_BYPASS_FORWARD_DURA = 300
+    ROUTE_STUCK_BYPASS_FORWARD_DURA_STEP = 160
+    ROUTE_STUCK_BYPASS_FORWARD_MAX_DURA = 900
     ROUTE_STUCK_BYPASS_FORWARD_BASE_WAIT = 700
     ROUTE_STUCK_BYPASS_FORWARD_STEP_WAIT = 450
     ROUTE_STUCK_BYPASS_FORWARD_MAX_WAIT = 2600
+    ROUTE_STUCK_BACKOFF_Y_BIAS = 300
+    ROUTE_STUCK_BACKOFF_BASE_DURA = 450
+    ROUTE_STUCK_BACKOFF_DURA_STEP = 180
+    ROUTE_STUCK_BACKOFF_MAX_DURA = 900
+    ROUTE_STUCK_BACKOFF_BASE_WAIT = 850
+    ROUTE_STUCK_BACKOFF_WAIT_STEP = 300
+    ROUTE_STUCK_BACKOFF_MAX_WAIT = 1800
     HOUSE_SEARCH_TIMEOUT_SECONDS = 60
+    ENTRY_NEAR_MICRO_ADJUST_DISTANCE = 1.0
+    ENTRY_NEAR_MICRO_DONE_DISTANCE = 0.25
+    ENTRY_NEAR_MICRO_MAX_ATTEMPTS = 3
+    ENTRY_NEAR_MICRO_X_BIAS = 120
+    ENTRY_NEAR_MICRO_Y_BIAS = 120
+    ENTRY_NEAR_MICRO_DURA = 160
+    ENTRY_NEAR_MICRO_WAIT = 320
+    ENTRY_DOOR_FINAL_ALIGN_MAX_STEPS = 4
+    ENTRY_DOOR_FINAL_LATERAL_X_BIAS = 140
+    ENTRY_DOOR_FINAL_LATERAL_DURA = 180
+    ENTRY_DOOR_FINAL_LATERAL_WAIT = 360
+    ENTRY_DOOR_FINAL_VIEW_TOLERANCE_PX = 55
+    ENTRY_DOOR_DIRECT_CENTER_MIN_RATIO = 0.40
+    ENTRY_DOOR_DIRECT_CENTER_MAX_RATIO = 0.60
+    ENTRY_DOOR_DIRECT_FORWARD_Y_BIAS = -200
+    ENTRY_DOOR_DIRECT_FORWARD_DURA = 200
+    ENTRY_DOOR_DIRECT_FORWARD_WAIT = 3000
+    ENTRY_DOOR_DIRECT_BACKOFF_Y_BIAS = 200
+    ENTRY_DOOR_DIRECT_BACKOFF_DURA = 200
+    ENTRY_DOOR_DIRECT_BACKOFF_WAIT = 5000
+    ENTRY_DOOR_DIRECT_PUSHES_PER_FAILURE = 2
+    ENTRY_DOOR_DIRECT_MAX_FAILURES = 3
     ENTRY_WALL_BACKOFF_DURA = 520
     ENTRY_WALL_BACKOFF_WAIT = 900
     EXCLUDED_ENTRY_LOCATIONS = {
@@ -152,6 +191,8 @@ class HouseSearchManager:
         self.initial_location_samples = []
         self.route_stuck_reference_loc = None
         self.route_stuck_bypass_attempts = 0
+        self.house_bypass_unstuck_pause_until = 0.0
+        self.entry_near_micro_adjust_attempts = 0
 
     def _entry_location_tuple(self, entry):
         try:
@@ -217,6 +258,8 @@ class HouseSearchManager:
         self.initial_location_samples = []
         self.route_stuck_reference_loc = None
         self.route_stuck_bypass_attempts = 0
+        self.house_bypass_unstuck_pause_until = 0.0
+        self.entry_near_micro_adjust_attempts = 0
 
     def process(self, w: 'FrameWorker'):
         if self._should_abort(w):
@@ -297,6 +340,7 @@ class HouseSearchManager:
             self.initial_target_pending = True
             self.location_missing_frames = 0
             self.initial_location_samples = []
+            self._reset_entry_near_micro_adjust()
             return self._finish_searching_phase(w, reason)
 
         print(f"[Searching] {reason}，但搜房未满10分钟，重置本轮目标继续搜房")
@@ -313,6 +357,7 @@ class HouseSearchManager:
         self.initial_target_pending = True
         self.location_missing_frames = 0
         self.initial_location_samples = []
+        self._reset_entry_near_micro_adjust()
         return False
 
     def _get_forward_scene(self, w: 'FrameWorker'):
@@ -342,6 +387,26 @@ class HouseSearchManager:
     def _reset_route_stuck_bypass(self):
         self.route_stuck_reference_loc = None
         self.route_stuck_bypass_attempts = 0
+        self.house_bypass_unstuck_pause_until = 0.0
+        self._reset_entry_near_micro_adjust()
+
+    def _reset_entry_near_micro_adjust(self):
+        self.entry_near_micro_adjust_attempts = 0
+
+    def _pause_unstuck_for_house_bypass(self, phase_label='NAV'):
+        self.house_bypass_unstuck_pause_until = (
+            time.monotonic() + self.HOUSE_BYPASS_UNSTUCK_PAUSE_SECONDS
+        )
+        self.history_locations = []
+        print(f"[NavBypass] {phase_label} 绕房调整视角/前推期间暂停通用避障")
+
+    def _is_house_bypass_unstuck_paused(self) -> bool:
+        pause_until = getattr(self, "house_bypass_unstuck_pause_until", 0.0)
+        if pause_until and time.monotonic() < pause_until:
+            return True
+        if pause_until:
+            self.house_bypass_unstuck_pause_until = 0.0
+        return False
 
     def _resolve_house_by_location(self, current_loc, max_distance=None):
         loc = self._normalize_location_value(current_loc)
@@ -696,6 +761,7 @@ class HouseSearchManager:
         return True
 
     def _bypass_front_house_by_view_turn(self, w: 'FrameWorker', target_loc, phase_label='NAV'):
+        self._pause_unstuck_for_house_bypass(phase_label)
         self.stop_auto_forward(w)
         side = self._choose_house_bypass_side(w)
         print(
@@ -717,6 +783,7 @@ class HouseSearchManager:
         w.refresh_frame()
         if hasattr(self, "history_locations"):
             self.history_locations = []
+        self._pause_unstuck_for_house_bypass(phase_label)
         return True
 
     def _center_visible_door_by_lateral_move(self, w: 'FrameWorker', door):
@@ -840,6 +907,308 @@ class HouseSearchManager:
         self.history_locations = []
         return True
 
+    def _entry_near_micro_move_params(self, current_dir, target_angle):
+        if current_dir is None or target_angle is None:
+            return None
+        try:
+            current_dir = float(current_dir)
+            target_angle = float(target_angle)
+        except (TypeError, ValueError):
+            return None
+
+        relative = (target_angle - current_dir + 540) % 360 - 180
+        if abs(relative) <= 45:
+            return "forward", 0, -self.ENTRY_NEAR_MICRO_Y_BIAS, relative
+        if abs(relative) >= 135:
+            return "back", 0, self.ENTRY_NEAR_MICRO_Y_BIAS, relative
+        if relative < 0:
+            return "left", -self.ENTRY_NEAR_MICRO_X_BIAS, 0, relative
+        return "right", self.ENTRY_NEAR_MICRO_X_BIAS, 0, relative
+
+    @staticmethod
+    def _entry_micro_direction_label(direction: str) -> str:
+        labels = {
+            "forward": "上方",
+            "back": "后方",
+            "left": "左边",
+            "right": "右边",
+        }
+        return labels.get(direction, direction)
+
+    @staticmethod
+    def _door_center_x(door):
+        try:
+            return (float(door[0]) + float(door[2])) / 2
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    def _entry_door_frame_width(self):
+        inf_w, inf_h = get_wh()
+        return max(int(inf_w or 0), int(inf_h or 0))
+
+    def _door_center_ratio(self, door, frame_w=None):
+        if frame_w is None:
+            frame_w = self._entry_door_frame_width()
+        if frame_w <= 0:
+            return None
+
+        center_x = self._door_center_x(door)
+        if center_x is None:
+            return None
+        return center_x / frame_w
+
+    def _is_entry_door_roughly_centered(self, door, frame_w=None):
+        ratio = self._door_center_ratio(door, frame_w)
+        if ratio is None:
+            return False
+        return self.ENTRY_DOOR_DIRECT_CENTER_MIN_RATIO <= ratio <= self.ENTRY_DOOR_DIRECT_CENTER_MAX_RATIO
+
+    def _align_visible_entry_door_for_direct_push(self, w: 'FrameWorker', door, phase_label='Nav'):
+        """Move laterally first, then turn view until the door is roughly centered."""
+        for step in range(self.ENTRY_DOOR_FINAL_ALIGN_MAX_STEPS):
+            frame_w = self._entry_door_frame_width()
+            if frame_w <= 0:
+                return None
+
+            center_x = self._door_center_x(door)
+            if center_x is None:
+                return None
+
+            left_third = frame_w / 3
+            right_third = frame_w * 2 / 3
+            screen_center = frame_w / 2
+
+            if center_x < left_third:
+                print(
+                    f"[{phase_label}] 到达进门点后门在左侧1/3，"
+                    f"先向左轻微横移对齐 {step + 1}/{self.ENTRY_DOOR_FINAL_ALIGN_MAX_STEPS}"
+                )
+                w.tap_single(
+                    '摇杆',
+                    x_bias=-self.ENTRY_DOOR_FINAL_LATERAL_X_BIAS,
+                    y_bias=0,
+                    dura=self.ENTRY_DOOR_FINAL_LATERAL_DURA,
+                    wait=self.ENTRY_DOOR_FINAL_LATERAL_WAIT,
+                )
+                w.refresh_frame()
+                door = self.find_largest_door(w)
+                if door is None:
+                    print(f"[{phase_label}] 横移后门目标丢失，继续原进门流程")
+                    return None
+                continue
+
+            if center_x > right_third:
+                print(
+                    f"[{phase_label}] 到达进门点后门在右侧1/3，"
+                    f"先向右轻微横移对齐 {step + 1}/{self.ENTRY_DOOR_FINAL_ALIGN_MAX_STEPS}"
+                )
+                w.tap_single(
+                    '摇杆',
+                    x_bias=self.ENTRY_DOOR_FINAL_LATERAL_X_BIAS,
+                    y_bias=0,
+                    dura=self.ENTRY_DOOR_FINAL_LATERAL_DURA,
+                    wait=self.ENTRY_DOOR_FINAL_LATERAL_WAIT,
+                )
+                w.refresh_frame()
+                door = self.find_largest_door(w)
+                if door is None:
+                    print(f"[{phase_label}] 横移后门目标丢失，继续原进门流程")
+                    return None
+                continue
+
+            if left_third <= center_x <= right_third:
+                if self._is_entry_door_roughly_centered(door, frame_w):
+                    print(f"[{phase_label}] 门中心已大致在屏幕1/2附近，准备自动开门直推")
+                    return door
+
+                side = "左" if center_x < screen_center else "右"
+                print(
+                    f"[{phase_label}] 门中心已进入屏幕中间区域，"
+                    f"位于{side}侧1/3到1/2范围，调整视角正对门"
+                )
+                self._align_to_door_detection(
+                    w,
+                    door,
+                    tolerance_px=self.ENTRY_DOOR_FINAL_VIEW_TOLERANCE_PX,
+                )
+                w.refresh_frame()
+                door = self.find_largest_door(w)
+                if door is None:
+                    print(f"[{phase_label}] 视角调整后门目标丢失，继续原进门流程")
+                    return None
+                if self._is_entry_door_roughly_centered(door):
+                    print(f"[{phase_label}] 视角调整后门已大致居中，准备自动开门直推")
+                    return door
+
+        print(f"[{phase_label}] 门框横向预对齐达到步数上限，继续原进门流程")
+        return None
+
+    def _backoff_after_centered_entry_push_failure(self, w: 'FrameWorker', phase_label: str, failures: int, reason: str):
+        print(
+            f"[{phase_label}] {reason}，后拉记为进门失败 "
+            f"{failures}/{self.ENTRY_DOOR_DIRECT_MAX_FAILURES}"
+        )
+        w.tap_single(
+            '摇杆',
+            y_bias=self.ENTRY_DOOR_DIRECT_BACKOFF_Y_BIAS,
+            dura=self.ENTRY_DOOR_DIRECT_BACKOFF_DURA,
+            wait=self.ENTRY_DOOR_DIRECT_BACKOFF_WAIT,
+        )
+        w.refresh_frame()
+
+    def _push_centered_entry_door_without_button(self, w: 'FrameWorker', phase_label='Nav', initial_door=None) -> str:
+        failures = 0
+        direct_started = False
+        door = initial_door
+
+        while failures < self.ENTRY_DOOR_DIRECT_MAX_FAILURES:
+            pushes_this_failure = 0
+            while pushes_this_failure < self.ENTRY_DOOR_DIRECT_PUSHES_PER_FAILURE:
+                if self._should_abort(w):
+                    return "aborted"
+
+                w.refresh_frame()
+                scene = self._get_house_scene(w)
+                if scene == self.HOUSE_INDOOR:
+                    print(f"[{phase_label}] 直推前已是 indoor，启动搜房策略")
+                    return "indoor"
+
+                visible_door = self.find_largest_door(w)
+                if visible_door is not None:
+                    door = self._align_visible_entry_door_for_direct_push(w, visible_door, phase_label)
+                    if door is None:
+                        if not direct_started:
+                            return "not_ready"
+                        failures += 1
+                        self._backoff_after_centered_entry_push_failure(
+                            w,
+                            phase_label,
+                            failures,
+                            "门可见但无法重新调整到大致居中",
+                        )
+                        break
+                elif not direct_started and door is None:
+                    print(f"[{phase_label}] 门未进入视野，继续原进门流程")
+                    return "not_ready"
+                else:
+                    print(f"[{phase_label}] 本次前推前未识别到门，沿当前进门方向继续直推")
+
+                print(
+                    f"[{phase_label}] 自动开门策略直推进门: "
+                    f"y_bias={self.ENTRY_DOOR_DIRECT_FORWARD_Y_BIAS}, "
+                    f"dura={self.ENTRY_DOOR_DIRECT_FORWARD_DURA}, "
+                    f"wait={self.ENTRY_DOOR_DIRECT_FORWARD_WAIT}"
+                )
+                w.tap_single(
+                    '摇杆',
+                    y_bias=self.ENTRY_DOOR_DIRECT_FORWARD_Y_BIAS,
+                    dura=self.ENTRY_DOOR_DIRECT_FORWARD_DURA,
+                    wait=self.ENTRY_DOOR_DIRECT_FORWARD_WAIT,
+                )
+                direct_started = True
+                pushes_this_failure += 1
+                w.refresh_frame()
+
+                scene = self._get_house_scene(w)
+                if scene == self.HOUSE_INDOOR:
+                    print(f"[{phase_label}] 自动开门直推后 house_scene=indoor，启动搜房策略")
+                    return "indoor"
+
+                if scene == self.HOUSE_NEAR_WALL:
+                    failures += 1
+                    self._backoff_after_centered_entry_push_failure(
+                        w,
+                        phase_label,
+                        failures,
+                        "直推后检测到贴墙/撞墙",
+                    )
+                    break
+
+                print(
+                    f"[{phase_label}] 直推后暂未进房 house_scene={scene}，"
+                    f"本轮已推 {pushes_this_failure}/{self.ENTRY_DOOR_DIRECT_PUSHES_PER_FAILURE}"
+                )
+            else:
+                failures += 1
+                self._backoff_after_centered_entry_push_failure(
+                    w,
+                    phase_label,
+                    failures,
+                    f"连续直推 {self.ENTRY_DOOR_DIRECT_PUSHES_PER_FAILURE} 次仍未进房",
+                )
+
+        print(f"[{phase_label}] 自动开门直推累计失败 {failures} 次，判定当前进门点失败")
+        return "failed"
+
+    def _align_entry_door_after_arrival(self, w: 'FrameWorker', phase_label='Nav') -> str:
+        """Arrived at the entry point: align the visible door, then push through auto-open."""
+        door = self.find_largest_door(w)
+        if door is None:
+            print(f"[{phase_label}] 到达进门点后未识别到门，继续原进门流程")
+            return "not_ready"
+
+        self.stop_auto_forward(w)
+        aligned_door = self._align_visible_entry_door_for_direct_push(w, door, phase_label)
+        if aligned_door is None:
+            return "not_ready"
+
+        return self._push_centered_entry_door_without_button(w, phase_label, aligned_door)
+
+    def _micro_adjust_near_entry_point(self, w: 'FrameWorker', current_loc, target_loc, dist: float) -> bool:
+        try:
+            dist_val = float(dist)
+        except (TypeError, ValueError):
+            return False
+
+        if dist_val >= self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
+            self._reset_entry_near_micro_adjust()
+            return False
+        if dist_val <= self.ENTRY_NEAR_MICRO_DONE_DISTANCE:
+            return False
+        if self.entry_near_micro_adjust_attempts >= self.ENTRY_NEAR_MICRO_MAX_ATTEMPTS:
+            print(
+                f"[Nav] 进门点近距离微调已达上限 "
+                f"{self.entry_near_micro_adjust_attempts}/{self.ENTRY_NEAR_MICRO_MAX_ATTEMPTS}，进入进门流程"
+            )
+            return False
+
+        ideal_angle = self.active_entry.get('direction') if self.active_entry else None
+        if ideal_angle is not None:
+            self.align_direction_blocking(
+                w,
+                w.get_info('direction'),
+                ideal_angle,
+                threshold=3,
+                max_steps=3,
+            )
+            w.refresh_frame()
+
+        refreshed_loc = self._get_current_location(w) or current_loc
+        current_dir = w.get_info('direction') or ideal_angle
+        target_angle = calculate_angle(refreshed_loc, target_loc)
+        move_params = self._entry_near_micro_move_params(current_dir, target_angle)
+        if move_params is None:
+            return False
+
+        direction, x_bias, y_bias, relative = move_params
+        self.entry_near_micro_adjust_attempts += 1
+        print(
+            f"[Nav] 距离进门点 {dist_val:.2f}<1，已对准门方向 {ideal_angle}，"
+            f"目标点在{self._entry_micro_direction_label(direction)}，轻推摇杆微调 "
+            f"{self.entry_near_micro_adjust_attempts}/{self.ENTRY_NEAR_MICRO_MAX_ATTEMPTS} "
+            f"(relative={relative:.1f}, x_bias={x_bias}, y_bias={y_bias})"
+        )
+        w.tap_single(
+            '摇杆',
+            x_bias=x_bias,
+            y_bias=y_bias,
+            dura=self.ENTRY_NEAR_MICRO_DURA,
+            wait=self.ENTRY_NEAR_MICRO_WAIT,
+        )
+        w.refresh_frame()
+        self.history_locations = []
+        return True
+
     def searching_logic(self, w: 'FrameWorker', current_loc, current_direction):
         if self._should_abort(w):
             return
@@ -907,7 +1276,12 @@ class HouseSearchManager:
         # --- 快速前进 (距离 > 30.0 才使用自动前进) ---
         if self.status == "FAST_NAV":
             # 卡顿检测逻辑
-            if self.update_and_check_stuck(current_loc):
+            if self._is_house_bypass_unstuck_paused():
+                self.history_locations = []
+                print("[Nav] 绕房视角调整/前推冷却中，跳过通用避障检测")
+            elif self.update_and_check_stuck(current_loc):
+                if self._maybe_bypass_front_house_on_route(w, current_loc, target_loc, dist, "FAST_NAV"):
+                    return
                 print("[Nav] 检测到人物卡死，启动避障程序...")
                 if not self.execute_unstuck_logic(w, current_loc):
                     self.handle_failed_entry_logic(self.active_entry['direction'])
@@ -935,7 +1309,12 @@ class HouseSearchManager:
         elif self.status == "PRECISE_NAV":
             # --- [修改 1] 在精细导航阶段加入卡顿检测 ---
             # 原因：即使在慢速移动时，也可能卡在树根或小障碍物上
-            if self.update_and_check_stuck(current_loc):
+            if self._is_house_bypass_unstuck_paused():
+                self.history_locations = []
+                print("[Nav] (Precise) 绕房视角调整/前推冷却中，跳过通用避障检测")
+            elif self.update_and_check_stuck(current_loc):
+                if self._maybe_bypass_front_house_on_route(w, current_loc, target_loc, dist, "PRECISE_NAV"):
+                    return
                 print("[Nav] (Precise) 检测到人物卡死，启动避障程序...")
                 if not self.execute_unstuck_logic(w, current_loc):
                     self.handle_failed_entry_logic(self.active_entry['direction'])
@@ -944,8 +1323,43 @@ class HouseSearchManager:
                 return
             # ----------------------------------------
 
+            if dist < self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
+                self.stop_auto_forward(w)
+                if self._micro_adjust_near_entry_point(w, current_loc, target_loc, dist):
+                    self.handle_jump_logic(w)
+                    return
+
+                print(f"[Nav] 已到达进门点 (距离 {dist:.2f})")
+                arrival_result = self._align_entry_door_after_arrival(w, "Nav")
+                self._reset_entry_near_micro_adjust()
+                if arrival_result == "indoor":
+                    self._complete_current_house_search(w, "自动开门直推进房成功")
+                    return
+                if arrival_result == "failed":
+                    if self.active_entry:
+                        self.handle_failed_entry_logic(self.active_entry['direction'])
+                    self.status = "IDLE"
+                    return
+                if arrival_result == "aborted":
+                    return
+                self.status = "SCANNING"
+                return
+
+            self._reset_entry_near_micro_adjust()
+
             if dist <= self.ENTRY_ARRIVAL_DISTANCE:
                 print(f"[Nav] 已到达进门点 (距离 {dist:.2f})")
+                arrival_result = self._align_entry_door_after_arrival(w, "Nav")
+                if arrival_result == "indoor":
+                    self._complete_current_house_search(w, "自动开门直推进房成功")
+                    return
+                if arrival_result == "failed":
+                    if self.active_entry:
+                        self.handle_failed_entry_logic(self.active_entry['direction'])
+                    self.status = "IDLE"
+                    return
+                if arrival_result == "aborted":
+                    return
                 self.status = "SCANNING"
                 return
 
@@ -1265,6 +1679,34 @@ class HouseSearchManager:
             + max(0, attempt - 1) * self.ROUTE_STUCK_BYPASS_FORWARD_STEP_WAIT,
         ))
 
+    def _route_stuck_turn_degrees(self, attempt: int) -> int:
+        return int(min(
+            self.ROUTE_STUCK_MAX_TURN_DEGREES,
+            self.ROUTE_STUCK_TURN_DEGREES
+            + max(0, attempt - 1) * self.ROUTE_STUCK_TURN_ESCALATE_STEP,
+        ))
+
+    def _route_stuck_backoff_motion(self, attempt: int):
+        level = max(0, attempt - 1)
+        dura = int(min(
+            self.ROUTE_STUCK_BACKOFF_MAX_DURA,
+            self.ROUTE_STUCK_BACKOFF_BASE_DURA + level * self.ROUTE_STUCK_BACKOFF_DURA_STEP,
+        ))
+        wait = int(min(
+            self.ROUTE_STUCK_BACKOFF_MAX_WAIT,
+            self.ROUTE_STUCK_BACKOFF_BASE_WAIT + level * self.ROUTE_STUCK_BACKOFF_WAIT_STEP,
+        ))
+        return self.ROUTE_STUCK_BACKOFF_Y_BIAS, dura, wait
+
+    def _route_stuck_forward_motion(self, attempt: int):
+        level = max(0, attempt - 1)
+        dura = int(min(
+            self.ROUTE_STUCK_BYPASS_FORWARD_MAX_DURA,
+            self.ROUTE_STUCK_BYPASS_FORWARD_DURA + level * self.ROUTE_STUCK_BYPASS_FORWARD_DURA_STEP,
+        ))
+        wait = self._route_stuck_forward_wait(attempt)
+        return self.ROUTE_STUCK_BYPASS_FORWARD_Y_BIAS, dura, wait
+
     def _resume_entry_direction_after_bypass(self, w: 'FrameWorker', target_loc):
         current_loc = self._get_current_location(w)
         if current_loc is None or target_loc is None:
@@ -1299,8 +1741,12 @@ class HouseSearchManager:
         attempt = self._next_route_stuck_attempt(current_loc)
 
         if backoff_first:
-            print(f"[Unstuck] 前往进门点卡住，先后退复位 attempt={attempt}")
-            w.tap_single('摇杆', y_bias=300, dura=450, wait=850)
+            backoff_y_bias, backoff_dura, backoff_wait = self._route_stuck_backoff_motion(attempt)
+            print(
+                f"[Unstuck] 前往进门点卡住，先后退复位 attempt={attempt}, "
+                f"y_bias={backoff_y_bias}, dura={backoff_dura}, wait={backoff_wait}"
+            )
+            w.tap_single('摇杆', y_bias=backoff_y_bias, dura=backoff_dura, wait=backoff_wait)
             w.refresh_frame()
             if self._get_house_scene(w) == 0:
                 loc_after_back = self._get_current_location(w) or current_loc
@@ -1312,12 +1758,13 @@ class HouseSearchManager:
 
         side = self._choose_house_bypass_side(w)
         current_dir = w.get_info('direction')
+        turn_degrees = self._route_stuck_turn_degrees(attempt)
         if current_dir is not None:
-            turn_delta = self.ROUTE_STUCK_TURN_DEGREES if side == "right" else -self.ROUTE_STUCK_TURN_DEGREES
+            turn_delta = turn_degrees if side == "right" else -turn_degrees
             target_dir = (float(current_dir) + turn_delta) % 360
             print(
-                f"[Unstuck] 视野向{side}侧转 {self.ROUTE_STUCK_TURN_DEGREES}° "
-                f"复核室内/室外: target={target_dir:.1f}"
+                f"[Unstuck] 视野向{side}侧转 {turn_degrees}° "
+                f"复核室内/室外: attempt={attempt}, target={target_dir:.1f}"
             )
             self.align_direction_blocking(
                 w,
@@ -1336,15 +1783,15 @@ class HouseSearchManager:
                 "卡住后转向复核确认误入房",
             )
 
-        wait = self._route_stuck_forward_wait(attempt)
+        forward_y_bias, forward_dura, wait = self._route_stuck_forward_motion(attempt)
         print(
             f"[Unstuck] 确认为室外卡住，沿{side}侧前推绕开障碍 "
-            f"attempt={attempt}, dura={self.ROUTE_STUCK_BYPASS_FORWARD_DURA}, wait={wait}"
+            f"attempt={attempt}, y_bias={forward_y_bias}, dura={forward_dura}, wait={wait}"
         )
         w.tap_single(
             '摇杆',
-            y_bias=self.ROUTE_STUCK_BYPASS_FORWARD_Y_BIAS,
-            dura=self.ROUTE_STUCK_BYPASS_FORWARD_DURA,
+            y_bias=forward_y_bias,
+            dura=forward_dura,
             wait=wait,
         )
         w.refresh_frame()
@@ -1548,6 +1995,7 @@ class HouseSearchManager:
         self.current_house_id = None
         self.avoid_angle_ref = failed_entry_angle
         self.avoid_mode = 'SAME'
+        self._reset_entry_near_micro_adjust()
 
     def prepare_next_target_logic(self, exit_direction):
         self.avoid_angle_ref = exit_direction

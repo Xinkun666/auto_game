@@ -18,6 +18,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_g
     persist_adaptive_motion_section,
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import Cooldown, Stopwatch
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import autogame_print as print
 
 if TYPE_CHECKING:
     from aw.autogame.tools.GameFrameWorker import FrameWorker

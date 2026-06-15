@@ -23,6 +23,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import (
     Stopwatch,
     TimeoutTracker,
 )
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import autogame_print as print
 
 if TYPE_CHECKING:
     from aw.autogame.tools.GameFrameWorker import FrameWorker

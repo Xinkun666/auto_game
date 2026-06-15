@@ -133,6 +133,131 @@ TEST_PROFILE_SCREEN_MODES = {
 PUBG_CASE_KEYWORDS = ("和平精英", "pubg")
 PUBG_CASE_DEFAULT_LOOP_COUNT = 2
 PUBG_CASE_RUNTIME_DESCRIPTION = "和平精英用例默认10分钟搜房、10分钟开车、10分钟跑图，总测试时长60分钟，要循环2次。"
+LOG_FILTER_ALL = "总的"
+LOG_CATEGORY_SYSTEM = "系统日志"
+LOG_CATEGORY_TIME = "时间日志"
+LOG_CATEGORY_LOGIC = "逻辑日志"
+LOG_CATEGORY_UI = "UI和控点日志"
+LOG_CATEGORY_OTHER = "其他日志"
+LOG_FILTERS = (
+    LOG_FILTER_ALL,
+    LOG_CATEGORY_SYSTEM,
+    LOG_CATEGORY_TIME,
+    LOG_CATEGORY_LOGIC,
+    LOG_CATEGORY_UI,
+    LOG_CATEGORY_OTHER,
+)
+LOG_CATEGORIES = set(LOG_FILTERS) - {LOG_FILTER_ALL}
+STRUCTURED_LOG_RE = re.compile(r"^\[AutoLog\](?:\[(?P<category>[^\]]+)\])?")
+TIME_LOG_MARKERS = (
+    "[Timer]",
+    "[PhaseTimer]",
+    "运行信息：",
+    "阶段",
+    "搜房计时",
+    "剩余",
+    "remaining=",
+)
+UI_LOG_MARKERS = (
+    "执行点击",
+    "执行单指操作",
+    "执行双指操作",
+    "执行 uinput",
+    "执行按下",
+    "执行抬起",
+    "touch_down",
+    "touch_move",
+    "touch_up",
+    "move_to",
+    "move_press",
+    "move_up",
+    "控点",
+    "按钮",
+    "摇杆",
+)
+LOGIC_LOG_MARKERS = (
+    "[AutoLog]",
+    "[Parachute]",
+    "[Searching]",
+    "[搜房]",
+    "[SceneSearch]",
+    "[SceneEntry]",
+    "[SceneRotate]",
+    "[SceneExit]",
+    "[HouseExit]",
+    "[Nav]",
+    "[NavBypass]",
+    "[Unstuck]",
+    "[Jump]",
+    "[Smart]",
+    "[Running]",
+    "[Driving]",
+    "[Entry]",
+    "[Interact]",
+    "[Scan]",
+    "[Visual]",
+    "[Finish]",
+    "[Flow]",
+    "[TurnCalibration]",
+)
+SYSTEM_LOG_MARKERS = (
+    "[Launcher]",
+    "[Stream]",
+    "[HDC]",
+    "[StartGame]",
+    "[Popup]",
+    "[End]",
+    "[FrameWorker]",
+    "[Visualizer]",
+    "[Resolution]",
+    "[Rotation]",
+    "[Data]",
+    "[Log]",
+    "[ERROR]",
+    "hdc ",
+    "hdc.exe",
+    "shell",
+    "subprocess",
+    "force-stop",
+    "Traceback",
+    "Exception",
+    "命令执行失败",
+    "成功加载业务逻辑",
+)
+
+
+def classify_output_line(line: str) -> str:
+    text = str(line or "").strip()
+    if not text:
+        return LOG_CATEGORY_OTHER
+
+    structured_match = STRUCTURED_LOG_RE.match(text)
+    if structured_match:
+        category = structured_match.group("category")
+        if category in LOG_CATEGORIES:
+            return category
+        return LOG_CATEGORY_LOGIC
+
+    if any(marker in text for marker in TIME_LOG_MARKERS):
+        return LOG_CATEGORY_TIME
+    if any(marker in text for marker in LOGIC_LOG_MARKERS):
+        return LOG_CATEGORY_LOGIC
+    if any(marker in text for marker in UI_LOG_MARKERS):
+        return LOG_CATEGORY_UI
+    if any(marker in text for marker in SYSTEM_LOG_MARKERS):
+        return LOG_CATEGORY_SYSTEM
+    return LOG_CATEGORY_OTHER
+
+
+def filter_output_text(text: str, selected_filter: str) -> str:
+    if selected_filter == LOG_FILTER_ALL:
+        return text
+
+    return "".join(
+        line
+        for line in str(text or "").splitlines(keepends=True)
+        if classify_output_line(line) == selected_filter
+    )
 
 
 class CaptureStreamCheckResult(NamedTuple):
@@ -1349,6 +1474,18 @@ class LauncherWindow(QWidget):
         self.output_edit.setReadOnly(True)
         self.output_edit.setMinimumHeight(90)
         self.output_edit.setPlaceholderText("运行输出会显示在这里...")
+        self.output_log_filter = LOG_FILTER_ALL
+        self.output_log_entries: list[tuple[str, str]] = []
+        self.output_filter_button_group = QButtonGroup(self)
+        self.output_filter_button_group.setExclusive(True)
+        self.output_filter_buttons: dict[str, QPushButton] = {}
+        for filter_name in LOG_FILTERS:
+            button = QPushButton(filter_name)
+            button.setCheckable(True)
+            button.setProperty("toggleButton", True)
+            button.setChecked(filter_name == self.output_log_filter)
+            self.output_filter_button_group.addButton(button)
+            self.output_filter_buttons[filter_name] = button
 
         self.preview_image_label = QLabel("启动后将在这里实时显示可视化帧")
         self.preview_image_label.setObjectName("previewSurface")
@@ -2000,6 +2137,14 @@ class LauncherWindow(QWidget):
         log_group.setObjectName("logPanel")
         log_layout = QVBoxLayout(log_group)
         log_layout.setContentsMargins(12, 10, 12, 12)
+        log_filter_layout = QHBoxLayout()
+        log_filter_layout.setContentsMargins(0, 0, 0, 0)
+        log_filter_layout.setSpacing(6)
+        log_filter_layout.addWidget(QLabel("显示"))
+        for filter_name in LOG_FILTERS:
+            log_filter_layout.addWidget(self.output_filter_buttons[filter_name])
+        log_filter_layout.addStretch(1)
+        log_layout.addLayout(log_filter_layout)
         log_layout.addWidget(self.output_edit)
         content_splitter.addWidget(preview_group)
         content_splitter.addWidget(log_group)
@@ -2154,16 +2299,15 @@ class LauncherWindow(QWidget):
         self.preview_overlay_button.toggled.connect(self._toggle_preview_overlay)
         self.preview_points_button.toggled.connect(self._toggle_preview_points)
         self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        for filter_name, button in self.output_filter_buttons.items():
+            button.clicked.connect(lambda checked=False, name=filter_name: self._set_output_log_filter(name))
         self.preview_timer.timeout.connect(self._poll_preview_frame)
         self.safety_timer.timeout.connect(self._check_and_start_if_safe)
         self.run_timeout_timer.timeout.connect(self._handle_run_timeout)
         self.stream_disconnect_signal_timer.timeout.connect(self._poll_stream_disconnect_signal)
         LOGGER.debug("signals bound")
 
-    def _append_output(self, text: str):
-        if not text:
-            return
-
+    def _insert_output_text(self, text: str):
         scrollbar = self.output_edit.verticalScrollBar()
         old_scroll_value = scrollbar.value()
         should_follow = scrollbar.value() >= max(0, scrollbar.maximum() - 4)
@@ -2178,6 +2322,45 @@ class LauncherWindow(QWidget):
         else:
             scrollbar.setValue(old_scroll_value)
         QApplication.processEvents()
+
+    def _record_output_text(self, text: str):
+        for line in str(text or "").splitlines(keepends=True):
+            self.output_log_entries.append((classify_output_line(line), line))
+
+    def _all_output_text(self) -> str:
+        return "".join(line for _, line in self.output_log_entries)
+
+    def _filtered_output_text(self) -> str:
+        if self.output_log_filter == LOG_FILTER_ALL:
+            return self._all_output_text()
+        return "".join(
+            line
+            for category, line in self.output_log_entries
+            if category == self.output_log_filter
+        )
+
+    def _render_output_filter(self):
+        self.output_edit.setPlainText(self._filtered_output_text())
+        self.output_edit.moveCursor(QTextCursor.MoveOperation.End)
+        QApplication.processEvents()
+
+    def _set_output_log_filter(self, filter_name: str):
+        if filter_name not in LOG_FILTERS:
+            return
+
+        self.output_log_filter = filter_name
+        for name, button in self.output_filter_buttons.items():
+            button.setChecked(name == filter_name)
+        self._render_output_filter()
+
+    def _append_output(self, text: str):
+        if not text:
+            return
+
+        self._record_output_text(text)
+        visible_text = filter_output_text(text, self.output_log_filter)
+        if visible_text:
+            self._insert_output_text(visible_text)
 
     def _log_message(self, text: str, level: int = logging.INFO):
         self._append_output(text)
@@ -3097,6 +3280,7 @@ class LauncherWindow(QWidget):
         self.stop_requested = False
         self.current_run_index = 0
         self.current_run_timed_out = False
+        self.output_log_entries.clear()
         self.output_edit.clear()
         self._clear_preview_files()
         self.start_button.setEnabled(False)
@@ -3270,7 +3454,7 @@ class LauncherWindow(QWidget):
         self.current_run_start_timestamp = time.strftime("%Y%m%d%H%M%S")
         self.current_run_archive_dir = None
         self._clear_preview_files()
-        self.current_run_output_start = len(self.output_edit.toPlainText())
+        self.current_run_output_start = len(self._all_output_text())
 
         project_case = self.current_plan["project_case"]
         target_case = self.current_plan["target_case"]
@@ -3478,7 +3662,7 @@ class LauncherWindow(QWidget):
         try:
             logs_dir = archive_dir / "logs"
             logs_dir.mkdir(parents=True, exist_ok=True)
-            run_output_text = self.output_edit.toPlainText()[self.current_run_output_start:]
+            run_output_text = self._all_output_text()[self.current_run_output_start:]
             (logs_dir / "launcher_output_partial.txt").write_text(
                 run_output_text,
                 encoding="utf-8",
@@ -3779,7 +3963,7 @@ class LauncherWindow(QWidget):
         if self.current_plan is None:
             return
 
-        run_output_text = self.output_edit.toPlainText()[self.current_run_output_start:]
+        run_output_text = self._all_output_text()[self.current_run_output_start:]
         extra_text_files = {"launcher_output.txt": run_output_text}
         extra_log_files = {}
         stream_device_log_path = None

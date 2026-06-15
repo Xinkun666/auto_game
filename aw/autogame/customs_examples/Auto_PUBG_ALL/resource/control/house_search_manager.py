@@ -5,6 +5,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_navigati
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import *
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_manager import HouseExitManager
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import TimeoutTracker
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import autogame_print as print
 from aw.autogame.tools.Utils import *
 
 if TYPE_CHECKING:

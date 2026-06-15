@@ -250,25 +250,24 @@ class HouseSceneSearchManager(HouseSearchManager):
                 self.history_locations = []
                 return
 
-            if dist < self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
-                self.stop_auto_forward(w)
-                if self._micro_adjust_near_entry_point(w, current_loc, target_loc, dist):
+            if dist <= self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
+                near_result = self._handle_near_entry_point(w, current_loc, target_loc, dist, "SceneSearch")
+                if near_result == "adjusting":
                     self.handle_jump_logic(w)
                     return
 
                 print(f"[SceneSearch] 已到达进门点 (距离 {dist:.2f})，进入 house_scene 进门流程")
-                arrival_result = self._align_entry_door_after_arrival(w, "SceneSearch")
-                self._reset_entry_near_micro_adjust()
-                if arrival_result == "indoor":
+                if near_result == "indoor":
                     self._complete_current_house_search(w, "自动开门直推进房成功")
                     return
-                if arrival_result == "failed":
+                if near_result == "failed":
                     if self.active_entry:
                         self.handle_failed_entry_logic(self.active_entry["direction"])
                     self.status = "IDLE"
                     return
-                if arrival_result == "aborted":
+                if near_result in {"aborted", "aligning"}:
                     return
+                self._reset_entry_near_micro_adjust()
                 self.status = self.STATUS_SCENE_ENTRY
                 return
 

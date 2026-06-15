@@ -1300,7 +1300,7 @@ class HouseSearchManager:
         door = self.find_largest_door(w)
         if door is None:
             print(f"[{phase_label}] 到达进门点后未识别到门，继续原进门流程")
-            return "not_ready"
+            return "not_visible"
 
         self.stop_auto_forward(w)
         aligned_door = self._align_visible_entry_door_for_direct_push(w, door, phase_label)
@@ -1309,13 +1309,49 @@ class HouseSearchManager:
 
         return self._push_centered_entry_door_without_button(w, phase_label, aligned_door)
 
+    def _align_entry_direction_at_near_point(self, w: 'FrameWorker', phase_label='Nav') -> bool:
+        ideal_angle = self.active_entry.get('direction') if self.active_entry else None
+        if ideal_angle is None:
+            return True
+
+        print(f"[{phase_label}] 距离进门点<=1，先对准进门点方向: {ideal_angle}")
+        aligned = self.align_direction_blocking(
+            w,
+            w.get_info('direction'),
+            ideal_angle,
+            threshold=getattr(self, 'ENTRY_DIRECTION_ALIGN_TOLERANCE', 3),
+            max_steps=getattr(self, 'ENTRY_DIRECTION_ALIGN_MAX_STEPS', 3),
+        )
+        if aligned:
+            w.refresh_frame()
+        return aligned
+
+    def _handle_near_entry_point(self, w: 'FrameWorker', current_loc, target_loc, dist: float, phase_label='Nav') -> str:
+        self.stop_auto_forward(w)
+        if not self._align_entry_direction_at_near_point(w, phase_label):
+            print(f"[{phase_label}] 进门点方向尚未对准，等待下一轮继续对准")
+            return "aligning"
+
+        arrival_result = self._align_entry_door_after_arrival(w, phase_label)
+        if arrival_result == "not_visible":
+            if self._micro_adjust_near_entry_point(w, current_loc, target_loc, dist):
+                return "adjusting"
+            return "not_ready"
+
+        if arrival_result != "not_ready":
+            self._reset_entry_near_micro_adjust()
+            return arrival_result
+
+        self._reset_entry_near_micro_adjust()
+        return "not_ready"
+
     def _micro_adjust_near_entry_point(self, w: 'FrameWorker', current_loc, target_loc, dist: float) -> bool:
         try:
             dist_val = float(dist)
         except (TypeError, ValueError):
             return False
 
-        if dist_val >= self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
+        if dist_val > self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
             self._reset_entry_near_micro_adjust()
             return False
         if dist_val <= self.ENTRY_NEAR_MICRO_DONE_DISTANCE:
@@ -1348,7 +1384,7 @@ class HouseSearchManager:
         direction, x_bias, y_bias, relative = move_params
         self.entry_near_micro_adjust_attempts += 1
         print(
-            f"[Nav] 距离进门点 {dist_val:.2f}<1，已对准门方向 {ideal_angle}，"
+            f"[Nav] 距离进门点 {dist_val:.2f}<=1，未识别到门，已对准进门方向 {ideal_angle}，"
             f"目标点在{self._entry_micro_direction_label(direction)}，轻推摇杆微调 "
             f"{self.entry_near_micro_adjust_attempts}/{self.ENTRY_NEAR_MICRO_MAX_ATTEMPTS} "
             f"(relative={relative:.1f}, x_bias={x_bias}, y_bias={y_bias})"
@@ -1478,25 +1514,24 @@ class HouseSearchManager:
                 return
             # ----------------------------------------
 
-            if dist < self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
-                self.stop_auto_forward(w)
-                if self._micro_adjust_near_entry_point(w, current_loc, target_loc, dist):
+            if dist <= self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
+                near_result = self._handle_near_entry_point(w, current_loc, target_loc, dist, "Nav")
+                if near_result == "adjusting":
                     self.handle_jump_logic(w)
                     return
 
                 print(f"[Nav] 已到达进门点 (距离 {dist:.2f})")
-                arrival_result = self._align_entry_door_after_arrival(w, "Nav")
-                self._reset_entry_near_micro_adjust()
-                if arrival_result == "indoor":
+                if near_result == "indoor":
                     self._complete_current_house_search(w, "自动开门直推进房成功")
                     return
-                if arrival_result == "failed":
+                if near_result == "failed":
                     if self.active_entry:
                         self.handle_failed_entry_logic(self.active_entry['direction'])
                     self.status = "IDLE"
                     return
-                if arrival_result == "aborted":
+                if near_result in {"aborted", "aligning"}:
                     return
+                self._reset_entry_near_micro_adjust()
                 self.status = "SCANNING"
                 return
 

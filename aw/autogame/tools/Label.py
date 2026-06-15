@@ -16,7 +16,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QMenu, QFileDialog, QInputDialog, QLabel, QSplitter,
                              QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
                              QGraphicsRectItem, QGraphicsLineItem, QToolBar, QMessageBox, QFrame,
-                             QPinchGesture, QHeaderView, QProgressDialog)
+                             QPinchGesture, QHeaderView, QProgressDialog, QComboBox, QDialog,
+                             QLineEdit, QCheckBox, QScrollArea, QDialogButtonBox)
 from PyQt6.QtCore import Qt, QRectF, QPointF, QEvent
 from PyQt6.QtGui import QAction, QPixmap, QColor, QPen, QBrush, QImage, QPainter, QGuiApplication, QFontMetricsF
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
@@ -24,12 +25,36 @@ from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
 # ==========================================
 # 1. 数据模型 (Data Structure)
 # ==========================================
+DEFAULT_GROUP_NAME = "默认"
+GROUPABLE_ITEM_TYPES = ("area", "special_area")
+
+
 @dataclass
 class RectData:
     x: float
     y: float
     w: float
     h: float
+
+
+@dataclass(frozen=True)
+class GroupItemRef:
+    scene_name: str
+    item_type: str
+    item_name: str
+
+
+@dataclass
+class GroupData:
+    name: str
+    items: List[GroupItemRef] = field(default_factory=list)
+    includes_all: bool = False
+
+
+def default_stage_groups():
+    return [GroupData(name=DEFAULT_GROUP_NAME, includes_all=True)]
+
+
 @dataclass
 class ItemData:
     id: str
@@ -53,6 +78,8 @@ class StageData:
     id: str
     name: str
     scenes: List[SceneData] = field(default_factory=list)
+    groups: List[GroupData] = field(default_factory=default_stage_groups)
+    active_group_name: str = DEFAULT_GROUP_NAME
 @dataclass
 class ProjectData:
     name: str
@@ -226,8 +253,11 @@ class ImageCanvas(QGraphicsView):
                 self.scene.removeItem(item)
         if not scene_data:
             return
+        stage = self.main_window._find_stage_for_scene(scene_data)
         for item in scene_data.items:
             if not item.visible:
+                continue
+            if not self.main_window._is_item_visible_in_stage_group(stage, scene_data, item):
                 continue
             # 绘制本体
             r = item.rect
@@ -436,6 +466,20 @@ class AutoStudioWindow(QMainWindow):
         canvas_toolbar.addWidget(btn_zoom_in)
         canvas_toolbar.addWidget(btn_zoom_out)
         canvas_toolbar.addStretch()
+        canvas_toolbar.addWidget(QLabel("分组名:"))
+        self.group_combo = QComboBox()
+        self.group_combo.setMinimumWidth(140)
+        self.group_combo.currentTextChanged.connect(self.on_group_combo_changed)
+        canvas_toolbar.addWidget(self.group_combo)
+        self.btn_add_group = QPushButton("添加")
+        self.btn_add_group.clicked.connect(self.add_group)
+        canvas_toolbar.addWidget(self.btn_add_group)
+        self.btn_edit_group = QPushButton("修改")
+        self.btn_edit_group.clicked.connect(self.edit_current_group)
+        canvas_toolbar.addWidget(self.btn_edit_group)
+        self.btn_delete_group = QPushButton("删除")
+        self.btn_delete_group.clicked.connect(self.delete_current_group)
+        canvas_toolbar.addWidget(self.btn_delete_group)
         self.status_label = QLabel("欢迎使用。请新建工程。")
         self.status_label.setStyleSheet("background-color: #ddd; padding: 5px;")
         self.coord_label = QLabel("坐标: (-,-)")
@@ -484,6 +528,8 @@ class AutoStudioWindow(QMainWindow):
         splitter.setStretchFactor(0, 85)
         splitter.setStretchFactor(1, 15)
         layout.addWidget(splitter)
+        self._updating_group_combo = False
+        self.update_group_controls()
     def trigger_add_shortcut(self, mode):
         if not self.current_scene:
             QMessageBox.warning(self, "提示", "请先在项目树中选择一个场景。")
@@ -503,6 +549,342 @@ class AutoStudioWindow(QMainWindow):
             self.status_label.setText(f"工程 {name} 已创建。请添加阶段。")
     def set_current_work_stage(self, stage: Optional[StageData]):
         self.current_work_stage = stage
+        if hasattr(self, "group_combo"):
+            self.update_group_controls()
+
+    def _ensure_stage_default_group(self, stage: Optional[StageData]):
+        if not stage:
+            return
+        if not stage.groups:
+            stage.groups = default_stage_groups()
+        default_group = None
+        custom_groups = []
+        for group in stage.groups:
+            if group.name == DEFAULT_GROUP_NAME:
+                if default_group is None:
+                    default_group = group
+                continue
+            custom_groups.append(group)
+        if default_group is None:
+            default_group = GroupData(name=DEFAULT_GROUP_NAME, includes_all=True)
+        default_group.name = DEFAULT_GROUP_NAME
+        default_group.includes_all = True
+        default_group.items = []
+        stage.groups = [default_group] + custom_groups
+        if not self._get_stage_group(stage, stage.active_group_name):
+            stage.active_group_name = DEFAULT_GROUP_NAME
+
+    def _get_stage_group(self, stage: Optional[StageData], group_name: Optional[str]) -> Optional[GroupData]:
+        if not stage:
+            return None
+        if not group_name:
+            group_name = DEFAULT_GROUP_NAME
+        for group in stage.groups:
+            if group.name == group_name:
+                return group
+        return None
+
+    def _get_active_stage_group(self, stage: Optional[StageData]) -> Optional[GroupData]:
+        self._ensure_stage_default_group(stage)
+        if not stage:
+            return None
+        return self._get_stage_group(stage, stage.active_group_name) or self._get_stage_group(stage, DEFAULT_GROUP_NAME)
+
+    def _set_active_stage_group(self, stage: Optional[StageData], group_name: str):
+        self._ensure_stage_default_group(stage)
+        if not stage:
+            return False
+        group = self._get_stage_group(stage, group_name)
+        if not group:
+            return False
+        stage.active_group_name = group.name
+        return True
+
+    def _group_item_ref(self, scene: SceneData, item: ItemData) -> GroupItemRef:
+        return GroupItemRef(scene.name, item.item_type, item.name)
+
+    def _iter_groupable_item_refs(self, stage: Optional[StageData]) -> List[GroupItemRef]:
+        if not stage:
+            return []
+        refs = []
+        seen = set()
+        for scene in stage.scenes:
+            for item in scene.items:
+                if item.item_type not in GROUPABLE_ITEM_TYPES:
+                    continue
+                ref = self._group_item_ref(scene, item)
+                if ref in seen:
+                    continue
+                seen.add(ref)
+                refs.append(ref)
+        return refs
+
+    def _is_item_visible_in_stage_group(
+        self,
+        stage: Optional[StageData],
+        scene: Optional[SceneData],
+        item: ItemData,
+    ) -> bool:
+        if not item or item.item_type not in GROUPABLE_ITEM_TYPES:
+            return True
+        if not stage or not scene:
+            return True
+        group = self._get_active_stage_group(stage)
+        if not group or group.includes_all:
+            return True
+        return self._group_item_ref(scene, item) in set(group.items)
+
+    def _serialize_stage_groups(self, stage: StageData) -> Dict[str, Dict[str, object]]:
+        self._ensure_stage_default_group(stage)
+        group_data = {}
+        for group in stage.groups:
+            if group.name == DEFAULT_GROUP_NAME or group.includes_all:
+                group_data[group.name] = {"all": True}
+                continue
+            group_data[group.name] = {
+                "items": [
+                    {
+                        "scene": ref.scene_name,
+                        "type": ref.item_type,
+                        "name": ref.item_name,
+                    }
+                    for ref in group.items
+                ]
+            }
+        return group_data
+
+    def _deserialize_stage_groups(self, groups_data, stage: StageData) -> List[GroupData]:
+        if not isinstance(groups_data, dict) or not groups_data:
+            return default_stage_groups()
+
+        valid_refs = set(self._iter_groupable_item_refs(stage))
+        has_valid_ref_catalog = bool(valid_refs)
+        groups = [GroupData(name=DEFAULT_GROUP_NAME, includes_all=True)]
+        seen_names = {DEFAULT_GROUP_NAME}
+
+        for raw_name, raw_group in groups_data.items():
+            name = str(raw_name).strip()
+            if not name or name in seen_names:
+                continue
+            if name == DEFAULT_GROUP_NAME:
+                continue
+            if isinstance(raw_group, dict) and raw_group.get("all"):
+                continue
+            raw_items = raw_group.get("items", []) if isinstance(raw_group, dict) else []
+            items = []
+            for raw_ref in raw_items:
+                if not isinstance(raw_ref, dict):
+                    continue
+                ref = GroupItemRef(
+                    scene_name=str(raw_ref.get("scene", "")).strip(),
+                    item_type=str(raw_ref.get("type", "")).strip(),
+                    item_name=str(raw_ref.get("name", "")).strip(),
+                )
+                if ref.item_type not in GROUPABLE_ITEM_TYPES or not ref.scene_name or not ref.item_name:
+                    continue
+                if has_valid_ref_catalog and ref not in valid_refs:
+                    continue
+                if ref not in items:
+                    items.append(ref)
+            groups.append(GroupData(name=name, items=items))
+            seen_names.add(name)
+        return groups
+
+    def _rename_group_item_refs(self, stage: Optional[StageData], old_ref: GroupItemRef, new_ref: GroupItemRef):
+        if not stage:
+            return
+        for group in stage.groups:
+            if group.includes_all:
+                continue
+            group.items = [new_ref if ref == old_ref else ref for ref in group.items]
+
+    def _remove_group_item_refs(self, stage: Optional[StageData], predicate):
+        if not stage:
+            return
+        for group in stage.groups:
+            if group.includes_all:
+                continue
+            group.items = [ref for ref in group.items if not predicate(ref)]
+
+    def _rename_group_scene_refs(self, stage: Optional[StageData], old_scene_name: str, new_scene_name: str):
+        if not stage or old_scene_name == new_scene_name:
+            return
+        for group in stage.groups:
+            if group.includes_all:
+                continue
+            updated_items = []
+            for ref in group.items:
+                if ref.scene_name == old_scene_name:
+                    ref = GroupItemRef(new_scene_name, ref.item_type, ref.item_name)
+                if ref not in updated_items:
+                    updated_items.append(ref)
+            group.items = updated_items
+
+    def update_group_controls(self):
+        if not hasattr(self, "group_combo"):
+            return
+        stage = self.current_stage or self.current_work_stage
+        enabled = stage is not None
+        self._updating_group_combo = True
+        self.group_combo.clear()
+        if stage:
+            self._ensure_stage_default_group(stage)
+            for group in stage.groups:
+                self.group_combo.addItem(group.name)
+            active_group = self._get_active_stage_group(stage)
+            active_name = active_group.name if active_group else DEFAULT_GROUP_NAME
+            index = self.group_combo.findText(active_name)
+            if index >= 0:
+                self.group_combo.setCurrentIndex(index)
+        else:
+            self.group_combo.addItem(DEFAULT_GROUP_NAME)
+        self._updating_group_combo = False
+        active_name = self.group_combo.currentText() or DEFAULT_GROUP_NAME
+        is_default = active_name == DEFAULT_GROUP_NAME
+        self.group_combo.setEnabled(enabled)
+        self.btn_add_group.setEnabled(enabled)
+        self.btn_edit_group.setEnabled(enabled and not is_default)
+        self.btn_delete_group.setEnabled(enabled and not is_default)
+
+    def on_group_combo_changed(self, group_name):
+        if getattr(self, "_updating_group_combo", False):
+            return
+        stage = self.current_stage or self.current_work_stage
+        if not stage or not self._set_active_stage_group(stage, group_name):
+            self.update_group_controls()
+            return
+        self.update_group_controls()
+        self.update_tree_view()
+        if self.current_scene:
+            self.select_data_in_tree(self.current_scene)
+        elif stage:
+            self.select_data_in_tree(stage)
+        if self.current_scene:
+            self.canvas.redraw_overlays(self.current_scene)
+        self.status_label.setText(f"当前分组已切换为 {group_name}。")
+
+    def _format_group_item_ref_label(self, ref: GroupItemRef) -> str:
+        suffix = "Area" if ref.item_type == "area" else "Special"
+        return f"{ref.scene_name}_{ref.item_name} ({suffix})"
+
+    def _open_group_dialog(self, stage: StageData, existing_group: Optional[GroupData] = None):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("修改分组" if existing_group else "添加分组")
+        layout = QVBoxLayout(dialog)
+
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("组名:"))
+        name_edit = QLineEdit(existing_group.name if existing_group else "")
+        name_row.addWidget(name_edit)
+        layout.addLayout(name_row)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_widget = QWidget()
+        checks_layout = QVBoxLayout(scroll_widget)
+        selected_refs = set(existing_group.items if existing_group else [])
+        checkboxes = []
+        for ref in self._iter_groupable_item_refs(stage):
+            checkbox = QCheckBox(self._format_group_item_ref_label(ref))
+            checkbox.setChecked(ref in selected_refs)
+            checks_layout.addWidget(checkbox)
+            checkboxes.append((ref, checkbox))
+        checks_layout.addStretch()
+        scroll.setWidget(scroll_widget)
+        layout.addWidget(scroll)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("确认")
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        group_name = name_edit.text().strip()
+        items = [ref for ref, checkbox in checkboxes if checkbox.isChecked()]
+        return group_name, items
+
+    def add_group(self):
+        stage = self.current_stage or self.current_work_stage
+        if not stage:
+            QMessageBox.warning(self, "提示", "请先选择一个阶段。")
+            return
+        result = self._open_group_dialog(stage)
+        if result is None:
+            return
+        group_name, items = result
+        if not group_name:
+            QMessageBox.warning(self, "提示", "组名不能为空。")
+            return
+        self._ensure_stage_default_group(stage)
+        if self._get_stage_group(stage, group_name):
+            QMessageBox.warning(self, "名称重复", "分组名重复，请重新输入。")
+            return
+        if group_name == DEFAULT_GROUP_NAME:
+            QMessageBox.warning(self, "提示", "默认分组已内置，不能重复创建。")
+            return
+        stage.groups.append(GroupData(name=group_name, items=items))
+        stage.active_group_name = group_name
+        self.update_group_controls()
+        self.update_tree_view()
+        if self.current_scene:
+            self.canvas.redraw_overlays(self.current_scene)
+        self.status_label.setText(f"已添加分组 {group_name}。")
+
+    def edit_current_group(self):
+        stage = self.current_stage or self.current_work_stage
+        group = self._get_active_stage_group(stage)
+        if not stage or not group:
+            QMessageBox.warning(self, "提示", "请先选择一个分组。")
+            return
+        if group.includes_all or group.name == DEFAULT_GROUP_NAME:
+            QMessageBox.information(self, "提示", "默认分组包含全部区域和特殊区域，不能修改。")
+            return
+        result = self._open_group_dialog(stage, group)
+        if result is None:
+            return
+        group_name, items = result
+        if not group_name:
+            QMessageBox.warning(self, "提示", "组名不能为空。")
+            return
+        if group_name == DEFAULT_GROUP_NAME:
+            QMessageBox.warning(self, "提示", "不能将自定义分组改名为默认。")
+            return
+        existing = self._get_stage_group(stage, group_name)
+        if existing and existing is not group:
+            QMessageBox.warning(self, "名称重复", "分组名重复，请重新输入。")
+            return
+        old_name = group.name
+        group.name = group_name
+        group.items = items
+        stage.active_group_name = group_name
+        self.update_group_controls()
+        self.update_tree_view()
+        if self.current_scene:
+            self.canvas.redraw_overlays(self.current_scene)
+        self.status_label.setText(f"已更新分组 {old_name}。")
+
+    def delete_current_group(self):
+        stage = self.current_stage or self.current_work_stage
+        group = self._get_active_stage_group(stage)
+        if not stage or not group:
+            QMessageBox.warning(self, "提示", "请先选择一个分组。")
+            return
+        if group.includes_all or group.name == DEFAULT_GROUP_NAME:
+            QMessageBox.information(self, "提示", "默认分组不能删除。")
+            return
+        reply = QMessageBox.question(self, "删除分组", f"确认删除分组 {group.name}？")
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        stage.groups.remove(group)
+        stage.active_group_name = DEFAULT_GROUP_NAME
+        self.update_group_controls()
+        self.update_tree_view()
+        if self.current_scene:
+            self.canvas.redraw_overlays(self.current_scene)
+        self.status_label.setText(f"已删除分组 {group.name}。")
 
     def _scene_size_label(self, scene: SceneData) -> str:
         width, height = self._get_scene_image_size(scene)
@@ -585,6 +967,8 @@ class AutoStudioWindow(QMainWindow):
                     sc_node.setData(0, Qt.ItemDataRole.UserRole, scene)
                     scene_items[scene.id] = sc_node
                     for item in scene.items:
+                        if not self._is_item_visible_in_stage_group(stage, scene, item):
+                            continue
                         i_node = QTreeWidgetItem(sc_node)
                         if item.item_type == 'area':
                             type_icon = "[区域]"
@@ -612,6 +996,7 @@ class AutoStudioWindow(QMainWindow):
                 item.setExpanded(True)
         self.last_expand_stage_id = None
         self.last_expand_scene_id = None
+        self.update_group_controls()
     def add_stage(self):
         if not self.project: return
         name = self.prompt_unique_name("新建阶段", "阶段名称:",
@@ -920,7 +1305,10 @@ class AutoStudioWindow(QMainWindow):
         elif isinstance(data, SceneData):
             stage = self._find_stage_for_scene(data)
             if stage:
+                scene_name = data.name
                 stage.scenes.remove(data)
+                if not any(scene.name == scene_name for scene in stage.scenes):
+                    self._remove_group_item_refs(stage, lambda ref: ref.scene_name == scene_name)
             if self.current_scene == data:
                 self.current_scene = None
         elif isinstance(data, ItemData):
@@ -1135,6 +1523,15 @@ class AutoStudioWindow(QMainWindow):
             target = self._find_scene_item(peer, item_data.item_type, item_data.name)
             if target:
                 peer.items.remove(target)
+        stage = self._find_stage_for_scene(source_scene)
+        self._remove_group_item_refs(
+            stage,
+            lambda ref: (
+                ref.scene_name == source_scene.name
+                and ref.item_type == item_data.item_type
+                and ref.item_name == item_data.name
+            ),
+        )
 
     def sync_renamed_item_to_scene_peers(self, source_scene: SceneData, item_data: ItemData, old_name: str):
         for peer in self._find_scene_peers(source_scene):
@@ -1142,6 +1539,12 @@ class AutoStudioWindow(QMainWindow):
             if target:
                 target.name = item_data.name
                 target.match_mode = item_data.match_mode or target.match_mode
+        stage = self._find_stage_for_scene(source_scene)
+        self._rename_group_item_refs(
+            stage,
+            GroupItemRef(source_scene.name, item_data.item_type, old_name),
+            GroupItemRef(source_scene.name, item_data.item_type, item_data.name),
+        )
     def _clone_scene(self, scene: SceneData, new_name: Optional[str] = None) -> SceneData:
         pixmap = None
         if scene.pixmap and not scene.pixmap.isNull():
@@ -1408,6 +1811,11 @@ class AutoStudioWindow(QMainWindow):
                 new_item.search_scope = rect_data
             self.current_scene.items.append(new_item)
             self.sync_added_item_to_scene_peers(self.current_scene, new_item)
+            active_group = self._get_active_stage_group(self.current_stage)
+            if mode in GROUPABLE_ITEM_TYPES and active_group and not active_group.includes_all:
+                ref = self._group_item_ref(self.current_scene, new_item)
+                if ref not in active_group.items:
+                    active_group.items.append(ref)
             if self.current_stage:
                 self.last_expand_stage_id = self.current_stage.id
             self.last_expand_scene_id = self.current_scene.id
@@ -1485,6 +1893,7 @@ class AutoStudioWindow(QMainWindow):
             for scene in stage.scenes:
                 if scene.name == old_name:
                     scene.name = name
+            self._rename_group_scene_refs(stage, old_name, name)
             self.status_label.setText(f"已更新场景名称为 {name}")
             self.update_tree_view()
 
@@ -1497,6 +1906,7 @@ class AutoStudioWindow(QMainWindow):
             for scene in stage.scenes:
                 if scene.name == scene_name:
                     scene.name = name
+            self._rename_group_scene_refs(stage, scene_name, name)
             self.status_label.setText(f"已更新场景名称为 {name}")
             self.update_tree_view()
 
@@ -1504,6 +1914,7 @@ class AutoStudioWindow(QMainWindow):
         if not stage:
             return
         stage.scenes = [scene for scene in stage.scenes if scene.name != scene_name]
+        self._remove_group_item_refs(stage, lambda ref: ref.scene_name == scene_name)
         if self.current_scene and self.current_scene.name == scene_name:
             self.current_scene = None
             self.clear_scene_display()
@@ -1514,7 +1925,10 @@ class AutoStudioWindow(QMainWindow):
         stage = self._find_stage_for_scene(scene_data) or self.current_stage
         if not stage:
             return
+        scene_name = scene_data.name
         stage.scenes.remove(scene_data)
+        if not any(scene.name == scene_name for scene in stage.scenes):
+            self._remove_group_item_refs(stage, lambda ref: ref.scene_name == scene_name)
         if self.current_scene == scene_data:
             self.current_scene = None
             self.canvas.scene.clear()
@@ -2103,7 +2517,10 @@ class AutoStudioWindow(QMainWindow):
             for index, stage in enumerate(self.project.stages):
                 self._advance_export_progress(progress_dialog, progress_state, f"正在导出阶段: {stage.name}", 1)
                 stage_dict[stage.name] = index == 0
-                stage_entry = {"scenes": {}}
+                stage_entry = {
+                    "groups": self._serialize_stage_groups(stage),
+                    "scenes": {},
+                }
                 stage_safe_name = safe_filename(stage.name)
                 scenes_stage_dir = os.path.join(scenes_dir, stage_safe_name)
                 os.makedirs(scenes_stage_dir, exist_ok=True)
@@ -2305,6 +2722,8 @@ class AutoStudioWindow(QMainWindow):
                 for _, scene_version_data in scene_versions.items():
                     scene = self._import_scene_version(import_dir, stage_name, scene_name, scene_version_data, stage_control_names)
                     stage.scenes.append(scene)
+            stage.groups = self._deserialize_stage_groups(stage_data.get("groups", {}), stage) if isinstance(stage_data, dict) else default_stage_groups()
+            stage.active_group_name = DEFAULT_GROUP_NAME
             new_project.stages.append(stage)
         self.project = new_project
         resource_dir = os.path.join(import_dir, "resource")

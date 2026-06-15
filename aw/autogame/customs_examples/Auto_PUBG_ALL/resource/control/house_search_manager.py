@@ -29,6 +29,8 @@ class HouseSearchManager:
     ENTRY_FINE_Y_BIAS = -220
     ENTRY_FINE_DURA = 480
     HOUSE_CLASS_IDS = {8}
+    HOUSE_ENTRY_CLASS_IDS = {0, 2, 4}
+    DOOR_CLASS_IDS = {0, 4}
     HOUSE_BLOCK_CENTER_OVERLAP = 0.12
     HOUSE_BLOCK_LOWER_OVERLAP = 0.18
     HOUSE_BLOCK_AREA_RATIO = 0.015
@@ -44,6 +46,18 @@ class HouseSearchManager:
     HOUSE_PROACTIVE_BYPASS_FORWARD_DURA = 320
     HOUSE_PROACTIVE_BYPASS_FORWARD_WAIT = 700
     HOUSE_PROACTIVE_BYPASS_NEAR_ENTRY_SCENES = {3, 4}
+    HOUSE_OBSTACLE_TURN_STEP_DEGREES = 30
+    HOUSE_OBSTACLE_MAX_TURN_DEGREES = 90
+    HOUSE_OBSTACLE_FORWARD_Y_BIAS = -300
+    HOUSE_OBSTACLE_FORWARD_DURA = 500
+    HOUSE_OBSTACLE_FORWARD_WAIT = 3000
+    VISIBLE_DOOR_CENTER_MAX_STEPS = 6
+    VISIBLE_DOOR_CENTER_SIDE_BIAS = 240
+    VISIBLE_DOOR_CENTER_SIDE_DURA = 260
+    VISIBLE_DOOR_CENTER_SIDE_WAIT = 420
+    VISIBLE_DOOR_FORWARD_Y_BIAS = -320
+    VISIBLE_DOOR_FORWARD_DURA = 420
+    VISIBLE_DOOR_FORWARD_WAIT = 800
     ACCIDENTAL_HOUSE_MATCH_MAX_DISTANCE = 22.0
     ROUTE_STUCK_TURN_DEGREES = 90
     ROUTE_STUCK_REPEAT_RADIUS = 4.0
@@ -367,7 +381,7 @@ class HouseSearchManager:
         if self.current_house_id is not None:
             self.completed_houses.add(self.current_house_id)
         self.searching_number += 1
-        print(f"[Searching] 房屋 {self.current_house_id} 完成，已搜 {self.searching_number}/5")
+        print(f"[Searching] 房屋 {self.current_house_id} 完成，累计已搜 {self.searching_number} 个")
 
         w.refresh_frame()
         exit_direction = w.get_info('direction')
@@ -485,10 +499,30 @@ class HouseSearchManager:
         except (TypeError, ValueError):
             return False
 
+    def _is_house_entry_detection(self, det):
+        try:
+            return len(det) >= 6 and int(det[5]) in self.HOUSE_ENTRY_CLASS_IDS
+        except (TypeError, ValueError):
+            return False
+
+    def _is_house_like_detection(self, det):
+        return self._is_house_detection(det) or self._is_house_entry_detection(det)
+
+    def _detection_area(self, det):
+        try:
+            x1, y1, x2, y2 = [float(v) for v in det[:4]]
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
     def _front_house_blocking(self, w: 'FrameWorker'):
         scene = self._get_forward_scene(w)
         if not scene:
             return None
+
+        entry_candidates = [det for det in scene if self._is_house_entry_detection(det)]
+        if entry_candidates:
+            return max(entry_candidates, key=self._detection_area)
 
         frame_w, frame_h = self._get_frame_size()
         center_l = frame_w * 0.38
@@ -528,7 +562,7 @@ class HouseSearchManager:
         lane_area = lane_w * max(frame_h - lower_top, 1)
         score = 0.0
         for det in scene:
-            if not self._is_house_detection(det):
+            if not self._is_house_like_detection(det):
                 continue
             x1, y1, x2, y2 = [float(v) for v in det[:4]]
             overlap_w = max(0, min(x2, lane_right) - max(x1, lane_left))
@@ -599,13 +633,163 @@ class HouseSearchManager:
         print("[Unstuck] 房体绕行未成功，回退到通用避障")
         return False
 
+    def _is_searching_stage_frame(self, w: 'FrameWorker') -> bool:
+        current_stage = getattr(w, "current_stage", None)
+        return current_stage is None or current_stage == '搜房阶段'
+
+    def _safe_get_frame_location(self, w: 'FrameWorker'):
+        raw = w.get_info('location')
+        if raw is None:
+            return None
+        if isinstance(raw, (list, tuple)) and raw and isinstance(raw[0], (list, tuple)):
+            return check_location(raw[0])
+        return check_location(raw)
+
+    def _is_route_close_to_current_entry(self, target_loc, dist_val):
+        if not self.current_house_id or not self.active_entry:
+            return False
+        entry_loc = self._entry_location_tuple(self.active_entry)
+        target = check_location(target_loc)
+        if entry_loc is None or target is None:
+            return False
+        if get_distance(entry_loc, target) > 2.0:
+            return False
+        return dist_val <= self.ENTRY_AUTO_FORWARD_DISTANCE
+
+    def _rotate_view_until_house_clear(self, w: 'FrameWorker', side: str, phase_label: str):
+        turned = 0
+        direction = w.get_info('direction')
+        while turned < self.HOUSE_OBSTACLE_MAX_TURN_DEGREES:
+            if self._should_abort(w):
+                return True
+            if not self._front_house_blocking(w):
+                return True
+
+            step = min(
+                self.HOUSE_OBSTACLE_TURN_STEP_DEGREES,
+                self.HOUSE_OBSTACLE_MAX_TURN_DEGREES - turned,
+            )
+            if direction is None:
+                x_bias = 300 if side == "right" else -300
+                print(f"[NavBypass] {phase_label} 缺少方向角，直接向{side}拨视角")
+                w.tap_single('视角', x_bias=x_bias, dura=520, wait=500)
+            else:
+                target_direction = (float(direction) + (step if side == "right" else -step)) % 360
+                if target_direction == 0:
+                    target_direction = 360
+                print(
+                    f"[NavBypass] {phase_label} 前方仍有房体，向{side}转{step}度避让"
+                )
+                self.align_direction_blocking(
+                    w,
+                    direction,
+                    target_direction,
+                    threshold=8,
+                    max_steps=2,
+                    wait=260,
+                )
+
+            turned += step
+            w.refresh_frame()
+            direction = w.get_info('direction')
+        return True
+
+    def _bypass_front_house_by_view_turn(self, w: 'FrameWorker', target_loc, phase_label='NAV'):
+        self.stop_auto_forward(w)
+        side = self._choose_house_bypass_side(w)
+        print(
+            f"[NavBypass] {phase_label} 前方检测到房体/门窗，"
+            f"固定向{side}侧转向绕行，最大{self.HOUSE_OBSTACLE_MAX_TURN_DEGREES}度"
+        )
+
+        self._rotate_view_until_house_clear(w, side, phase_label)
+        if self._should_abort(w):
+            return True
+
+        print(f"[NavBypass] {phase_label} 绕行视角已处理，前推3秒后继续导航")
+        w.tap_single(
+            '摇杆',
+            y_bias=self.HOUSE_OBSTACLE_FORWARD_Y_BIAS,
+            dura=self.HOUSE_OBSTACLE_FORWARD_DURA,
+            wait=self.HOUSE_OBSTACLE_FORWARD_WAIT,
+        )
+        w.refresh_frame()
+        if hasattr(self, "history_locations"):
+            self.history_locations = []
+        return True
+
+    def _center_visible_door_by_lateral_move(self, w: 'FrameWorker', door):
+        for _ in range(self.VISIBLE_DOOR_CENTER_MAX_STEPS):
+            inf_w, inf_h = get_wh()
+            frame_w = max(inf_w, inf_h)
+            left_bound = frame_w / 3
+            right_bound = frame_w * 2 / 3
+            door_center_x = (door[0] + door[2]) / 2
+            if left_bound <= door_center_x <= right_bound:
+                return door
+
+            x_bias = (
+                -self.VISIBLE_DOOR_CENTER_SIDE_BIAS
+                if door_center_x < left_bound
+                else self.VISIBLE_DOOR_CENTER_SIDE_BIAS
+            )
+            print("[NavBypass] 非目标房门不在中间1/3，横向调整人物位置")
+            w.tap_single(
+                '摇杆',
+                x_bias=x_bias,
+                dura=self.VISIBLE_DOOR_CENTER_SIDE_DURA,
+                wait=self.VISIBLE_DOOR_CENTER_SIDE_WAIT,
+            )
+            w.refresh_frame()
+            door = self.find_largest_door(w)
+            if door is None:
+                return None
+        return door
+
+    def _try_enter_visible_non_target_house(self, w: 'FrameWorker', current_loc, phase_label='NAV'):
+        door = self.find_largest_door(w)
+        if door is None:
+            return False
+
+        print(f"[NavBypass] {phase_label} 前方不是当前目标但看到门，尝试顺路进房")
+        self.stop_auto_forward(w)
+        door = self._center_visible_door_by_lateral_move(w, door)
+        if door is None:
+            print("[NavBypass] 横向调整后门目标丢失，改走绕房策略")
+            return False
+
+        if not self._align_to_door_detection(w, door):
+            print("[NavBypass] 门视角对齐失败，改走绕房策略")
+            return False
+
+        for _ in range(3):
+            if self._should_abort(w):
+                return True
+            if w.get_info('开门'):
+                w.click('开门')
+                time.sleep(1)
+            w.tap_single(
+                '摇杆',
+                y_bias=self.VISIBLE_DOOR_FORWARD_Y_BIAS,
+                dura=self.VISIBLE_DOOR_FORWARD_DURA,
+                wait=self.VISIBLE_DOOR_FORWARD_WAIT,
+            )
+            w.refresh_frame()
+            if self._get_house_scene(w) == 0:
+                indoor_loc = self._safe_get_frame_location(w) or current_loc
+                return self._handle_indoor_during_entry_route(
+                    w,
+                    indoor_loc,
+                    "前方非目标房门顺路进房",
+                )
+
+        print("[NavBypass] 顺路进房未确认 indoor，改走绕房策略")
+        return False
+
     def _maybe_bypass_front_house_on_route(self, w: 'FrameWorker', current_loc, target_loc, dist, phase_label='NAV'):
         try:
             dist_val = float(dist)
         except (TypeError, ValueError):
-            return False
-
-        if dist_val <= self.HOUSE_PROACTIVE_BYPASS_MIN_DISTANCE:
             return False
 
         house_scene = self._get_house_scene(w)
@@ -618,84 +802,24 @@ class HouseSearchManager:
 
         self.align_direction(w, target_loc, threshold=10, max_steps=1)
         w.refresh_frame()
-        if not self._front_house_blocking(w):
+        front_block = self._front_house_blocking(w)
+        if not front_block:
             return False
 
-        if (
-            dist_val <= self.ENTRY_AUTO_FORWARD_DISTANCE
-            and (w.get_info('开门') or w.get_info('关门') or self.find_largest_door(w))
-        ):
-            print(f"[NavBypass] {phase_label} 前方可能是目标房门，跳过主动绕房")
-            return False
+        if not self._is_searching_stage_frame(w):
+            return self._bypass_front_house_by_view_turn(w, target_loc, phase_label)
 
-        def _safe_get_loc():
-            raw = w.get_info('location')
-            if raw is None:
-                return None
-            if isinstance(raw, (list, tuple)) and raw and isinstance(raw[0], (list, tuple)):
-                return check_location(raw[0])
-            return check_location(raw)
+        if self._is_route_close_to_current_entry(target_loc, dist_val):
+            if w.get_info('开门') or w.get_info('关门') or self.find_largest_door(w):
+                print(f"[NavBypass] {phase_label} 前方可能是当前目标房门，交给进门流程")
+                return False
+            print(f"[NavBypass] {phase_label} 当前目标房体挡住直线路径，先绕到进门点")
+            return self._bypass_front_house_by_view_turn(w, target_loc, phase_label)
 
-        self.stop_auto_forward(w)
-        first_side = self._choose_house_bypass_side(w)
-        sides = [first_side, "left" if first_side == "right" else "right"]
-        print(
-            f"[NavBypass] {phase_label} 前往进门点途中检测到房体挡路，"
-            f"dist={dist_val:.2f}，尝试主动绕行"
-        )
-
-        for side in sides:
-            if self._should_abort(w):
-                return True
-
-            x_bias = (
-                self.HOUSE_PROACTIVE_BYPASS_SIDE_BIAS
-                if side == "right"
-                else -self.HOUSE_PROACTIVE_BYPASS_SIDE_BIAS
-            )
-            base_loc = _safe_get_loc() or current_loc
-            print(f"[NavBypass] 向{side}侧滑绕房")
-
-            for step in range(self.HOUSE_PROACTIVE_BYPASS_SIDE_STEPS):
-                if self._should_abort(w):
-                    return True
-                w.tap_single(
-                    '摇杆',
-                    x_bias=x_bias,
-                    dura=self.HOUSE_PROACTIVE_BYPASS_SIDE_DURA,
-                    wait=self.HOUSE_PROACTIVE_BYPASS_SIDE_WAIT,
-                )
-                w.refresh_frame()
-                if not self._front_house_blocking(w):
-                    break
-
-            side_loc = _safe_get_loc()
-            moved = get_distance(base_loc, side_loc) if base_loc and side_loc else -1
-            if self._front_house_blocking(w):
-                print(f"[NavBypass] {side}侧仍被房体挡住，尝试另一侧")
-                continue
-
-            print(f"[NavBypass] {side}侧绕出中心遮挡，side_moved={moved:.2f}，短前推恢复路线")
-            self.align_direction(w, target_loc, threshold=12, max_steps=1)
-            for _ in range(self.HOUSE_PROACTIVE_BYPASS_FORWARD_STEPS):
-                if self._should_abort(w):
-                    return True
-                if self._front_house_blocking(w):
-                    break
-                w.tap_single(
-                    '摇杆',
-                    y_bias=self.HOUSE_PROACTIVE_BYPASS_FORWARD_Y_BIAS,
-                    dura=self.HOUSE_PROACTIVE_BYPASS_FORWARD_DURA,
-                    wait=self.HOUSE_PROACTIVE_BYPASS_FORWARD_WAIT,
-                )
-                w.refresh_frame()
-
-            self.history_locations = []
+        if self._try_enter_visible_non_target_house(w, current_loc, phase_label):
             return True
 
-        self.history_locations = []
-        print("[NavBypass] 主动绕房未找到清晰侧向路径，交给后续卡住脱困逻辑")
-        return False
+        return self._bypass_front_house_by_view_turn(w, target_loc, phase_label)
 
     def _try_lock_visible_door_after_block(self, w: 'FrameWorker') -> bool:
         door = self.find_largest_door(w)
@@ -717,10 +841,6 @@ class HouseSearchManager:
 
     def searching_logic(self, w: 'FrameWorker', current_loc, current_direction):
         if self._should_abort(w):
-            return
-
-        if self.searching_number == 5:
-            self._continue_searching_until_timer(w, '已经搜满5个房间')
             return
 
         # --- 屋内卡死兜底检测 ---
@@ -975,7 +1095,7 @@ class HouseSearchManager:
                 return
             self.completed_houses.add(self.current_house_id)
             self.searching_number += 1
-            print(f"[Finish] 房屋 {self.current_house_id} 完成，已搜 {self.searching_number}/5")
+            print(f"[Finish] 房屋 {self.current_house_id} 完成，累计已搜 {self.searching_number} 个")
             w.refresh_frame()
             exit_direction = w.get_info('direction')
             self.prepare_next_target_logic(exit_direction)
@@ -1500,7 +1620,13 @@ class HouseSearchManager:
         """
         scene = self._get_forward_scene(w)
         if not scene: return None
-        doors = [obj for obj in scene if int(obj[5]) in [0, 4]]
+        doors = []
+        for obj in scene:
+            try:
+                if int(obj[5]) in self.DOOR_CLASS_IDS:
+                    doors.append(obj)
+            except (IndexError, TypeError, ValueError):
+                continue
         if not doors: return None
         return max(doors, key=lambda x: (x[2] - x[0]) * (x[3] - x[1]))
 

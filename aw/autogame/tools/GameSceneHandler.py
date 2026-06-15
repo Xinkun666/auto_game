@@ -5,6 +5,9 @@ from aw.autogame.tools.Utils import *
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 import numpy as np
 
+DEFAULT_GROUP_NAME = "默认"
+GROUPABLE_ITEM_TYPES = ("area", "special_area")
+
 project_case = os.environ.get("TARGET_PROJECT_CASE")
 if not project_case:
     raise ValueError("TARGET_PROJECT_CASE 未设置，无法定位资源路径")
@@ -274,13 +277,53 @@ class StageLogicController:
         self.processor = GameImageProcessor(project_case)
         print(f"[{self.project_name}] 逻辑控制器已就绪。")
 
-    def process_frame(self, frame_img, current_stage_name):
+    def get_stage_groups(self, stage_name):
+        stage_data = self.stage_info.get(stage_name, {})
+        groups = stage_data.get('groups', {}) if isinstance(stage_data, dict) else {}
+        if not isinstance(groups, dict) or not groups:
+            return [DEFAULT_GROUP_NAME]
+        names = [DEFAULT_GROUP_NAME]
+        for name in groups.keys():
+            if name != DEFAULT_GROUP_NAME:
+                names.append(name)
+        return names
+
+    def has_group(self, stage_name, group_name):
+        if not group_name:
+            group_name = DEFAULT_GROUP_NAME
+        return group_name in self.get_stage_groups(stage_name)
+
+    def _resolve_group_filter(self, stage_data, group_name):
+        if not group_name or group_name == DEFAULT_GROUP_NAME:
+            return None
+        groups = stage_data.get('groups', {}) if isinstance(stage_data, dict) else {}
+        if not isinstance(groups, dict):
+            return None
+        group_data = groups.get(group_name)
+        if group_data is None:
+            return set()
+        if isinstance(group_data, dict) and group_data.get('all'):
+            return None
+        raw_items = group_data.get('items', []) if isinstance(group_data, dict) else []
+        allowed = set()
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            scene_name = str(item.get('scene', '')).strip()
+            item_type = str(item.get('type', '')).strip()
+            item_name = str(item.get('name', '')).strip()
+            if scene_name and item_name and item_type in GROUPABLE_ITEM_TYPES:
+                allowed.add((scene_name, item_type, item_name))
+        return allowed
+
+    def process_frame(self, frame_img, current_stage_name, group_name=DEFAULT_GROUP_NAME):
         """
         处理单帧逻辑。
 
         Args:
             frame_img: 当前视频帧
             current_stage_name (str): 由 Framework 传入的当前阶段名称 (如 '关闭弹窗')
+            group_name (str): 当前阶段内要识别的分组名，默认分组识别全部区域和特殊区域
 
         Returns:
             dict: 检测结果
@@ -293,6 +336,7 @@ class StageLogicController:
         # 这里不再读取全局 STAGE_DICT，而是完全依赖传入的参数
         stage_data = self.stage_info.get(current_stage_name, {})
         scenes = stage_data.get('scenes', {})
+        group_filter = self._resolve_group_filter(stage_data, group_name)
         tasks_config = {}
 
         # 遍历该阶段下的所有场景和区域
@@ -304,6 +348,8 @@ class StageLogicController:
             # 普通 Areas (模板匹配)
             areas = scene_info.get('areas', {})
             for area_name, area_data in areas.items():
+                if group_filter is not None and (scene_name, 'area', area_name) not in group_filter:
+                    continue
                 task_key = f"{scene_name}__{area_name}"
                 scope = area_data.get('search_scope', area_data.get('rect'))
                 if area_data.get('search_scope'):
@@ -327,6 +373,8 @@ class StageLogicController:
             # Special Areas (特殊函数)
             special_areas = scene_info.get('special_areas', {})
             for sa_name, sa_data in special_areas.items():
+                if group_filter is not None and (scene_name, 'special_area', sa_name) not in group_filter:
+                    continue
                 task_key = f"{scene_name}__{sa_name}"
                 tasks_config[task_key] = {
                     'type': 'special',

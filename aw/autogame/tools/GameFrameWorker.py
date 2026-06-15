@@ -16,7 +16,7 @@ import numpy as np
 from aw.autogame.tools.Utils import *
 from aw.autogame.tools.Utils import _parse_display_rotation
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
-from aw.autogame.tools.GameSceneHandler import StageLogicController
+from aw.autogame.tools.GameSceneHandler import DEFAULT_GROUP_NAME, StageLogicController
 from aw.autogame.tools.ProcessUtils import hdc_command_args, hidden_subprocess_kwargs
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1834,6 +1834,7 @@ class FrameWorker(threading.Thread):
         self.stage_resolver = StageLogicController()
         self.stage_info = {}
         self.current_stage = None
+        self.current_group = DEFAULT_GROUP_NAME
         self.frame = None
         self.last_gc_time = time.time()
 
@@ -2017,7 +2018,11 @@ class FrameWorker(threading.Thread):
             try:
                 self.frame = np.array(frame, copy=True)
                 self.current_stage = self.get_stage()
-                self.stage_info = self.stage_resolver.process_frame(self.frame, self.current_stage)
+                self.stage_info = self.stage_resolver.process_frame(
+                    self.frame,
+                    self.current_stage,
+                    self.current_group,
+                )
 
                 if not self.viz_queue.full() and self.viz_proc:
                     self.viz_queue.put((self.frame.copy(), self.current_stage, self.stage_info, self.frame_index))
@@ -2111,10 +2116,35 @@ class FrameWorker(threading.Thread):
             self.stage_dict[key] = False
         self.stage_dict[stage_name] = True
         self.current_stage = stage_name
+        self.current_group = DEFAULT_GROUP_NAME
 
         print("\n" + ">" * 40)
         print(f"  STATUS CHANGE: [{old_stage}] -> [{stage_name}]")
         print(">" * 40 + "\n")
+
+    def change_group(self, group_name=DEFAULT_GROUP_NAME):
+        group_name = (group_name or DEFAULT_GROUP_NAME).strip()
+        if not self.current_stage:
+            print("[ERROR] 切换分组失败：当前没有阶段。")
+            return False
+        if not self.stage_resolver.has_group(self.current_stage, group_name):
+            print(f"[ERROR] 切换分组失败：阶段 '{self.current_stage}' 中不存在分组 '{group_name}'。")
+            return False
+
+        old_group = self.current_group
+        self.current_group = group_name
+        print(f"[GROUP CHANGE] [{self.current_stage}] {old_group} -> {group_name}")
+
+        if self.frame is not None:
+            self.stage_info = self.stage_resolver.process_frame(
+                self.frame,
+                self.current_stage,
+                self.current_group,
+            )
+            if self.viz_proc and not self.viz_queue.full():
+                self.viz_queue.put((self.frame.copy(), self.current_stage, self.stage_info, self.frame_index))
+                self.frame_index += 1
+        return True
 
     def refresh_frame(self):
         frame = self.buffer.get_latest(must_new=True)
@@ -2124,7 +2154,11 @@ class FrameWorker(threading.Thread):
 
         self.frame = np.array(frame, copy=True)
         self.current_stage = self.get_stage()
-        self.stage_info = self.stage_resolver.process_frame(self.frame, self.current_stage)
+        self.stage_info = self.stage_resolver.process_frame(
+            self.frame,
+            self.current_stage,
+            self.current_group,
+        )
 
         if not self.viz_queue.full():
             self.viz_queue.put((self.frame.copy(), self.current_stage, self.stage_info, self.frame_index))

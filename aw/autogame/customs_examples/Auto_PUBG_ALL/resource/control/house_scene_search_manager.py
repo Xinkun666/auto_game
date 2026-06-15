@@ -163,10 +163,6 @@ class HouseSceneSearchManager(HouseSearchManager):
             self._handle_indoor_during_entry_route(w, current_loc, "导航/进门过程中检测到 indoor")
             return
 
-        if self.searching_number == 5:
-            self._continue_searching_until_timer(w, "已经搜满5个房间")
-            return
-
         self.indoor_stuck_frames = 0
 
         if self.current_house_id is None:
@@ -277,8 +273,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _should_start_search_from_indoor(self) -> bool:
         return (
-            self.searching_number < 5
-            and self.current_house_id is not None
+            self.current_house_id is not None
             and self.current_house_id not in self.completed_houses
         )
 
@@ -312,7 +307,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         if self.current_house_id is not None:
             self.completed_houses.add(self.current_house_id)
         self.searching_number += 1
-        print(f"[SceneSearch] 房屋 {self.current_house_id} 完成，已搜 {self.searching_number}/5")
+        print(f"[SceneSearch] 房屋 {self.current_house_id} 完成，累计已搜 {self.searching_number} 个")
         w.refresh_frame()
         exit_direction = w.get_info("direction")
         self.prepare_next_target_logic(exit_direction)

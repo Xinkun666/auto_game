@@ -1352,7 +1352,9 @@ class LauncherWindow(QWidget):
         self.browse_button = QPushButton("选择用例")
         self.clear_button = QPushButton("重选")
         self.open_label_tool_button = QPushButton("打开标注工具")
-        self.refresh_button = QPushButton("刷新配置")
+        self.refresh_button = QPushButton("刷新")
+        self.refresh_button.setToolTip("刷新配置")
+        self.refresh_button.setFixedWidth(64)
 
         self.project_combo = QComboBox()
         self.target_combo = QComboBox()
@@ -2061,6 +2063,7 @@ class LauncherWindow(QWidget):
         testcase_layout.addWidget(self.browse_button)
         testcase_layout.addWidget(self.clear_button)
         testcase_layout.addWidget(self.open_label_tool_button)
+        testcase_layout.addWidget(self.refresh_button)
         launch_row.addWidget(testcase_group, 2)
         controls_layout.addLayout(launch_row)
 
@@ -2088,7 +2091,6 @@ class LauncherWindow(QWidget):
         add_config_item(3, 1, "安全时间", self.safe_time_field)
         add_config_item(4, 0, "无操控超时", self.inactivity_timeout_field)
         add_config_item(4, 1, "视频归档", self.generate_preview_video_button)
-        config_layout.addWidget(self.refresh_button, 4, 3)
 
         config_layout.setColumnStretch(1, 1)
         config_layout.setColumnStretch(3, 1)

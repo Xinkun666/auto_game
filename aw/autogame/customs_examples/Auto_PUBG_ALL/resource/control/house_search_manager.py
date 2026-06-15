@@ -35,6 +35,8 @@ class HouseSearchManager:
     HOUSE_NEAR_DOOR = 3
     HOUSE_NEAR_WALL = 4
     HOUSE_CLASS_IDS = {8}
+    WINDOW_CLASS_IDS = {2}
+    STONE_WALL_CLASS_IDS = {9}
     HOUSE_ENTRY_CLASS_IDS = {0, 2, 4}
     DOOR_CLASS_IDS = {0, 4}
     HOUSE_BLOCK_CENTER_OVERLAP = 0.12
@@ -52,12 +54,20 @@ class HouseSearchManager:
     HOUSE_PROACTIVE_BYPASS_FORWARD_DURA = 320
     HOUSE_PROACTIVE_BYPASS_FORWARD_WAIT = 700
     HOUSE_PROACTIVE_BYPASS_NEAR_ENTRY_SCENES = {3, 4}
+    HOUSE_SEARCH_BYPASS_MIN_ENTRY_DISTANCE = 10.0
     HOUSE_OBSTACLE_TURN_STEP_DEGREES = 30
     HOUSE_OBSTACLE_MAX_TURN_DEGREES = 90
     HOUSE_OBSTACLE_FORWARD_Y_BIAS = -300
     HOUSE_OBSTACLE_FORWARD_DURA = 500
     HOUSE_OBSTACLE_FORWARD_WAIT = 3000
     HOUSE_BYPASS_UNSTUCK_PAUSE_SECONDS = 5.0
+    STONE_WALL_FORWARD_Y_BIAS = -200
+    STONE_WALL_FORWARD_DURA = 200
+    STONE_WALL_FORWARD_WAIT = 500
+    STONE_WALL_JUMP_FORWARD_Y_BIAS = -300
+    STONE_WALL_JUMP_FORWARD_DURA = 300
+    STONE_WALL_JUMP_FORWARD_WAIT = 900
+    STONE_WALL_JUMP_SETTLE_SECONDS = 0.15
     VISIBLE_DOOR_CENTER_MAX_STEPS = 6
     VISIBLE_DOOR_CENTER_SIDE_BIAS = 240
     VISIBLE_DOOR_CENTER_SIDE_DURA = 260
@@ -571,6 +581,18 @@ class HouseSearchManager:
         except (TypeError, ValueError):
             return False
 
+    def _detection_class_id(self, det):
+        try:
+            if len(det) < 6:
+                return None
+            return int(det[5])
+        except (TypeError, ValueError):
+            return None
+
+    def _is_detection_class(self, det, class_ids):
+        cls_id = self._detection_class_id(det)
+        return cls_id in class_ids if cls_id is not None else False
+
     def _is_house_like_detection(self, det):
         return self._is_house_detection(det) or self._is_house_entry_detection(det)
 
@@ -621,6 +643,68 @@ class HouseSearchManager:
         if not candidates:
             return None
         return max(candidates, key=lambda item: item[0])[1]
+
+    def _front_path_detection(self, scene, class_ids):
+        if not scene:
+            return None
+
+        frame_w, frame_h = self._get_frame_size()
+        center_l = frame_w * 0.35
+        center_r = frame_w * 0.65
+        lower_t = frame_h * 0.30
+        center_band_w = max(center_r - center_l, 1)
+        lower_band_h = max(frame_h - lower_t, 1)
+        candidates = []
+
+        for det in scene:
+            if not self._is_detection_class(det, class_ids):
+                continue
+            try:
+                x1, y1, x2, y2 = [float(v) for v in det[:4]]
+            except (TypeError, ValueError):
+                continue
+
+            x1, x2 = max(0, min(x1, frame_w)), max(0, min(x2, frame_w))
+            y1, y2 = max(0, min(y1, frame_h)), max(0, min(y2, frame_h))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            center_overlap = max(0, min(x2, center_r) - max(x1, center_l)) / center_band_w
+            lower_overlap = max(0, min(y2, frame_h) - max(y1, lower_t)) / lower_band_h
+            area_ratio = ((x2 - x1) * (y2 - y1)) / max(frame_w * frame_h, 1)
+            if center_overlap <= 0 and lower_overlap <= 0:
+                continue
+            score = center_overlap * 2 + lower_overlap + area_ratio * 4
+            candidates.append((score, det))
+
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item[0])[1]
+
+    def _front_route_obstacle_summary(self, w: 'FrameWorker'):
+        scene = self._get_forward_scene(w)
+        summary = {
+            "has_house": False,
+            "has_window": False,
+            "has_door": False,
+            "stone_wall": None,
+        }
+        if not scene:
+            return summary
+
+        for det in scene:
+            cls_id = self._detection_class_id(det)
+            if cls_id is None:
+                continue
+            if cls_id in self.HOUSE_CLASS_IDS:
+                summary["has_house"] = True
+            if cls_id in self.WINDOW_CLASS_IDS:
+                summary["has_window"] = True
+            if cls_id in self.DOOR_CLASS_IDS:
+                summary["has_door"] = True
+
+        summary["stone_wall"] = self._front_path_detection(scene, self.STONE_WALL_CLASS_IDS)
+        return summary
 
     def _house_side_block_score(self, scene, lane_left, lane_right, frame_h):
         lane_w = max(lane_right - lane_left, 1)
@@ -854,6 +938,53 @@ class HouseSearchManager:
         print("[NavBypass] 顺路进房未确认 indoor，改走绕房策略")
         return False
 
+    def _handle_front_stone_wall_on_search_route(self, w: 'FrameWorker', current_loc, phase_label='NAV') -> bool:
+        self.stop_auto_forward(w)
+        print(
+            f"[NavBypass] {phase_label} 前方发现 stone_wall，"
+            f"先短前推 y_bias={self.STONE_WALL_FORWARD_Y_BIAS}, wait={self.STONE_WALL_FORWARD_WAIT}"
+        )
+        w.tap_single(
+            '摇杆',
+            y_bias=self.STONE_WALL_FORWARD_Y_BIAS,
+            dura=self.STONE_WALL_FORWARD_DURA,
+            wait=self.STONE_WALL_FORWARD_WAIT,
+        )
+        w.refresh_frame()
+        if self._get_house_scene(w) == self.HOUSE_INDOOR:
+            indoor_loc = self._safe_get_frame_location(w) or current_loc
+            return self._handle_indoor_during_entry_route(
+                w,
+                indoor_loc,
+                "stone_wall 短前推后确认进房",
+            )
+
+        if w.get_info('跳跃'):
+            print(f"[NavBypass] {phase_label} stone_wall 前推后出现跳跃按钮，点击跳跃")
+            w.click('跳跃')
+            time.sleep(self.STONE_WALL_JUMP_SETTLE_SECONDS)
+        else:
+            print(f"[NavBypass] {phase_label} stone_wall 前推后未识别到跳跃按钮，仍尝试跳跃前推")
+
+        w.tap_single(
+            '摇杆',
+            y_bias=self.STONE_WALL_JUMP_FORWARD_Y_BIAS,
+            dura=self.STONE_WALL_JUMP_FORWARD_DURA,
+            wait=self.STONE_WALL_JUMP_FORWARD_WAIT,
+        )
+        w.refresh_frame()
+        if self._get_house_scene(w) == self.HOUSE_INDOOR:
+            indoor_loc = self._safe_get_frame_location(w) or current_loc
+            return self._handle_indoor_during_entry_route(
+                w,
+                indoor_loc,
+                "stone_wall 跳跃前推后确认进房",
+            )
+
+        if hasattr(self, "history_locations"):
+            self.history_locations = []
+        return True
+
     def _maybe_bypass_front_house_on_route(self, w: 'FrameWorker', current_loc, target_loc, dist, phase_label='NAV'):
         try:
             dist_val = float(dist)
@@ -870,6 +1001,11 @@ class HouseSearchManager:
 
         self.align_direction(w, target_loc, threshold=10, max_steps=1)
         w.refresh_frame()
+        front_summary = self._front_route_obstacle_summary(w)
+
+        if self._is_searching_stage_frame(w) and front_summary["stone_wall"] is not None:
+            return self._handle_front_stone_wall_on_search_route(w, current_loc, phase_label)
+
         front_block = self._front_house_blocking(w)
         if not front_block:
             return False
@@ -877,16 +1013,35 @@ class HouseSearchManager:
         if not self._is_searching_stage_frame(w):
             return self._bypass_front_house_by_view_turn(w, target_loc, phase_label)
 
+        if dist_val <= self.HOUSE_SEARCH_BYPASS_MIN_ENTRY_DISTANCE:
+            print(
+                f"[NavBypass] {phase_label} 前方有房体但距离进门点 {dist_val:.2f}<=10，"
+                f"按当前目标入口处理，不主动绕房"
+            )
+            return False
+
+        if front_summary["has_door"] or w.get_info('开门') or w.get_info('关门') or self.find_largest_door(w):
+            print(
+                f"[NavBypass] {phase_label} 前方有房体且距离进门点 {dist_val:.2f}>10，"
+                f"但已定位到门，改走对准门前推逻辑"
+            )
+            if self._try_enter_visible_non_target_house(w, current_loc, phase_label):
+                return True
+            print(f"[NavBypass] {phase_label} 本轮对门前推未进房，不主动绕房，下一轮继续识别")
+            return False
+
         if self._is_route_close_to_current_entry(target_loc, dist_val):
-            if w.get_info('开门') or w.get_info('关门') or self.find_largest_door(w):
-                print(f"[NavBypass] {phase_label} 前方可能是当前目标房门，交给进门流程")
-                return False
-            print(f"[NavBypass] {phase_label} 当前目标房体挡住直线路径，先绕到进门点")
-            return self._bypass_front_house_by_view_turn(w, target_loc, phase_label)
+            print(f"[NavBypass] {phase_label} 前方可能是当前目标入门点房体，交给进门流程")
+            return False
 
-        if self._try_enter_visible_non_target_house(w, current_loc, phase_label):
-            return True
+        if not front_summary["has_house"] and not front_summary["has_window"]:
+            print(f"[NavBypass] {phase_label} 前方阻挡不是房子/窗户组合，不主动绕房")
+            return False
 
+        print(
+            f"[NavBypass] {phase_label} 距离进门点 {dist_val:.2f}>10，"
+            f"前方只有房体/窗且未看到门，执行绕房"
+        )
         return self._bypass_front_house_by_view_turn(w, target_loc, phase_label)
 
     def _try_lock_visible_door_after_block(self, w: 'FrameWorker') -> bool:

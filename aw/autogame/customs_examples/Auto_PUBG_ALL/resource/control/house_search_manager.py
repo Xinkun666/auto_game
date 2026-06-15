@@ -117,6 +117,8 @@ class HouseSearchManager:
     ENTRY_DOOR_DIRECT_BACKOFF_WAIT = 5000
     ENTRY_DOOR_DIRECT_PUSHES_PER_FAILURE = 2
     ENTRY_DOOR_DIRECT_MAX_FAILURES = 3
+    ENTRY_NEAR_ALIGN_MIN_DURA = 300
+    ENTRY_NEAR_ALIGN_WAIT = 100
     ENTRY_WALL_BACKOFF_DURA = 520
     ENTRY_WALL_BACKOFF_WAIT = 900
     EXCLUDED_ENTRY_LOCATIONS = {
@@ -1229,7 +1231,9 @@ class HouseSearchManager:
                     return "indoor"
 
                 visible_door = self.find_largest_door(w)
+                confirm_indoor_after_push = False
                 if visible_door is not None:
+                    confirm_indoor_after_push = direct_started and pushes_this_failure >= 1
                     door = self._align_visible_entry_door_for_direct_push(w, visible_door, phase_label)
                     if door is None:
                         if not direct_started:
@@ -1263,6 +1267,10 @@ class HouseSearchManager:
                 direct_started = True
                 pushes_this_failure += 1
                 w.refresh_frame()
+
+                if confirm_indoor_after_push:
+                    print(f"[{phase_label}] 第二次直推前仍能看到门，默认已进房，启动搜房策略")
+                    return "indoor"
 
                 scene = self._get_house_scene(w)
                 if scene == self.HOUSE_INDOOR:
@@ -1321,6 +1329,8 @@ class HouseSearchManager:
             ideal_angle,
             threshold=getattr(self, 'ENTRY_DIRECTION_ALIGN_TOLERANCE', 3),
             max_steps=getattr(self, 'ENTRY_DIRECTION_ALIGN_MAX_STEPS', 3),
+            wait=self.ENTRY_NEAR_ALIGN_WAIT,
+            min_dura=self.ENTRY_NEAR_ALIGN_MIN_DURA,
         )
         if aligned:
             w.refresh_frame()
@@ -2211,15 +2221,24 @@ class HouseSearchManager:
             w.click('自动前进')
             self.auto_forward = False
 
-    def align_direction_blocking(self, w, current_dir, target_angle, threshold=5, max_steps=10):
+    def align_direction_blocking(
+        self,
+        w,
+        current_dir,
+        target_angle,
+        threshold=5,
+        max_steps=10,
+        wait=None,
+        min_dura=None,
+    ):
         return execute_view_turn(
             w,
             current_dir,
             target_angle,
             threshold=threshold,
             max_steps=max_steps,
-            wait=self.ALIGN_WAIT,
-            min_dura=self.ALIGN_MIN_DURA,
+            wait=self.ALIGN_WAIT if wait is None else wait,
+            min_dura=self.ALIGN_MIN_DURA if min_dura is None else min_dura,
             max_dura=self.ALIGN_MAX_DURA,
             max_px=self.ALIGN_MAX_BIAS,
             log_prefix="[NavAlign]",

@@ -125,6 +125,7 @@ DISMISS_REBOOT_PROMPT_ENV = "AUTOGAME_DISMISS_REBOOT_PROMPT"
 DEVICE_LOG_SETTLE_TIMEOUT_SECONDS = 3.0
 DEVICE_LOG_SETTLE_INTERVAL_SECONDS = 0.2
 DEVICE_LOG_STOP_WAIT_TIMEOUT_SECONDS = 15.0
+HDC_SHELL_TIMEOUT_SECONDS = float(os.environ.get("AUTOGAME_HDC_SHELL_TIMEOUT_SECONDS", "5"))
 TEST_PROFILE_SCREEN_MODES = {
     "power": "0",
     "function": "1",
@@ -1068,7 +1069,7 @@ def run_hdc_shell(command: str) -> Optional[str]:
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
-            timeout=20,
+            timeout=HDC_SHELL_TIMEOUT_SECONDS,
             **hidden_subprocess_kwargs(),
         )
     except FileNotFoundError:
@@ -3207,7 +3208,12 @@ class LauncherWindow(QWidget):
         )
 
         if battery is None or temperature is None:
-            self._set_status("无法读取手机温度或电量，稍后重试。")
+            retry_message = "无法读取手机温度或电量，稍后重试。"
+            self._log_message(
+                f"[Launcher] 安全检查：{retry_message} temperature={temperature}, battery={battery}\n",
+                level=logging.WARNING,
+            )
+            self._set_status(retry_message)
             self._set_runtime(
                 self._format_runtime_text(run_no, self.current_plan["run_count"], temperature, battery, "等待重试。")
             )

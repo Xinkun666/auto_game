@@ -108,6 +108,7 @@ class HouseSceneSearchManager(HouseSearchManager):
     ROTATE_SEARCH_LEFT_UP_WAIT = 3000
     ROTATE_SEARCH_VIEW_RIGHT_X_BIAS = 400
     ROTATE_SEARCH_VIEW_LEFT_X_BIAS = -400
+    ROTATE_SEARCH_NEAR_WALL_VIEW_BIASES = (400, 200, 100)
     ROTATE_SEARCH_VIEW_DURA = 500
     ROTATE_SEARCH_VIEW_WAIT = 300
     ROTATE_SEARCH_RIGHT_TURN_STEPS = 5
@@ -153,9 +154,9 @@ class HouseSceneSearchManager(HouseSearchManager):
     EXIT_DOOR_SCAN_STEP_DEGREES = 30
     EXIT_DOOR_SCAN_MAX_DEGREES = 360
     EXIT_NEAR_WALL_TURN_BACK_DEGREES = 180
-    EXIT_NEAR_WALL_FORWARD_Y_BIAS = -300
-    EXIT_NEAR_WALL_FORWARD_DURA = 500
-    EXIT_NEAR_WALL_FORWARD_WAIT = 900
+    EXIT_NEAR_WALL_FORWARD_Y_BIAS = -200
+    EXIT_NEAR_WALL_FORWARD_DURA = 200
+    EXIT_NEAR_WALL_FORWARD_WAIT = 2000
     EXIT_BRUTE_FORCE_SECONDS = 10.0
     EXIT_BRUTE_FORCE_VIEW_DURA = 300
     EXIT_BRUTE_FORCE_VIEW_WAIT = 120
@@ -225,6 +226,9 @@ class HouseSceneSearchManager(HouseSearchManager):
         dist = get_distance(current_loc, target_loc)
 
         if self.status == "FAST_NAV":
+            if self._jump_forward_if_visible_near_house(w, "FAST_NAV 靠近房子"):
+                return
+
             if self._is_house_bypass_unstuck_paused():
                 self.history_locations = []
                 print("[SceneSearch] 绕房视角调整/前推冷却中，跳过通用避障检测")
@@ -257,6 +261,9 @@ class HouseSceneSearchManager(HouseSearchManager):
             return
 
         if self.status == "PRECISE_NAV":
+            if self._jump_forward_if_visible_near_house(w, "PRECISE_NAV 靠近房子"):
+                return
+
             if self._is_house_bypass_unstuck_paused():
                 self.history_locations = []
                 print("[SceneSearch] 精细导航绕房冷却中，跳过通用避障检测")
@@ -670,37 +677,24 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _rotate_search_inside_house(self, w: "FrameWorker"):
         self.stop_auto_forward(w)
-        for step in range(self.ROTATE_SEARCH_RIGHT_TURN_STEPS):
+        total_steps = self.ROTATE_SEARCH_RIGHT_TURN_STEPS + self.ROTATE_SEARCH_LEFT_TURN_STEPS
+        wall_turn_count = 0
+        move_modes = (
+            ["left_up"] * self.ROTATE_SEARCH_RIGHT_TURN_STEPS
+            + ["right_up"] * self.ROTATE_SEARCH_LEFT_TURN_STEPS
+        )
+        for step, move_mode in enumerate(move_modes, start=1):
             if self._should_abort(w):
                 return self.ROTATE_RESULT_FINISHED
-            result = self._rotate_search_sweep_house_scene(
-                w,
-                step + 1,
-                self.ROTATE_SEARCH_RIGHT_TURN_STEPS + self.ROTATE_SEARCH_LEFT_TURN_STEPS,
-                before_turn_x_bias=None,
-                after_turn_x_bias=self.ROTATE_SEARCH_VIEW_RIGHT_X_BIAS,
-                phase_label="右视角旋转",
-            )
-            if result == self.ROTATE_RESULT_EXITED:
-                return result
-
-        for step in range(self.ROTATE_SEARCH_LEFT_TURN_STEPS):
-            if self._should_abort(w):
-                return self.ROTATE_RESULT_FINISHED
-            result = self._rotate_search_sweep_house_scene(
-                w,
-                self.ROTATE_SEARCH_RIGHT_TURN_STEPS + step + 1,
-                self.ROTATE_SEARCH_RIGHT_TURN_STEPS + self.ROTATE_SEARCH_LEFT_TURN_STEPS,
-                before_turn_x_bias=self.ROTATE_SEARCH_VIEW_LEFT_X_BIAS,
-                after_turn_x_bias=None,
-                phase_label="左视角调整后左上滑",
+            result, wall_turn_count = self._rotate_search_sweep_house_scene(
+                w, step, total_steps, move_mode, wall_turn_count
             )
             if result == self.ROTATE_RESULT_EXITED:
                 return result
 
         print(
             f"[SceneRotate] 左上滑旋转累计 "
-            f"{self.ROTATE_SEARCH_RIGHT_TURN_STEPS + self.ROTATE_SEARCH_LEFT_TURN_STEPS} 次仍未出房"
+            f"{total_steps} 次仍未出房"
         )
         return self.ROTATE_RESULT_FALLBACK_EXIT
 
@@ -709,41 +703,47 @@ class HouseSceneSearchManager(HouseSearchManager):
         w: "FrameWorker",
         step: int,
         total_steps: int,
-        before_turn_x_bias: Optional[int],
-        after_turn_x_bias: Optional[int],
-        phase_label: str,
-    ) -> str:
+        move_mode: str,
+        wall_turn_count: int,
+    ):
         w.refresh_frame()
         scene = self._get_house_scene(w)
-        print(f"[SceneRotate] step={step}/{total_steps}, {phase_label}, move_before_scene={scene}")
+        phase_label = self._move_mode_label(move_mode)
+        print(f"[SceneRotate] step={step}/{total_steps}, {phase_label}滑动前 house_scene={scene}")
         if self._is_out_of_house(w):
             print(f"[SceneRotate] 左上滑前已判定出房 house_scene={scene}")
-            return self.ROTATE_RESULT_EXITED
+            return self.ROTATE_RESULT_EXITED, wall_turn_count
 
-        if before_turn_x_bias is not None:
-            self._rotate_search_turn_view(w, before_turn_x_bias, "左")
-            w.refresh_frame()
-            scene = self._get_house_scene(w)
-            if self._is_out_of_house(w):
-                print(f"[SceneRotate] 左视角调整后判定出房 house_scene={scene}")
-                return self.ROTATE_RESULT_EXITED
-
-        self._move_rotate_search_left_up(w, step, total_steps)
+        self._move_rotate_search_step(w, move_mode, step, total_steps)
         scene = self._get_house_scene(w)
         if self._is_out_of_house(w):
-            print(f"[SceneRotate] 左上滑后判定出房 house_scene={scene}")
-            return self.ROTATE_RESULT_EXITED
+            print(f"[SceneRotate] {phase_label}滑动后判定出房 house_scene={scene}")
+            return self.ROTATE_RESULT_EXITED, wall_turn_count
 
-        if after_turn_x_bias is not None:
-            self._rotate_search_turn_view(w, after_turn_x_bias, "右")
+        if scene == self.HOUSE_NEAR_WALL:
+            wall_turn_count += 1
+            x_bias = self._rotate_search_near_wall_turn_x_bias(move_mode, wall_turn_count)
+            label = "右" if x_bias > 0 else "左"
+            print(
+                f"[SceneRotate] {phase_label}滑动后检测到 NEAR_WALL，"
+                f"第 {wall_turn_count} 次补转 x_bias={x_bias}"
+            )
+            self._rotate_search_turn_view(w, x_bias, label)
             w.refresh_frame()
             scene = self._get_house_scene(w)
             if self._is_out_of_house(w):
-                print(f"[SceneRotate] 右视角旋转后判定出房 house_scene={scene}")
-                return self.ROTATE_RESULT_EXITED
+                print(f"[SceneRotate] NEAR_WALL 补转后判定出房 house_scene={scene}")
+                return self.ROTATE_RESULT_EXITED, wall_turn_count
+        else:
+            print(f"[SceneRotate] {phase_label}滑动后 house_scene={scene}，非 NEAR_WALL，不调整视角")
 
         print(f"[SceneRotate] step={step}/{total_steps} 后 house_scene={scene}，未出房则继续旋转搜房")
-        return self.ROTATE_RESULT_FINISHED
+        return self.ROTATE_RESULT_FINISHED, wall_turn_count
+
+    def _rotate_search_near_wall_turn_x_bias(self, move_mode: str, wall_turn_count: int) -> int:
+        index = min(max(wall_turn_count, 1) - 1, len(self.ROTATE_SEARCH_NEAR_WALL_VIEW_BIASES) - 1)
+        magnitude = self.ROTATE_SEARCH_NEAR_WALL_VIEW_BIASES[index]
+        return magnitude if move_mode == "left_up" else -magnitude
 
     def _move_rotate_search_left_up(self, w: "FrameWorker", step: int, total_steps: int):
         print(
@@ -803,10 +803,17 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.auto_forward = False
         w.refresh_frame()
 
-    def _move_rotate_search_step(self, w: "FrameWorker", move_mode: str):
+    def _move_rotate_search_step(
+        self,
+        w: "FrameWorker",
+        move_mode: str,
+        step: Optional[int] = None,
+        total_steps: Optional[int] = None,
+    ):
         x_bias = self._rotate_move_x_bias(move_mode)
         label = self._move_mode_label(move_mode)
-        print(f"[SceneRotate] 向{label}滑动 {self.ROTATE_SEARCH_MOVE_DURA}ms")
+        prefix = f"{step}/{total_steps} " if step is not None and total_steps is not None else ""
+        print(f"[SceneRotate] {prefix}向{label}滑动 {self.ROTATE_SEARCH_MOVE_DURA}ms")
         w.tap_single(
             "摇杆",
             x_bias=x_bias,
@@ -935,6 +942,13 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _exit_house_by_scene_strategy(self, w: "FrameWorker") -> bool:
         print("[SceneExit] 启动 door/open_door 优先出房策略")
+        w.refresh_frame()
+        if self._is_out_of_house(w):
+            print("[SceneExit] 出房策略开始前已在屋外")
+            return True
+        if self._get_house_scene(w) == self.HOUSE_NEAR_WALL:
+            if self._handle_exit_near_wall_turnaround(w, 0, 0):
+                return True
         if self._try_exit_visible_door(w, "出房开始"):
             return True
         if self._scan_exit_door_one_circle(w):

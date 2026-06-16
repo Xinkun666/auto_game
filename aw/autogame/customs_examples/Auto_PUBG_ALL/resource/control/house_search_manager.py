@@ -114,10 +114,15 @@ class HouseSearchManager:
     ENTRY_DOOR_DIRECT_FORWARD_WAIT = 3000
     ENTRY_DOOR_DIRECT_BACKOFF_Y_BIAS = 200
     ENTRY_DOOR_DIRECT_BACKOFF_DURA = 200
-    ENTRY_DOOR_DIRECT_BACKOFF_WAIT = 5000
+    ENTRY_DOOR_DIRECT_BACKOFF_WAIT = 3000
     ENTRY_DOOR_DIRECT_PUSHES_PER_FAILURE = 2
     ENTRY_DOOR_DIRECT_MAX_FAILURES = 3
     ENTRY_DOOR_DIRECT_REALIGN_MAX_ATTEMPTS = 3
+    ENTRY_NEAR_LATERAL_CORRECT_MIN_RELATIVE_DEGREES = 5
+    ENTRY_NEAR_LATERAL_CORRECT_MAX_RELATIVE_DEGREES = 175
+    ENTRY_NEAR_LATERAL_CORRECT_X_BIAS = 120
+    ENTRY_NEAR_LATERAL_CORRECT_DURA = 160
+    ENTRY_NEAR_LATERAL_CORRECT_WAIT = 320
     ENTRY_NEAR_ALIGN_TOLERANCE = 5
     ENTRY_NEAR_ALIGN_MAX_STEPS = 2
     ENTRY_NEAR_ALIGN_MIN_DURA = 300
@@ -1380,16 +1385,79 @@ class HouseSearchManager:
             log_prefix="[EntryNearAlign]",
         )
 
+    def _correct_near_entry_lateral_position_once(
+        self,
+        w: 'FrameWorker',
+        current_loc,
+        target_loc,
+        dist: float,
+        phase_label='Nav',
+    ) -> bool:
+        try:
+            dist_val = float(dist)
+        except (TypeError, ValueError):
+            return False
+
+        if dist_val <= self.ENTRY_NEAR_MICRO_DONE_DISTANCE:
+            print(f"[{phase_label}] 距离进门点 {dist_val:.2f}，无需左右位置修正")
+            return False
+
+        refreshed_loc = self._get_current_location(w) or current_loc
+        current_dir = w.get_info('direction')
+        target_angle = calculate_angle(refreshed_loc, target_loc)
+        if current_dir is None or target_angle is None:
+            print(f"[{phase_label}] 近门左右位置修正缺少方向/坐标，跳过")
+            return False
+
+        try:
+            relative = (float(target_angle) - float(current_dir) + 540) % 360 - 180
+        except (TypeError, ValueError):
+            print(f"[{phase_label}] 近门左右位置修正角度无效，跳过")
+            return False
+
+        abs_relative = abs(relative)
+        if (
+            abs_relative <= self.ENTRY_NEAR_LATERAL_CORRECT_MIN_RELATIVE_DEGREES
+            or abs_relative >= self.ENTRY_NEAR_LATERAL_CORRECT_MAX_RELATIVE_DEGREES
+        ):
+            print(
+                f"[{phase_label}] 近门位置偏差主要在前后方向，"
+                f"不做前后修正 relative={relative:.1f}"
+            )
+            return False
+
+        side = "右" if relative > 0 else "左"
+        x_bias = (
+            self.ENTRY_NEAR_LATERAL_CORRECT_X_BIAS
+            if relative > 0
+            else -self.ENTRY_NEAR_LATERAL_CORRECT_X_BIAS
+        )
+        print(
+            f"[{phase_label}] 对准入门方向后做一次左右位置修正: "
+            f"dist={dist_val:.2f}, target_angle={target_angle:.1f}, "
+            f"current_dir={float(current_dir):.1f}, relative={relative:.1f}, 向{side}推"
+        )
+        w.tap_single(
+            '摇杆',
+            x_bias=x_bias,
+            y_bias=0,
+            dura=self.ENTRY_NEAR_LATERAL_CORRECT_DURA,
+            wait=self.ENTRY_NEAR_LATERAL_CORRECT_WAIT,
+        )
+        w.refresh_frame()
+        self.history_locations = []
+        return True
+
     def _handle_near_entry_point(self, w: 'FrameWorker', current_loc, target_loc, dist: float, phase_label='Nav') -> str:
         self.stop_auto_forward(w)
         if not self._align_entry_direction_at_near_point(w, phase_label):
             print(f"[{phase_label}] 进门点方向尚未对准，等待下一轮继续对准")
             return "aligning"
 
+        self._correct_near_entry_lateral_position_once(w, current_loc, target_loc, dist, phase_label)
+
         arrival_result = self._align_entry_door_after_arrival(w, phase_label)
         if arrival_result == "not_visible":
-            if self._micro_adjust_near_entry_point(w, current_loc, target_loc, dist):
-                return "adjusting"
             return "not_ready"
 
         if arrival_result != "not_ready":
@@ -1515,6 +1583,9 @@ class HouseSearchManager:
 
         # --- 快速前进 (距离 > 30.0 才使用自动前进) ---
         if self.status == "FAST_NAV":
+            if self._jump_forward_if_visible_near_house(w, "FAST_NAV 靠近房子"):
+                return
+
             # 卡顿检测逻辑
             if self._is_house_bypass_unstuck_paused():
                 self.history_locations = []
@@ -1547,6 +1618,9 @@ class HouseSearchManager:
 
         # --- 分段摇杆逼近 ---
         elif self.status == "PRECISE_NAV":
+            if self._jump_forward_if_visible_near_house(w, "PRECISE_NAV 靠近房子"):
+                return
+
             # --- [修改 1] 在精细导航阶段加入卡顿检测 ---
             # 原因：即使在慢速移动时，也可能卡在树根或小障碍物上
             if self._is_house_bypass_unstuck_paused():
@@ -2168,6 +2242,15 @@ class HouseSearchManager:
             time.sleep(0.2)
             w.tap_single('摇杆', y_bias=-400, dura=100, wait=300)
             w.refresh_frame()
+
+    def _jump_forward_if_visible_near_house(self, w: 'FrameWorker', phase_label: str) -> bool:
+        if not w.get_info('跳跃'):
+            return False
+
+        print(f"[Jump] {phase_label} 检测到跳跃按钮，立即跳跃并前推")
+        self.handle_jump_logic(w)
+        self.history_locations = []
+        return True
 
     def select_nearest_entry(self, current_loc):
         """落地后根据当前位置，从 house_data 中计算距离最近的进门点。"""

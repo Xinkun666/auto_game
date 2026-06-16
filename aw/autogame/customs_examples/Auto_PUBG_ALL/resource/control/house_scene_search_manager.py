@@ -312,7 +312,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                         self.handle_failed_entry_logic(self.active_entry["direction"])
                     self.status = "IDLE"
                     return
-                if arrival_result == "aborted":
+                if arrival_result in {"aborted", "adjusting"}:
                     return
                 self.status = self.STATUS_SCENE_ENTRY
                 return

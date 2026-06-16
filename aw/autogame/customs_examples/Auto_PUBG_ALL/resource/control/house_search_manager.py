@@ -23,7 +23,7 @@ class HouseSearchManager:
     INITIAL_LOCATION_STABLE_DISTANCE = 2.5
     INITIAL_LOCATION_JUMP_RESET_DISTANCE = 8.0
     ENTRY_AUTO_FORWARD_DISTANCE = 30.0
-    ENTRY_COARSE_MOVE_DISTANCE = 10.0
+    ENTRY_COARSE_MOVE_DISTANCE = 15.0
     ENTRY_ARRIVAL_DISTANCE = 1.0
     ENTRY_COARSE_Y_BIAS = -430
     ENTRY_COARSE_DURA = 1300
@@ -1133,6 +1133,9 @@ class HouseSearchManager:
     def _align_visible_entry_door_for_direct_push(self, w: 'FrameWorker', door, phase_label='Nav'):
         """Move laterally first, then turn view until the door is roughly centered."""
         for step in range(self.ENTRY_DOOR_FINAL_ALIGN_MAX_STEPS):
+            if self._backoff_entry_near_wall_if_needed(w, phase_label, "门框横向对齐前"):
+                return "near_wall_backoff"
+
             frame_w = self._entry_door_frame_width()
             if frame_w <= 0:
                 return None
@@ -1158,6 +1161,8 @@ class HouseSearchManager:
                     wait=self.ENTRY_DOOR_FINAL_LATERAL_WAIT,
                 )
                 w.refresh_frame()
+                if self._backoff_entry_near_wall_if_needed(w, phase_label, "门在左侧横移后"):
+                    return "near_wall_backoff"
                 door = self.find_largest_door(w)
                 if door is None:
                     print(f"[{phase_label}] 横移后门目标丢失，继续原进门流程")
@@ -1177,6 +1182,8 @@ class HouseSearchManager:
                     wait=self.ENTRY_DOOR_FINAL_LATERAL_WAIT,
                 )
                 w.refresh_frame()
+                if self._backoff_entry_near_wall_if_needed(w, phase_label, "门在右侧横移后"):
+                    return "near_wall_backoff"
                 door = self.find_largest_door(w)
                 if door is None:
                     print(f"[{phase_label}] 横移后门目标丢失，继续原进门流程")
@@ -1199,6 +1206,8 @@ class HouseSearchManager:
                     tolerance_px=self.ENTRY_DOOR_FINAL_VIEW_TOLERANCE_PX,
                 )
                 w.refresh_frame()
+                if self._backoff_entry_near_wall_if_needed(w, phase_label, "门框视角调整后"):
+                    return "near_wall_backoff"
                 door = self.find_largest_door(w)
                 if door is None:
                     print(f"[{phase_label}] 视角调整后门目标丢失，继续原进门流程")
@@ -1223,6 +1232,26 @@ class HouseSearchManager:
         )
         w.refresh_frame()
 
+    def _backoff_entry_near_wall_if_needed(self, w: 'FrameWorker', phase_label: str, reason: str) -> bool:
+        if self._get_house_scene(w) != self.HOUSE_NEAR_WALL:
+            return False
+
+        print(
+            f"[{phase_label}] {reason}检测到 near_wall，"
+            f"先后拉脱离墙面: y_bias={self.ENTRY_DOOR_DIRECT_BACKOFF_Y_BIAS}, "
+            f"dura={self.ENTRY_DOOR_DIRECT_BACKOFF_DURA}, "
+            f"wait={self.ENTRY_DOOR_DIRECT_BACKOFF_WAIT}"
+        )
+        w.tap_single(
+            '摇杆',
+            y_bias=self.ENTRY_DOOR_DIRECT_BACKOFF_Y_BIAS,
+            dura=self.ENTRY_DOOR_DIRECT_BACKOFF_DURA,
+            wait=self.ENTRY_DOOR_DIRECT_BACKOFF_WAIT,
+        )
+        w.refresh_frame()
+        self.history_locations = []
+        return True
+
     def _push_centered_entry_door_without_button(self, w: 'FrameWorker', phase_label='Nav', initial_door=None) -> str:
         failures = 0
         direct_started = False
@@ -1240,6 +1269,9 @@ class HouseSearchManager:
                 if scene == self.HOUSE_INDOOR:
                     print(f"[{phase_label}] 直推前已是 indoor，启动搜房策略")
                     return "indoor"
+                if scene == self.HOUSE_NEAR_WALL:
+                    self._backoff_entry_near_wall_if_needed(w, phase_label, "直推前")
+                    return "adjusting"
 
                 visible_door = self.find_largest_door(w)
                 if visible_door is not None:
@@ -1260,6 +1292,8 @@ class HouseSearchManager:
                         )
 
                     aligned_door = self._align_visible_entry_door_for_direct_push(w, visible_door, phase_label)
+                    if aligned_door == "near_wall_backoff":
+                        return "adjusting"
                     if aligned_door is None:
                         if not direct_started:
                             return "not_ready"
@@ -1307,14 +1341,8 @@ class HouseSearchManager:
                     return "indoor"
 
                 if scene == self.HOUSE_NEAR_WALL:
-                    failures += 1
-                    self._backoff_after_centered_entry_push_failure(
-                        w,
-                        phase_label,
-                        failures,
-                        "直推后检测到贴墙/撞墙",
-                    )
-                    break
+                    self._backoff_entry_near_wall_if_needed(w, phase_label, "直推后")
+                    return "adjusting"
 
                 visible_after_push = self.find_largest_door(w)
                 if visible_after_push is not None:
@@ -1345,6 +1373,9 @@ class HouseSearchManager:
 
     def _align_entry_door_after_arrival(self, w: 'FrameWorker', phase_label='Nav') -> str:
         """Arrived at the entry point: align the visible door, then push through auto-open."""
+        if self._backoff_entry_near_wall_if_needed(w, phase_label, "到达进门点后"):
+            return "adjusting"
+
         door = self.find_largest_door(w)
         if door is None:
             print(f"[{phase_label}] 到达进门点后未识别到门，继续原进门流程")
@@ -1352,6 +1383,8 @@ class HouseSearchManager:
 
         self.stop_auto_forward(w)
         aligned_door = self._align_visible_entry_door_for_direct_push(w, door, phase_label)
+        if aligned_door == "near_wall_backoff":
+            return "adjusting"
         if aligned_door is None:
             return "not_ready"
 
@@ -1454,7 +1487,12 @@ class HouseSearchManager:
             print(f"[{phase_label}] 进门点方向尚未对准，等待下一轮继续对准")
             return "aligning"
 
-        self._correct_near_entry_lateral_position_once(w, current_loc, target_loc, dist, phase_label)
+        if self._backoff_entry_near_wall_if_needed(w, phase_label, "对准进门方向后"):
+            return "adjusting"
+
+        if self._correct_near_entry_lateral_position_once(w, current_loc, target_loc, dist, phase_label):
+            if self._backoff_entry_near_wall_if_needed(w, phase_label, "近门左右位置修正后"):
+                return "adjusting"
 
         arrival_result = self._align_entry_door_after_arrival(w, phase_label)
         if arrival_result == "not_visible":
@@ -1671,7 +1709,7 @@ class HouseSearchManager:
                         self.handle_failed_entry_logic(self.active_entry['direction'])
                     self.status = "IDLE"
                     return
-                if arrival_result == "aborted":
+                if arrival_result in {"aborted", "adjusting"}:
                     return
                 self.status = "SCANNING"
                 return

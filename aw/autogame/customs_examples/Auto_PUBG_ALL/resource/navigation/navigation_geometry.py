@@ -250,12 +250,17 @@ def calculate_move_count(current_dir, target_angle):
     else:
         turn_dir = 'right'
 
-    # 2. 如果角度差极小，直接返回 0
-    if diff < 1.0:
+    # 2. 如果角度差极小，直接返回 0，避免小角度反复过调
+    if diff <= 1.5:
         return turn_dir, 0, diff
 
-    # 3. 回退到初始线性拟合模型，不再走经验查表
-    pixel = int(diff * 5.31 + 49)
+    # 3. 小角度用更温和的分段模型，避免 2-10 度时一次滑动过大导致震荡
+    if diff <= 10.0:
+        pixel = int(diff * 4.0 + 12)
+    elif diff <= 20.0:
+        pixel = int(diff * 4.8 + 18)
+    else:
+        pixel = int(diff * 5.31 + 49)
 
     return turn_dir, pixel, diff
 

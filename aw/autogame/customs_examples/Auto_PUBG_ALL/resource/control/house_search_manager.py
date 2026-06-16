@@ -95,7 +95,7 @@ class HouseSearchManager:
     ROUTE_STUCK_BACKOFF_WAIT_STEP = 300
     ROUTE_STUCK_BACKOFF_MAX_WAIT = 1800
     HOUSE_SEARCH_TIMEOUT_SECONDS = 60
-    ENTRY_NEAR_MICRO_ADJUST_DISTANCE = 1.0
+    ENTRY_NEAR_MICRO_ADJUST_DISTANCE = 1.5
     ENTRY_NEAR_MICRO_DONE_DISTANCE = 0.25
     ENTRY_NEAR_MICRO_MAX_ATTEMPTS = 3
     ENTRY_NEAR_MICRO_X_BIAS = 120
@@ -103,7 +103,7 @@ class HouseSearchManager:
     ENTRY_NEAR_MICRO_DURA = 160
     ENTRY_NEAR_MICRO_WAIT = 320
     ENTRY_DOOR_FINAL_ALIGN_MAX_STEPS = 4
-    ENTRY_DOOR_FINAL_LATERAL_X_BIAS = 140
+    ENTRY_DOOR_FINAL_LATERAL_X_BIAS = 450
     ENTRY_DOOR_FINAL_LATERAL_DURA = 180
     ENTRY_DOOR_FINAL_LATERAL_WAIT = 360
     ENTRY_DOOR_FINAL_VIEW_TOLERANCE_PX = 55
@@ -1322,7 +1322,10 @@ class HouseSearchManager:
         if ideal_angle is None:
             return True
 
-        print(f"[{phase_label}] 距离进门点<=1，先对准进门点方向: {ideal_angle}")
+        print(
+            f"[{phase_label}] 距离进门点<={self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:g}，"
+            f"先对准进门点方向: {ideal_angle}"
+        )
         aligned = self.align_direction_blocking(
             w,
             w.get_info('direction'),
@@ -1394,7 +1397,8 @@ class HouseSearchManager:
         direction, x_bias, y_bias, relative = move_params
         self.entry_near_micro_adjust_attempts += 1
         print(
-            f"[Nav] 距离进门点 {dist_val:.2f}<=1，未识别到门，已对准进门方向 {ideal_angle}，"
+            f"[Nav] 距离进门点 {dist_val:.2f}<={self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:g}，"
+            f"未识别到门，已对准进门方向 {ideal_angle}，"
             f"目标点在{self._entry_micro_direction_label(direction)}，轻推摇杆微调 "
             f"{self.entry_near_micro_adjust_attempts}/{self.ENTRY_NEAR_MICRO_MAX_ATTEMPTS} "
             f"(relative={relative:.1f}, x_bias={x_bias}, y_bias={y_bias})"

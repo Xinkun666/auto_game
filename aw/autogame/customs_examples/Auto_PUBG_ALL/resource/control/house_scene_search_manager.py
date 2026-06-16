@@ -143,6 +143,26 @@ class HouseSceneSearchManager(HouseSearchManager):
     EXIT_SEARCH_LEFT_UP_DURA = 1000
     EXIT_SEARCH_TURN_DEGREES = 60
     EXIT_DOOR_SWEEP_MAX_STEPS = 14
+    EXIT_DOOR_ALIGN_MAX_STEPS = 6
+    EXIT_DOOR_ALIGN_TOLERANCE_DEGREES = 4.0
+    EXIT_DOOR_ALIGN_MAX_STEP_DEGREES = 20.0
+    EXIT_DOOR_FORWARD_MAX_STEPS = 3
+    EXIT_DOOR_FORWARD_Y_BIAS = -360
+    EXIT_DOOR_FORWARD_DURA = 360
+    EXIT_DOOR_FORWARD_WAIT = 650
+    EXIT_DOOR_SCAN_STEP_DEGREES = 30
+    EXIT_DOOR_SCAN_MAX_DEGREES = 360
+    EXIT_NEAR_WALL_TURN_BACK_DEGREES = 180
+    EXIT_NEAR_WALL_FORWARD_Y_BIAS = -300
+    EXIT_NEAR_WALL_FORWARD_DURA = 500
+    EXIT_NEAR_WALL_FORWARD_WAIT = 900
+    EXIT_BRUTE_FORCE_SECONDS = 10.0
+    EXIT_BRUTE_FORCE_VIEW_DURA = 300
+    EXIT_BRUTE_FORCE_VIEW_WAIT = 120
+    EXIT_BRUTE_FORCE_TURN_X_BIASES = (450, -450, 320, -320)
+    EXIT_BRUTE_FORCE_FORWARD_Y_BIAS = -430
+    EXIT_BRUTE_FORCE_FORWARD_DURA = 600
+    EXIT_BRUTE_FORCE_FORWARD_WAIT = 1000
     EXIT_WINDOW_ALIGN_MAX_STEPS = 6
     EXIT_WINDOW_ALIGN_TOLERANCE_DEGREES = 3.0
     EXIT_WINDOW_ALIGN_MAX_STEP_DEGREES = 20
@@ -914,66 +934,232 @@ class HouseSceneSearchManager(HouseSearchManager):
         return self._exit_house_by_scene_strategy(w)
 
     def _exit_house_by_scene_strategy(self, w: "FrameWorker") -> bool:
-        print("[SceneExit] 启动 house_scene 多路径出房策略")
-        move_mode = "left_up"
-        wall_hit_count = 0
+        print("[SceneExit] 启动 door/open_door 优先出房策略")
+        if self._try_exit_visible_door(w, "出房开始"):
+            return True
+        if self._scan_exit_door_one_circle(w):
+            return True
+        return self._brute_force_exit_and_recheck_door(w)
 
-        for step in range(self.EXIT_SEARCH_MAX_STEPS):
+    def _try_exit_visible_door(self, w: "FrameWorker", reason: str) -> bool:
+        if self._should_abort(w):
+            return False
+
+        w.refresh_frame()
+        if self._is_out_of_house(w):
+            print(f"[SceneExit] {reason} 已判定在屋外，出房成功")
+            return True
+
+        door = self._find_largest_forward_target(w, self.EXIT_DOOR_CLASS_IDS)
+        if door is not None:
+            rel_angle = self._target_relative_angle(door)
+            print(f"[SceneExit] {reason} 发现 door/open_door，优先对齐出房 rel_angle={rel_angle}")
+            align_state = self._align_to_exit_door(w, door)
+            if align_state == "abort":
+                return False
+            return self._push_exit_door_forward(w, f"{reason} door/open_door 已处理")
+
+        button_state = self._door_button_state(w)
+        if button_state:
+            print(f"[SceneExit] {reason} 未看到视觉门目标，但发现门按钮 state={button_state}")
+            return self._exit_via_door_button(w, button_state)
+
+        return False
+
+    def _align_to_exit_door(self, w: "FrameWorker", door) -> str:
+        target = door
+        for step in range(self.EXIT_DOOR_ALIGN_MAX_STEPS):
+            if self._should_abort(w):
+                return "abort"
+
+            rel_angle = self._target_relative_angle(target)
+            if rel_angle is None:
+                print("[SceneExit] door/open_door 对齐时角度不可用，按已接近门处理")
+                return "lost"
+            if abs(rel_angle) <= self.EXIT_DOOR_ALIGN_TOLERANCE_DEGREES:
+                print(f"[SceneExit] door/open_door 已对齐 rel_angle={rel_angle:.1f}")
+                return "aligned"
+
+            turn_angle = max(
+                -self.EXIT_DOOR_ALIGN_MAX_STEP_DEGREES,
+                min(self.EXIT_DOOR_ALIGN_MAX_STEP_DEGREES, rel_angle),
+            )
+            side = "右" if turn_angle > 0 else "左"
+            print(
+                f"[SceneExit] door/open_door 在{side}侧，对齐 "
+                f"{step + 1}/{self.EXIT_DOOR_ALIGN_MAX_STEPS}: turn={turn_angle:.1f}"
+            )
+            self._turn(w, turn_angle)
+            w.refresh_frame()
+
+            refreshed = self._find_largest_forward_target(w, self.EXIT_DOOR_CLASS_IDS)
+            if refreshed is None:
+                print("[SceneExit] door/open_door 对齐过程中目标丢失，按已接近门处理")
+                return "lost"
+            target = refreshed
+
+        print("[SceneExit] door/open_door 对齐达到步数上限，开始前推尝试出房")
+        return "aligned"
+
+    def _push_exit_door_forward(self, w: "FrameWorker", reason: str) -> bool:
+        print(f"[SceneExit] {reason}，对齐后开始前推尝试出房")
+        for step in range(self.EXIT_DOOR_FORWARD_MAX_STEPS):
             if self._should_abort(w):
                 return False
 
             w.refresh_frame()
             if self._is_out_of_house(w):
-                print("[SceneExit] 出房策略开始前已判定在屋外")
+                print("[SceneExit] door/open_door 前推前已在屋外")
                 return True
 
-            window = self._find_largest_forward_target(w, self.EXIT_WINDOW_CLASS_IDS)
-            if window and self._exit_via_window_by_scene(w, window):
-                return True
+            if self._door_button_state(w) == "open":
+                print("[SceneExit] door/open_door 前推前看到开门按钮，补点一次开门")
+                w.click("开门")
+                time.sleep(self.OPEN_DOOR_SETTLE_SECONDS)
+                w.refresh_frame()
 
-            button_state = self._door_button_state(w)
-            if button_state and self._exit_via_door_button(w, button_state):
-                return True
+            print(f"[SceneExit] door/open_door 对齐后前推 {step + 1}/{self.EXIT_DOOR_FORWARD_MAX_STEPS}")
+            w.tap_single(
+                "摇杆",
+                y_bias=self.EXIT_DOOR_FORWARD_Y_BIAS,
+                dura=self.EXIT_DOOR_FORWARD_DURA,
+                wait=self.EXIT_DOOR_FORWARD_WAIT,
+            )
+            w.refresh_frame()
 
-            label = self._move_mode_label(move_mode)
-            print(f"[SceneExit] {label}绕圈找出口 {step + 1}/{self.EXIT_SEARCH_MAX_STEPS}")
-            self._move_exit_search_step(w, move_mode)
             if self._is_out_of_house(w):
-                print(f"[SceneExit] {label}滑动时意外出房，出房成功")
+                print("[SceneExit] door/open_door 前推后出房成功")
                 return True
 
-            button_state = self._door_button_state(w)
-            if button_state and self._exit_via_door_button(w, button_state):
-                return True
+        print("[SceneExit] door/open_door 前推到上限，未确认出房")
+        return False
 
-            window = self._find_largest_forward_target(w, self.EXIT_WINDOW_CLASS_IDS)
-            if window and self._exit_via_window_by_scene(w, window):
+    def _scan_exit_door_one_circle(self, w: "FrameWorker") -> bool:
+        scan_steps = max(1, int(self.EXIT_DOOR_SCAN_MAX_DEGREES / self.EXIT_DOOR_SCAN_STEP_DEGREES))
+        print(
+            f"[SceneExit] 当前视野没有 door/open_door，开始旋转扫描一圈 "
+            f"{scan_steps} 步，每步 {self.EXIT_DOOR_SCAN_STEP_DEGREES}°"
+        )
+        for step in range(scan_steps):
+            if self._should_abort(w):
+                return False
+
+            if self._try_exit_visible_door(w, f"旋转扫描前检查 {step + 1}/{scan_steps}"):
                 return True
 
             scene = self._get_house_scene(w)
-            if scene in self.HOUSE_NEAR_ENTRY_SCENES:
-                wall_hit_count += 1
-                print(
-                    f"[SceneExit] 累计撞墙/门 {wall_hit_count}/"
-                    f"{self.ROTATE_SEARCH_HIT_SWITCH_COUNT}, mode={move_mode}"
-                )
-                if wall_hit_count >= self.ROTATE_SEARCH_HIT_SWITCH_COUNT:
-                    move_mode = self._opposite_move_mode(move_mode)
-                    wall_hit_count = 0
-                    label = self._move_mode_label(move_mode)
-                    print(f"[SceneExit] 撞墙/门达到阈值，切换为{label}逆向绕圈")
+            if scene == self.HOUSE_NEAR_WALL:
+                if self._handle_exit_near_wall_turnaround(w, step + 1, scan_steps):
+                    return True
+                continue
 
-            turn_sign = self._move_mode_turn_sign(move_mode)
-            turn_label = "向右" if turn_sign > 0 else "向左"
             print(
-                f"[SceneExit] {self._move_mode_label(move_mode)}后{turn_label}调整视角 "
-                f"{self.EXIT_SEARCH_TURN_DEGREES}° 继续绕圈"
+                f"[SceneExit] 未看到 door/open_door，向右旋转 "
+                f"{self.EXIT_DOOR_SCAN_STEP_DEGREES}° 扫描 {step + 1}/{scan_steps}"
             )
-            self._turn(w, turn_sign * self.EXIT_SEARCH_TURN_DEGREES)
+            self._turn(w, self.EXIT_DOOR_SCAN_STEP_DEGREES)
             w.refresh_frame()
 
-        print("[SceneExit] 多路径出房策略达到步数上限，仍未确认出房")
-        return self._is_out_of_house(w)
+            if self._try_exit_visible_door(w, f"旋转扫描后检查 {step + 1}/{scan_steps}"):
+                return True
+
+        print("[SceneExit] 旋转一圈仍未发现 door/open_door")
+        return False
+
+    def _handle_exit_near_wall_turnaround(self, w: "FrameWorker", step: int, total_steps: int) -> bool:
+        print(
+            f"[SceneExit] 旋转扫描 {step}/{total_steps} 检测到 near_wall，"
+            f"转向 {self.EXIT_NEAR_WALL_TURN_BACK_DEGREES}° 后前推脱离墙面"
+        )
+        self._turn(w, self.EXIT_NEAR_WALL_TURN_BACK_DEGREES)
+        w.refresh_frame()
+        if self._is_out_of_house(w):
+            print("[SceneExit] near_wall 转向后已出房")
+            return True
+
+        w.tap_single(
+            "摇杆",
+            y_bias=self.EXIT_NEAR_WALL_FORWARD_Y_BIAS,
+            dura=self.EXIT_NEAR_WALL_FORWARD_DURA,
+            wait=self.EXIT_NEAR_WALL_FORWARD_WAIT,
+        )
+        w.refresh_frame()
+        if self._is_out_of_house(w):
+            print("[SceneExit] near_wall 转向前推后出房成功")
+            return True
+
+        return self._try_exit_visible_door(w, "near_wall 转向前推后复查")
+
+    def _brute_force_exit_and_recheck_door(self, w: "FrameWorker") -> bool:
+        print(
+            f"[SceneExit] 一圈扫描仍找不到 door/open_door，切换暴力模式，"
+            f"快速奔跑约 {self.EXIT_BRUTE_FORCE_SECONDS:g}s 并变换视角"
+        )
+        fast_run_button = self._click_exit_fast_run(w)
+        start_ts = time.monotonic()
+        step = 0
+        while time.monotonic() - start_ts < self.EXIT_BRUTE_FORCE_SECONDS:
+            if self._should_abort(w):
+                self._stop_exit_fast_run(w, fast_run_button)
+                return False
+
+            w.refresh_frame()
+            if self._is_out_of_house(w):
+                print("[SceneExit] 暴力模式中意外出房，出房成功")
+                self._stop_exit_fast_run(w, fast_run_button)
+                return True
+
+            if self._try_exit_visible_door(w, f"暴力模式中复查门 {step + 1}"):
+                self._stop_exit_fast_run(w, fast_run_button)
+                return True
+
+            x_bias = self.EXIT_BRUTE_FORCE_TURN_X_BIASES[
+                step % len(self.EXIT_BRUTE_FORCE_TURN_X_BIASES)
+            ]
+            print(
+                f"[SceneExit] 暴力模式变换角度并前推 step={step + 1}, "
+                f"x_bias={x_bias}"
+            )
+            w.tap_single(
+                "视角",
+                x_bias=x_bias,
+                dura=self.EXIT_BRUTE_FORCE_VIEW_DURA,
+                wait=self.EXIT_BRUTE_FORCE_VIEW_WAIT,
+            )
+            w.tap_single(
+                "摇杆",
+                y_bias=self.EXIT_BRUTE_FORCE_FORWARD_Y_BIAS,
+                dura=self.EXIT_BRUTE_FORCE_FORWARD_DURA,
+                wait=self.EXIT_BRUTE_FORCE_FORWARD_WAIT,
+            )
+            step += 1
+
+        self._stop_exit_fast_run(w, fast_run_button)
+        w.refresh_frame()
+        if self._is_out_of_house(w):
+            print("[SceneExit] 暴力模式结束后已在屋外")
+            return True
+        return self._try_exit_visible_door(w, "暴力模式结束后复查")
+
+    def _click_exit_fast_run(self, w: "FrameWorker") -> Optional[str]:
+        for button_name in ("快速奔跑", "自动前进"):
+            try:
+                if button_name == "自动前进" or w.get_info(button_name):
+                    print(f"[SceneExit] 暴力模式点击{button_name}")
+                    w.click(button_name)
+                    return button_name
+            except Exception as exc:
+                print(f"[SceneExit] 点击{button_name}失败: {exc}")
+        return None
+
+    def _stop_exit_fast_run(self, w: "FrameWorker", button_name: Optional[str]):
+        if not button_name:
+            return
+        try:
+            print(f"[SceneExit] 暴力模式结束，点击{button_name}停止快速移动")
+            w.click(button_name)
+        except Exception as exc:
+            print(f"[SceneExit] 停止{button_name}失败: {exc}")
 
     def _move_exit_search_step(self, w: "FrameWorker", move_mode: str):
         w.tap_single(

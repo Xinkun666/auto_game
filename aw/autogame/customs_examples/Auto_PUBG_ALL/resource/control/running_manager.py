@@ -409,6 +409,9 @@ class RunningManager:
     PRECISE_RESET_CENTER_WAIT = 700
     # 视觉对车时的参数，沿用 searching_house 的“对准门”思路
     CAR_ALIGN_CENTER_THRESHOLD = 80
+    CAR_ALIGN_CLOSE_CENTER_THRESHOLD = 140
+    CAR_ALIGN_NEAR_CENTER_THRESHOLD = 220
+    CAR_ALIGN_VERY_NEAR_CENTER_THRESHOLD = 300
     CAR_ALIGN_STEP_RATIO = 0.33
     CAR_ALIGN_MAX_BIAS = 400
     CAR_ALIGN_DURA = 500
@@ -3398,17 +3401,38 @@ class RunningManager:
         print(f"[Running] 检测到车辆，视觉中心偏移 {offset_real:.2f}px")
         return offset_real
 
+    def _get_car_align_center_threshold(self) -> int:
+        ratio = self.roadside_car_last_area_ratio
+        if ratio is None:
+            return self.CAR_ALIGN_CENTER_THRESHOLD
+        if ratio >= self.CAR_VISUAL_DYNAMIC_VERY_NEAR_AREA_RATIO:
+            return self.CAR_ALIGN_VERY_NEAR_CENTER_THRESHOLD
+        if ratio >= self.CAR_VISUAL_DYNAMIC_NEAR_AREA_RATIO:
+            return self.CAR_ALIGN_NEAR_CENTER_THRESHOLD
+        if ratio >= self.CAR_VISUAL_DYNAMIC_CLOSE_AREA_RATIO:
+            return self.CAR_ALIGN_CLOSE_CENTER_THRESHOLD
+        return self.CAR_ALIGN_CENTER_THRESHOLD
+
     def _align_to_visible_car(self, w: "FrameWorker") -> Optional[bool]:
         offset_real = self._get_visible_car_center_offset(w)
         if offset_real is None:
             return None
 
-        if abs(offset_real) <= self.CAR_ALIGN_CENTER_THRESHOLD:
+        center_threshold = self._get_car_align_center_threshold()
+        if abs(offset_real) <= center_threshold:
+            print(
+                f"[Running] 车辆已大致对准，offset={offset_real:.2f}px, "
+                f"threshold={center_threshold}, car_area_ratio={self.roadside_car_last_area_ratio}"
+            )
             return True
 
         adjust_val = int(offset_real * self.CAR_ALIGN_STEP_RATIO)
         adjust_val = max(-self.CAR_ALIGN_MAX_BIAS, min(self.CAR_ALIGN_MAX_BIAS, adjust_val))
-        print(f"[Running] 使用视角对准车辆，x_bias={adjust_val}")
+        print(
+            f"[Running] 使用视角对准车辆，x_bias={adjust_val}, "
+            f"offset={offset_real:.2f}px, threshold={center_threshold}, "
+            f"car_area_ratio={self.roadside_car_last_area_ratio}"
+        )
         w.tap_single("视角", x_bias=adjust_val, dura=self.CAR_ALIGN_DURA, wait=self.CAR_ALIGN_WAIT)
         w.refresh_frame()
         return False
@@ -3457,18 +3481,30 @@ class RunningManager:
                     duration_ms=self.CAR_APPROACH_MIXED_MOVE_DURA,
                 )
 
-                if abs(offset_real) > self.CAR_APPROACH_MIXED_CENTER_THRESHOLD:
+                center_threshold = max(
+                    self.CAR_APPROACH_MIXED_CENTER_THRESHOLD,
+                    self._get_car_align_center_threshold(),
+                )
+                if abs(offset_real) > center_threshold:
                     view_bias = int(offset_real * self.CAR_APPROACH_MIXED_VIEW_STEP_RATIO)
                     view_bias = max(
                         -self.CAR_APPROACH_MIXED_MAX_VIEW_BIAS,
                         min(self.CAR_APPROACH_MIXED_MAX_VIEW_BIAS, view_bias),
                     )
-                    print(f"[Running] uinput 同步调整视角靠车 {step_text}: x_bias={view_bias}")
+                    print(
+                        f"[Running] uinput 同步调整视角靠车 {step_text}: "
+                        f"x_bias={view_bias}, offset={offset_real:.2f}px, threshold={center_threshold}"
+                    )
                     w.uinput_tap_single(
                         "视角",
                         x_bias=view_bias,
                         dura=self.CAR_APPROACH_MIXED_VIEW_DURA,
                         wait=self.CAR_APPROACH_MIXED_VIEW_WAIT,
+                    )
+                else:
+                    print(
+                        f"[Running] sendevent+uinput 近车已大致对准 {step_text}: "
+                        f"offset={offset_real:.2f}px, threshold={center_threshold}"
                     )
 
                 w.refresh_frame()

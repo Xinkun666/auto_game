@@ -99,6 +99,9 @@ class HouseSceneSearchManager(HouseSearchManager):
     ENTRY_OPEN_DOOR_RELOCK_EXTRA_BACKOFF_DURA = 260
     ENTRY_OPEN_DOOR_RELOCK_EXTRA_BACKOFF_WAIT = 420
     ENTRY_OPEN_DOOR_RELOCK_TOLERANCE_PX = 90
+    ENTRY_NO_VISIBLE_DOOR_BACKOFF_Y_BIAS = 200
+    ENTRY_NO_VISIBLE_DOOR_BACKOFF_DURA = 200
+    ENTRY_NO_VISIBLE_DOOR_BACKOFF_WAIT = 2000
 
     ROTATE_SEARCH_MOVE_DURA = 1000
     ROTATE_SEARCH_MOVE_WAIT_PAD = 260
@@ -460,6 +463,47 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.status = "IDLE"
         self.history_locations = []
         self._reset_route_stuck_bypass()
+        self._lock_next_entry_after_house_exit(w, exit_direction)
+        return True
+
+    def _lock_next_entry_after_house_exit(self, w: "FrameWorker", exit_direction) -> bool:
+        current_loc = self._get_current_location(w)
+        if current_loc is None or exit_direction is None:
+            print(
+                f"[SceneSearch] 出房后无法立即锁定下一个进门点: "
+                f"location={current_loc}, direction={exit_direction}"
+            )
+            return False
+
+        self.select_smart_target(current_loc, exit_direction)
+        if not self.current_house_id or not self.active_entry:
+            print("[SceneSearch] 出房后暂未找到可立即前往的下一个进门点")
+            return False
+
+        target_loc = self.active_entry["location"]
+        dist = get_distance(current_loc, target_loc)
+        self.status = "FAST_NAV"
+        self.history_locations = []
+        self.initial_target_pending = False
+        print(
+            f"[SceneSearch] 出房后立即锁定下一个进门点: {self.current_house_id} | "
+            f"入口={target_loc} | dist={dist:.2f} | exit_direction={exit_direction}"
+        )
+
+        if 0 <= dist <= self.ENTRY_AUTO_FORWARD_DISTANCE:
+            self.stop_auto_forward(w)
+            self.status = "PRECISE_NAV"
+            print(
+                f"[SceneSearch] 下一个进门点距离 {dist:.2f} <= "
+                f"{self.ENTRY_AUTO_FORWARD_DISTANCE:.1f}，直接进入精细导航"
+            )
+            return True
+
+        self.align_direction(w, target_loc)
+        if not self.auto_forward:
+            print("[SceneSearch] 出房后朝下一个进门点立即开启自动前进")
+            w.click("自动前进")
+            self.auto_forward = True
         return True
 
     def _exit_unexpected_indoor(self, w: "FrameWorker"):
@@ -792,25 +836,48 @@ class HouseSceneSearchManager(HouseSearchManager):
         scene = self._get_house_scene(w)
         phase_label = self._move_mode_label(move_mode)
         print(f"[SceneRotate] step={step}/{total_steps}, {phase_label}滑动前 house_scene={scene}")
-        if self._is_out_of_house(w):
-            print(f"[SceneRotate] {phase_label}滑动前已判定出房 house_scene={scene}")
+        if self._confirm_rotate_search_exit(w, move_mode, turn_x_bias, turn_label, f"{phase_label}滑动前"):
             return self.ROTATE_RESULT_EXITED
 
         self._move_rotate_search_step(w, move_mode, step, total_steps)
         scene = self._get_house_scene(w)
-        if self._is_out_of_house(w):
-            print(f"[SceneRotate] {phase_label}滑动后判定出房 house_scene={scene}")
+        if self._confirm_rotate_search_exit(w, move_mode, turn_x_bias, turn_label, f"{phase_label}滑动后"):
             return self.ROTATE_RESULT_EXITED
 
         print(f"[SceneRotate] {phase_label}滑动后固定向{turn_label}滑视角 x_bias={turn_x_bias}")
         self._rotate_search_turn_view(w, turn_x_bias, turn_label)
         scene = self._get_house_scene(w)
-        if self._is_out_of_house(w):
-            print(f"[SceneRotate] 固定向{turn_label}滑视角后判定出房 house_scene={scene}")
+        if self._confirm_rotate_search_exit(w, move_mode, turn_x_bias, turn_label, f"固定向{turn_label}滑视角后"):
             return self.ROTATE_RESULT_EXITED
 
         print(f"[SceneRotate] step={step}/{total_steps} 后 house_scene={scene}，继续固定旋转搜房")
         return self.ROTATE_RESULT_FINISHED
+
+    def _confirm_rotate_search_exit(
+        self,
+        w: "FrameWorker",
+        move_mode: str,
+        turn_x_bias: int,
+        turn_label: str,
+        reason: str,
+    ) -> bool:
+        scene = self._get_house_scene(w)
+        if scene not in self.HOUSE_EXIT_SCENES:
+            return False
+
+        phase_label = self._move_mode_label(move_mode)
+        print(
+            f"[SceneRotate] {reason} house_scene={scene} 疑似看向窗外，"
+            f"{phase_label}阶段再向{turn_label}滑视角确认"
+        )
+        self._rotate_search_turn_view(w, turn_x_bias, turn_label)
+        confirmed_scene = self._get_house_scene(w)
+        if confirmed_scene in self.HOUSE_EXIT_SCENES:
+            print(f"[SceneRotate] 二次确认仍为屋外 house_scene={confirmed_scene}，判定出房")
+            return True
+
+        print(f"[SceneRotate] 二次确认 house_scene={confirmed_scene}，不是出房，继续旋转搜房")
+        return False
 
     def _rotate_search_transition_to_right_up(self, w: "FrameWorker"):
         print(
@@ -1771,10 +1838,20 @@ class HouseSceneSearchManager(HouseSearchManager):
     def _align_visible_entry_door_before_push(self, w: "FrameWorker") -> bool:
         door = self.find_largest_door(w)
         if door is None:
-            print("[SceneEntry] 进门方向上未识别到门，直接按进门方向前推")
-            return False
+            self._backoff_when_entry_door_missing_after_direction_align(w)
+            if self._is_indoor(w):
+                print("[SceneEntry] 无门后拉复查时已是 indoor，直接开始屋内搜索")
+                return True
 
-        print("[SceneEntry] 进门方向上识别到门，先粗略对齐门再前推")
+            door = self.find_largest_door(w)
+            if door is None:
+                print("[SceneEntry] 后拉复查后仍未识别到门，继续按进门方向前推")
+                return False
+
+            print("[SceneEntry] 后拉复查后识别到门，先粗略对齐门再前推")
+        else:
+            print("[SceneEntry] 进门方向上识别到门，先粗略对齐门再前推")
+
         aligned = self._align_to_door_detection(
             w,
             door,
@@ -1784,6 +1861,21 @@ class HouseSceneSearchManager(HouseSearchManager):
         if not aligned:
             print("[SceneEntry] 视觉门粗对齐未完全成功，继续按当前方向前推试探")
         return aligned
+
+    def _backoff_when_entry_door_missing_after_direction_align(self, w: "FrameWorker"):
+        print(
+            "[SceneEntry] 进门方向已对齐但未识别到门，"
+            f"先后拉2s复查: y_bias={self.ENTRY_NO_VISIBLE_DOOR_BACKOFF_Y_BIAS}, "
+            f"dura={self.ENTRY_NO_VISIBLE_DOOR_BACKOFF_DURA}, "
+            f"wait={self.ENTRY_NO_VISIBLE_DOOR_BACKOFF_WAIT}"
+        )
+        w.tap_single(
+            "摇杆",
+            y_bias=self.ENTRY_NO_VISIBLE_DOOR_BACKOFF_Y_BIAS,
+            dura=self.ENTRY_NO_VISIBLE_DOOR_BACKOFF_DURA,
+            wait=self.ENTRY_NO_VISIBLE_DOOR_BACKOFF_WAIT,
+        )
+        w.refresh_frame()
 
     def _approach_until_near_entry(self, w: "FrameWorker", force_first_forward: bool = False) -> str:
         for step in range(self.ENTRY_APPROACH_MAX_STEPS):

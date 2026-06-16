@@ -455,12 +455,12 @@ class RunningManager:
     CAR_FORWARD_LOST_BACKOFF_Y_BIAS = 360
     CAR_FORWARD_LOST_BACKOFF_DURA = 300
     CAR_FORWARD_LOST_BACKOFF_WAIT = 5000
-    CAR_FORWARD_LOST_BACKOFF_MIN_PUSHES = 2
+    CAR_FORWARD_LOST_BACKOFF_MIN_PUSHES = 1
     # 单轮寻车超过该时间仍未上车，则结束当前局；计时从进入/恢复寻车模式开始。
     CAR_SEARCH_TIMEOUT = 5 * 60
     # 路边发现远车后，允许跨帧追车，避免车辆框短暂丢失后又回头追原道路点。
     ROADSIDE_CAR_LOST_LIMIT = 5
-    # 看到车后需要至少前推多次，后续丢失才按滑过头执行大后拉。
+    # 看到车后向同一目标前推超过一次，后续丢失即按滑过头执行大后拉。
     ROADSIDE_CAR_LOST_FORWARD_LIMIT = 1
     ROADSIDE_CAR_PURSUIT_STEP_LIMIT = 24
     ROADSIDE_CAR_MAX_ROAD_DISTANCE = 10.0
@@ -2651,14 +2651,14 @@ class RunningManager:
             dura=forward_dura,
             wait=forward_wait,
         )
-        if aligned is not None:
+        if aligned is not None or self.roadside_car_forward_pushes > 0:
             self.roadside_car_forward_pushes += 1
         self.roadside_car_last_forward_motion = (forward_bias_y, forward_dura, forward_wait)
         w.refresh_frame()
 
-        if self._attempt_drive_after_move(
+        if self._attempt_drive_immediately_after_car_forward(
             w,
-            f"路边追车靠近后检查驾驶按钮 {self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}",
+            f"路边追车靠近后 {self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}",
         ):
             return True
 
@@ -2667,7 +2667,8 @@ class RunningManager:
                 self.roadside_car_lost_after_forward_pushes += 1
                 print(
                     f"[Running] 路边追车前推后车辆消失，但仅向该车前推 "
-                    f"{self.roadside_car_forward_pushes}/{self.CAR_FORWARD_LOST_BACKOFF_MIN_PUSHES} 次，"
+                    f"{self.roadside_car_forward_pushes} 次，未超过 "
+                    f"{self.CAR_FORWARD_LOST_BACKOFF_MIN_PUSHES} 次，"
                     "不执行后拉，继续向前找车"
                 )
                 return True
@@ -2685,12 +2686,6 @@ class RunningManager:
                 self._give_up_roadside_car_pursuit("大后拉点击驾驶未上车，继续向前找车")
                 return True
             self.roadside_car_lost_after_forward_pushes += 1
-            return True
-
-        if self._click_drive_directly_after_move(
-            w,
-            f"路边追车靠近后直接点击驾驶 {self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}",
-        ):
             return True
 
         if self.roadside_car_steps >= self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT:
@@ -3522,7 +3517,7 @@ class RunningManager:
                 return True
 
             aligned = self._align_to_visible_car(w)
-            pushing_visible_target = aligned is not None
+            pushing_visible_target = aligned is not None or visible_target_forward_pushes > 0
             if aligned is None:
                 print("[Running] 当前画面未检测到车辆，保持朝向向前推进")
             elif not aligned:
@@ -3546,14 +3541,17 @@ class RunningManager:
                 visible_target_forward_pushes += 1
             w.refresh_frame()
 
-            if self._attempt_drive_after_move(w, f"视觉对车后检查驾驶按钮 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}"):
+            if self._attempt_drive_immediately_after_car_forward(
+                w,
+                f"视觉对车后 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}",
+            ):
                 return True
 
             if not self._find_largest_car(w):
                 if not self._should_backoff_after_lost_car_forward_push(visible_target_forward_pushes):
                     print(
                         f"[Running] 视觉对车前推后车辆消失 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}，"
-                        f"但仅向该车前推 {visible_target_forward_pushes}/"
+                        f"但仅向该车前推 {visible_target_forward_pushes} 次，未超过 "
                         f"{self.CAR_FORWARD_LOST_BACKOFF_MIN_PUSHES} 次，不后拉，继续向前找车"
                     )
                     continue
@@ -3568,9 +3566,6 @@ class RunningManager:
                     continue
                 return False
 
-            if self._click_drive_directly_after_move(w, f"视觉对车后直接点击驾驶 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}"):
-                return True
-
         return False
 
     def _should_backoff_after_lost_car_forward_push(self, forward_pushes: int) -> bool:
@@ -3578,7 +3573,12 @@ class RunningManager:
             pushes = int(forward_pushes)
         except (TypeError, ValueError):
             pushes = 0
-        return pushes >= self.CAR_FORWARD_LOST_BACKOFF_MIN_PUSHES
+        return pushes > self.CAR_FORWARD_LOST_BACKOFF_MIN_PUSHES
+
+    def _attempt_drive_immediately_after_car_forward(self, w: "FrameWorker", reason: str) -> bool:
+        if self._attempt_drive_after_move(w, f"{reason}检查驾驶按钮"):
+            return True
+        return self._click_drive_directly_after_move(w, f"{reason}直接点击驾驶")
 
     def _recover_car_lost_after_forward_push(
         self,

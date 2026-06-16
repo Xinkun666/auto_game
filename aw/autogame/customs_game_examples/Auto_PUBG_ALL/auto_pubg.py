@@ -52,6 +52,7 @@ PHASE_DURATIONS = {
 }
 
 DROP_TARGET_R_CITY = (990, 757)
+DROP_TARGET_R_CITY_SEARCH_START = (986, 759)
 DROP_TARGET_GARAGE = DROP_TARGET_R_CITY
 DROP_TARGET_CENTER = DROP_TARGET_R_CITY
 DROP_TARGET_RUNNING_AFTER_SEARCH = (1094, 790)
@@ -91,6 +92,10 @@ running_manager = RunningManager()
 driving_manager = DrivingManager()
 searching_house_manager = HouseSceneSearchManager()
 searching_house_manager.configure_r_city_landing_target(DROP_TARGET_R_CITY)
+searching_house_manager.configure_r_city_pre_search_target(
+    DROP_TARGET_R_CITY_SEARCH_START,
+    arrival_distance=3.0,
+)
 house_exit_manager = HouseExitManager()
 phase_timer = PhaseTimeManager(PHASE_DURATIONS, PHASE_STAGE_MAP)
 phase_timer.configure_case_loop_count(
@@ -233,6 +238,36 @@ def recover_bad_landing_to_r_city(w: "FrameWorker", target, reason: str):
 
 
 searching_house_manager.r_city_recovery_route_callback = recover_bad_landing_to_r_city
+
+
+def route_to_r_city_search_start(
+    w: "FrameWorker",
+    target,
+    reason: str,
+    arrival_distance: float,
+):
+    global searching_view_synced, searching_to_running_notified
+
+    route_target = tuple(target or DROP_TARGET_R_CITY_SEARCH_START)
+    print(
+        f"[Flow] 搜房前置跑图，先到R城搜房起点: "
+        f"reason={reason}, target={route_target}, arrival={arrival_distance:.1f}"
+    )
+    searching_house_manager.stop_auto_forward(w)
+    running_manager.start_forced_route(
+        target=route_target,
+        finish_stage="搜房阶段",
+        reason=reason,
+        arrival_distance=arrival_distance,
+    )
+    running_manager.set_view_mode(RunningManager.VIEW_MODE_FIRST)
+    searching_view_synced = True
+    searching_to_running_notified = True
+    w.change_stage("跑图阶段")
+    return True
+
+
+searching_house_manager.r_city_pre_search_route_callback = route_to_r_city_search_start
 
 
 def _should_find_car_after_searching() -> bool:

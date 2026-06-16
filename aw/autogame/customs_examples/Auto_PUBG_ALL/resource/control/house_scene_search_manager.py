@@ -137,6 +137,7 @@ class HouseSceneSearchManager(HouseSearchManager):
     ROTATE_FRAME_CHANGED_RATIO_THRESHOLD = 0.02
     ROTATE_FRAME_CHANGED_PIXEL_THRESHOLD = 12
     R_CITY_DEFAULT_NEAR_DISTANCE = 30.0
+    R_CITY_PRE_SEARCH_DISTANCE = 3.0
 
     EXIT_DOOR_CLASS_IDS = {0, 4}
     EXIT_WINDOW_CLASS_IDS = {2}
@@ -180,11 +181,68 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_landing_target = None
         self.r_city_near_distance = self.R_CITY_DEFAULT_NEAR_DISTANCE
         self.r_city_recovery_route_callback = None
+        self.r_city_pre_search_target = None
+        self.r_city_pre_search_distance = self.R_CITY_PRE_SEARCH_DISTANCE
+        self.r_city_pre_search_route_callback = None
+        self.r_city_pre_search_completed = False
 
     def configure_r_city_landing_target(self, target):
         loc = check_location(target)
         if loc is not None:
             self.r_city_landing_target = loc
+
+    def configure_r_city_pre_search_target(
+        self,
+        target,
+        arrival_distance: float = R_CITY_PRE_SEARCH_DISTANCE,
+    ):
+        loc = check_location(target)
+        if loc is None:
+            return
+        self.r_city_pre_search_target = tuple(map(int, loc))
+        self.r_city_pre_search_distance = max(0.0, float(arrival_distance))
+
+    def reset(self):
+        super().reset()
+        self.r_city_pre_search_completed = False
+
+    def _handle_r_city_pre_search_route(self, w: "FrameWorker", current_loc) -> bool:
+        if self.r_city_pre_search_completed:
+            return False
+
+        target = self.r_city_pre_search_target
+        if target is None:
+            return False
+
+        loc = check_location(current_loc)
+        if loc is None:
+            return False
+
+        dist = get_distance(loc, target)
+        if 0 <= dist <= self.r_city_pre_search_distance:
+            self.r_city_pre_search_completed = True
+            print(
+                f"[SceneSearch] 已到达R城搜房起点 {target}，"
+                f"dist={dist:.2f} <= {self.r_city_pre_search_distance:.1f}，开始找房"
+            )
+            return False
+
+        callback = self.r_city_pre_search_route_callback
+        if not callable(callback):
+            self.r_city_pre_search_completed = True
+            print("[SceneSearch] 未配置R城搜房起点跑图回调，跳过前置点直接找房")
+            return False
+
+        reason = (
+            f"R城落地后先前往搜房起点 {target}，"
+            f"dist={dist:.2f} > {self.r_city_pre_search_distance:.1f}"
+        )
+        print(f"[SceneSearch] {reason}")
+        self.stop_auto_forward(w)
+        self.history_locations = []
+        self.initial_location_samples = []
+        self.initial_target_pending = True
+        return bool(callback(w, target, reason, self.r_city_pre_search_distance))
 
     def searching_logic(self, w: "FrameWorker", current_loc, current_direction):
         if self._should_abort(w):
@@ -196,6 +254,9 @@ class HouseSceneSearchManager(HouseSearchManager):
             return
 
         self.indoor_stuck_frames = 0
+
+        if self.current_house_id is None and self._handle_r_city_pre_search_route(w, current_loc):
+            return
 
         if self.current_house_id is None:
             if self.initial_target_pending:

@@ -117,7 +117,12 @@ class HouseSearchManager:
     ENTRY_DOOR_DIRECT_BACKOFF_WAIT = 5000
     ENTRY_DOOR_DIRECT_PUSHES_PER_FAILURE = 2
     ENTRY_DOOR_DIRECT_MAX_FAILURES = 3
+    ENTRY_DOOR_DIRECT_REALIGN_MAX_ATTEMPTS = 3
+    ENTRY_NEAR_ALIGN_TOLERANCE = 5
+    ENTRY_NEAR_ALIGN_MAX_STEPS = 2
     ENTRY_NEAR_ALIGN_MIN_DURA = 300
+    ENTRY_NEAR_ALIGN_MAX_DURA = 300
+    ENTRY_NEAR_ALIGN_MAX_BIAS = 120
     ENTRY_NEAR_ALIGN_WAIT = 100
     ENTRY_WALL_BACKOFF_DURA = 520
     ENTRY_WALL_BACKOFF_WAIT = 900
@@ -1217,10 +1222,11 @@ class HouseSearchManager:
         failures = 0
         direct_started = False
         door = initial_door
+        realign_attempts = 0
 
         while failures < self.ENTRY_DOOR_DIRECT_MAX_FAILURES:
             pushes_this_failure = 0
-            while pushes_this_failure < self.ENTRY_DOOR_DIRECT_PUSHES_PER_FAILURE:
+            while True:
                 if self._should_abort(w):
                     return "aborted"
 
@@ -1231,25 +1237,47 @@ class HouseSearchManager:
                     return "indoor"
 
                 visible_door = self.find_largest_door(w)
-                confirm_indoor_after_push = False
                 if visible_door is not None:
-                    confirm_indoor_after_push = direct_started and pushes_this_failure >= 1
-                    door = self._align_visible_entry_door_for_direct_push(w, visible_door, phase_label)
-                    if door is None:
+                    if direct_started:
+                        if realign_attempts >= self.ENTRY_DOOR_DIRECT_REALIGN_MAX_ATTEMPTS:
+                            failures += 1
+                            self._backoff_after_centered_entry_push_failure(
+                                w,
+                                phase_label,
+                                failures,
+                                f"前推后仍能看到门但重新对齐已达 {self.ENTRY_DOOR_DIRECT_REALIGN_MAX_ATTEMPTS} 次",
+                            )
+                            break
+                        realign_attempts += 1
+                        print(
+                            f"[{phase_label}] 前推后仍能定位到门，继续调整视角对齐 "
+                            f"{realign_attempts}/{self.ENTRY_DOOR_DIRECT_REALIGN_MAX_ATTEMPTS}"
+                        )
+
+                    aligned_door = self._align_visible_entry_door_for_direct_push(w, visible_door, phase_label)
+                    if aligned_door is None:
                         if not direct_started:
                             return "not_ready"
+                        print(
+                            f"[{phase_label}] 重新对齐过程中门目标丢失，"
+                            f"不记失败，沿当前方向继续前推"
+                        )
+                        door = None
+                    else:
+                        door = aligned_door
+                elif not direct_started and door is None:
+                    print(f"[{phase_label}] 门未进入视野，继续原进门流程")
+                    return "not_ready"
+                else:
+                    if pushes_this_failure >= self.ENTRY_DOOR_DIRECT_PUSHES_PER_FAILURE:
                         failures += 1
                         self._backoff_after_centered_entry_push_failure(
                             w,
                             phase_label,
                             failures,
-                            "门可见但无法重新调整到大致居中",
+                            f"连续直推 {self.ENTRY_DOOR_DIRECT_PUSHES_PER_FAILURE} 次仍未进房且未再看到门",
                         )
                         break
-                elif not direct_started and door is None:
-                    print(f"[{phase_label}] 门未进入视野，继续原进门流程")
-                    return "not_ready"
-                else:
                     print(f"[{phase_label}] 本次前推前未识别到门，沿当前进门方向继续直推")
 
                 print(
@@ -1268,10 +1296,6 @@ class HouseSearchManager:
                 pushes_this_failure += 1
                 w.refresh_frame()
 
-                if confirm_indoor_after_push:
-                    print(f"[{phase_label}] 第二次直推前仍能看到门，默认已进房，启动搜房策略")
-                    return "indoor"
-
                 scene = self._get_house_scene(w)
                 if scene == self.HOUSE_INDOOR:
                     print(f"[{phase_label}] 自动开门直推后 house_scene=indoor，启动搜房策略")
@@ -1287,17 +1311,28 @@ class HouseSearchManager:
                     )
                     break
 
+                visible_after_push = self.find_largest_door(w)
+                if visible_after_push is not None:
+                    door = visible_after_push
+                    print(
+                        f"[{phase_label}] 直推后仍能定位到门，"
+                        f"下一轮继续调整视角后再前推"
+                    )
+                    continue
+
+                if pushes_this_failure >= self.ENTRY_DOOR_DIRECT_PUSHES_PER_FAILURE:
+                    failures += 1
+                    self._backoff_after_centered_entry_push_failure(
+                        w,
+                        phase_label,
+                        failures,
+                        f"连续直推 {self.ENTRY_DOOR_DIRECT_PUSHES_PER_FAILURE} 次仍未进房且未再看到门",
+                    )
+                    break
+
                 print(
                     f"[{phase_label}] 直推后暂未进房 house_scene={scene}，"
                     f"本轮已推 {pushes_this_failure}/{self.ENTRY_DOOR_DIRECT_PUSHES_PER_FAILURE}"
-                )
-            else:
-                failures += 1
-                self._backoff_after_centered_entry_push_failure(
-                    w,
-                    phase_label,
-                    failures,
-                    f"连续直推 {self.ENTRY_DOOR_DIRECT_PUSHES_PER_FAILURE} 次仍未进房",
                 )
 
         print(f"[{phase_label}] 自动开门直推累计失败 {failures} 次，判定当前进门点失败")
@@ -1326,18 +1361,24 @@ class HouseSearchManager:
             f"[{phase_label}] 距离进门点<={self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:g}，"
             f"先对准进门点方向: {ideal_angle}"
         )
-        aligned = self.align_direction_blocking(
-            w,
-            w.get_info('direction'),
-            ideal_angle,
-            threshold=getattr(self, 'ENTRY_DIRECTION_ALIGN_TOLERANCE', 3),
-            max_steps=getattr(self, 'ENTRY_DIRECTION_ALIGN_MAX_STEPS', 3),
-            wait=self.ENTRY_NEAR_ALIGN_WAIT,
-            min_dura=self.ENTRY_NEAR_ALIGN_MIN_DURA,
-        )
+        aligned = self._align_near_entry_direction(w, ideal_angle)
         if aligned:
             w.refresh_frame()
         return aligned
+
+    def _align_near_entry_direction(self, w: 'FrameWorker', ideal_angle) -> bool:
+        return execute_view_turn(
+            w,
+            w.get_info('direction'),
+            ideal_angle,
+            threshold=getattr(self, 'ENTRY_DIRECTION_ALIGN_TOLERANCE', self.ENTRY_NEAR_ALIGN_TOLERANCE),
+            max_steps=getattr(self, 'ENTRY_DIRECTION_ALIGN_MAX_STEPS', self.ENTRY_NEAR_ALIGN_MAX_STEPS),
+            wait=self.ENTRY_NEAR_ALIGN_WAIT,
+            min_dura=self.ENTRY_NEAR_ALIGN_MIN_DURA,
+            max_dura=self.ENTRY_NEAR_ALIGN_MAX_DURA,
+            max_px=self.ENTRY_NEAR_ALIGN_MAX_BIAS,
+            log_prefix="[EntryNearAlign]",
+        )
 
     def _handle_near_entry_point(self, w: 'FrameWorker', current_loc, target_loc, dist: float, phase_label='Nav') -> str:
         self.stop_auto_forward(w)
@@ -1378,13 +1419,7 @@ class HouseSearchManager:
 
         ideal_angle = self.active_entry.get('direction') if self.active_entry else None
         if ideal_angle is not None:
-            self.align_direction_blocking(
-                w,
-                w.get_info('direction'),
-                ideal_angle,
-                threshold=3,
-                max_steps=3,
-            )
+            self._align_near_entry_direction(w, ideal_angle)
             w.refresh_frame()
 
         refreshed_loc = self._get_current_location(w) or current_loc

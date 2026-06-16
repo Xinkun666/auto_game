@@ -523,6 +523,11 @@ def on_stage(w: "FrameWorker"):
             time.sleep(2)
 
         w.click("海岛")
+        time.sleep(1)
+        w.refresh_frame()
+        if w.get_info('自动匹配'):
+            w.click(w.get_info('自动匹配'))
+        time.sleep(1)
         w.click("确定")
         w.change_stage("开始游戏阶段")
         return

@@ -56,6 +56,10 @@ DROP_TARGET_R_CITY_SEARCH_START = (986, 759)
 DROP_TARGET_GARAGE = DROP_TARGET_R_CITY
 DROP_TARGET_CENTER = DROP_TARGET_R_CITY
 DROP_TARGET_RUNNING_AFTER_SEARCH = (1094, 790)
+STAGE_PRIORITY_JUMP_FORWARD_Y_BIAS = -400
+STAGE_PRIORITY_JUMP_FORWARD_DURA = 100
+STAGE_PRIORITY_JUMP_FORWARD_WAIT = 300
+STAGE_PRIORITY_JUMP_SETTLE_SECONDS = 0.2
 SP_SAVE_LONG_PRESS_MS = 3000
 SP_RECORDING_ENABLED = should_use_sp_recording_for_profile(
     os.environ.get("AUTOGAME_TEST_PROFILE")
@@ -432,6 +436,27 @@ def maybe_report_phase_remaining():
     phase_reporter.maybe_report(phase_timer)
 
 
+def handle_priority_stage_jump_forward(w: "FrameWorker", stage_label: str) -> bool:
+    if not w.get_info("跳跃"):
+        return False
+
+    print(f"[Jump] {stage_label} 检测到跳跃按钮，第一优先级点击跳跃并前推")
+    searching_house_manager.stop_auto_forward(w)
+    running_manager.stop_auto_forward(w)
+    w.click("跳跃")
+    time.sleep(STAGE_PRIORITY_JUMP_SETTLE_SECONDS)
+    w.tap_single(
+        "摇杆",
+        y_bias=STAGE_PRIORITY_JUMP_FORWARD_Y_BIAS,
+        dura=STAGE_PRIORITY_JUMP_FORWARD_DURA,
+        wait=STAGE_PRIORITY_JUMP_FORWARD_WAIT,
+    )
+    w.refresh_frame()
+    searching_house_manager.history_locations = []
+    running_manager.history_locations = []
+    return True
+
+
 def on_stage(w: "FrameWorker"):
     global start_game, start_game_click_time, final_shutdown_pending
     global searching_view_synced, searching_to_running_notified
@@ -573,6 +598,9 @@ def on_stage(w: "FrameWorker"):
         if should_abort_searching(w):
             return
 
+        if handle_priority_stage_jump_forward(w, "搜房阶段"):
+            return
+
         searching_view_synced = True
         searching_house_manager.process(w)
         return
@@ -586,6 +614,9 @@ def on_stage(w: "FrameWorker"):
 
         if phase_timer.all_done():
             finish_case_loop_or_finalize(w)
+            return
+
+        if handle_priority_stage_jump_forward(w, "跑图阶段"):
             return
 
         running_manager.set_drive_required(phase_timer.need_drive())

@@ -106,8 +106,9 @@ class HouseSceneSearchManager(HouseSearchManager):
     ROTATE_SEARCH_Y_BIAS = -300
     ROTATE_SEARCH_LEFT_UP_DURA = 1000
     ROTATE_SEARCH_LEFT_UP_WAIT = 3000
-    ROTATE_SEARCH_VIEW_RIGHT_X_BIAS = 400
-    ROTATE_SEARCH_VIEW_LEFT_X_BIAS = -400
+    ROTATE_SEARCH_VIEW_RIGHT_X_BIAS = 450
+    ROTATE_SEARCH_VIEW_LEFT_X_BIAS = -450
+    ROTATE_SEARCH_TRANSITION_LEFT_X_BIAS = -900
     ROTATE_SEARCH_NEAR_WALL_VIEW_BIASES = (400, 200, 100)
     ROTATE_SEARCH_VIEW_DURA = 500
     ROTATE_SEARCH_VIEW_WAIT = 300
@@ -739,25 +740,93 @@ class HouseSceneSearchManager(HouseSearchManager):
     def _rotate_search_inside_house(self, w: "FrameWorker"):
         self.stop_auto_forward(w)
         total_steps = self.ROTATE_SEARCH_RIGHT_TURN_STEPS + self.ROTATE_SEARCH_LEFT_TURN_STEPS
-        wall_turn_count = 0
-        move_modes = (
-            ["left_up"] * self.ROTATE_SEARCH_RIGHT_TURN_STEPS
-            + ["right_up"] * self.ROTATE_SEARCH_LEFT_TURN_STEPS
-        )
-        for step, move_mode in enumerate(move_modes, start=1):
+        for step in range(1, self.ROTATE_SEARCH_RIGHT_TURN_STEPS + 1):
             if self._should_abort(w):
                 return self.ROTATE_RESULT_FINISHED
-            result, wall_turn_count = self._rotate_search_sweep_house_scene(
-                w, step, total_steps, move_mode, wall_turn_count
+            result = self._rotate_search_move_then_turn(
+                w,
+                "left_up",
+                step,
+                total_steps,
+                self.ROTATE_SEARCH_VIEW_RIGHT_X_BIAS,
+                "右",
+            )
+            if result == self.ROTATE_RESULT_EXITED:
+                return result
+
+        transition_result = self._rotate_search_transition_to_right_up(w)
+        if transition_result == self.ROTATE_RESULT_EXITED:
+            return transition_result
+
+        for step in range(1, self.ROTATE_SEARCH_LEFT_TURN_STEPS + 1):
+            if self._should_abort(w):
+                return self.ROTATE_RESULT_FINISHED
+            global_step = self.ROTATE_SEARCH_RIGHT_TURN_STEPS + step
+            result = self._rotate_search_move_then_turn(
+                w,
+                "right_up",
+                global_step,
+                total_steps,
+                self.ROTATE_SEARCH_VIEW_LEFT_X_BIAS,
+                "左",
             )
             if result == self.ROTATE_RESULT_EXITED:
                 return result
 
         print(
-            f"[SceneRotate] 左上滑旋转累计 "
-            f"{total_steps} 次仍未出房"
+            f"[SceneRotate] 左上+右滑 {self.ROTATE_SEARCH_RIGHT_TURN_STEPS} 次，"
+            f"右上+左滑 {self.ROTATE_SEARCH_LEFT_TURN_STEPS} 次后仍未出房"
         )
         return self.ROTATE_RESULT_FALLBACK_EXIT
+
+    def _rotate_search_move_then_turn(
+        self,
+        w: "FrameWorker",
+        move_mode: str,
+        step: int,
+        total_steps: int,
+        turn_x_bias: int,
+        turn_label: str,
+    ):
+        w.refresh_frame()
+        scene = self._get_house_scene(w)
+        phase_label = self._move_mode_label(move_mode)
+        print(f"[SceneRotate] step={step}/{total_steps}, {phase_label}滑动前 house_scene={scene}")
+        if self._is_out_of_house(w):
+            print(f"[SceneRotate] {phase_label}滑动前已判定出房 house_scene={scene}")
+            return self.ROTATE_RESULT_EXITED
+
+        self._move_rotate_search_step(w, move_mode, step, total_steps)
+        scene = self._get_house_scene(w)
+        if self._is_out_of_house(w):
+            print(f"[SceneRotate] {phase_label}滑动后判定出房 house_scene={scene}")
+            return self.ROTATE_RESULT_EXITED
+
+        print(f"[SceneRotate] {phase_label}滑动后固定向{turn_label}滑视角 x_bias={turn_x_bias}")
+        self._rotate_search_turn_view(w, turn_x_bias, turn_label)
+        scene = self._get_house_scene(w)
+        if self._is_out_of_house(w):
+            print(f"[SceneRotate] 固定向{turn_label}滑视角后判定出房 house_scene={scene}")
+            return self.ROTATE_RESULT_EXITED
+
+        print(f"[SceneRotate] step={step}/{total_steps} 后 house_scene={scene}，继续固定旋转搜房")
+        return self.ROTATE_RESULT_FINISHED
+
+    def _rotate_search_transition_to_right_up(self, w: "FrameWorker"):
+        print(
+            f"[SceneRotate] 左上阶段完成，先向左大幅滑视角 "
+            f"x_bias={self.ROTATE_SEARCH_TRANSITION_LEFT_X_BIAS}，再进入右上阶段"
+        )
+        self._rotate_search_turn_view(
+            w,
+            self.ROTATE_SEARCH_TRANSITION_LEFT_X_BIAS,
+            "左",
+        )
+        scene = self._get_house_scene(w)
+        if self._is_out_of_house(w):
+            print(f"[SceneRotate] 左滑900切换方向后判定出房 house_scene={scene}")
+            return self.ROTATE_RESULT_EXITED
+        return self.ROTATE_RESULT_FINISHED
 
     def _rotate_search_sweep_house_scene(
         self,

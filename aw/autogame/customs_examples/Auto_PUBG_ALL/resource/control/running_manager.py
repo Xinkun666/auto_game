@@ -454,12 +454,13 @@ class RunningManager:
     CAR_VISUAL_DYNAMIC_FAR_BIAS_Y = -220
     CAR_FORWARD_LOST_BACKOFF_Y_BIAS = 360
     CAR_FORWARD_LOST_BACKOFF_DURA = 300
-    CAR_FORWARD_LOST_BACKOFF_WAIT = 2000
+    CAR_FORWARD_LOST_BACKOFF_WAIT = 5000
+    CAR_FORWARD_LOST_BACKOFF_MIN_PUSHES = 2
     # 单轮寻车超过该时间仍未上车，则结束当前局；计时从进入/恢复寻车模式开始。
     CAR_SEARCH_TIMEOUT = 5 * 60
     # 路边发现远车后，允许跨帧追车，避免车辆框短暂丢失后又回头追原道路点。
     ROADSIDE_CAR_LOST_LIMIT = 5
-    # 已经看到车并前推靠近后，若目标丢失，只额外前推一次；仍丢失则视为误识别。
+    # 看到车后需要至少前推多次，后续丢失才按滑过头执行大后拉。
     ROADSIDE_CAR_LOST_FORWARD_LIMIT = 1
     ROADSIDE_CAR_PURSUIT_STEP_LIMIT = 24
     ROADSIDE_CAR_MAX_ROAD_DISTANCE = 10.0
@@ -495,6 +496,8 @@ class RunningManager:
     FORBIDDEN_ESCAPE_SEARCH_DIST = 120
     FORBIDDEN_ESCAPE_FORWARD_DURA = 700
     FORBIDDEN_ESCAPE_FORWARD_WAIT = 900
+    # 临时路线目标很近时，优先按跳伞偏差处理，直接朝目标点行进。
+    FORCED_ROUTE_FORBIDDEN_DIRECT_DISTANCE = 200.0
     # 道路巡游/进圈策略
     ROAD_NODE_REACHED_TOLERANCE = 3.0
     ROAD_PATROL_MIN_NODE_DISTANCE = 8.0
@@ -562,6 +565,7 @@ class RunningManager:
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_lost_after_forward_pushes = 0
+        self.roadside_car_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio: Optional[float] = None
         self.roadside_car_peak_area_ratio: Optional[float] = None
@@ -621,6 +625,7 @@ class RunningManager:
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_lost_after_forward_pushes = 0
+        self.roadside_car_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
         self.roadside_car_peak_area_ratio = None
@@ -685,6 +690,7 @@ class RunningManager:
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_lost_after_forward_pushes = 0
+        self.roadside_car_forward_pushes = 0
         self.roadside_car_steps = 0
         print(
             f"[Running] 启动临时跑图路线: reason={reason}, "
@@ -703,6 +709,19 @@ class RunningManager:
         self.forced_route_finish_stage = None
         self.forced_route_reason = None
         self.forced_route_arrival_distance = self.DEFAULT_FORCED_ROUTE_ARRIVAL_DISTANCE
+
+    def _should_direct_nav_for_near_forced_route_in_forbidden(
+        self,
+        location: Tuple[int, int],
+    ) -> bool:
+        if not self._has_forced_route() or self.forced_route_target is None:
+            return False
+
+        if self.map_tool.is_walkable(location):
+            return False
+
+        dist_to_forced_target = get_distance(location, self.forced_route_target)
+        return 0 <= dist_to_forced_target <= self.FORCED_ROUTE_FORBIDDEN_DIRECT_DISTANCE
 
     def set_game_time(self, game_time: Optional[float] = None):
         started_at = self.match_clock.start(game_time)
@@ -1039,6 +1058,7 @@ class RunningManager:
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_lost_after_forward_pushes = 0
+        self.roadside_car_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
         self.roadside_car_peak_area_ratio = None
@@ -1185,6 +1205,7 @@ class RunningManager:
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_lost_after_forward_pushes = 0
+        self.roadside_car_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
         self.roadside_car_peak_area_ratio = None
@@ -1220,6 +1241,7 @@ class RunningManager:
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_lost_after_forward_pushes = 0
+        self.roadside_car_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
         self.roadside_car_peak_area_ratio = None
@@ -1275,6 +1297,24 @@ class RunningManager:
             return False
 
         if self.map_tool.is_walkable(location):
+            return False
+
+        if self._should_direct_nav_for_near_forced_route_in_forbidden(location):
+            target = self.forced_route_target
+            dist_to_target = get_distance(location, target)
+            print(
+                f"[Running] 当前位于不可通行区域，但距离临时路线目标 {target} "
+                f"{dist_to_target:.2f} <= {self.FORCED_ROUTE_FORBIDDEN_DIRECT_DISTANCE:.0f}，"
+                "按跳伞偏差直接朝目标点行进"
+            )
+            self._log_running_state(
+                "不可通行区域靠近临时目标",
+                location,
+                direction,
+                "跳过黑区脱离，直接朝临时目标行进",
+                target,
+                dist_to_target,
+            )
             return False
 
         self._check_if_stuck(location)
@@ -1412,6 +1452,29 @@ class RunningManager:
             self.current_segment_start = None
             self.current_running_route_kind = None
             w.change_stage(finish_stage)
+            return True
+
+        if self._should_direct_nav_for_near_forced_route_in_forbidden(location):
+            print(
+                f"[Running] 临时路线目标 {target} 距离 {dist_to_final:.2f}，"
+                "当前位置仍不可通行，直接调整方向朝目标点前进"
+            )
+            self._log_running_state(
+                "不可通行区域直奔临时目标",
+                location,
+                direction,
+                "跳过安全点脱离和路径规划",
+                target,
+                dist_to_final,
+            )
+            self.loading_road = False
+            self.road_list = []
+            self.current_segment_start = None
+            self.locations = [location]
+            self.history_locations = [location]
+            self.stuck = False
+            self.trapped = False
+            self._move_towards_target(w, location, direction, target)
             return True
 
         if self._handle_location_jump(location):
@@ -1837,12 +1900,9 @@ class RunningManager:
         self.water_escape_target = target
         self._log_running_state("检测到落水", location, direction, "执行上浮脱困", target)
 
-        print("[Running] 检测到上浮图标，先点击上浮再长按保持浮出水面")
-        float_button = w.get_info("上浮")
+        print("[Running] 检测到上浮图标，只点击一次上浮，随后按目标方向尽快离开水域")
         w.click("上浮")
         time.sleep(0.2)
-        w.click_down(float_button or "上浮", dura=self.WATER_FLOAT_DURA)
-        time.sleep(0.3)
         w.refresh_frame()
 
         updated_location = self._get_location(w) or location
@@ -2518,6 +2578,7 @@ class RunningManager:
         self.roadside_car_pursuing = True
         self.roadside_car_lost_rounds = 0
         self.roadside_car_lost_after_forward_pushes = 0
+        self.roadside_car_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
         self.roadside_car_peak_area_ratio = None
@@ -2590,6 +2651,8 @@ class RunningManager:
             dura=forward_dura,
             wait=forward_wait,
         )
+        if aligned is not None:
+            self.roadside_car_forward_pushes += 1
         self.roadside_car_last_forward_motion = (forward_bias_y, forward_dura, forward_wait)
         w.refresh_frame()
 
@@ -2600,13 +2663,23 @@ class RunningManager:
             return True
 
         if not self._find_largest_car(w):
+            if not self._should_backoff_after_lost_car_forward_push(self.roadside_car_forward_pushes):
+                self.roadside_car_lost_after_forward_pushes += 1
+                print(
+                    f"[Running] 路边追车前推后车辆消失，但仅向该车前推 "
+                    f"{self.roadside_car_forward_pushes}/{self.CAR_FORWARD_LOST_BACKOFF_MIN_PUSHES} 次，"
+                    "不执行后拉，继续向前找车"
+                )
+                return True
             recover_result = self._recover_car_lost_after_forward_push(
                 w,
                 f"路边追车前推后车辆消失 {self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}",
+                self.roadside_car_forward_pushes,
             )
             if recover_result in {"entered", "visible"}:
                 self.roadside_car_lost_rounds = 0
                 self.roadside_car_lost_after_forward_pushes = 0
+                self.roadside_car_forward_pushes = 0
                 return True
             if recover_result == "forward":
                 self._give_up_roadside_car_pursuit("大后拉点击驾驶未上车，继续向前找车")
@@ -2638,6 +2711,7 @@ class RunningManager:
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_lost_after_forward_pushes = 0
+        self.roadside_car_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
         self.roadside_car_peak_area_ratio = None
@@ -2675,6 +2749,7 @@ class RunningManager:
         self.roadside_car_pursuing = False
         self.roadside_car_lost_rounds = 0
         self.roadside_car_lost_after_forward_pushes = 0
+        self.roadside_car_forward_pushes = 0
         self.roadside_car_steps = 0
         self.roadside_car_last_area_ratio = None
         self.roadside_car_peak_area_ratio = None
@@ -3441,11 +3516,13 @@ class RunningManager:
                     print(f"[Running] sendevent+uinput 靠车松开摇杆失败: {exc}")
 
     def _approach_visible_car_legacy(self, w: "FrameWorker") -> bool:
+        visible_target_forward_pushes = 0
         for step in range(self.CAR_VISUAL_SEARCH_MAX_STEPS):
             if self._attempt_drive_after_move(w, f"视觉寻车前检查驾驶按钮 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}"):
                 return True
 
             aligned = self._align_to_visible_car(w)
+            pushing_visible_target = aligned is not None
             if aligned is None:
                 print("[Running] 当前画面未检测到车辆，保持朝向向前推进")
             elif not aligned:
@@ -3465,15 +3542,25 @@ class RunningManager:
                 dura=forward_dura,
                 wait=forward_wait,
             )
+            if pushing_visible_target:
+                visible_target_forward_pushes += 1
             w.refresh_frame()
 
             if self._attempt_drive_after_move(w, f"视觉对车后检查驾驶按钮 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}"):
                 return True
 
             if not self._find_largest_car(w):
+                if not self._should_backoff_after_lost_car_forward_push(visible_target_forward_pushes):
+                    print(
+                        f"[Running] 视觉对车前推后车辆消失 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}，"
+                        f"但仅向该车前推 {visible_target_forward_pushes}/"
+                        f"{self.CAR_FORWARD_LOST_BACKOFF_MIN_PUSHES} 次，不后拉，继续向前找车"
+                    )
+                    continue
                 recover_result = self._recover_car_lost_after_forward_push(
                     w,
                     f"视觉对车前推后车辆消失 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}",
+                    visible_target_forward_pushes,
                 )
                 if recover_result == "entered":
                     return True
@@ -3486,9 +3573,27 @@ class RunningManager:
 
         return False
 
-    def _recover_car_lost_after_forward_push(self, w: "FrameWorker", reason: str) -> str:
+    def _should_backoff_after_lost_car_forward_push(self, forward_pushes: int) -> bool:
+        try:
+            pushes = int(forward_pushes)
+        except (TypeError, ValueError):
+            pushes = 0
+        return pushes >= self.CAR_FORWARD_LOST_BACKOFF_MIN_PUSHES
+
+    def _recover_car_lost_after_forward_push(
+        self,
+        w: "FrameWorker",
+        reason: str,
+        forward_pushes: Optional[int] = None,
+    ) -> str:
+        push_text = (
+            f"，已向该车前推 {forward_pushes} 次"
+            if forward_pushes is not None
+            else ""
+        )
         print(
-            f"[Running] {reason}，后拉 {self.CAR_FORWARD_LOST_BACKOFF_WAIT}ms "
+            f"[Running] {reason}{push_text}，判定可能滑过头，"
+            f"后拉 {self.CAR_FORWARD_LOST_BACKOFF_WAIT}ms "
             "复核驾驶按钮和车辆位置"
         )
         w.tap_single(

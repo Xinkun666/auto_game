@@ -454,7 +454,7 @@ class RunningManager:
     CAR_VISUAL_DYNAMIC_FAR_BIAS_Y = -220
     CAR_FORWARD_LOST_BACKOFF_Y_BIAS = 360
     CAR_FORWARD_LOST_BACKOFF_DURA = 300
-    CAR_FORWARD_LOST_BACKOFF_WAIT = 500
+    CAR_FORWARD_LOST_BACKOFF_WAIT = 2000
     # 单轮寻车超过该时间仍未上车，则结束当前局；计时从进入/恢复寻车模式开始。
     CAR_SEARCH_TIMEOUT = 5 * 60
     # 路边发现远车后，允许跨帧追车，避免车辆框短暂丢失后又回头追原道路点。
@@ -468,11 +468,6 @@ class RunningManager:
     ROADSIDE_CAR_DISTANCE_SCALE = 1.6
     ROADSIDE_CAR_MIN_ESTIMATED_DISTANCE = 5.0
     ROADSIDE_CAR_MAX_ESTIMATED_DISTANCE = 70.0
-    ROADSIDE_CAR_OVERSHOOT_AREA_RATIO = 0.045
-    ROADSIDE_CAR_REAR_TURN_ATTEMPTS = 6
-    ROADSIDE_CAR_REAR_FORWARD_BIAS_Y = -110
-    ROADSIDE_CAR_REAR_FORWARD_DURA = 120
-    ROADSIDE_CAR_REAR_FORWARD_WAIT = 250
     POST_HOUSE_EXIT_CLEAR_X_BIAS = 260
     POST_HOUSE_EXIT_CLEAR_Y_BIAS = -220
     POST_HOUSE_EXIT_CLEAR_DURA = 450
@@ -2558,11 +2553,6 @@ class RunningManager:
                 f"前推后丢失 {self.roadside_car_lost_after_forward_pushes}/"
                 f"{self.ROADSIDE_CAR_LOST_FORWARD_LIMIT}，保持方向继续靠近"
             )
-            if self._should_try_rear_car_recovery():
-                if self._try_recover_overshot_car_behind(w, location, direction):
-                    return True
-                self._give_up_roadside_car_pursuit("近距离前推后丢车，回头也未发现车辆")
-                return True
             if self.roadside_car_lost_after_forward_pushes > self.ROADSIDE_CAR_LOST_FORWARD_LIMIT:
                 self._give_up_roadside_car_pursuit("前推后连续丢失车辆，判定为误识别")
                 return True
@@ -2617,6 +2607,9 @@ class RunningManager:
             if recover_result in {"entered", "visible"}:
                 self.roadside_car_lost_rounds = 0
                 self.roadside_car_lost_after_forward_pushes = 0
+                return True
+            if recover_result == "forward":
+                self._give_up_roadside_car_pursuit("大后拉点击驾驶未上车，继续向前找车")
                 return True
             self.roadside_car_lost_after_forward_pushes += 1
             return True
@@ -3287,85 +3280,6 @@ class RunningManager:
                 return left_wait + progress * (right_wait - left_wait)
         return anchors[-1][1]
 
-    def _should_try_rear_car_recovery(self) -> bool:
-        peak_ratio = self.roadside_car_peak_area_ratio or 0.0
-        last_ratio = self.roadside_car_last_area_ratio or 0.0
-        return (
-            self.roadside_car_lost_after_forward_pushes >= 1
-            and max(peak_ratio, last_ratio) >= self.ROADSIDE_CAR_OVERSHOOT_AREA_RATIO
-        )
-
-    def _try_recover_overshot_car_behind(
-        self,
-        w: "FrameWorker",
-        location: Tuple[int, int],
-        direction: Optional[float],
-    ) -> bool:
-        print(
-            "[Running] 近距离前推后车辆丢失，怀疑已经越过车辆，"
-            "转身检查身后是否有车"
-        )
-        self._log_running_state("近车过冲复核", location, direction, "转身检查身后车辆")
-        self.stop_auto_forward(w)
-
-        original_direction = self._get_scalar(w.get_info("direction"))
-        if original_direction is None:
-            original_direction = self._get_scalar(direction)
-
-        if original_direction is None:
-            w.tap_single("视角", x_bias=self.UNSTUCK_TURN_BIAS * 2, dura=850, wait=500)
-            w.refresh_frame()
-        else:
-            rear_direction = (float(original_direction) + 180.0) % 360.0
-            print(
-                f"[Running] 以当前角度 {float(original_direction):.1f} 为基准，"
-                f"回头转向 {rear_direction:.1f}"
-            )
-            for _ in range(self.ROADSIDE_CAR_REAR_TURN_ATTEMPTS):
-                current_direction = self._get_scalar(w.get_info("direction"))
-                if current_direction is None:
-                    break
-                if self._align_to_direction(w, current_direction, rear_direction, threshold=8):
-                    break
-            w.refresh_frame()
-
-        rear_car = self._find_largest_car(w)
-        if not rear_car:
-            print("[Running] 回头后未发现车辆")
-            if original_direction is not None:
-                for _ in range(2):
-                    current_direction = self._get_scalar(w.get_info("direction"))
-                    if current_direction is None:
-                        break
-                    if self._align_to_direction(w, current_direction, float(original_direction), threshold=10):
-                        break
-            return False
-
-        area_ratio = self._get_detection_area_ratio(w, rear_car)
-        if area_ratio is not None:
-            self.roadside_car_last_area_ratio = area_ratio
-            self.roadside_car_peak_area_ratio = max(self.roadside_car_peak_area_ratio or 0.0, area_ratio)
-        print(f"[Running] 回头发现身后车辆，area_ratio={area_ratio}，执行微调上车")
-
-        aligned = self._align_to_visible_car(w)
-        if aligned is None:
-            return False
-        if not aligned:
-            self.roadside_car_lost_rounds = 0
-            self.roadside_car_lost_after_forward_pushes = 0
-            return True
-
-        w.tap_single(
-            "摇杆",
-            y_bias=self.ROADSIDE_CAR_REAR_FORWARD_BIAS_Y,
-            dura=self.ROADSIDE_CAR_REAR_FORWARD_DURA,
-            wait=self.ROADSIDE_CAR_REAR_FORWARD_WAIT,
-        )
-        w.refresh_frame()
-        self.roadside_car_lost_rounds = 0
-        self.roadside_car_lost_after_forward_pushes = 0
-        return self._click_drive_directly_after_move(w, "回头发现身后车辆后微调点击驾驶") or True
-
     def _get_visual_frame_width(self, w: "FrameWorker") -> Optional[int]:
         frame = getattr(w, "frame", None)
         if frame is None:
@@ -3597,8 +3511,8 @@ class RunningManager:
             print(f"[Running] {reason}后拉后重新发现车辆，area_ratio={area_ratio}")
             return "visible"
 
-        print(f"[Running] {reason}后拉后仍未发现车辆")
-        return "lost"
+        print(f"[Running] {reason}后拉后仍未发现车辆，继续原方向向前找车")
+        return "forward"
 
     def _align_to_point(
         self,

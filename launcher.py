@@ -113,8 +113,6 @@ STREAM_DISCONNECT_PATTERNS = (
     "[Stream] Receive loop ended unexpectedly.",
     "[Stream] gRPC Error:",
     "[Stream] Runtime Error:",
-    "[HDC] Frame ready timeout.",
-    "[HDC] Consecutive capture failures exceeded.",
 )
 SP_RECORD_EVER_STARTED_MARKERS = (
     "[Timer] sp 记录已开始",
@@ -2847,7 +2845,10 @@ class LauncherWindow(QWidget):
         env.insert("AUTOGAME_RUN_SOURCE", "launcher")
         env.insert("AUTOGAME_RUN_INDEX", str(int(run_no)))
         env.insert("AUTOGAME_DEVICE_LOG_PATH", str(LOG_DIR / f"{target_case}.txt"))
-        env.insert("AUTOGAME_EXIT_ON_STREAM_DISCONNECT", "1")
+        env.insert(
+            "AUTOGAME_EXIT_ON_STREAM_DISCONNECT",
+            "1" if self._stream_disconnect_recovery_enabled() else "0",
+        )
         for key, value in build_launcher_plan_env_values(self.current_plan).items():
             env.insert(key, value)
         if self.dismiss_reboot_prompt_on_next_case_start:
@@ -3578,7 +3579,10 @@ class LauncherWindow(QWidget):
         safe_minutes = self.current_plan["safe_minutes"]
         if safe_minutes > 0:
             self.run_timeout_timer.start(int(safe_minutes * 60 * 1000))
-        self.stream_disconnect_signal_timer.start()
+        if self._stream_disconnect_recovery_enabled():
+            self.stream_disconnect_signal_timer.start()
+        else:
+            self.stream_disconnect_signal_timer.stop()
 
     def _resolve_current_device_log_path(self) -> Optional[Path]:
         if self.current_plan is None:
@@ -3768,6 +3772,15 @@ class LauncherWindow(QWidget):
         if self.current_plan is None:
             return True
         return should_use_sp_recording_for_profile(self.current_plan.get("test_profile"))
+
+    def _current_plan_uses_hdc_capture(self) -> bool:
+        if self.current_plan is None:
+            return False
+        screen_mode = str(self.current_plan.get("screen_mode") or "").strip()
+        return screen_mode == TEST_PROFILE_SCREEN_MODES["function"]
+
+    def _stream_disconnect_recovery_enabled(self) -> bool:
+        return not self._current_plan_uses_hdc_capture()
 
     def _capture_stream_disconnect_screenshot(self, archive_dir: Path) -> Optional[Path]:
         screenshot_dir = archive_dir / "stream_disconnect_screenshots"
@@ -3984,6 +3997,8 @@ class LauncherWindow(QWidget):
     def _poll_stream_disconnect_signal(self):
         if self.process is None or self.current_run_stream_disconnected:
             return
+        if not self._stream_disconnect_recovery_enabled():
+            return
 
         archive_dir = self._resolve_current_run_archive_dir()
         if archive_dir is None:
@@ -4192,6 +4207,9 @@ class LauncherWindow(QWidget):
 
         if any(marker in text for marker in STREAM_CONNECTED_MARKERS):
             self.current_run_stream_started = True
+
+        if not self._stream_disconnect_recovery_enabled():
+            return
 
         matched_pattern = next(
             (pattern for pattern in STREAM_DISCONNECT_PATTERNS if pattern in text),

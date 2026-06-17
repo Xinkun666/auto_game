@@ -560,6 +560,7 @@ class RunningManager:
         self.current_road_node: Optional[Tuple[int, int]] = None
         self.active_vehicle_entry_source: Optional[str] = None
         self.last_vehicle_entry_source: Optional[str] = None
+        self.terminal_state_callback: Optional[Callable] = None
         self.car_search_mode = self.CAR_SEARCH_ROADSIDE
         self.garage_to_roadside_route_active = False
         self.roadside_car_pursuing = False
@@ -734,6 +735,9 @@ class RunningManager:
         return self.match_clock.elapsed()
 
     def process(self, w: "FrameWorker"):
+        if self._handle_terminal_state(w, "跑图模块入口"):
+            return
+
         location = self._get_location(w)
         if location is None:
             print("[Running] 位置无效，尝试小幅前探刷新坐标...")
@@ -745,16 +749,6 @@ class RunningManager:
         forced_route_active = self._has_forced_route()
         if not forced_route_active:
             self._refresh_finding_car_policy(w, location, direction)
-
-        if self._is_dead(w):
-            print("[Running] 检测到死亡!")
-            self._handle_death(w)
-            return
-
-        if self._has_rank_info(w):
-            print("[Running] 检测到个人排名或队伍排名，进入结束阶段")
-            self._handle_rank_finish(w)
-            return
 
         if self._handle_recent_vehicle_exit(w, location, direction):
             return
@@ -1084,6 +1078,23 @@ class RunningManager:
     def _has_rank_info(self, w: "FrameWorker") -> bool:
         return bool(w.get_info("个人排名")) or bool(w.get_info("队伍排名"))
 
+    def _handle_terminal_state(self, w: "FrameWorker", context: str) -> bool:
+        callback = getattr(self, "terminal_state_callback", None)
+        if callable(callback) and callback(w, context):
+            return True
+
+        if self._has_rank_info(w):
+            print(f"[Running] {context}检测到个人排名或队伍排名，进入结束阶段")
+            self._handle_rank_finish(w)
+            return True
+
+        if self._is_dead(w):
+            print(f"[Running] {context}检测到死亡!")
+            self._handle_death(w)
+            return True
+
+        return False
+
     def _handle_car_search_timeout(
         self,
         w: "FrameWorker",
@@ -1162,7 +1173,7 @@ class RunningManager:
         else:
             w.click("sp")
             time.sleep(0.5)
-        time.sleep(1)
+        time.sleep(2)
         w.click("观战对手")
         self.reset()
         w.change_stage("结束阶段")
@@ -2164,6 +2175,8 @@ class RunningManager:
         self.stop_auto_forward(w)
         self.house_exit_manager.reset()
         for _ in range(20):
+            if self._handle_terminal_state(w, "屋内出房循环"):
+                return True
             if self.house_exit_manager.process(w):
                 self._clear_after_house_exit(w)
                 new_location = self._get_location(w) or location
@@ -3441,6 +3454,8 @@ class RunningManager:
         try:
             for step in range(self.CAR_APPROACH_MIXED_MAX_STEPS):
                 step_text = f"{step + 1}/{self.CAR_APPROACH_MIXED_MAX_STEPS}"
+                if self._handle_terminal_state(w, f"sendevent+uinput 靠车循环 {step_text}"):
+                    return True
                 if self._attempt_drive_after_move(w, f"sendevent+uinput 靠车前检查驾驶按钮 {step_text}"):
                     return True
 
@@ -3513,6 +3528,8 @@ class RunningManager:
     def _approach_visible_car_legacy(self, w: "FrameWorker") -> bool:
         visible_target_forward_pushes = 0
         for step in range(self.CAR_VISUAL_SEARCH_MAX_STEPS):
+            if self._handle_terminal_state(w, f"视觉寻车循环 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}"):
+                return True
             if self._attempt_drive_after_move(w, f"视觉寻车前检查驾驶按钮 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}"):
                 return True
 

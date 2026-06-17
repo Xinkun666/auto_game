@@ -338,6 +338,7 @@ class DrivingManager:
         self.forward_block_recovery_active = False
         self.allow_running_fallback = True
         self.pause_sp_callback: Optional[Callable] = None
+        self.terminal_state_callback: Optional[Callable] = None
         self.next_running_finding_car: Optional[bool] = None
         self.horn_missing_frames = 0
         self.drive_auto_forward_active = False
@@ -432,20 +433,12 @@ class DrivingManager:
     def process(self, w: "FrameWorker"):
         self._begin_frame()
 
+        if self._handle_terminal_state(w, "开车模块入口"):
+            self._finalize_frame(w)
+            return
+
         if self.driving_clock.ensure_started():
             print(f"[Driving] 本次驾驶计时开始：{self.driving_clock.started_at:.3f}")
-
-        if self._has_rank_info(w):
-            print("[Driving] 检测到个人排名或队伍排名，进入结束阶段")
-            self._handle_rank_finish(w)
-            self._finalize_frame(w)
-            return
-
-        if self._is_dead(w):
-            print("[Driving] 检测到死亡，结束当前局")
-            self._handle_death(w)
-            self._finalize_frame(w)
-            return
 
         if self._is_out_of_vehicle(w):
             print("[Driving] 检测到人物已下车，切回跑图阶段")
@@ -1827,7 +1820,7 @@ class DrivingManager:
             self._frame_action_executed = True
             w.click("sp")
             time.sleep(0.5)
-        time.sleep(1)
+        time.sleep(2)
         self._frame_action_executed = True
         w.click("观战对手")
         self.reset(max_driving_time=self.max_driving_time)
@@ -1933,6 +1926,10 @@ class DrivingManager:
 
     def _monitor_drive_auto_forward_for_obstacles(self, w: "FrameWorker") -> bool:
         while self.drive_auto_forward_active:
+            if self._handle_terminal_state(w, "车辆自动前进监控中"):
+                self._cancel_drive_auto_forward(w, "检测到死亡或排名界面，取消车辆自动前进")
+                return True
+
             started_at = self.drive_auto_forward_started_at or time.monotonic()
             elapsed = time.monotonic() - started_at
             remaining = self.STRAIGHT_AUTO_FORWARD_ON_S - elapsed
@@ -1950,6 +1947,8 @@ class DrivingManager:
         deadline = time.monotonic() + self.STRAIGHT_AUTO_FORWARD_PAUSE_S
         while time.monotonic() < deadline:
             time.sleep(min(self.STRAIGHT_AUTO_FORWARD_OBSTACLE_POLL_S, max(0.0, deadline - time.monotonic())))
+            if self._handle_terminal_state(w, "车辆自动前进暂停等待中"):
+                return True
             if self._auto_forward_detected_obstacle(w):
                 print("[Driving] 自动前进暂停期间检测到障碍物，暂不重新开启自动前进")
                 return True
@@ -2083,6 +2082,24 @@ class DrivingManager:
 
     def _has_rank_info(self, w: "FrameWorker") -> bool:
         return bool(w.get_info("个人排名")) or bool(w.get_info("队伍排名"))
+
+    def _handle_terminal_state(self, w: "FrameWorker", context: str) -> bool:
+        callback = getattr(self, "terminal_state_callback", None)
+        if callable(callback) and callback(w, context):
+            self._frame_action_executed = True
+            return True
+
+        if self._has_rank_info(w):
+            print(f"[Driving] {context}检测到个人排名或队伍排名，进入结束阶段")
+            self._handle_rank_finish(w)
+            return True
+
+        if self._is_dead(w):
+            print(f"[Driving] {context}检测到死亡，结束当前局")
+            self._handle_death(w)
+            return True
+
+        return False
 
     def _is_out_of_vehicle(self, w: "FrameWorker") -> bool:
         if w.get_info("驾驶"):

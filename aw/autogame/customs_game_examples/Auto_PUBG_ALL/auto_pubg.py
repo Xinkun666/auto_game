@@ -60,6 +60,7 @@ STAGE_PRIORITY_JUMP_FORWARD_Y_BIAS = -400
 STAGE_PRIORITY_JUMP_FORWARD_DURA = 100
 STAGE_PRIORITY_JUMP_FORWARD_WAIT = 300
 STAGE_PRIORITY_JUMP_SETTLE_SECONDS = 0.2
+RANK_FINISH_SPECTATE_WAIT_SECONDS = 2.0
 SP_SAVE_LONG_PRESS_MS = 3000
 SP_RECORDING_ENABLED = should_use_sp_recording_for_profile(
     os.environ.get("AUTOGAME_TEST_PROFILE")
@@ -183,25 +184,53 @@ def handle_sp_stop(w: "FrameWorker"):
     phase_timer.mark_sp_stopped()
 
 
-def should_abort_searching(w: "FrameWorker"):
-    global rank_finish_pending
+def _has_rank_finish_info(w: "FrameWorker") -> bool:
+    return bool(w.get_info("个人排名")) or bool(w.get_info("队伍排名"))
 
+
+def _has_death_finish_info(w: "FrameWorker") -> bool:
+    return bool(w.get_info("变身")) or bool(w.get_info("红色血条"))
+
+
+def _stop_active_motion(w: "FrameWorker"):
+    for manager in (searching_house_manager, running_manager):
+        stop_func = getattr(manager, "stop_auto_forward", None)
+        if callable(stop_func):
+            stop_func(w)
+
+    cancel_drive = getattr(driving_manager, "_cancel_drive_auto_forward", None)
+    if callable(cancel_drive):
+        cancel_drive(w, "检测到死亡或排名界面，取消车辆自动前进")
+
+
+def handle_terminal_state(w: "FrameWorker", context: str = "阶段入口") -> bool:
+    global rank_finish_pending, searching_phase_finishing
+
+    if _has_rank_finish_info(w):
+        print(f"[Terminal] {context} 检测到个人排名或队伍排名，进入结束阶段")
+        rank_finish_pending = True
+        searching_phase_finishing = False
+        _stop_active_motion(w)
+        handle_sp_stop(w)
+        w.change_stage("结束阶段")
+        return True
+
+    if _has_death_finish_info(w):
+        print(f"[Terminal] {context} 检测到死亡界面，进入结束阶段")
+        searching_phase_finishing = False
+        _stop_active_motion(w)
+        handle_sp_stop(w)
+        w.change_stage("结束阶段")
+        return True
+
+    return False
+
+
+def should_abort_searching(w: "FrameWorker"):
     if w.current_stage != "搜房阶段":
         return True
 
-    if w.get_info("变身") or w.get_info("红色血条"):
-        print("[Searching] 检测到死亡，进入结束阶段")
-        searching_house_manager.stop_auto_forward(w)
-        handle_sp_stop(w)
-        w.change_stage("结束阶段")
-        return True
-
-    if w.get_info("个人排名") or w.get_info("队伍排名"):
-        print("[Searching] 检测到排名界面，进入结束阶段")
-        rank_finish_pending = True
-        searching_house_manager.stop_auto_forward(w)
-        handle_sp_stop(w)
-        w.change_stage("结束阶段")
+    if handle_terminal_state(w, "搜房阶段"):
         return True
 
     if searching_phase_finishing:
@@ -217,6 +246,8 @@ def should_abort_searching(w: "FrameWorker"):
 
 searching_house_manager.abort_callback = should_abort_searching
 searching_house_manager.can_finish_callback = lambda w: phase_timer.is_completed(PHASE_SEARCHING)
+running_manager.terminal_state_callback = handle_terminal_state
+driving_manager.terminal_state_callback = handle_terminal_state
 
 
 def recover_bad_landing_to_r_city(w: "FrameWorker", target, reason: str):
@@ -422,12 +453,12 @@ def confirm_lobby_after_popups(w: "FrameWorker") -> bool:
 def prepare_rank_finish_for_lobby(w: "FrameWorker"):
     global rank_finish_pending
 
-    if not rank_finish_pending and not (w.get_info("个人排名") or w.get_info("队伍排名")):
+    if not rank_finish_pending and not _has_rank_finish_info(w):
         return
 
-    print("[End] 检测到排名界面，先点击观战对手再返回大厅")
+    print("[End] 检测到排名界面，等待2s后点击观战对手再返回大厅")
+    time.sleep(RANK_FINISH_SPECTATE_WAIT_SECONDS)
     w.click("观战对手")
-    time.sleep(1)
     w.refresh_frame()
     rank_finish_pending = False
 
@@ -483,6 +514,8 @@ def on_stage(w: "FrameWorker"):
             driving_manager.set_game_time(phase_timer.start_game_time)
 
     if w.current_stage in {"搜房阶段", "跑图阶段", "开车阶段"}:
+        if handle_terminal_state(w, f"{w.current_stage}入口"):
+            return
         maybe_report_phase_remaining()
 
     if w.current_stage == "关闭弹窗阶段":

@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<style>
+    .left {
+        flex: 1; /* 平均分配容器的宽度 */
+        margin-right: 10px;
+    }
+
+    .right {
+        flex: 1; /* 平均分配容器的宽度 */
+        margin-right: 10px;
+    }
+
+    .container {
+        display: flex;
+    }
+</style>
+<head>
+    <meta charset="UTF-8">
+    <meta name="description"
+          content="jMuxer - a simple javascript mp4 muxer for non-standard streaming communications protocol">
+    <meta name="keywords" content="h264 player, mp4 player, mse, mp4 muxing, jmuxer, aac player">
+    <title>JMuxer demo</title>
+</head>
+
+<body>
+<div id="" class="container">
+    <video class="left" autoplay style="cursor: pointer; width: 500px; height: 800px; text-align: center;"
+           id="player"></video>
+    <div class="right" style="margin: 0 auto; text-align: right; ">
+        <button id="btnPower" onclick="sendKeyCodeEvent(18)">电源键</button>
+        <button id="btnVolumeUp" onclick="sendKeyCodeEvent(16)">音量加</button>
+        <button id="btnVolumeDown" onclick="sendKeyCodeEvent(17)">音量减</button>
+        <button id="btnGetScreenSize" onclick="getScreenSize()">刷新设备分辨率</button>
+    </div>
+    <div id="scrcpyVersionSwitchDiv">
+        <label id="scrcpyVersionSwitch"><input type="checkbox" id="versionSwitch"/>
+            使用旧投屏版本</label>
+    </div>
+</div>
+
+
+</body>
+
+<script type="text/javascript" src="jmuxer.min.js"></script>
+<script>
+    var jmuxer = new JMuxer({
+        node: 'player',
+        mode: 'video',
+        flushingTime: 0,
+        fps: 120,
+        debug: false,
+        onError: function (data) {
+            jmuxer.reset();
+        }
+    });
+    var videoPlayer = document.getElementById("player");
+    var stepTextArea = document.getElementById("step")
+    var socketURL = 'ws://127.0.0.1:8888/';
+    var flag = 0;
+    var ws = new WebSocket(socketURL);
+    var isFoldingScreen = false;
+    var deviceWidth = null;
+    var deviceHeight = null;
+    var versionSwitch = document.getElementById("versionSwitch");
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = function () {
+        var txt = '{"type":"screen","message":""}';
+        ws.send(txt)
+        txt = '{"type":"isFoldingScreen","message":""}';
+        ws.send(txt)
+        getScreenSize();
+    }
+    //oh设备video监听
+    videoPlayer.addEventListener("mousedown", doMouseDown, false);
+    videoPlayer.addEventListener('mouseup', doMouseUp, false);
+    videoPlayer.addEventListener('mousemove', doMouseDrag, false);
+    versionSwitch.addEventListener("change", versionSwitchChange, false)
+
+    ws.onmessage = function (message) {
+        if (typeof message.data === "string") {
+            console.log(message.data)
+            var obj = JSON.parse(message.data);
+            if (obj.type === "screenSize") {
+                deviceHeight = obj.deviceHeight;
+                deviceWidth = obj.deviceWidth;
+            } else if (obj.type === "isFoldingScreen") {
+                isFoldingScreen = (obj.isFoldingScreen === "true")
+            }
+        } else if (message.data instanceof ArrayBuffer) {
+            jmuxer.feed({
+                video: new Uint8Array(message.data)
+            });
+        }
+    }
+
+    ws.onclose = function (event) {
+        console.log("close")
+    }
+
+    ws.onerror = function (event) {
+        console.log("error")
+    }
+
+
+    function getScreenSize() {
+        txt = '{"type":"getScreenSize","message":""}';
+        ws.send(txt)
+    }
+
+    function versionSwitchChange() {
+        var checkbox = document.getElementById('versionSwitch');
+        if (checkbox.checked) {
+            txt = '{"type":"changeScrcpyVersionEvent","message":{"version":"old"}}';
+        } else {
+            txt = '{"type":"changeScrcpyVersionEvent","message":{"version":"new"}}';
+        }
+        ws.send(txt)
+    }
+
+
+    function getActualClickPoint(x, y) {
+        // // 获取video控件的长宽
+        var videoHeight = videoPlayer.offsetHeight
+        var videoWidth = videoPlayer.offsetWidth
+        // // 设备分辨率(一般视频流分辨率都与设备原始分辨率相同)
+        // var streamHeight = videoPlayer.videoHeight
+        // var streamWidth = videoPlayer.videoWidth
+
+        // 获取video控件的长宽
+        // var videoHeight = videoPlayer.height
+        // var videoWidth = videoPlayer.width
+        var streamHeight = 1
+        var streamWidth = 1
+        // 获取视频流分辨率
+        if (isFoldingScreen) {
+            // 如果是折叠屏就使用设备原有的分辨率信息
+            streamHeight = deviceHeight
+            streamWidth = deviceWidth
+        } else {
+            streamHeight = videoPlayer.videoHeight
+            streamWidth = videoPlayer.videoWidth
+        }
+        // 计算视频流宽高比
+        var aspectRatio = streamWidth / streamHeight
+        //  计算等比例缩放后的视频区域大小
+        var streamSizeWidth = Math.min(videoWidth, aspectRatio * videoHeight)
+        var streamSizeHeight = streamSizeWidth / aspectRatio
+        // 获取视频流在video控件内的左上角起始点
+        var startX = 0.5 * (videoWidth - streamSizeWidth)
+        var startY = 0.5 * (videoHeight - streamSizeHeight)
+        // 判断点击点是否在范围内
+        if (x < startX) {
+            x = startX + 2;
+            y = startY + (streamSizeHeight / 2);
+        } else if (x > startX + streamSizeWidth) {
+            x = startX + streamSizeWidth - 2;
+            y = startY + (streamSizeHeight / 2);
+        } else if (y < startY) {
+            x = startX + (streamSizeWidth / 2);
+            y = startY + 2;
+        } else if (y > startY + streamSizeHeight) {
+            x = startX + (streamSizeWidth / 2);
+            y = startY + streamSizeHeight - 2;
+        }
+        // 计算video中显示的视频大小相对于原始视频流大小的缩放比
+        var widthScaleRate = streamSizeWidth / streamWidth
+        var heightScaleRate = streamSizeHeight / streamHeight
+        var actualX = Math.floor((x - startX) / widthScaleRate)
+        var actualY = Math.floor((y - startY) / heightScaleRate)
+        return {
+            actualX: actualX,
+            actualY: actualY
+        };
+    }
+
+    function sendKeyCodeEvent(keyCode) {
+        var message = '{"keyCode":' + keyCode + '}';
+        var txt = '{"type":"keyCode","message":' + message + '}';
+        ws.send(txt)
+    }
+
+    function doMouseDrag(event) {
+        if (flag !== 1) {
+            return;
+        }
+        var x = event.offsetX;
+        var y = event.offsetY;
+        var clickPoint = getActualClickPoint(x, y)
+        if (clickPoint === null) {
+            return;
+        }
+        // 发送点击位置
+        var message = '{"event":"move","x":' + clickPoint.actualX + ', "y":' + clickPoint.actualY + '}';
+        var txt = '{"type":"touchEvent","message":' + message + '}';
+        ws.send(txt)
+    }
+
+
+    function doMouseDown(event) {
+        lastMouseDownTime = new Date().getTime();
+        lastMouseDownX = event.offsetX;
+        lastMouseDownY = event.offsetY;
+        var clickPoint = getActualClickPoint(lastMouseDownX, lastMouseDownY)
+        if (clickPoint === null) {
+            return;
+        }
+        flag = 1;
+        // 发送点击位置
+        var message = '{"event":"down","x":' + clickPoint.actualX + ', "y":' + clickPoint.actualY + '}';
+        var txt = '{"type":"touchEvent","message":' + message + '}';
+        ws.send(txt);
+    }
+
+    function doMouseUp(event) {
+        flag = 0;
+        var x = event.offsetX;
+        var y = event.offsetY;
+        var clickPoint = getActualClickPoint(x, y)
+        if (clickPoint === null) {
+            return;
+        }
+        // 发送点击位置
+        var message = '{"event":"up","x":' + clickPoint.actualX + ', "y":' + clickPoint.actualY + '}';
+        var txt = '{"type":"touchEvent","message":' + message + '}';
+        ws.send(txt)
+    }
+</script>
+</html>

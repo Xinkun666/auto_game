@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.phase_time_manager import (
     PHASE_DRIVING,
@@ -60,6 +61,20 @@ class PhaseTimeManagerLoopTests(unittest.TestCase):
 
         self.assertFalse(timer.has_next_case_loop())
         self.assertFalse(timer.advance_case_loop())
+
+    def test_phase_timer_prints_phase_start_and_end(self):
+        timer = self._new_timer()
+
+        with mock.patch("builtins.print") as print_mock:
+            events = timer.sync_stage("搜房阶段")
+            timer.active_since -= timer.phase_states[PHASE_SEARCHING].duration + 1
+            events |= timer.refresh()
+
+        self.assertIn(f"enter_{PHASE_SEARCHING}", events)
+        self.assertIn(f"completed_{PHASE_SEARCHING}", events)
+        printed_lines = [call.args[0] for call in print_mock.call_args_list]
+        self.assertIn("[Timer] 搜房阶段开始，计划 10 分钟", printed_lines)
+        self.assertIn("[Timer] 搜房阶段结束，已累计 10 分钟", printed_lines)
 
 
 if __name__ == "__main__":

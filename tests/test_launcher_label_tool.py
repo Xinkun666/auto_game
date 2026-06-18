@@ -12,14 +12,26 @@ from launcher import (
     apply_pyinstaller_splash_suppression,
     build_restart_device_commands,
     build_launcher_plan_env_values,
+    classify_output_line,
     check_capture_stream_for_screen_mode,
     CUSTOMS_EXAMPLES_DIR,
     discover_history_outputs,
+    filter_output_text,
     find_latest_preview_frame,
     format_history_record_summary,
     get_testcase_button_texts,
     HiddenSubprocess,
     is_multiprocessing_child,
+    is_pubg_testcase_keyword_match,
+    LauncherWindow,
+    LOG_CATEGORY_LOGIC,
+    LOG_CATEGORY_OTHER,
+    LOG_CATEGORY_SYSTEM,
+    LOG_CATEGORY_TIME,
+    LOG_CATEGORY_UI,
+    LOG_FILTER_ALL,
+    PUBG_CASE_DEFAULT_LOOP_COUNT,
+    PUBG_CASE_RUNTIME_DESCRIPTION,
     resolve_app_paths,
     resolve_preview_frame_dir,
     resolve_test_profile_from_radio_selection,
@@ -27,6 +39,7 @@ from launcher import (
     resolve_label_project_dir,
     resolve_runtime_temp_dir,
     run_testcase_entry,
+    run_hdc_shell,
     write_screen_mode_config,
     WindowsProcessLaunchTracer,
 )
@@ -37,6 +50,7 @@ from aw.autogame.tools.ProcessUtils import hdc_command_args
 from aw.autogame.tools.ProcessUtils import install_hidden_subprocess_patch
 from aw.autogame.tools.ProcessUtils import start_hidden_subprocess_window_suppressor
 from aw.autogame.tools.ProcessUtils import WindowsSubprocessWindowSuppressor
+from aw.autogame.tools import Utils as autogame_utils
 
 
 class FakeStartupInfo:
@@ -131,6 +145,21 @@ class KillableFakeProcess:
         return self.returncode
 
 
+class FakeTimer:
+    def __init__(self):
+        self.started = False
+        self.stopped = False
+
+    def isActive(self):
+        return self.started
+
+    def start(self, *args):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+
 class LauncherLabelToolTests(unittest.TestCase):
     def test_resolve_label_project_dir_returns_existing_project_with_info(self):
         project_dir = resolve_label_project_dir("Auto_PUBG_ALL")
@@ -144,6 +173,165 @@ class LauncherLabelToolTests(unittest.TestCase):
     def test_testcase_button_texts_reflect_selection_state(self):
         self.assertEqual(("选择用例", "重选"), get_testcase_button_texts(False))
         self.assertEqual(("已选择", "重选"), get_testcase_button_texts(True))
+
+    def test_pubg_testcase_keyword_match_detects_pubg_and_chinese_names(self):
+        self.assertTrue(
+            is_pubg_testcase_keyword_match(
+                "testcases/pubg/和平精英全流程/auto_pubg.py",
+                "Auto_PUBG_ALL",
+            )
+        )
+        self.assertTrue(is_pubg_testcase_keyword_match("PUBG mobile smoke test"))
+        self.assertTrue(is_pubg_testcase_keyword_match("和平精英功能测试"))
+        self.assertFalse(is_pubg_testcase_keyword_match("testcases/racing/demo.py"))
+
+    def test_pubg_case_runtime_description_documents_default_loop_plan(self):
+        self.assertEqual(2, PUBG_CASE_DEFAULT_LOOP_COUNT)
+        self.assertIn("10分钟搜房", PUBG_CASE_RUNTIME_DESCRIPTION)
+        self.assertIn("10分钟开车", PUBG_CASE_RUNTIME_DESCRIPTION)
+        self.assertIn("10分钟跑图", PUBG_CASE_RUNTIME_DESCRIPTION)
+        self.assertIn("总测试时长60分钟", PUBG_CASE_RUNTIME_DESCRIPTION)
+        self.assertIn("循环2次", PUBG_CASE_RUNTIME_DESCRIPTION)
+
+    def test_classify_output_line_groups_launcher_logs(self):
+        self.assertEqual(LOG_CATEGORY_SYSTEM, classify_output_line("[Launcher] 开始执行"))
+        self.assertEqual(LOG_CATEGORY_SYSTEM, classify_output_line("hdc shell aa force-stop demo.package"))
+        self.assertEqual(LOG_CATEGORY_TIME, classify_output_line("[Timer] 搜房阶段开始"))
+        self.assertEqual(LOG_CATEGORY_LOGIC, classify_output_line("[Parachute] 检测到跳伞按钮，开始监控航线距离"))
+        self.assertEqual(
+            LOG_CATEGORY_LOGIC,
+            classify_output_line("[AutoLog][逻辑日志] 观察现象=发现房体 | 当前目标=进门点 | 要做的事=绕行 | 结果=等待"),
+        )
+        self.assertEqual(LOG_CATEGORY_UI, classify_output_line("执行点击: open_door"))
+        self.assertEqual(LOG_CATEGORY_OTHER, classify_output_line("plain unclassified line"))
+
+    def test_filter_output_text_keeps_requested_category_only(self):
+        text = (
+            "[Launcher] 开始执行\n"
+            "[Timer] 搜房阶段开始\n"
+            "[AutoLog][逻辑日志] 观察现象=发现房体 | 当前目标=进门点 | 要做的事=绕行 | 结果=等待\n"
+            "执行点击: open_door\n"
+            "plain unclassified line\n"
+        )
+
+        self.assertEqual(text, filter_output_text(text, LOG_FILTER_ALL))
+        self.assertEqual("[Timer] 搜房阶段开始\n", filter_output_text(text, LOG_CATEGORY_TIME))
+        self.assertEqual("执行点击: open_door\n", filter_output_text(text, LOG_CATEGORY_UI))
+
+    def test_output_log_buffer_preserves_all_text_when_filter_changes(self):
+        window = LauncherWindow.__new__(LauncherWindow)
+        window.output_log_filter = LOG_FILTER_ALL
+        window.output_log_entries = []
+        text = (
+            "[Launcher] 开始执行\n"
+            "[Timer] 搜房阶段开始\n"
+            "[AutoLog][逻辑日志] 观察现象=发现房体 | 当前目标=进门点 | 要做的事=绕行 | 结果=等待\n"
+        )
+
+        LauncherWindow._record_output_text(window, text)
+        window.output_log_filter = LOG_CATEGORY_TIME
+
+        self.assertEqual("[Timer] 搜房阶段开始\n", LauncherWindow._filtered_output_text(window))
+        self.assertEqual(text, LauncherWindow._all_output_text(window))
+
+    def test_archive_run_artifacts_skips_preview_video_by_default(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            log_dir = temp_root / "logs"
+            process_temp_dir = log_dir / "process_temp_logs"
+            process_save_dir = log_dir / "process_save_frames"
+            process_temp_dir.mkdir(parents=True)
+            (process_temp_dir / "frame_1.jpg").write_text("frame", encoding="utf-8")
+
+            with mock.patch.object(autogame_utils, "TEMP_DIR", temp_root), mock.patch.object(
+                autogame_utils,
+                "LOG_DIR",
+                log_dir,
+            ), mock.patch.object(autogame_utils, "PROCESS_TEMP_LOGS_DIR", process_temp_dir), mock.patch.object(
+                autogame_utils,
+                "PROCESS_SAVE_FRAMES_DIR",
+                process_save_dir,
+            ), mock.patch.object(autogame_utils, "_create_preview_video") as create_video:
+                archive_dir = autogame_utils.archive_run_artifacts(
+                    run_index=1,
+                    source="test",
+                    extra_metadata={
+                        "batch_start_timestamp": "20260615120000",
+                        "run_start_timestamp": "20260615120100",
+                    },
+                )
+
+            metadata = json.loads((archive_dir / "archive_info.json").read_text(encoding="utf-8"))
+            create_video.assert_not_called()
+            self.assertIsNone(metadata["preview_video"])
+            self.assertIsNone(metadata["preview_video_source"])
+            self.assertFalse((archive_dir / "preview_10fps.mp4").exists())
+
+    def test_archive_run_artifacts_generates_preview_video_when_enabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            log_dir = temp_root / "logs"
+            process_temp_dir = log_dir / "process_temp_logs"
+            process_save_dir = log_dir / "process_save_frames"
+            process_temp_dir.mkdir(parents=True)
+            (process_temp_dir / "frame_1.jpg").write_text("frame", encoding="utf-8")
+
+            with mock.patch.object(autogame_utils, "TEMP_DIR", temp_root), mock.patch.object(
+                autogame_utils,
+                "LOG_DIR",
+                log_dir,
+            ), mock.patch.object(autogame_utils, "PROCESS_TEMP_LOGS_DIR", process_temp_dir), mock.patch.object(
+                autogame_utils,
+                "PROCESS_SAVE_FRAMES_DIR",
+                process_save_dir,
+            ), mock.patch.object(
+                autogame_utils,
+                "_create_preview_video",
+                return_value="preview_10fps.mp4",
+            ) as create_video:
+                archive_dir = autogame_utils.archive_run_artifacts(
+                    run_index=1,
+                    source="test",
+                    extra_metadata={
+                        "batch_start_timestamp": "20260615120000",
+                        "run_start_timestamp": "20260615120100",
+                    },
+                    generate_preview_video=True,
+                )
+
+            metadata = json.loads((archive_dir / "archive_info.json").read_text(encoding="utf-8"))
+            create_video.assert_called_once()
+            self.assertEqual("preview_10fps.mp4", metadata["preview_video"])
+            self.assertEqual("process_temp_logs", metadata["preview_video_source"])
+
+    def test_launcher_archive_passes_generate_video_toggle_to_archiver(self):
+        window = LauncherWindow.__new__(LauncherWindow)
+        window.current_plan = {
+            "mode": "direct",
+            "project_case": "Auto_PUBG_ALL",
+            "target_case": "auto_pubg",
+            "testcase_label": None,
+            "inactivity_timeout_minutes": 5.0,
+            "generate_preview_video": True,
+        }
+        window.output_log_entries = [(LOG_CATEGORY_SYSTEM, "[Launcher] run\n")]
+        window.current_run_output_start = 0
+        window.current_run_timed_out = False
+        window.current_run_stream_disconnected = False
+        window.current_run_stream_disconnect_startup = False
+        window.current_run_stream_disconnect_message = ""
+        window.current_run_stream_started = True
+        window.current_run_sp_started = False
+        window.current_run_sp_state = {}
+        window.current_batch_start_timestamp = "20260615120000"
+        window.current_run_start_timestamp = "20260615120100"
+        window.messages = []
+        window._log_message = lambda text, level=None: window.messages.append(text)
+
+        with mock.patch("launcher.archive_run_artifacts", return_value=Path("/tmp/archive")) as archive_mock:
+            LauncherWindow._archive_run_outputs(window, 1, 0)
+
+        self.assertTrue(archive_mock.call_args.kwargs["generate_preview_video"])
 
     def test_is_multiprocessing_child_detects_pyinstaller_worker_argv(self):
         self.assertTrue(
@@ -217,6 +405,53 @@ class LauncherLabelToolTests(unittest.TestCase):
         self.assertEqual("function", env_values["AUTOGAME_TEST_PROFILE"])
         self.assertEqual("1", env_values["AUTOGAME_SCREEN_MODE"])
         self.assertEqual("2", env_values["AUTOGAME_SINGLE_CASE_LOOPS"])
+
+    def test_safety_check_logs_retry_when_device_status_unavailable(self):
+        window = LauncherWindow.__new__(LauncherWindow)
+        window.batch_active = True
+        window.current_plan = {
+            "run_count": 1,
+            "safe_temp": 40.0,
+            "safe_battery": 30,
+        }
+        window.process = None
+        window.stop_requested = False
+        window.current_run_index = 0
+        window.safety_timer = FakeTimer()
+        window.status_messages = []
+        window.runtime_messages = []
+        window.output_messages = []
+        window._set_status = lambda text: window.status_messages.append(text)
+        window._set_runtime = lambda text: window.runtime_messages.append(text)
+        window._log_message = lambda text, level=None: window.output_messages.append(text)
+        window._finish_batch = lambda message: self.fail(f"unexpected finish: {message}")
+        window._launch_iteration = lambda *args: self.fail("should not launch without device status")
+
+        with mock.patch("launcher.get_battery_temperature_c", return_value=None), mock.patch(
+            "launcher.get_battery_capacity",
+            return_value=None,
+        ):
+            LauncherWindow._check_and_start_if_safe(window)
+
+        self.assertTrue(window.safety_timer.started)
+        self.assertIn("无法读取手机温度或电量，稍后重试。", window.status_messages)
+        self.assertTrue(any("安全检查" in text and "无法读取" in text for text in window.output_messages))
+
+    def test_run_hdc_shell_uses_short_timeout_for_launcher_responsiveness(self):
+        observed = {}
+
+        def fake_run(_cmd, **kwargs):
+            observed["timeout"] = kwargs.get("timeout")
+            return subprocess.CompletedProcess(_cmd, 0, stdout="ok\n", stderr="")
+
+        with mock.patch("launcher.resolve_hdc_executable", return_value="hdc"), mock.patch(
+            "launcher.subprocess.run",
+            side_effect=fake_run,
+        ):
+            result = run_hdc_shell("echo ok")
+
+        self.assertEqual("ok", result)
+        self.assertLessEqual(observed["timeout"], 5)
 
     def test_capture_stream_check_for_hdc_mode_validates_snapshot_image(self):
         with tempfile.TemporaryDirectory() as temp_dir:

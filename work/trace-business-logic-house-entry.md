@@ -39,3 +39,14 @@
 
 未决问题：
 - 用户是否只关心 R 城新搜房进门路径，还是也要旧 `HouseSearchManager` 普通房屋进门路径；当前代码主实例是 `HouseSceneSearchManager`，优先讲新路径。
+
+本轮用户追问范围：
+- 从“距离一个房子很近”开始讲到“进房”为止，优先从已锁定 R 城目标后的 `FAST_NAV -> PRECISE_NAV -> SCENE_ENTRY -> indoor` 近距离链路讲起。
+
+近距离链路步骤：
+1. 进入精细导航：`FAST_NAV` 中距离进门靠近点 `<= ENTRY_AUTO_FORWARD_DISTANCE` 时停自动前进并切 `PRECISE_NAV`。
+2. 精细导航每帧先判断是否能触发进门：到靠近点 `<= house_arrival_distance`，或 `house_scene` 是 `near_door/near_wall` 且离房体 `<= early_entry_scene_distance`。
+3. 未触发进门时，先对齐进门点，再按 fast/slow 模型小步前推，最多 4 小步，并用前后距离反馈更新移动模型。
+4. 触发 `SCENE_ENTRY` 后，R 城目标走自由找入口：优先处理 indoor、跳跃、开门/关门按钮、stone_wall、门、窗等机会。
+5. 点击开门或识别门已开后，重新修正进门方向，执行后拉/重锁门/短前推循环，直到 `house_scene=indoor` 或次数耗尽。
+6. 一旦确认 indoor，调用 `start_searching()` 做室内旋转搜房，完成后标记当前 R 城房点完成并清空当前目标。

@@ -26,7 +26,8 @@ from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
 # 1. 数据模型 (Data Structure)
 # ==========================================
 DEFAULT_GROUP_NAME = "默认"
-DEFAULT_SCENE_GROUP_NAME = "未分组"
+DEFAULT_SCENE_GROUP_NAME = "待分组场景"
+LEGACY_DEFAULT_SCENE_GROUP_NAME = "未分组"
 GROUPABLE_ITEM_TYPES = ("area", "special_area")
 
 
@@ -926,7 +927,18 @@ class AutoStudioWindow(QMainWindow):
             return None
         if not project.scene_groups:
             project.scene_groups.append(AutoStudioWindow._default_scene_group())
-        default_group = project.scene_groups[0]
+        default_group = None
+        for group in project.scene_groups:
+            if group.name == DEFAULT_SCENE_GROUP_NAME:
+                default_group = group
+                break
+            if group.name == LEGACY_DEFAULT_SCENE_GROUP_NAME:
+                group.name = DEFAULT_SCENE_GROUP_NAME
+                default_group = group
+                break
+        if default_group is None:
+            default_group = AutoStudioWindow._default_scene_group()
+            project.scene_groups.insert(0, default_group)
         existing_ids = {id(scene) for group in project.scene_groups for scene in group.scenes}
         for stage in project.stages:
             for scene in stage.scenes:
@@ -1019,6 +1031,42 @@ class AutoStudioWindow(QMainWindow):
             if scene.name == scene_name:
                 return scene
         return None
+
+    @staticmethod
+    def _pending_scene_group(project: Optional[ProjectData]) -> Optional[SceneGroupData]:
+        if not project:
+            return None
+        for group in project.scene_groups:
+            if group.name == DEFAULT_SCENE_GROUP_NAME:
+                return group
+            if group.name == LEGACY_DEFAULT_SCENE_GROUP_NAME:
+                group.name = DEFAULT_SCENE_GROUP_NAME
+                return group
+        return AutoStudioWindow._ensure_project_scene_pool(project)
+
+    @staticmethod
+    def _move_pending_scenes_to_group(
+        project: Optional[ProjectData],
+        target_group: Optional[SceneGroupData],
+        scene_names: List[str],
+    ) -> List[SceneData]:
+        if not project or not target_group or target_group.name == DEFAULT_SCENE_GROUP_NAME:
+            return []
+        pending_group = AutoStudioWindow._pending_scene_group(project)
+        if not pending_group or pending_group is target_group:
+            return []
+        selected_names = set(scene_names)
+        moved_scenes = []
+        remaining_scenes = []
+        for scene in pending_group.scenes:
+            if scene.name in selected_names:
+                moved_scenes.append(scene)
+                if not any(existing is scene for existing in target_group.scenes):
+                    target_group.scenes.append(scene)
+            else:
+                remaining_scenes.append(scene)
+        pending_group.scenes = remaining_scenes
+        return moved_scenes
 
     def _group_scenes_by_name(self, stage: StageData) -> Dict[str, List[SceneData]]:
         grouped = {}
@@ -1190,6 +1238,56 @@ class AutoStudioWindow(QMainWindow):
         self.project.scene_groups.append(SceneGroupData(id=str(random.randint(1000, 9999)), name=name))
         self.update_tree_view()
         self.status_label.setText(f"已新建场景分组 {name}。")
+
+    def select_pending_scenes_for_group(self, target_group: Optional[SceneGroupData]):
+        if not self.project or not target_group:
+            return
+        if target_group.name == DEFAULT_SCENE_GROUP_NAME:
+            QMessageBox.information(self, "提示", "待分组场景是来源分组，请在其他分组中选择场景。")
+            return
+        pending_group = self._pending_scene_group(self.project)
+        if not pending_group or not pending_group.scenes:
+            QMessageBox.information(self, "提示", "待分组场景中没有可选择的场景。")
+            return
+        scene_names = []
+        for scene in pending_group.scenes:
+            if scene.name not in scene_names:
+                scene_names.append(scene.name)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("从待分组场景选择")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("请选择要移动到当前分组的场景:"))
+        scroll = QScrollArea(dialog)
+        scroll.setWidgetResizable(True)
+        content = QWidget(scroll)
+        content_layout = QVBoxLayout(content)
+        checkboxes = []
+        for scene_name in scene_names:
+            checkbox = QCheckBox(scene_name)
+            content_layout.addWidget(checkbox)
+            checkboxes.append(checkbox)
+        content_layout.addStretch()
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected_scene_names = [checkbox.text() for checkbox in checkboxes if checkbox.isChecked()]
+        if not selected_scene_names:
+            QMessageBox.information(self, "提示", "请至少选择一个场景。")
+            return
+        moved_scenes = self._move_pending_scenes_to_group(self.project, target_group, selected_scene_names)
+        if not moved_scenes:
+            QMessageBox.information(self, "提示", "没有可移动的场景。")
+            return
+        self.update_tree_view()
+        self.status_label.setText(f"已将 {len(moved_scenes)} 个场景分辨率移动到分组 {target_group.name}。")
 
     def rename_scene_pool_group(self, scene_group: Optional[SceneGroupData]):
         if not self.project or not scene_group:
@@ -1379,11 +1477,19 @@ class AutoStudioWindow(QMainWindow):
             btn_add_scene = QPushButton("新建池内场景")
             btn_add_scene.clicked.connect(lambda: self.add_pool_scene(scene_group))
             self.action_layout.addWidget(btn_add_scene)
+            pending_group = self._pending_scene_group(self.project) if self.project else None
+            is_pending_group = bool(scene_group and scene_group.name == DEFAULT_SCENE_GROUP_NAME)
+            btn_select_scene = QPushButton("选择场景")
+            btn_select_scene.clicked.connect(lambda: self.select_pending_scenes_for_group(scene_group))
+            btn_select_scene.setEnabled(bool(scene_group and not is_pending_group and pending_group and pending_group.scenes))
+            self.action_layout.addWidget(btn_select_scene)
             btn_rename = QPushButton("✏️ 修改分组名称")
             btn_rename.clicked.connect(lambda: self.rename_scene_pool_group(scene_group))
+            btn_rename.setEnabled(not is_pending_group)
             self.action_layout.addWidget(btn_rename)
             btn_delete = QPushButton("🗑 删除空分组")
             btn_delete.clicked.connect(lambda: self.delete_scene_pool_group(scene_group))
+            btn_delete.setEnabled(not is_pending_group)
             self.action_layout.addWidget(btn_delete)
         elif isinstance(data, dict) and data.get("kind") == "scene_pool_scene_group":
             scene_group = data.get("scene_group")

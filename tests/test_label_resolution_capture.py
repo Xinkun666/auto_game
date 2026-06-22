@@ -259,7 +259,8 @@ class LabelResolutionCaptureTests(unittest.TestCase):
             project = AutoStudioWindow._load_project_model_from_dir(str(project_dir))
 
         self.assertEqual("demo", project.name)
-        self.assertEqual([DEFAULT_SCENE_GROUP_NAME], [group.name for group in project.scene_groups])
+        self.assertEqual(["待分组场景"], [group.name for group in project.scene_groups])
+        self.assertEqual("待分组场景", DEFAULT_SCENE_GROUP_NAME)
         self.assertEqual(1, len(project.scene_groups[0].scenes))
         shared_scene = project.scene_groups[0].scenes[0]
         self.assertIs(project.stages[0].scenes[0], shared_scene)
@@ -284,7 +285,7 @@ class LabelResolutionCaptureTests(unittest.TestCase):
 
         AutoStudioWindow._ensure_project_scene_pool(project)
 
-        self.assertEqual([DEFAULT_SCENE_GROUP_NAME], [group.name for group in project.scene_groups])
+        self.assertEqual(["待分组场景"], [group.name for group in project.scene_groups])
         self.assertEqual([shared_scene], project.scene_groups[0].scenes)
 
     def test_stage_scene_references_share_pool_scene_without_cloning(self):
@@ -332,6 +333,19 @@ class LabelResolutionCaptureTests(unittest.TestCase):
         selected = AutoStudioWindow._first_pool_scene_resolution(scene_group, "大厅")
 
         self.assertIs(first_resolution, selected)
+
+    def test_move_selected_pending_scenes_into_target_group(self):
+        pending_a = SceneData(id="scene-1", name="大厅", image_width=100, image_height=50)
+        pending_b = SceneData(id="scene-2", name="设置", image_width=100, image_height=50)
+        pending = SceneGroupData(id="group-1", name=DEFAULT_SCENE_GROUP_NAME, scenes=[pending_a, pending_b])
+        target = SceneGroupData(id="group-2", name="游戏场景")
+        project = ProjectData(name="demo", scene_groups=[pending, target])
+
+        moved = AutoStudioWindow._move_pending_scenes_to_group(project, target, ["大厅"])
+
+        self.assertEqual([pending_a], moved)
+        self.assertEqual([pending_b], pending.scenes)
+        self.assertEqual([pending_a], target.scenes)
 
 
 if __name__ == "__main__":

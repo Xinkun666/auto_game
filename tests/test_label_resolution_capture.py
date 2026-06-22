@@ -379,6 +379,90 @@ class LabelResolutionCaptureTests(unittest.TestCase):
         self.assertIs(stage_b.scenes[0], global_scene)
         self.assertIs(future_stage.scenes[0], global_scene)
 
+    def test_stage_pool_scene_choices_prioritize_global_then_pending_then_other_groups(self):
+        pending_scene = SceneData(id="scene-pending", name="待分组场景")
+        global_scene = SceneData(id="scene-global", name="全局弹窗")
+        custom_scene = SceneData(id="scene-custom", name="游戏内主界面")
+        project = ProjectData(
+            name="demo",
+            scene_groups=[
+                SceneGroupData(id="group-pending", name=DEFAULT_SCENE_GROUP_NAME, scenes=[pending_scene]),
+                SceneGroupData(id="group-global", name=DEFAULT_GLOBAL_SCENE_GROUP_NAME, scenes=[global_scene]),
+                SceneGroupData(id="group-custom", name="游戏场景", scenes=[custom_scene]),
+            ],
+        )
+        window = AutoStudioWindow.__new__(AutoStudioWindow)
+        window.project = project
+
+        choices, labels = AutoStudioWindow._pool_scene_choices(window)
+
+        self.assertIs(choices[labels[0]], global_scene)
+        self.assertIs(choices[labels[1]], pending_scene)
+        self.assertIs(choices[labels[2]], custom_scene)
+
+    def test_direct_stage_scene_creation_uses_pending_pool_group(self):
+        stage = StageData(id="stage-1", name="搜房阶段")
+        scene = SceneData(id="scene-1", name="临时识别")
+        project = ProjectData(name="demo", stages=[stage])
+        AutoStudioWindow._ensure_project_scene_pool(project)
+
+        AutoStudioWindow._add_scene_to_project_pool(project, scene)
+        AutoStudioWindow._add_scene_reference_to_stage(stage, scene)
+
+        self.assertIs(stage.scenes[0], scene)
+        self.assertIn(scene, project.scene_groups[0].scenes)
+        self.assertEqual(DEFAULT_SCENE_GROUP_NAME, project.scene_groups[0].name)
+
+    def test_pool_scene_rename_updates_stage_references(self):
+        scene = SceneData(
+            id="scene-1",
+            name="退出弹窗",
+            items=[ItemData(id="item-1", name="确认", item_type="area", rect=RectData(0, 0, 1, 1))],
+        )
+        stage = StageData(
+            id="stage-1",
+            name="搜房阶段",
+            scenes=[scene],
+            groups=[GroupData(name="默认", includes_all=True), GroupData(name="弹窗识别", items=[
+                GroupItemRef("退出弹窗", "area", "确认"),
+            ])],
+        )
+        scene_group = SceneGroupData(id="group-1", name="弹窗", scenes=[scene])
+        project = ProjectData(name="demo", stages=[stage], scene_groups=[scene_group])
+        AutoStudioWindow._rename_pool_scene_group(project, scene_group, "退出弹窗", "返回弹窗")
+
+        self.assertEqual("返回弹窗", scene.name)
+        self.assertIs(stage.scenes[0], scene)
+        self.assertEqual([GroupItemRef("返回弹窗", "area", "确认")], stage.groups[1].items)
+
+    def test_pool_scene_delete_removes_all_stage_references(self):
+        scene_a = SceneData(id="scene-1", name="退出弹窗")
+        scene_b = SceneData(id="scene-2", name="退出弹窗", image_width=200, image_height=100)
+        keep_scene = SceneData(id="scene-3", name="大厅")
+        stage_a = StageData(id="stage-a", name="搜房阶段", scenes=[scene_a, keep_scene])
+        stage_b = StageData(id="stage-b", name="跑圈阶段", scenes=[scene_b])
+        scene_group = SceneGroupData(id="group-1", name="弹窗", scenes=[scene_a, scene_b, keep_scene])
+        project = ProjectData(name="demo", stages=[stage_a, stage_b], scene_groups=[scene_group])
+
+        deleted = AutoStudioWindow._delete_pool_scene_group(project, scene_group, "退出弹窗")
+
+        self.assertEqual([scene_a, scene_b], deleted)
+        self.assertEqual([keep_scene], scene_group.scenes)
+        self.assertEqual([keep_scene], stage_a.scenes)
+        self.assertEqual([], stage_b.scenes)
+
+    def test_stage_scene_delete_removes_reference_but_keeps_pool_scene(self):
+        scene = SceneData(id="scene-1", name="退出弹窗")
+        stage = StageData(id="stage-1", name="搜房阶段", scenes=[scene])
+        scene_group = SceneGroupData(id="group-1", name="弹窗", scenes=[scene])
+        project = ProjectData(name="demo", stages=[stage], scene_groups=[scene_group])
+
+        removed = AutoStudioWindow._remove_stage_scene_group_reference(project, stage, "退出弹窗")
+
+        self.assertEqual([scene], removed)
+        self.assertEqual([], stage.scenes)
+        self.assertEqual([scene], scene_group.scenes)
+
 
 if __name__ == "__main__":
     unittest.main()

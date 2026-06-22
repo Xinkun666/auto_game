@@ -716,7 +716,8 @@ class AutoStudioWindow(QMainWindow):
             seen_names.add(name)
         return groups
 
-    def _rename_group_item_refs(self, stage: Optional[StageData], old_ref: GroupItemRef, new_ref: GroupItemRef):
+    @staticmethod
+    def _rename_group_item_refs(stage: Optional[StageData], old_ref: GroupItemRef, new_ref: GroupItemRef):
         if not stage:
             return
         for group in stage.groups:
@@ -724,7 +725,8 @@ class AutoStudioWindow(QMainWindow):
                 continue
             group.items = [new_ref if ref == old_ref else ref for ref in group.items]
 
-    def _remove_group_item_refs(self, stage: Optional[StageData], predicate):
+    @staticmethod
+    def _remove_group_item_refs(stage: Optional[StageData], predicate):
         if not stage:
             return
         for group in stage.groups:
@@ -732,7 +734,8 @@ class AutoStudioWindow(QMainWindow):
                 continue
             group.items = [ref for ref in group.items if not predicate(ref)]
 
-    def _rename_group_scene_refs(self, stage: Optional[StageData], old_scene_name: str, new_scene_name: str):
+    @staticmethod
+    def _rename_group_scene_refs(stage: Optional[StageData], old_scene_name: str, new_scene_name: str):
         if not stage or old_scene_name == new_scene_name:
             return
         for group in stage.groups:
@@ -1118,6 +1121,61 @@ class AutoStudioWindow(QMainWindow):
             AutoStudioWindow._sync_global_scenes_to_stages(project)
         return moved_scenes
 
+    @staticmethod
+    def _rename_pool_scene_group(
+        project: Optional[ProjectData],
+        scene_group: Optional[SceneGroupData],
+        old_scene_name: str,
+        new_scene_name: str,
+    ) -> bool:
+        if not project or not scene_group or not old_scene_name or not new_scene_name:
+            return False
+        if old_scene_name == new_scene_name:
+            return False
+        renamed = False
+        for scene in scene_group.scenes:
+            if scene.name == old_scene_name:
+                scene.name = new_scene_name
+                renamed = True
+        if not renamed:
+            return False
+        for stage in project.stages:
+            AutoStudioWindow._rename_group_scene_refs(stage, old_scene_name, new_scene_name)
+        return True
+
+    @staticmethod
+    def _remove_stage_scene_group_reference(
+        project: Optional[ProjectData],
+        stage: Optional[StageData],
+        scene_name: str,
+    ) -> List[SceneData]:
+        if not stage or not scene_name:
+            return []
+        removed_scenes = [scene for scene in stage.scenes if scene.name == scene_name]
+        stage.scenes = [scene for scene in stage.scenes if scene.name != scene_name]
+        if removed_scenes:
+            AutoStudioWindow._remove_group_item_refs(stage, lambda ref: ref.scene_name == scene_name)
+        return removed_scenes
+
+    @staticmethod
+    def _delete_pool_scene_group(
+        project: Optional[ProjectData],
+        scene_group: Optional[SceneGroupData],
+        scene_name: str,
+    ) -> List[SceneData]:
+        if not project or not scene_group or not scene_name:
+            return []
+        deleted_scenes = [scene for scene in scene_group.scenes if scene.name == scene_name]
+        if not deleted_scenes:
+            return []
+        deleted_ids = {id(scene) for scene in deleted_scenes}
+        scene_group.scenes = [scene for scene in scene_group.scenes if id(scene) not in deleted_ids]
+        for stage in project.stages:
+            stage.scenes = [scene for scene in stage.scenes if id(scene) not in deleted_ids]
+            if not any(scene.name == scene_name for scene in stage.scenes):
+                AutoStudioWindow._remove_group_item_refs(stage, lambda ref: ref.scene_name == scene_name)
+        return deleted_scenes
+
     def _group_scenes_by_name(self, stage: StageData) -> Dict[str, List[SceneData]]:
         grouped = {}
         for scene in stage.scenes:
@@ -1397,7 +1455,7 @@ class AutoStudioWindow(QMainWindow):
             return {}, []
         choices = {}
         labels = []
-        for group in self.project.scene_groups:
+        for group in self._ordered_scene_pool_groups_for_stage_add(self.project):
             for scene in group.scenes:
                 width, height = self._get_scene_image_size(scene)
                 size_label = f"{width}x{height}" if width > 0 and height > 0 else "未抓图"
@@ -1405,6 +1463,22 @@ class AutoStudioWindow(QMainWindow):
                 choices[label] = scene
                 labels.append(label)
         return choices, labels
+
+    @staticmethod
+    def _ordered_scene_pool_groups_for_stage_add(project: Optional[ProjectData]) -> List[SceneGroupData]:
+        if not project:
+            return []
+        ordered = []
+        for group_name in (DEFAULT_GLOBAL_SCENE_GROUP_NAME, DEFAULT_SCENE_GROUP_NAME):
+            group = next((item for item in project.scene_groups if item.name == group_name), None)
+            if group:
+                ordered.append(group)
+        ordered.extend(
+            group
+            for group in project.scene_groups
+            if group.name not in (DEFAULT_GLOBAL_SCENE_GROUP_NAME, DEFAULT_SCENE_GROUP_NAME)
+        )
+        return ordered
 
     def add_existing_pool_scene_to_stage(self, stage: Optional[StageData]):
         if not self.project or not stage:
@@ -1443,13 +1517,21 @@ class AutoStudioWindow(QMainWindow):
         )
         if not name:
             return
-        for scene in scene_group.scenes:
-            if scene.name == scene_name:
-                scene.name = name
-        for stage in self.project.stages:
-            self._rename_group_scene_refs(stage, scene_name, name)
+        self._rename_pool_scene_group(self.project, scene_group, scene_name, name)
         self.update_tree_view()
         self.status_label.setText(f"已更新池内场景名称为 {name}。")
+
+    def delete_pool_scene_group(self, scene_group: Optional[SceneGroupData], scene_name: str):
+        if not self.project or not scene_group or not scene_name:
+            return
+        deleted_scenes = self._delete_pool_scene_group(self.project, scene_group, scene_name)
+        if not deleted_scenes:
+            return
+        if self.current_scene and self.current_scene.name == scene_name:
+            self.current_scene = None
+            self.clear_scene_display()
+        self.update_tree_view()
+        self.status_label.setText(f"已从场景池删除场景 {scene_name}，并同步移除所有阶段引用。")
 
     def move_pool_scene_group(self, source_group: Optional[SceneGroupData], scene_name: str):
         if not self.project or not source_group:
@@ -1496,7 +1578,7 @@ class AutoStudioWindow(QMainWindow):
             self.set_current_work_stage(data)
             self.current_scene = None
             self.clear_scene_display()
-            btn = QPushButton("添加场景")
+            btn = QPushButton("新建场景")
             btn.clicked.connect(lambda: self.add_scene(data))
             self.action_layout.addWidget(btn)
             btn_add_pool_scene = QPushButton("从场景池添加场景")
@@ -1576,6 +1658,9 @@ class AutoStudioWindow(QMainWindow):
             btn_move = QPushButton("移动到其他分组")
             btn_move.clicked.connect(lambda: self.move_pool_scene_group(scene_group, scene_name))
             self.action_layout.addWidget(btn_move)
+            btn_delete = QPushButton("🗑 删除池内场景")
+            btn_delete.clicked.connect(lambda: self.delete_pool_scene_group(scene_group, scene_name))
+            self.action_layout.addWidget(btn_delete)
         elif isinstance(data, dict) and data.get("kind") == "scene_group":
             self.current_stage = data.get("stage")
             self.set_current_work_stage(self.current_stage)
@@ -1584,48 +1669,40 @@ class AutoStudioWindow(QMainWindow):
             scene_name = data.get("scene_name", "")
             lbl = QLabel(f"当前场景: {scene_name}")
             self.action_layout.addWidget(lbl)
-            btn_add_res = QPushButton("复制控件到不同分辨率")
-            btn_add_res.clicked.connect(lambda: self.copy_scene_to_different_resolution(self.current_stage, scene_name))
-            self.action_layout.addWidget(btn_add_res)
-            btn_rename = QPushButton("✏️ 修改场景名称")
-            btn_rename.clicked.connect(lambda: self.rename_scene_group(self.current_stage, scene_name))
-            self.action_layout.addWidget(btn_rename)
-            btn_delete = QPushButton("🗑 删除整个场景")
+            btn_delete = QPushButton("从当前阶段移除")
             btn_delete.clicked.connect(lambda: self.delete_scene_group(self.current_stage, scene_name))
             self.action_layout.addWidget(btn_delete)
         elif isinstance(data, SceneData):
+            is_pool_scene = item.treeWidget() is getattr(self, "scene_pool_tree", None)
             self.current_stage = self._find_stage_for_scene(data)
             self.set_current_work_stage(self.current_stage)
             self.current_scene = data
             self.show_scene_image(data)
-            # 场景操作按钮
-            btn_cap = QPushButton("📷 抓图")
-            btn_cap.clicked.connect(lambda: self.capture_image(data))
-            btn_import = QPushButton("🖼 导入图片")
-            btn_import.clicked.connect(lambda: self.import_image(data))
-            btn_area = QPushButton("🟦 添加区域 (Area)")
-            btn_area.clicked.connect(lambda: self.prepare_draw('area'))
-            btn_ctrl = QPushButton("🟥 添加控点 (Control)")
-            btn_ctrl.clicked.connect(lambda: self.prepare_draw('control'))
-            btn_sp_area = QPushButton("🟧 添加特殊区域 (Special)")
-            btn_sp_area.clicked.connect(lambda: self.prepare_draw('special_area'))
-            self.action_layout.addWidget(btn_cap)
-            self.action_layout.addWidget(btn_import)
-            self.action_layout.addWidget(btn_area)
-            self.action_layout.addWidget(btn_ctrl)
-            self.action_layout.addWidget(btn_sp_area)
-            btn_copy_resolution = QPushButton("复制控件到不同分辨率")
-            btn_copy_resolution.clicked.connect(lambda: self.copy_scene_to_different_resolution(self.current_stage, data.name, data))
-            self.action_layout.addWidget(btn_copy_resolution)
-            btn_copy_scene = QPushButton("📋 复制场景")
-            btn_copy_scene.clicked.connect(lambda: self.copy_scene(data))
-            self.action_layout.addWidget(btn_copy_scene)
-            btn_rename = QPushButton("✏️ 修改场景名称")
-            btn_rename.clicked.connect(lambda: self.rename_scene(data))
-            self.action_layout.addWidget(btn_rename)
-            btn_delete = QPushButton("🗑 删除场景")
-            btn_delete.clicked.connect(lambda: self.delete_scene(data))
-            self.action_layout.addWidget(btn_delete)
+            if is_pool_scene:
+                btn_cap = QPushButton("📷 抓图")
+                btn_cap.clicked.connect(lambda: self.capture_image(data))
+                btn_import = QPushButton("🖼 导入图片")
+                btn_import.clicked.connect(lambda: self.import_image(data))
+                btn_area = QPushButton("🟦 添加区域 (Area)")
+                btn_area.clicked.connect(lambda: self.prepare_draw('area'))
+                btn_ctrl = QPushButton("🟥 添加控点 (Control)")
+                btn_ctrl.clicked.connect(lambda: self.prepare_draw('control'))
+                btn_sp_area = QPushButton("🟧 添加特殊区域 (Special)")
+                btn_sp_area.clicked.connect(lambda: self.prepare_draw('special_area'))
+                self.action_layout.addWidget(btn_cap)
+                self.action_layout.addWidget(btn_import)
+                self.action_layout.addWidget(btn_area)
+                self.action_layout.addWidget(btn_ctrl)
+                self.action_layout.addWidget(btn_sp_area)
+                btn_copy_resolution = QPushButton("复制控件到不同分辨率")
+                btn_copy_resolution.clicked.connect(lambda: self.copy_scene_to_different_resolution(self.current_stage, data.name, data))
+                self.action_layout.addWidget(btn_copy_resolution)
+                btn_copy_scene = QPushButton("📋 复制场景")
+                btn_copy_scene.clicked.connect(lambda: self.copy_scene(data))
+                self.action_layout.addWidget(btn_copy_scene)
+            else:
+                lbl = QLabel("当前为阶段引用。请在场景池中修改场景本体。")
+                self.action_layout.addWidget(lbl)
         elif isinstance(data, ItemData):
             scene_node = item.parent()
             self.current_scene = scene_node.data(0, Qt.ItemDataRole.UserRole) if scene_node else None
@@ -1741,31 +1818,43 @@ class AutoStudioWindow(QMainWindow):
             paste_action.triggered.connect(lambda: self.paste_scene_to_stage(data))
             menu.addAction(paste_action)
             menu.addSeparator()
+        elif isinstance(data, dict) and data.get("kind") == "scene_pool_scene_group":
+            scene_group = data.get("scene_group")
+            scene_name = data.get("scene_name", "")
+            rename_pool_action = QAction("修改池内场景名称", self)
+            rename_pool_action.triggered.connect(lambda: self.rename_pool_scene_group(scene_group, scene_name))
+            menu.addAction(rename_pool_action)
+            move_pool_action = QAction("移动到其他分组", self)
+            move_pool_action.triggered.connect(lambda: self.move_pool_scene_group(scene_group, scene_name))
+            menu.addAction(move_pool_action)
+            delete_pool_action = QAction("删除池内场景", self)
+            delete_pool_action.triggered.connect(lambda: self.delete_pool_scene_group(scene_group, scene_name))
+            menu.addAction(delete_pool_action)
+            menu.addSeparator()
         elif isinstance(data, dict) and data.get("kind") == "scene_group":
             copy_resolution_action = QAction("复制控件到不同分辨率", self)
             copy_resolution_action.triggered.connect(
                 lambda: self.copy_scene_to_different_resolution(data.get("stage"), data.get("scene_name", ""))
             )
             menu.addAction(copy_resolution_action)
-            rename_group_action = QAction("✏️ 修改场景名称", self)
-            rename_group_action.triggered.connect(
-                lambda: self.rename_scene_group(data.get("stage"), data.get("scene_name", ""))
+            remove_reference_action = QAction("从当前阶段移除", self)
+            remove_reference_action.triggered.connect(
+                lambda: self.delete_scene_group(data.get("stage"), data.get("scene_name", ""))
             )
-            menu.addAction(rename_group_action)
+            menu.addAction(remove_reference_action)
             menu.addSeparator()
         elif isinstance(data, SceneData):
-            copy_action = QAction("📋 复制场景", self)
-            copy_action.triggered.connect(lambda: self.copy_scene(data))
-            menu.addAction(copy_action)
-            copy_resolution_action = QAction("复制控件到不同分辨率", self)
-            copy_resolution_action.triggered.connect(
-                lambda: self.copy_scene_to_different_resolution(self._find_stage_for_scene(data), data.name, data)
-            )
-            menu.addAction(copy_resolution_action)
-            menu.addSeparator()
-        if isinstance(data, (StageData, SceneData, ItemData)) or (
-            isinstance(data, dict) and data.get("kind") == "scene_group"
-        ):
+            if tree is getattr(self, "scene_pool_tree", None):
+                copy_action = QAction("复制场景", self)
+                copy_action.triggered.connect(lambda: self.copy_scene(data))
+                menu.addAction(copy_action)
+                copy_resolution_action = QAction("复制控件到不同分辨率", self)
+                copy_resolution_action.triggered.connect(
+                    lambda: self.copy_scene_to_different_resolution(self._find_stage_for_scene(data), data.name, data)
+                )
+                menu.addAction(copy_resolution_action)
+                menu.addSeparator()
+        if isinstance(data, (StageData, ItemData)):
             del_action = QAction("删除", self)
             del_action.triggered.connect(lambda: self.delete_item(item, data))
             menu.addAction(del_action)
@@ -2471,12 +2560,11 @@ class AutoStudioWindow(QMainWindow):
     def delete_scene_group(self, stage: Optional[StageData], scene_name: str):
         if not stage:
             return
-        stage.scenes = [scene for scene in stage.scenes if scene.name != scene_name]
-        self._remove_group_item_refs(stage, lambda ref: ref.scene_name == scene_name)
+        self._remove_stage_scene_group_reference(self.project, stage, scene_name)
         if self.current_scene and self.current_scene.name == scene_name:
             self.current_scene = None
             self.clear_scene_display()
-        self.status_label.setText(f"已删除场景 {scene_name} 的所有分辨率。")
+        self.status_label.setText(f"已从当前阶段移除场景 {scene_name}。场景池内数据已保留。")
         self.update_tree_view()
 
     def delete_scene(self, scene_data: SceneData):

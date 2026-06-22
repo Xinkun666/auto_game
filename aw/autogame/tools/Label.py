@@ -1089,6 +1089,15 @@ class AutoStudioWindow(QMainWindow):
         return None
 
     @staticmethod
+    def _first_stage_scene_resolution(stage: Optional[StageData], scene_name: str) -> Optional[SceneData]:
+        if not stage:
+            return None
+        for scene in stage.scenes:
+            if scene.name == scene_name:
+                return scene
+        return None
+
+    @staticmethod
     def _pending_scene_group(project: Optional[ProjectData]) -> Optional[SceneGroupData]:
         if not project:
             return None
@@ -1180,6 +1189,68 @@ class AutoStudioWindow(QMainWindow):
             if not any(scene.name == scene_name for scene in stage.scenes):
                 AutoStudioWindow._remove_group_item_refs(stage, lambda ref: ref.scene_name == scene_name)
         return deleted_scenes
+
+    @staticmethod
+    def _stage_scene_pool_selection_entries(project: Optional[ProjectData], stage: Optional[StageData]) -> List[Dict]:
+        if not project or not stage:
+            return []
+        AutoStudioWindow._ensure_project_scene_pool(project)
+        stage_scene_ids = {id(scene) for scene in stage.scenes}
+        entries = []
+        for group in AutoStudioWindow._ordered_scene_pool_groups_for_stage_add(project):
+            grouped_scenes = {}
+            for scene in group.scenes:
+                grouped_scenes.setdefault(scene.name, []).append(scene)
+            for scene_name, scenes in grouped_scenes.items():
+                entries.append({
+                    "group_id": group.id,
+                    "group_name": group.name,
+                    "scene_name": scene_name,
+                    "scenes": scenes,
+                    "checked": any(id(scene) in stage_scene_ids for scene in scenes),
+                })
+        return entries
+
+    @staticmethod
+    def _apply_stage_scene_pool_selection(
+        project: Optional[ProjectData],
+        stage: Optional[StageData],
+        selected_scene_keys,
+    ) -> Dict[str, List[SceneData]]:
+        if not project or not stage:
+            return {"added": [], "removed": []}
+        entries = AutoStudioWindow._stage_scene_pool_selection_entries(project, stage)
+        managed_scene_ids = {id(scene) for entry in entries for scene in entry["scenes"]}
+        selected_scene_ids = {
+            id(scene)
+            for entry in entries
+            if (entry["group_id"], entry["scene_name"]) in selected_scene_keys
+            for scene in entry["scenes"]
+        }
+        removed_scenes = [
+            scene
+            for scene in stage.scenes
+            if id(scene) in managed_scene_ids and id(scene) not in selected_scene_ids
+        ]
+        if removed_scenes:
+            removed_ids = {id(scene) for scene in removed_scenes}
+            removed_names = {scene.name for scene in removed_scenes}
+            stage.scenes = [scene for scene in stage.scenes if id(scene) not in removed_ids]
+            for scene_name in removed_names:
+                if not any(scene.name == scene_name for scene in stage.scenes):
+                    AutoStudioWindow._remove_group_item_refs(stage, lambda ref, name=scene_name: ref.scene_name == name)
+        added_scenes = []
+        current_ids = {id(scene) for scene in stage.scenes}
+        for entry in entries:
+            if (entry["group_id"], entry["scene_name"]) not in selected_scene_keys:
+                continue
+            for scene in entry["scenes"]:
+                if id(scene) in current_ids:
+                    continue
+                stage.scenes.append(scene)
+                current_ids.add(id(scene))
+                added_scenes.append(scene)
+        return {"added": added_scenes, "removed": removed_scenes}
 
     def _group_scenes_by_name(self, stage: StageData) -> Dict[str, List[SceneData]]:
         grouped = {}
@@ -1497,30 +1568,73 @@ class AutoStudioWindow(QMainWindow):
         return ordered
 
     def add_existing_pool_scene_to_stage(self, stage: Optional[StageData]):
+        self.manage_stage_scenes(stage)
+
+    def manage_stage_scenes(self, stage: Optional[StageData]):
         if not self.project or not stage:
             return
-        choices, labels = self._pool_scene_choices()
-        if not labels:
+        entries = self._stage_scene_pool_selection_entries(self.project, stage)
+        if not entries:
             QMessageBox.warning(self, "提示", "场景池里还没有可添加的场景。")
             return
-        label, ok = QInputDialog.getItem(self, "从场景池添加场景", "请选择场景:", labels, 0, False)
-        if not ok or not label:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"场景管理 - {stage.name}")
+        layout = QVBoxLayout(dialog)
+        tree = QTreeWidget(dialog)
+        tree.setHeaderLabels(["场景池", "状态"])
+        scene_items = []
+        group_nodes = {}
+        for entry in entries:
+            group_node = group_nodes.get(entry["group_id"])
+            if group_node is None:
+                group_node = QTreeWidgetItem(tree)
+                group_node.setText(0, entry["group_name"])
+                group_node.setExpanded(True)
+                group_nodes[entry["group_id"]] = group_node
+            scene_node = QTreeWidgetItem(group_node)
+            scene_node.setText(0, entry["scene_name"])
+            scene_node.setText(1, f"{len(entry['scenes'])} 个分辨率")
+            scene_node.setFlags(scene_node.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            scene_node.setCheckState(
+                0,
+                Qt.CheckState.Checked if entry["checked"] else Qt.CheckState.Unchecked,
+            )
+            scene_node.setData(0, Qt.ItemDataRole.UserRole, (entry["group_id"], entry["scene_name"]))
+            scene_items.append(scene_node)
+        tree.expandAll()
+        tree.resizeColumnToContents(0)
+        tree.resizeColumnToContents(1)
+        layout.addWidget(tree)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        scene = choices.get(label)
-        if not scene:
-            return
-        added = self._add_scene_reference_to_stage(stage, scene)
-        if not added:
-            QMessageBox.information(self, "提示", "该阶段已经引用了这个场景。")
-            return
+        selected_keys = {
+            item.data(0, Qt.ItemDataRole.UserRole)
+            for item in scene_items
+            if item.checkState(0) == Qt.CheckState.Checked
+        }
+        result = self._apply_stage_scene_pool_selection(self.project, stage, selected_keys)
+        if self.current_scene and self.current_scene not in stage.scenes:
+            self.current_scene = None
+            self.clear_scene_display()
+        if result["added"]:
+            self.current_scene = result["added"][0]
+            self.last_expand_scene_id = self.current_scene.id
         self.current_stage = stage
         self.set_current_work_stage(stage)
-        self.current_scene = scene
         self.last_expand_stage_id = stage.id
-        self.last_expand_scene_id = scene.id
         self.update_tree_view()
-        self.select_data_in_tree(scene)
-        self.status_label.setText(f"已将场景 {scene.name} 添加到阶段 {stage.name}。")
+        if self.current_scene:
+            self.select_data_in_tree(self.current_scene)
+        self.status_label.setText(
+            f"场景管理已更新：添加 {len(result['added'])} 个分辨率，移除 {len(result['removed'])} 个分辨率。"
+        )
 
     def rename_pool_scene_group(self, scene_group: Optional[SceneGroupData], scene_name: str):
         if not self.project or not scene_group:
@@ -1597,10 +1711,10 @@ class AutoStudioWindow(QMainWindow):
             btn = QPushButton("新建场景")
             btn.clicked.connect(lambda: self.add_scene(data))
             self.action_layout.addWidget(btn)
-            btn_add_pool_scene = QPushButton("从场景池添加场景")
-            btn_add_pool_scene.clicked.connect(lambda: self.add_existing_pool_scene_to_stage(data))
-            btn_add_pool_scene.setEnabled(bool(self.project and any(group.scenes for group in self.project.scene_groups)))
-            self.action_layout.addWidget(btn_add_pool_scene)
+            btn_manage_scene = QPushButton("场景管理")
+            btn_manage_scene.clicked.connect(lambda: self.manage_stage_scenes(data))
+            btn_manage_scene.setEnabled(bool(self.project and any(group.scenes for group in self.project.scene_groups)))
+            self.action_layout.addWidget(btn_manage_scene)
             btn_paste_scene = QPushButton("📋 粘贴场景")
             btn_paste_scene.clicked.connect(lambda: self.paste_scene_to_stage(data))
             btn_paste_scene.setEnabled(self.scene_clipboard is not None)
@@ -1680,9 +1794,13 @@ class AutoStudioWindow(QMainWindow):
         elif isinstance(data, dict) and data.get("kind") == "scene_group":
             self.current_stage = data.get("stage")
             self.set_current_work_stage(self.current_stage)
-            self.current_scene = None
-            self.clear_scene_display()
             scene_name = data.get("scene_name", "")
+            first_scene = self._first_stage_scene_resolution(self.current_stage, scene_name)
+            self.current_scene = first_scene
+            if first_scene:
+                self.show_scene_image(first_scene)
+            else:
+                self.clear_scene_display()
             lbl = QLabel(f"当前场景: {scene_name}")
             self.action_layout.addWidget(lbl)
             btn_delete = QPushButton("从当前阶段移除")

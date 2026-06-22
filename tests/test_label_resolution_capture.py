@@ -350,6 +350,15 @@ class LabelResolutionCaptureTests(unittest.TestCase):
 
         self.assertIs(first_resolution, selected)
 
+    def test_first_stage_scene_resolution_returns_first_matching_scene(self):
+        first_resolution = SceneData(id="scene-1", name="大厅", image_width=100, image_height=50)
+        second_resolution = SceneData(id="scene-2", name="大厅", image_width=200, image_height=100)
+        stage = StageData(id="stage-1", name="搜房阶段", scenes=[first_resolution, second_resolution])
+
+        selected = AutoStudioWindow._first_stage_scene_resolution(stage, "大厅")
+
+        self.assertIs(first_resolution, selected)
+
     def test_move_selected_pending_scenes_into_target_group(self):
         pending_a = SceneData(id="scene-1", name="大厅", image_width=100, image_height=50)
         pending_b = SceneData(id="scene-2", name="设置", image_width=100, image_height=50)
@@ -487,6 +496,45 @@ class LabelResolutionCaptureTests(unittest.TestCase):
         self.assertEqual([scene], removed)
         self.assertEqual([], stage.scenes)
         self.assertEqual([scene], scene_group.scenes)
+
+    def test_stage_scene_pool_entries_reflect_stage_references(self):
+        global_scene = SceneData(id="scene-global", name="全局弹窗")
+        pending_scene = SceneData(id="scene-pending", name="临时场景")
+        stage = StageData(id="stage-1", name="搜房阶段", scenes=[global_scene])
+        project = ProjectData(
+            name="demo",
+            stages=[stage],
+            scene_groups=[
+                SceneGroupData(id="group-pending", name=DEFAULT_SCENE_GROUP_NAME, scenes=[pending_scene]),
+                SceneGroupData(id="group-global", name=DEFAULT_GLOBAL_SCENE_GROUP_NAME, scenes=[global_scene]),
+            ],
+        )
+
+        entries = AutoStudioWindow._stage_scene_pool_selection_entries(project, stage)
+
+        checked_by_name = {entry["scene_name"]: entry["checked"] for entry in entries}
+        self.assertFalse(checked_by_name["临时场景"])
+        self.assertTrue(checked_by_name["全局弹窗"])
+
+    def test_apply_stage_scene_pool_selection_adds_and_removes_stage_references(self):
+        old_scene = SceneData(id="scene-old", name="旧场景")
+        new_scene_a = SceneData(id="scene-new-a", name="新场景", image_width=100, image_height=50)
+        new_scene_b = SceneData(id="scene-new-b", name="新场景", image_width=200, image_height=100)
+        stage = StageData(id="stage-1", name="搜房阶段", scenes=[old_scene])
+        pending_group = SceneGroupData(id="group-pending", name=DEFAULT_SCENE_GROUP_NAME, scenes=[old_scene])
+        game_group = SceneGroupData(id="group-game", name="游戏场景", scenes=[new_scene_a, new_scene_b])
+        project = ProjectData(name="demo", stages=[stage], scene_groups=[pending_group, game_group])
+
+        result = AutoStudioWindow._apply_stage_scene_pool_selection(
+            project,
+            stage,
+            {("group-game", "新场景")},
+        )
+
+        self.assertEqual([new_scene_a, new_scene_b], result["added"])
+        self.assertEqual([old_scene], result["removed"])
+        self.assertEqual([new_scene_a, new_scene_b], stage.scenes)
+        self.assertEqual([old_scene], pending_group.scenes)
 
 
 if __name__ == "__main__":

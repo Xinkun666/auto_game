@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
                              QGraphicsRectItem, QGraphicsLineItem, QToolBar, QMessageBox, QFrame,
                              QPinchGesture, QHeaderView, QProgressDialog, QComboBox, QDialog,
-                             QLineEdit, QCheckBox, QScrollArea, QDialogButtonBox)
+                             QLineEdit, QCheckBox, QScrollArea, QDialogButtonBox, QTabWidget)
 from PyQt6.QtCore import Qt, QRectF, QPointF, QEvent
 from PyQt6.QtGui import QAction, QPixmap, QColor, QPen, QBrush, QImage, QPainter, QGuiApplication, QFontMetricsF
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
@@ -506,7 +506,7 @@ class AutoStudioWindow(QMainWindow):
         self.btn_layout.addWidget(self.btn_add_stage)
         right_layout.addLayout(self.btn_layout)
         tree_toolbar = QHBoxLayout()
-        tree_toolbar.addWidget(QLabel("项目层级"))
+        tree_toolbar.addWidget(QLabel("资源管理"))
         tree_toolbar.addStretch()
         btn_expand_tree = QPushButton("展开")
         btn_expand_tree.clicked.connect(self.expand_all_tree)
@@ -515,17 +515,12 @@ class AutoStudioWindow(QMainWindow):
         tree_toolbar.addWidget(btn_expand_tree)
         tree_toolbar.addWidget(btn_collapse_tree)
         right_layout.addLayout(tree_toolbar)
-        # 树控件
-        self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["项目层级", "属性"])
-        self.tree.setTextElideMode(Qt.TextElideMode.ElideNone)
-        self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.tree.itemClicked.connect(self.on_tree_click)
-        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tree.customContextMenuRequested.connect(self.open_context_menu)
-        right_layout.addWidget(self.tree)
+        self.tree_tabs = QTabWidget()
+        self.tree = self._create_tree_widget(["项目层级", "属性"])
+        self.scene_pool_tree = self._create_tree_widget(["场景池", "属性"])
+        self.tree_tabs.addTab(self.tree, "项目层级")
+        self.tree_tabs.addTab(self.scene_pool_tree, "场景池")
+        right_layout.addWidget(self.tree_tabs)
         # 操作面板 (动态显示)
         self.action_panel = QFrame()
         self.action_layout = QVBoxLayout(self.action_panel)
@@ -537,6 +532,18 @@ class AutoStudioWindow(QMainWindow):
         layout.addWidget(splitter)
         self._updating_group_combo = False
         self.update_group_controls()
+
+    def _create_tree_widget(self, headers):
+        tree = QTreeWidget()
+        tree.setHeaderLabels(headers)
+        tree.setTextElideMode(Qt.TextElideMode.ElideNone)
+        tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        tree.itemClicked.connect(self.on_tree_click)
+        tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        tree.customContextMenuRequested.connect(lambda position, tree=tree: self.open_context_menu(position, tree))
+        return tree
     def trigger_add_shortcut(self, mode):
         if not self.current_scene:
             QMessageBox.warning(self, "提示", "请先在项目树中选择一个场景。")
@@ -1004,6 +1011,15 @@ class AutoStudioWindow(QMainWindow):
                 return True
         return False
 
+    @staticmethod
+    def _first_pool_scene_resolution(scene_group: Optional[SceneGroupData], scene_name: str) -> Optional[SceneData]:
+        if not scene_group:
+            return None
+        for scene in scene_group.scenes:
+            if scene.name == scene_name:
+                return scene
+        return None
+
     def _group_scenes_by_name(self, stage: StageData) -> Dict[str, List[SceneData]]:
         grouped = {}
         for scene in stage.scenes:
@@ -1044,6 +1060,7 @@ class AutoStudioWindow(QMainWindow):
         """
         expanded_ids = self.collect_expanded_ids()
         self.tree.clear()
+        self.scene_pool_tree.clear()
         if not self.project:
             return
         self._ensure_project_scene_pool(self.project)
@@ -1082,7 +1099,7 @@ class AutoStudioWindow(QMainWindow):
                     i_node.setToolTip(1, vis_text)
                     i_node.setData(0, Qt.ItemDataRole.UserRole, item)
 
-        pool_root = QTreeWidgetItem(root)
+        pool_root = QTreeWidgetItem(self.scene_pool_tree)
         pool_text = "场景池"
         pool_root.setText(0, pool_text)
         pool_root.setToolTip(0, pool_text)
@@ -1132,6 +1149,8 @@ class AutoStudioWindow(QMainWindow):
                 add_scene_version_nodes(group_node, scenes, stage)
         self.tree.resizeColumnToContents(0)
         self.tree.resizeColumnToContents(1)
+        self.scene_pool_tree.resizeColumnToContents(0)
+        self.scene_pool_tree.resizeColumnToContents(1)
         self.restore_expanded_ids(expanded_ids, stage_items, scene_items)
         if self.last_expand_stage_id:
             item = stage_items.get(self.last_expand_stage_id)
@@ -1302,10 +1321,12 @@ class AutoStudioWindow(QMainWindow):
         if not self.project:
             return
         self.tree.expandAll()
+        self.scene_pool_tree.expandAll()
     def collapse_all_tree(self):
         if not self.project:
             return
         self.tree.collapseAll()
+        self.scene_pool_tree.collapseAll()
     # --- 树交互与动态按钮 ---
     def on_tree_click(self, item, column):
         data = item.data(0, Qt.ItemDataRole.UserRole)
@@ -1365,10 +1386,16 @@ class AutoStudioWindow(QMainWindow):
             btn_delete.clicked.connect(lambda: self.delete_scene_pool_group(scene_group))
             self.action_layout.addWidget(btn_delete)
         elif isinstance(data, dict) and data.get("kind") == "scene_pool_scene_group":
-            self.current_scene = None
-            self.clear_scene_display()
             scene_group = data.get("scene_group")
             scene_name = data.get("scene_name", "")
+            first_scene = self._first_pool_scene_resolution(scene_group, scene_name)
+            self.current_stage = self._find_stage_for_scene(first_scene) if first_scene else None
+            self.set_current_work_stage(self.current_stage)
+            self.current_scene = first_scene
+            if first_scene:
+                self.show_scene_image(first_scene)
+            else:
+                self.clear_scene_display()
             lbl = QLabel(f"池内场景: {scene_name}")
             self.action_layout.addWidget(lbl)
             btn_rename = QPushButton("✏️ 修改场景名称")
@@ -1512,17 +1539,27 @@ class AutoStudioWindow(QMainWindow):
                 if found:
                     return found
             return None
-        root = self.tree.invisibleRootItem()
-        target_item = walk(root)
+        target_tree = None
+        target_item = None
+        for tree in (self.tree, self.scene_pool_tree):
+            target_item = walk(tree.invisibleRootItem())
+            if target_item:
+                target_tree = tree
+                break
         if target_item:
             parent = target_item.parent()
             while parent:
                 parent.setExpanded(True)
                 parent = parent.parent()
-            self.tree.setCurrentItem(target_item)
+            if target_tree is self.scene_pool_tree and hasattr(self, "tree_tabs"):
+                self.tree_tabs.setCurrentWidget(self.scene_pool_tree)
+            elif target_tree is self.tree and hasattr(self, "tree_tabs"):
+                self.tree_tabs.setCurrentWidget(self.tree)
+            target_tree.setCurrentItem(target_item)
             self.on_tree_click(target_item, 0)
-    def open_context_menu(self, position):
-        item = self.tree.itemAt(position)
+    def open_context_menu(self, position, tree=None):
+        tree = tree or self.tree
+        item = tree.itemAt(position)
         if not item: return
         data = item.data(0, Qt.ItemDataRole.UserRole)
         menu = QMenu()
@@ -1554,10 +1591,13 @@ class AutoStudioWindow(QMainWindow):
             )
             menu.addAction(copy_resolution_action)
             menu.addSeparator()
-        del_action = QAction("删除", self)
-        del_action.triggered.connect(lambda: self.delete_item(item, data))
-        menu.addAction(del_action)
-        menu.exec(self.tree.viewport().mapToGlobal(position))
+        if isinstance(data, (StageData, SceneData, ItemData)) or (
+            isinstance(data, dict) and data.get("kind") == "scene_group"
+        ):
+            del_action = QAction("删除", self)
+            del_action.triggered.connect(lambda: self.delete_item(item, data))
+            menu.addAction(del_action)
+        menu.exec(tree.viewport().mapToGlobal(position))
     def show_item_context_menu(self, item_data: ItemData, global_pos):
         if not isinstance(item_data, ItemData):
             return
@@ -2391,6 +2431,7 @@ class AutoStudioWindow(QMainWindow):
     def collect_expanded_ids(self):
         expanded_stage_ids = set()
         expanded_scene_ids = set()
+        expanded_scene_group_ids = set()
         def walk(node):
             for i in range(node.childCount()):
                 child = node.child(i)
@@ -2399,12 +2440,21 @@ class AutoStudioWindow(QMainWindow):
                     expanded_stage_ids.add(data.id)
                 if isinstance(data, SceneData) and child.isExpanded():
                     expanded_scene_ids.add(data.id)
+                if isinstance(data, dict) and data.get("kind") == "scene_pool_group" and child.isExpanded():
+                    scene_group = data.get("scene_group")
+                    if scene_group:
+                        expanded_scene_group_ids.add(scene_group.id)
                 walk(child)
-        root = self.tree.invisibleRootItem()
-        walk(root)
-        return expanded_stage_ids, expanded_scene_ids
+        walk(self.tree.invisibleRootItem())
+        if hasattr(self, "scene_pool_tree"):
+            walk(self.scene_pool_tree.invisibleRootItem())
+        return expanded_stage_ids, expanded_scene_ids, expanded_scene_group_ids
     def restore_expanded_ids(self, expanded_ids, stage_items, scene_items):
-        expanded_stage_ids, expanded_scene_ids = expanded_ids
+        if len(expanded_ids) == 2:
+            expanded_stage_ids, expanded_scene_ids = expanded_ids
+            expanded_scene_group_ids = set()
+        else:
+            expanded_stage_ids, expanded_scene_ids, expanded_scene_group_ids = expanded_ids
         for stage_id in expanded_stage_ids:
             item = stage_items.get(stage_id)
             if item:
@@ -2413,6 +2463,17 @@ class AutoStudioWindow(QMainWindow):
             item = scene_items.get(scene_id)
             if item:
                 item.setExpanded(True)
+        if hasattr(self, "scene_pool_tree"):
+            def walk_pool(node):
+                for i in range(node.childCount()):
+                    child = node.child(i)
+                    data = child.data(0, Qt.ItemDataRole.UserRole)
+                    if isinstance(data, dict) and data.get("kind") == "scene_pool_group":
+                        scene_group = data.get("scene_group")
+                        if scene_group and scene_group.id in expanded_scene_group_ids:
+                            child.setExpanded(True)
+                    walk_pool(child)
+            walk_pool(self.scene_pool_tree.invisibleRootItem())
     def toggle_visibility(self, item_data):
         item_data.visible = not item_data.visible
         self.update_tree_view()

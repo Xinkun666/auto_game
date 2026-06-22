@@ -11,6 +11,7 @@ from aw.autogame.tools.Label import (
     ProjectData,
     RectData,
     SceneData,
+    SceneGroupData,
     StageData,
 )
 
@@ -317,6 +318,20 @@ class LabelResolutionCaptureTests(unittest.TestCase):
         self.assertTrue(removed)
         self.assertEqual([], stage.scenes)
         self.assertEqual([pool_scene], project.scene_groups[0].scenes)
+
+    def test_first_pool_scene_resolution_returns_first_matching_scene(self):
+        first_resolution = SceneData(id="scene-1", name="大厅", image_width=100, image_height=50)
+        second_resolution = SceneData(id="scene-2", name="大厅", image_width=200, image_height=100)
+        other_scene = SceneData(id="scene-3", name="设置", image_width=100, image_height=50)
+        scene_group = SceneGroupData(
+            id="group-1",
+            name="游戏场景",
+            scenes=[first_resolution, second_resolution, other_scene],
+        )
+
+        selected = AutoStudioWindow._first_pool_scene_resolution(scene_group, "大厅")
+
+        self.assertIs(first_resolution, selected)
 
 
 if __name__ == "__main__":

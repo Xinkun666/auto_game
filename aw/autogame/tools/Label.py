@@ -1212,6 +1212,13 @@ class AutoStudioWindow(QMainWindow):
         return entries
 
     @staticmethod
+    def _stage_scene_pool_entry_preview_scene(entry: Optional[Dict]) -> Optional[SceneData]:
+        if not entry:
+            return None
+        scenes = entry.get("scenes", [])
+        return scenes[0] if scenes else None
+
+    @staticmethod
     def _apply_stage_scene_pool_selection(
         project: Optional[ProjectData],
         stage: Optional[StageData],
@@ -1600,7 +1607,9 @@ class AutoStudioWindow(QMainWindow):
                 Qt.CheckState.Checked if entry["checked"] else Qt.CheckState.Unchecked,
             )
             scene_node.setData(0, Qt.ItemDataRole.UserRole, (entry["group_id"], entry["scene_name"]))
+            scene_node.setData(1, Qt.ItemDataRole.UserRole, self._stage_scene_pool_entry_preview_scene(entry))
             scene_items.append(scene_node)
+        tree.itemClicked.connect(lambda clicked_item, _column: self.preview_stage_scene_pool_item(clicked_item))
         tree.expandAll()
         tree.resizeColumnToContents(0)
         tree.resizeColumnToContents(1)
@@ -1635,6 +1644,16 @@ class AutoStudioWindow(QMainWindow):
         self.status_label.setText(
             f"场景管理已更新：添加 {len(result['added'])} 个分辨率，移除 {len(result['removed'])} 个分辨率。"
         )
+
+    def preview_stage_scene_pool_item(self, item: Optional[QTreeWidgetItem]):
+        if item is None:
+            return
+        scene = item.data(1, Qt.ItemDataRole.UserRole)
+        if not isinstance(scene, SceneData):
+            return
+        self.current_scene = scene
+        self.show_scene_image(scene)
+        self.status_label.setText(f"正在预览场景 {scene.name}。")
 
     def rename_pool_scene_group(self, scene_group: Optional[SceneGroupData], scene_name: str):
         if not self.project or not scene_group:

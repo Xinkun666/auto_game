@@ -516,6 +516,15 @@ class LabelResolutionCaptureTests(unittest.TestCase):
         self.assertFalse(checked_by_name["临时场景"])
         self.assertTrue(checked_by_name["全局弹窗"])
 
+    def test_stage_scene_pool_entry_preview_uses_first_resolution(self):
+        first_resolution = SceneData(id="scene-1", name="大厅", image_width=100, image_height=50)
+        second_resolution = SceneData(id="scene-2", name="大厅", image_width=200, image_height=100)
+        entry = {"scene_name": "大厅", "scenes": [first_resolution, second_resolution]}
+
+        preview_scene = AutoStudioWindow._stage_scene_pool_entry_preview_scene(entry)
+
+        self.assertIs(first_resolution, preview_scene)
+
     def test_apply_stage_scene_pool_selection_adds_and_removes_stage_references(self):
         old_scene = SceneData(id="scene-old", name="旧场景")
         new_scene_a = SceneData(id="scene-new-a", name="新场景", image_width=100, image_height=50)

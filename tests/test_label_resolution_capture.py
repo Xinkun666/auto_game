@@ -4,6 +4,7 @@ from pathlib import Path
 
 from aw.autogame.tools.Label import (
     AutoStudioWindow,
+    DEFAULT_GLOBAL_SCENE_GROUP_NAME,
     DEFAULT_SCENE_GROUP_NAME,
     GroupData,
     GroupItemRef,
@@ -259,7 +260,7 @@ class LabelResolutionCaptureTests(unittest.TestCase):
             project = AutoStudioWindow._load_project_model_from_dir(str(project_dir))
 
         self.assertEqual("demo", project.name)
-        self.assertEqual(["待分组场景"], [group.name for group in project.scene_groups])
+        self.assertEqual(["待分组场景", "默认分组"], [group.name for group in project.scene_groups])
         self.assertEqual("待分组场景", DEFAULT_SCENE_GROUP_NAME)
         self.assertEqual(1, len(project.scene_groups[0].scenes))
         shared_scene = project.scene_groups[0].scenes[0]
@@ -285,7 +286,7 @@ class LabelResolutionCaptureTests(unittest.TestCase):
 
         AutoStudioWindow._ensure_project_scene_pool(project)
 
-        self.assertEqual(["待分组场景"], [group.name for group in project.scene_groups])
+        self.assertEqual(["待分组场景", "默认分组"], [group.name for group in project.scene_groups])
         self.assertEqual([shared_scene], project.scene_groups[0].scenes)
 
     def test_stage_scene_references_share_pool_scene_without_cloning(self):
@@ -346,6 +347,37 @@ class LabelResolutionCaptureTests(unittest.TestCase):
         self.assertEqual([pending_a], moved)
         self.assertEqual([pending_b], pending.scenes)
         self.assertEqual([pending_a], target.scenes)
+
+    def test_moving_pending_scene_to_global_group_updates_existing_stages(self):
+        global_scene = SceneData(id="scene-1", name="退出弹窗")
+        pending = SceneGroupData(id="group-1", name=DEFAULT_SCENE_GROUP_NAME, scenes=[global_scene])
+        global_group = SceneGroupData(id="group-2", name=DEFAULT_GLOBAL_SCENE_GROUP_NAME)
+        stage = StageData(id="stage-1", name="搜房阶段")
+        project = ProjectData(name="demo", stages=[stage], scene_groups=[pending, global_group])
+
+        moved = AutoStudioWindow._move_pending_scenes_to_group(project, global_group, ["退出弹窗"])
+
+        self.assertEqual([global_scene], moved)
+        self.assertEqual([], pending.scenes)
+        self.assertEqual([global_scene], global_group.scenes)
+        self.assertIs(stage.scenes[0], global_scene)
+
+    def test_global_scene_group_references_existing_and_future_stages(self):
+        stage_a = StageData(id="stage-a", name="搜房阶段")
+        stage_b = StageData(id="stage-b", name="跑圈阶段")
+        global_scene = SceneData(id="scene-global", name="退出弹窗")
+        project = ProjectData(name="demo", stages=[stage_a, stage_b])
+        AutoStudioWindow._ensure_project_scene_pool(project)
+        global_group = AutoStudioWindow._global_scene_group(project)
+
+        AutoStudioWindow._add_scene_to_project_pool(project, global_scene, DEFAULT_GLOBAL_SCENE_GROUP_NAME)
+        AutoStudioWindow._sync_global_scenes_to_stages(project)
+        future_stage = AutoStudioWindow._new_stage_with_global_scenes(project, "结算阶段")
+
+        self.assertIs(project.scene_groups[1], global_group)
+        self.assertIs(stage_a.scenes[0], global_scene)
+        self.assertIs(stage_b.scenes[0], global_scene)
+        self.assertIs(future_stage.scenes[0], global_scene)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
 # ==========================================
 DEFAULT_GROUP_NAME = "默认"
 DEFAULT_SCENE_GROUP_NAME = "待分组场景"
+DEFAULT_GLOBAL_SCENE_GROUP_NAME = "默认分组"
 LEGACY_DEFAULT_SCENE_GROUP_NAME = "未分组"
 GROUPABLE_ITEM_TYPES = ("area", "special_area")
 
@@ -922,6 +923,10 @@ class AutoStudioWindow(QMainWindow):
         return SceneGroupData(id=str(random.randint(1000, 9999)), name=DEFAULT_SCENE_GROUP_NAME)
 
     @staticmethod
+    def _default_global_scene_group() -> SceneGroupData:
+        return SceneGroupData(id=str(random.randint(1000, 9999)), name=DEFAULT_GLOBAL_SCENE_GROUP_NAME)
+
+    @staticmethod
     def _ensure_project_scene_pool(project: Optional[ProjectData]) -> Optional[SceneGroupData]:
         if not project:
             return None
@@ -939,6 +944,14 @@ class AutoStudioWindow(QMainWindow):
         if default_group is None:
             default_group = AutoStudioWindow._default_scene_group()
             project.scene_groups.insert(0, default_group)
+        global_group = None
+        for group in project.scene_groups:
+            if group.name == DEFAULT_GLOBAL_SCENE_GROUP_NAME:
+                global_group = group
+                break
+        if global_group is None:
+            default_index = project.scene_groups.index(default_group)
+            project.scene_groups.insert(default_index + 1, AutoStudioWindow._default_global_scene_group())
         existing_ids = {id(scene) for group in project.scene_groups for scene in group.scenes}
         for stage in project.stages:
             for scene in stage.scenes:
@@ -1002,6 +1015,8 @@ class AutoStudioWindow(QMainWindow):
             project.scene_groups.append(target_group)
         if not any(existing is scene for group in project.scene_groups for existing in group.scenes):
             target_group.scenes.append(scene)
+        if target_group.name == DEFAULT_GLOBAL_SCENE_GROUP_NAME:
+            AutoStudioWindow._sync_global_scenes_to_stages(project)
         return scene
 
     @staticmethod
@@ -1012,6 +1027,39 @@ class AutoStudioWindow(QMainWindow):
             return False
         stage.scenes.append(scene)
         return True
+
+    @staticmethod
+    def _global_scene_group(project: Optional[ProjectData]) -> Optional[SceneGroupData]:
+        if not project:
+            return None
+        AutoStudioWindow._ensure_project_scene_pool(project)
+        for group in project.scene_groups:
+            if group.name == DEFAULT_GLOBAL_SCENE_GROUP_NAME:
+                return group
+        return None
+
+    @staticmethod
+    def _sync_global_scenes_to_stage(project: Optional[ProjectData], stage: Optional[StageData]) -> None:
+        if not project or not stage:
+            return
+        global_group = AutoStudioWindow._global_scene_group(project)
+        if not global_group:
+            return
+        for scene in global_group.scenes:
+            AutoStudioWindow._add_scene_reference_to_stage(stage, scene)
+
+    @staticmethod
+    def _sync_global_scenes_to_stages(project: Optional[ProjectData]) -> None:
+        if not project:
+            return
+        for stage in project.stages:
+            AutoStudioWindow._sync_global_scenes_to_stage(project, stage)
+
+    @staticmethod
+    def _new_stage_with_global_scenes(project: Optional[ProjectData], name: str) -> StageData:
+        stage = StageData(id=str(random.randint(1000, 9999)), name=name)
+        AutoStudioWindow._sync_global_scenes_to_stage(project, stage)
+        return stage
 
     @staticmethod
     def _remove_scene_reference_from_stage(stage: Optional[StageData], scene: SceneData) -> bool:
@@ -1066,6 +1114,8 @@ class AutoStudioWindow(QMainWindow):
             else:
                 remaining_scenes.append(scene)
         pending_group.scenes = remaining_scenes
+        if target_group.name == DEFAULT_GLOBAL_SCENE_GROUP_NAME:
+            AutoStudioWindow._sync_global_scenes_to_stages(project)
         return moved_scenes
 
     def _group_scenes_by_name(self, stage: StageData) -> Dict[str, List[SceneData]]:
@@ -1153,8 +1203,9 @@ class AutoStudioWindow(QMainWindow):
         pool_root.setToolTip(0, pool_text)
         pool_root.setData(0, Qt.ItemDataRole.UserRole, {"kind": "scene_pool_root"})
         pool_root.setExpanded(True)
-        for scene_group in self.project.scene_groups:
-            group_node = QTreeWidgetItem(pool_root)
+
+        def add_scene_pool_group_node(parent_node, scene_group):
+            group_node = QTreeWidgetItem(parent_node)
             group_text = f"场景分组: {scene_group.name}"
             group_node.setText(0, group_text)
             group_node.setToolTip(0, group_text)
@@ -1176,6 +1227,15 @@ class AutoStudioWindow(QMainWindow):
                     "scene_name": scene_name,
                 })
                 add_scene_version_nodes(pool_scene_node, scenes)
+            return group_node
+
+        global_group = self._global_scene_group(self.project)
+        for scene_group in self.project.scene_groups:
+            if scene_group.name == DEFAULT_GLOBAL_SCENE_GROUP_NAME:
+                continue
+            group_node = add_scene_pool_group_node(pool_root, scene_group)
+            if scene_group.name == DEFAULT_SCENE_GROUP_NAME and global_group:
+                add_scene_pool_group_node(group_node, global_group)
 
         for stage in self.project.stages:
             s_node = QTreeWidgetItem(root)
@@ -1216,7 +1276,7 @@ class AutoStudioWindow(QMainWindow):
         name = self.prompt_unique_name("新建阶段", "阶段名称:",
                                        existing_names=[s.name for s in self.project.stages])
         if name:
-            new_stage = StageData(id=str(random.randint(1000, 9999)), name=name)
+            new_stage = self._new_stage_with_global_scenes(self.project, name)
             self.project.stages.append(new_stage)
             self.current_stage = new_stage
             self.set_current_work_stage(new_stage)
@@ -1412,6 +1472,8 @@ class AutoStudioWindow(QMainWindow):
         for scene in moved_scenes:
             if not any(existing is scene for existing in target_group.scenes):
                 target_group.scenes.append(scene)
+        if target_group.name == DEFAULT_GLOBAL_SCENE_GROUP_NAME:
+            self._sync_global_scenes_to_stages(self.project)
         self.update_tree_view()
         self.status_label.setText(f"已将场景 {scene_name} 移动到分组 {target_group.name}。")
 
@@ -1479,17 +1541,21 @@ class AutoStudioWindow(QMainWindow):
             self.action_layout.addWidget(btn_add_scene)
             pending_group = self._pending_scene_group(self.project) if self.project else None
             is_pending_group = bool(scene_group and scene_group.name == DEFAULT_SCENE_GROUP_NAME)
+            is_system_group = bool(
+                scene_group
+                and scene_group.name in (DEFAULT_SCENE_GROUP_NAME, DEFAULT_GLOBAL_SCENE_GROUP_NAME)
+            )
             btn_select_scene = QPushButton("选择场景")
             btn_select_scene.clicked.connect(lambda: self.select_pending_scenes_for_group(scene_group))
             btn_select_scene.setEnabled(bool(scene_group and not is_pending_group and pending_group and pending_group.scenes))
             self.action_layout.addWidget(btn_select_scene)
             btn_rename = QPushButton("✏️ 修改分组名称")
             btn_rename.clicked.connect(lambda: self.rename_scene_pool_group(scene_group))
-            btn_rename.setEnabled(not is_pending_group)
+            btn_rename.setEnabled(not is_system_group)
             self.action_layout.addWidget(btn_rename)
             btn_delete = QPushButton("🗑 删除空分组")
             btn_delete.clicked.connect(lambda: self.delete_scene_pool_group(scene_group))
-            btn_delete.setEnabled(not is_pending_group)
+            btn_delete.setEnabled(not is_system_group)
             self.action_layout.addWidget(btn_delete)
         elif isinstance(data, dict) and data.get("kind") == "scene_pool_scene_group":
             scene_group = data.get("scene_group")

@@ -260,7 +260,7 @@ class LabelResolutionCaptureTests(unittest.TestCase):
             project = AutoStudioWindow._load_project_model_from_dir(str(project_dir))
 
         self.assertEqual("demo", project.name)
-        self.assertEqual(["待分组场景", "默认分组"], [group.name for group in project.scene_groups])
+        self.assertEqual(["待分组场景", "全局分组"], [group.name for group in project.scene_groups])
         self.assertEqual("待分组场景", DEFAULT_SCENE_GROUP_NAME)
         self.assertEqual(1, len(project.scene_groups[0].scenes))
         shared_scene = project.scene_groups[0].scenes[0]
@@ -286,8 +286,23 @@ class LabelResolutionCaptureTests(unittest.TestCase):
 
         AutoStudioWindow._ensure_project_scene_pool(project)
 
-        self.assertEqual(["待分组场景", "默认分组"], [group.name for group in project.scene_groups])
+        self.assertEqual(["待分组场景", "全局分组"], [group.name for group in project.scene_groups])
         self.assertEqual([shared_scene], project.scene_groups[0].scenes)
+
+    def test_legacy_default_global_group_is_migrated_to_global_group(self):
+        global_scene = SceneData(id="scene-1", name="退出弹窗")
+        project = ProjectData(
+            name="demo",
+            scene_groups=[
+                SceneGroupData(id="group-1", name=DEFAULT_SCENE_GROUP_NAME),
+                SceneGroupData(id="group-2", name="默认分组", scenes=[global_scene]),
+            ],
+        )
+
+        AutoStudioWindow._ensure_project_scene_pool(project)
+
+        self.assertEqual(["待分组场景", "全局分组"], [group.name for group in project.scene_groups])
+        self.assertEqual([global_scene], project.scene_groups[1].scenes)
 
     def test_stage_scene_references_share_pool_scene_without_cloning(self):
         pool_scene = SceneData(
@@ -399,6 +414,16 @@ class LabelResolutionCaptureTests(unittest.TestCase):
         self.assertIs(choices[labels[0]], global_scene)
         self.assertIs(choices[labels[1]], pending_scene)
         self.assertIs(choices[labels[2]], custom_scene)
+
+    def test_scene_pool_tree_groups_show_pending_then_global_as_siblings(self):
+        pending = SceneGroupData(id="group-pending", name=DEFAULT_SCENE_GROUP_NAME)
+        global_group = SceneGroupData(id="group-global", name=DEFAULT_GLOBAL_SCENE_GROUP_NAME)
+        custom = SceneGroupData(id="group-custom", name="游戏场景")
+        project = ProjectData(name="demo", scene_groups=[custom, global_group, pending])
+
+        ordered_groups = AutoStudioWindow._ordered_scene_pool_groups_for_tree(project)
+
+        self.assertEqual([pending, global_group, custom], ordered_groups)
 
     def test_direct_stage_scene_creation_uses_pending_pool_group(self):
         stage = StageData(id="stage-1", name="搜房阶段")

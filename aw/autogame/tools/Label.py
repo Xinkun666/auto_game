@@ -27,8 +27,9 @@ from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
 # ==========================================
 DEFAULT_GROUP_NAME = "默认"
 DEFAULT_SCENE_GROUP_NAME = "待分组场景"
-DEFAULT_GLOBAL_SCENE_GROUP_NAME = "默认分组"
+DEFAULT_GLOBAL_SCENE_GROUP_NAME = "全局分组"
 LEGACY_DEFAULT_SCENE_GROUP_NAME = "未分组"
+LEGACY_GLOBAL_SCENE_GROUP_NAME = "默认分组"
 GROUPABLE_ITEM_TYPES = ("area", "special_area")
 
 
@@ -952,6 +953,10 @@ class AutoStudioWindow(QMainWindow):
             if group.name == DEFAULT_GLOBAL_SCENE_GROUP_NAME:
                 global_group = group
                 break
+            if group.name == LEGACY_GLOBAL_SCENE_GROUP_NAME:
+                group.name = DEFAULT_GLOBAL_SCENE_GROUP_NAME
+                global_group = group
+                break
         if global_group is None:
             default_index = project.scene_groups.index(default_group)
             project.scene_groups.insert(default_index + 1, AutoStudioWindow._default_global_scene_group())
@@ -1287,13 +1292,8 @@ class AutoStudioWindow(QMainWindow):
                 add_scene_version_nodes(pool_scene_node, scenes)
             return group_node
 
-        global_group = self._global_scene_group(self.project)
-        for scene_group in self.project.scene_groups:
-            if scene_group.name == DEFAULT_GLOBAL_SCENE_GROUP_NAME:
-                continue
-            group_node = add_scene_pool_group_node(pool_root, scene_group)
-            if scene_group.name == DEFAULT_SCENE_GROUP_NAME and global_group:
-                add_scene_pool_group_node(group_node, global_group)
+        for scene_group in self._ordered_scene_pool_groups_for_tree(self.project):
+            add_scene_pool_group_node(pool_root, scene_group)
 
         for stage in self.project.stages:
             s_node = QTreeWidgetItem(root)
@@ -1477,6 +1477,22 @@ class AutoStudioWindow(QMainWindow):
             group
             for group in project.scene_groups
             if group.name not in (DEFAULT_GLOBAL_SCENE_GROUP_NAME, DEFAULT_SCENE_GROUP_NAME)
+        )
+        return ordered
+
+    @staticmethod
+    def _ordered_scene_pool_groups_for_tree(project: Optional[ProjectData]) -> List[SceneGroupData]:
+        if not project:
+            return []
+        ordered = []
+        for group_name in (DEFAULT_SCENE_GROUP_NAME, DEFAULT_GLOBAL_SCENE_GROUP_NAME):
+            group = next((item for item in project.scene_groups if item.name == group_name), None)
+            if group:
+                ordered.append(group)
+        ordered.extend(
+            group
+            for group in project.scene_groups
+            if group.name not in (DEFAULT_SCENE_GROUP_NAME, DEFAULT_GLOBAL_SCENE_GROUP_NAME)
         )
         return ordered
 

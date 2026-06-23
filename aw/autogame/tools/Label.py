@@ -1648,6 +1648,51 @@ class AutoStudioWindow(QMainWindow):
         return deleted_scenes
 
     @staticmethod
+    def _scene_group_scene_names(scene_group: Optional[SceneGroupData]) -> List[str]:
+        if not scene_group:
+            return []
+        scene_names = []
+        for scene in scene_group.scenes:
+            if scene.name not in scene_names:
+                scene_names.append(scene.name)
+        return scene_names
+
+    @staticmethod
+    def _add_scene_group_scenes_to_stage(
+        project: Optional[ProjectData],
+        scene_group: Optional[SceneGroupData],
+        stage: Optional[StageData],
+        scene_names: List[str],
+    ) -> List[SceneData]:
+        if not project or not scene_group or not stage or not scene_names:
+            return []
+        selected_names = set(scene_names)
+        added_scenes = []
+        current_ids = {id(scene) for scene in stage.scenes}
+        for scene in scene_group.scenes:
+            if scene.name not in selected_names or id(scene) in current_ids:
+                continue
+            stage.scenes.append(scene)
+            current_ids.add(id(scene))
+            added_scenes.append(scene)
+        return added_scenes
+
+    @staticmethod
+    def _delete_scene_group_scene_names(
+        project: Optional[ProjectData],
+        scene_group: Optional[SceneGroupData],
+        scene_names: List[str],
+    ) -> List[SceneData]:
+        if not project or not scene_group or not scene_names:
+            return []
+        deleted_scenes = []
+        for scene_name in AutoStudioWindow._scene_group_scene_names(scene_group):
+            if scene_name not in scene_names:
+                continue
+            deleted_scenes.extend(AutoStudioWindow._delete_pool_scene_group(project, scene_group, scene_name))
+        return deleted_scenes
+
+    @staticmethod
     def _stage_scene_pool_selection_entries(project: Optional[ProjectData], stage: Optional[StageData]) -> List[Dict]:
         if not project or not stage:
             return []
@@ -1997,6 +2042,118 @@ class AutoStudioWindow(QMainWindow):
             return
         self.update_tree_view()
         self.status_label.setText(f"已将 {len(moved_scenes)} 个场景分辨率移动到分组 {target_group.name}。")
+
+    def manage_scene_pool_group_batch(self, scene_group: Optional[SceneGroupData]):
+        if not self.project or not scene_group:
+            return
+        scene_names = self._scene_group_scene_names(scene_group)
+        if not scene_names:
+            QMessageBox.information(self, "提示", "当前分组里还没有场景。")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"批量管理 - {scene_group.name}")
+        layout = QVBoxLayout(dialog)
+        tree = QTreeWidget(dialog)
+        tree.setHeaderLabels(["场景", "分辨率数量"])
+        tree.setSelectionMode(QTreeWidget.SelectionMode.NoSelection)
+        scene_items = []
+        for scene_name in scene_names:
+            resolution_count = sum(1 for scene in scene_group.scenes if scene.name == scene_name)
+            scene_item = QTreeWidgetItem(tree)
+            scene_item.setText(0, scene_name)
+            scene_item.setText(1, str(resolution_count))
+            scene_item.setFlags(scene_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            scene_item.setCheckState(0, Qt.CheckState.Unchecked)
+            scene_item.setData(0, Qt.ItemDataRole.UserRole, scene_name)
+            scene_items.append(scene_item)
+        tree.resizeColumnToContents(0)
+        tree.resizeColumnToContents(1)
+        layout.addWidget(tree)
+
+        stage_row = QHBoxLayout()
+        stage_row.addWidget(QLabel("目标阶段:"))
+        stage_combo = QComboBox(dialog)
+        for stage in self.project.stages:
+            stage_combo.addItem(stage.name, stage.id)
+        stage_row.addWidget(stage_combo)
+        layout.addLayout(stage_row)
+
+        button_row = QHBoxLayout()
+        import_btn = QPushButton("导入到阶段")
+        delete_btn = QPushButton("删除选中")
+        close_btn = QPushButton("关闭")
+        button_row.addWidget(import_btn)
+        button_row.addWidget(delete_btn)
+        button_row.addStretch()
+        button_row.addWidget(close_btn)
+        layout.addLayout(button_row)
+
+        def selected_names():
+            return [
+                item.data(0, Qt.ItemDataRole.UserRole)
+                for item in scene_items
+                if item.checkState(0) == Qt.CheckState.Checked
+            ]
+
+        def import_selected():
+            names = selected_names()
+            if not names:
+                QMessageBox.information(dialog, "提示", "请先选择场景。")
+                return
+            stage_id = stage_combo.currentData()
+            target_stage = next((stage for stage in self.project.stages if stage.id == stage_id), None)
+            if not target_stage:
+                QMessageBox.warning(dialog, "提示", "请选择目标阶段。")
+                return
+            added_scenes = self._add_scene_group_scenes_to_stage(self.project, scene_group, target_stage, names)
+            if not added_scenes:
+                QMessageBox.information(dialog, "提示", "选中的场景已经在目标阶段中。")
+                return
+            self.current_stage = target_stage
+            self.set_current_work_stage(target_stage)
+            self.current_scene = added_scenes[0]
+            self.last_expand_stage_id = target_stage.id
+            self.last_expand_scene_id = self.current_scene.id
+            self._autosave_imported_project_state()
+            self.update_tree_view()
+            self.select_data_in_tree(self.current_scene)
+            self.status_label.setText(
+                f"已将 {len(added_scenes)} 个场景分辨率导入阶段 {target_stage.name}。"
+            )
+            dialog.accept()
+
+        def delete_selected():
+            names = selected_names()
+            if not names:
+                QMessageBox.information(dialog, "提示", "请先选择场景。")
+                return
+            reply = QMessageBox.question(
+                dialog,
+                "删除场景",
+                f"确认从分组 {scene_group.name} 删除选中的 {len(names)} 个场景？该操作会同步移除所有阶段引用。",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            deleted_scenes = self._delete_scene_group_scene_names(self.project, scene_group, names)
+            if not deleted_scenes:
+                QMessageBox.information(dialog, "提示", "没有可删除的场景。")
+                return
+            deleted_ids = {id(scene) for scene in deleted_scenes}
+            if self.current_scene and id(self.current_scene) in deleted_ids:
+                self.current_scene = None
+                self.clear_scene_display()
+            self._autosave_imported_project_state()
+            self.update_tree_view()
+            self.status_label.setText(
+                f"已从分组 {scene_group.name} 删除 {len(deleted_scenes)} 个场景分辨率。"
+            )
+            dialog.accept()
+
+        import_btn.clicked.connect(import_selected)
+        delete_btn.clicked.connect(delete_selected)
+        close_btn.clicked.connect(dialog.reject)
+        dialog.exec()
 
     def rename_scene_pool_group(self, scene_group: Optional[SceneGroupData]):
         if not self.project or not scene_group:
@@ -2386,6 +2543,10 @@ class AutoStudioWindow(QMainWindow):
             btn_select_scene.clicked.connect(lambda: self.select_pending_scenes_for_group(scene_group))
             btn_select_scene.setEnabled(bool(scene_group and not is_pending_group and pending_group and pending_group.scenes))
             self.action_layout.addWidget(btn_select_scene)
+            btn_batch_manage = QPushButton("批量管理")
+            btn_batch_manage.clicked.connect(lambda: self.manage_scene_pool_group_batch(scene_group))
+            btn_batch_manage.setEnabled(bool(scene_group and scene_group.scenes))
+            self.action_layout.addWidget(btn_batch_manage)
             btn_rename = QPushButton("✏️ 修改分组名称")
             btn_rename.clicked.connect(lambda: self.rename_scene_pool_group(scene_group))
             btn_rename.setEnabled(not is_system_group)
@@ -2589,6 +2750,13 @@ class AutoStudioWindow(QMainWindow):
             delete_pool_action = QAction("删除池内场景", self)
             delete_pool_action.triggered.connect(lambda: self.delete_pool_scene_group(scene_group, scene_name))
             menu.addAction(delete_pool_action)
+            menu.addSeparator()
+        elif isinstance(data, dict) and data.get("kind") == "scene_pool_group":
+            scene_group = data.get("scene_group")
+            batch_action = QAction("批量管理", self)
+            batch_action.setEnabled(bool(scene_group and scene_group.scenes))
+            batch_action.triggered.connect(lambda: self.manage_scene_pool_group_batch(scene_group))
+            menu.addAction(batch_action)
             menu.addSeparator()
         elif isinstance(data, dict) and data.get("kind") == "scene_group":
             copy_resolution_action = QAction("复制控件到不同分辨率", self)

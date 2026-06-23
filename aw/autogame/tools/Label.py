@@ -1069,7 +1069,7 @@ class AutoStudioWindow(QMainWindow):
             target_group.scenes.append(scene)
         if target_group.name == DEFAULT_GLOBAL_SCENE_GROUP_NAME:
             AutoStudioWindow._sync_global_scenes_to_stages(project)
-            AutoStudioWindow._remove_duplicate_global_controls(project)
+            AutoStudioWindow._remove_duplicate_global_items(project)
         return scene
 
     @staticmethod
@@ -1099,16 +1099,37 @@ class AutoStudioWindow(QMainWindow):
         return bool(global_group and any(existing is scene for existing in global_group.scenes))
 
     @staticmethod
-    def _global_control_names(project: Optional[ProjectData]) -> set:
+    def _global_item_keys(project: Optional[ProjectData]) -> set:
         global_group = AutoStudioWindow._global_scene_group(project)
         if not global_group:
             return set()
         return {
-            item.name
+            (item.item_type, item.name)
             for scene in global_group.scenes
             for item in scene.items
-            if item.item_type == "control" and item.name
+            if item.item_type in ITEM_TYPE_LABELS and item.name
         }
+
+    @staticmethod
+    def _global_item_names(project: Optional[ProjectData], item_type: str) -> set:
+        return {name for key_type, name in AutoStudioWindow._global_item_keys(project) if key_type == item_type}
+
+    @staticmethod
+    def _global_control_names(project: Optional[ProjectData]) -> set:
+        return AutoStudioWindow._global_item_names(project, "control")
+
+    @staticmethod
+    def _is_global_item_name_conflict(
+        project: Optional[ProjectData],
+        scene: Optional[SceneData],
+        item_type: str,
+        item_name: str,
+    ) -> bool:
+        if not project or not scene or not item_type or not item_name:
+            return False
+        if AutoStudioWindow._is_scene_in_global_group(project, scene):
+            return False
+        return (item_type, item_name) in AutoStudioWindow._global_item_keys(project)
 
     @staticmethod
     def _is_global_control_name_conflict(
@@ -1116,35 +1137,43 @@ class AutoStudioWindow(QMainWindow):
         scene: Optional[SceneData],
         control_name: str,
     ) -> bool:
-        if not project or not scene or not control_name:
-            return False
-        if AutoStudioWindow._is_scene_in_global_group(project, scene):
-            return False
-        return control_name in AutoStudioWindow._global_control_names(project)
+        return AutoStudioWindow._is_global_item_name_conflict(project, scene, "control", control_name)
+
+    @staticmethod
+    def _scene_global_item_conflicts(project: Optional[ProjectData], scene: Optional[SceneData]) -> List[Dict]:
+        if not project or not scene or AutoStudioWindow._is_scene_in_global_group(project, scene):
+            return []
+        global_keys = AutoStudioWindow._global_item_keys(project)
+        return sorted(
+            [
+                {"item_type": item.item_type, "item_name": item.name}
+                for item in scene.items
+                if (item.item_type, item.name) in global_keys
+            ],
+            key=lambda item: (item["item_type"], item["item_name"]),
+        )
 
     @staticmethod
     def _scene_global_control_conflicts(project: Optional[ProjectData], scene: Optional[SceneData]) -> List[str]:
-        if not project or not scene or AutoStudioWindow._is_scene_in_global_group(project, scene):
-            return []
-        global_names = AutoStudioWindow._global_control_names(project)
         return sorted({
-            item.name
-            for item in scene.items
-            if item.item_type == "control" and item.name in global_names
+            conflict["item_name"]
+            for conflict in AutoStudioWindow._scene_global_item_conflicts(project, scene)
+            if conflict["item_type"] == "control"
         })
 
     @staticmethod
-    def _remove_duplicate_global_controls(project: Optional[ProjectData]) -> int:
+    def _remove_duplicate_global_items(project: Optional[ProjectData]) -> int:
         if not project:
             return 0
         global_group = AutoStudioWindow._global_scene_group(project)
         if not global_group:
             return 0
         global_scene_ids = {id(scene) for scene in global_group.scenes}
-        global_names = AutoStudioWindow._global_control_names(project)
-        if not global_names:
+        global_keys = AutoStudioWindow._global_item_keys(project)
+        if not global_keys:
             return 0
         removed_count = 0
+        removed_refs = []
         visited_scene_ids = set()
         for group in project.scene_groups:
             for scene in group.scenes:
@@ -1156,11 +1185,60 @@ class AutoStudioWindow(QMainWindow):
                     continue
                 kept_items = []
                 for item in scene.items:
-                    if item.item_type == "control" and item.name in global_names:
+                    if (item.item_type, item.name) in global_keys:
                         removed_count += 1
+                        if item.item_type in GROUPABLE_ITEM_TYPES:
+                            removed_refs.append(GroupItemRef(scene.name, item.item_type, item.name))
                         continue
                     kept_items.append(item)
                 scene.items = kept_items
+        if removed_refs:
+            removed_ref_set = set(removed_refs)
+            for stage in project.stages:
+                AutoStudioWindow._remove_group_item_refs(stage, lambda ref, refs=removed_ref_set: ref in refs)
+        return removed_count
+
+    @staticmethod
+    def _remove_duplicate_global_controls(project: Optional[ProjectData]) -> int:
+        return AutoStudioWindow._remove_duplicate_global_items(project)
+
+    @staticmethod
+    def _remove_duplicate_global_items_for_scene(project: Optional[ProjectData], scene: Optional[SceneData]) -> int:
+        if not project or not scene or not AutoStudioWindow._is_scene_in_global_group(project, scene):
+            return 0
+        global_keys = {
+            (item.item_type, item.name)
+            for item in scene.items
+            if item.item_type in ITEM_TYPE_LABELS and item.name
+        }
+        if not global_keys:
+            return 0
+        global_group = AutoStudioWindow._global_scene_group(project)
+        global_scene_ids = {id(global_scene) for global_scene in global_group.scenes} if global_group else set()
+        removed_count = 0
+        removed_refs = []
+        visited_scene_ids = set()
+        for group in project.scene_groups:
+            for other_scene in group.scenes:
+                scene_id = id(other_scene)
+                if scene_id in visited_scene_ids:
+                    continue
+                visited_scene_ids.add(scene_id)
+                if scene_id in global_scene_ids:
+                    continue
+                kept_items = []
+                for item in other_scene.items:
+                    if (item.item_type, item.name) in global_keys:
+                        removed_count += 1
+                        if item.item_type in GROUPABLE_ITEM_TYPES:
+                            removed_refs.append(GroupItemRef(other_scene.name, item.item_type, item.name))
+                        continue
+                    kept_items.append(item)
+                other_scene.items = kept_items
+        if removed_refs:
+            removed_ref_set = set(removed_refs)
+            for stage in project.stages:
+                AutoStudioWindow._remove_group_item_refs(stage, lambda ref, refs=removed_ref_set: ref in refs)
         return removed_count
 
     @staticmethod
@@ -1250,7 +1328,7 @@ class AutoStudioWindow(QMainWindow):
         pending_group.scenes = remaining_scenes
         if target_group.name == DEFAULT_GLOBAL_SCENE_GROUP_NAME:
             AutoStudioWindow._sync_global_scenes_to_stages(project)
-            AutoStudioWindow._remove_duplicate_global_controls(project)
+            AutoStudioWindow._remove_duplicate_global_items(project)
         return moved_scenes
 
     @staticmethod
@@ -1849,23 +1927,47 @@ class AutoStudioWindow(QMainWindow):
         msg.exec()
         return msg.clickedButton() == continue_btn
 
-    def _control_existing_names_for_scene(self, scene: Optional[SceneData], base_names: List[str]) -> List[str]:
+    def _item_existing_names_for_scene(
+        self,
+        scene: Optional[SceneData],
+        item_type: str,
+        base_names: List[str],
+    ) -> List[str]:
+        if self.project and scene and self._is_scene_in_global_group(self.project, scene):
+            global_group = self._global_scene_group(self.project)
+            names = {
+                item.name
+                for global_scene in (global_group.scenes if global_group else [])
+                for item in global_scene.items
+                if item.item_type == item_type
+            }
+            return sorted(names)
         names = set(base_names)
-        if self.project and scene and not self._is_scene_in_global_group(self.project, scene):
-            names.update(self._global_control_names(self.project))
+        if self.project and scene:
+            names.update(self._global_item_names(self.project, item_type))
         return sorted(names)
 
-    def _warn_scene_global_control_conflicts(self, scene: Optional[SceneData]) -> bool:
-        conflicts = self._scene_global_control_conflicts(self.project, scene)
+    def _control_existing_names_for_scene(self, scene: Optional[SceneData], base_names: List[str]) -> List[str]:
+        return self._item_existing_names_for_scene(scene, "control", base_names)
+
+    def _warn_scene_global_item_conflicts(self, scene: Optional[SceneData]) -> bool:
+        conflicts = self._scene_global_item_conflicts(self.project, scene)
         if not conflicts:
             return False
+        labels = [
+            f"{ITEM_TYPE_LABELS.get(conflict['item_type'], conflict['item_type'])}「{conflict['item_name']}」"
+            for conflict in conflicts
+        ]
         QMessageBox.critical(
             self,
-            "全局控点重复",
-            "该场景包含已在全局场景中定义的控点，不能作为普通场景添加：\n"
-            + "、".join(conflicts),
+            "全局标注重复",
+            "该场景包含已在全局场景中定义的标注，不能作为普通场景添加：\n"
+            + "、".join(labels),
         )
         return True
+
+    def _warn_scene_global_control_conflicts(self, scene: Optional[SceneData]) -> bool:
+        return self._warn_scene_global_item_conflicts(scene)
 
     def preview_stage_scene_pool_item(self, item: Optional[QTreeWidgetItem]):
         if item is None:
@@ -1925,14 +2027,14 @@ class AutoStudioWindow(QMainWindow):
         for scene in moved_scenes:
             if not any(existing is scene for existing in target_group.scenes):
                 target_group.scenes.append(scene)
-        removed_controls = 0
+        removed_items = 0
         if target_group.name == DEFAULT_GLOBAL_SCENE_GROUP_NAME:
             self._sync_global_scenes_to_stages(self.project)
-            removed_controls = self._remove_duplicate_global_controls(self.project)
+            removed_items = self._remove_duplicate_global_items(self.project)
         self.update_tree_view()
-        if removed_controls:
+        if removed_items:
             self.status_label.setText(
-                f"已将场景 {scene_name} 移动到分组 {target_group.name}，并清理 {removed_controls} 个重复全局控点。"
+                f"已将场景 {scene_name} 移动到分组 {target_group.name}，并清理 {removed_items} 个重复全局标注。"
             )
         else:
             self.status_label.setText(f"已将场景 {scene_name} 移动到分组 {target_group.name}。")
@@ -2591,7 +2693,7 @@ class AutoStudioWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "当前没有可粘贴的场景。")
             return
         pasted_scene = self._clone_scene(self.scene_clipboard)
-        if self._warn_scene_global_control_conflicts(pasted_scene):
+        if self._warn_scene_global_item_conflicts(pasted_scene):
             return
         if self.project:
             self._add_scene_to_project_pool(self.project, pasted_scene)
@@ -2818,8 +2920,7 @@ class AutoStudioWindow(QMainWindow):
             if mode == 'special_area':
                 name_prefix = "特殊区域"
             existing_names = self.get_stage_item_names(self.current_stage, mode)
-            if mode == "control":
-                existing_names = self._control_existing_names_for_scene(self.current_scene, existing_names)
+            existing_names = self._item_existing_names_for_scene(self.current_scene, mode, existing_names)
             name = self.prompt_unique_name("命名", f"{name_prefix}名称:", existing_names=existing_names)
             if not name:
                 self.status_label.setText("已取消添加。")
@@ -2836,6 +2937,7 @@ class AutoStudioWindow(QMainWindow):
                 new_item.search_scope = rect_data
             self.current_scene.items.append(new_item)
             self.sync_added_item_to_scene_peers(self.current_scene, new_item)
+            removed_items = self._remove_duplicate_global_items_for_scene(self.project, self.current_scene)
             active_group = self._get_active_stage_group(self.current_stage)
             if mode in GROUPABLE_ITEM_TYPES and active_group and not active_group.includes_all:
                 ref = self._group_item_ref(self.current_scene, new_item)
@@ -2844,7 +2946,10 @@ class AutoStudioWindow(QMainWindow):
             if self.current_stage:
                 self.last_expand_stage_id = self.current_stage.id
             self.last_expand_scene_id = self.current_scene.id
-            self.status_label.setText(f"已添加 {name}")
+            if removed_items:
+                self.status_label.setText(f"已添加 {name}，并清理 {removed_items} 个重复全局标注。")
+            else:
+                self.status_label.setText(f"已添加 {name}")
             self.update_tree_view()
         # 重绘
         self.canvas.redraw_overlays(self.current_scene)
@@ -2855,9 +2960,9 @@ class AutoStudioWindow(QMainWindow):
             existing_names = self.get_stage_item_names(self.current_stage, "special_area")
         elif item_data.item_type == "control":
             existing_names = self.get_stage_item_names(self.current_stage, "control")
-            existing_names = self._control_existing_names_for_scene(self.current_scene, existing_names)
         else:
             existing_names = self.get_stage_item_names(self.current_stage, "area")
+        existing_names = self._item_existing_names_for_scene(self.current_scene, item_data.item_type, existing_names)
         existing_names = [n for n in existing_names if n != item_data.name]
         name = self.prompt_unique_name("修改名称", "新名称:", text=item_data.name,
                                        existing_names=existing_names)
@@ -2865,7 +2970,11 @@ class AutoStudioWindow(QMainWindow):
             old_name = item_data.name
             item_data.name = name
             self.sync_renamed_item_to_scene_peers(self.current_scene, item_data, old_name)
-            self.status_label.setText(f"已更新名称为 {name}")
+            removed_items = self._remove_duplicate_global_items_for_scene(self.project, self.current_scene)
+            if removed_items:
+                self.status_label.setText(f"已更新名称为 {name}，并清理 {removed_items} 个重复全局标注。")
+            else:
+                self.status_label.setText(f"已更新名称为 {name}")
             self.update_tree_view()
             self.canvas.redraw_overlays(self.current_scene)
     def delete_selected_item(self, item_data: ItemData):

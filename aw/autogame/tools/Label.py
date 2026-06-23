@@ -26,9 +26,10 @@ from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
 # 1. 数据模型 (Data Structure)
 # ==========================================
 DEFAULT_GROUP_NAME = "默认"
-DEFAULT_SCENE_GROUP_NAME = "待分组场景"
+DEFAULT_SCENE_GROUP_NAME = "未分组场景"
 DEFAULT_GLOBAL_SCENE_GROUP_NAME = "全局分组"
-LEGACY_DEFAULT_SCENE_GROUP_NAME = "未分组"
+LEGACY_DEFAULT_SCENE_GROUP_NAME = "待分组场景"
+LEGACY_BLANK_SCENE_GROUP_NAME = "未分组"
 LEGACY_GLOBAL_SCENE_GROUP_NAME = "默认分组"
 GROUPABLE_ITEM_TYPES = ("area", "special_area")
 EDITOR_STATE_FILENAME = ".label_project_state.json"
@@ -1207,7 +1208,7 @@ class AutoStudioWindow(QMainWindow):
             if group.name == DEFAULT_SCENE_GROUP_NAME:
                 default_group = group
                 break
-            if group.name == LEGACY_DEFAULT_SCENE_GROUP_NAME:
+            if group.name in (LEGACY_DEFAULT_SCENE_GROUP_NAME, LEGACY_BLANK_SCENE_GROUP_NAME):
                 group.name = DEFAULT_SCENE_GROUP_NAME
                 default_group = group
                 break
@@ -1560,7 +1561,7 @@ class AutoStudioWindow(QMainWindow):
         for group in project.scene_groups:
             if group.name == DEFAULT_SCENE_GROUP_NAME:
                 return group
-            if group.name == LEGACY_DEFAULT_SCENE_GROUP_NAME:
+            if group.name in (LEGACY_DEFAULT_SCENE_GROUP_NAME, LEGACY_BLANK_SCENE_GROUP_NAME):
                 group.name = DEFAULT_SCENE_GROUP_NAME
                 return group
         return AutoStudioWindow._ensure_project_scene_pool(project)
@@ -1587,6 +1588,31 @@ class AutoStudioWindow(QMainWindow):
             else:
                 remaining_scenes.append(scene)
         pending_group.scenes = remaining_scenes
+        if target_group.name == DEFAULT_GLOBAL_SCENE_GROUP_NAME:
+            AutoStudioWindow._sync_global_scenes_to_stages(project)
+            AutoStudioWindow._remove_duplicate_global_items(project)
+        return moved_scenes
+
+    @staticmethod
+    def _move_scene_group_scene_names(
+        project: Optional[ProjectData],
+        source_group: Optional[SceneGroupData],
+        target_group: Optional[SceneGroupData],
+        scene_names: List[str],
+    ) -> List[SceneData]:
+        if not project or not source_group or not target_group or source_group is target_group or not scene_names:
+            return []
+        selected_names = set(scene_names)
+        moved_scenes = []
+        remaining_scenes = []
+        for scene in source_group.scenes:
+            if scene.name in selected_names:
+                moved_scenes.append(scene)
+                if not any(existing is scene for existing in target_group.scenes):
+                    target_group.scenes.append(scene)
+            else:
+                remaining_scenes.append(scene)
+        source_group.scenes = remaining_scenes
         if target_group.name == DEFAULT_GLOBAL_SCENE_GROUP_NAME:
             AutoStudioWindow._sync_global_scenes_to_stages(project)
             AutoStudioWindow._remove_duplicate_global_items(project)
@@ -1997,18 +2023,18 @@ class AutoStudioWindow(QMainWindow):
         if not self.project or not target_group:
             return
         if target_group.name == DEFAULT_SCENE_GROUP_NAME:
-            QMessageBox.information(self, "提示", "待分组场景是来源分组，请在其他分组中选择场景。")
+            QMessageBox.information(self, "提示", f"{DEFAULT_SCENE_GROUP_NAME}是来源分组，请在其他分组中选择场景。")
             return
         pending_group = self._pending_scene_group(self.project)
         if not pending_group or not pending_group.scenes:
-            QMessageBox.information(self, "提示", "待分组场景中没有可选择的场景。")
+            QMessageBox.information(self, "提示", f"{DEFAULT_SCENE_GROUP_NAME}中没有可选择的场景。")
             return
         scene_names = []
         for scene in pending_group.scenes:
             if scene.name not in scene_names:
                 scene_names.append(scene.name)
         dialog = QDialog(self)
-        dialog.setWindowTitle("从待分组场景选择")
+        dialog.setWindowTitle(f"从{DEFAULT_SCENE_GROUP_NAME}选择")
         layout = QVBoxLayout(dialog)
         layout.addWidget(QLabel("请选择要移动到当前分组的场景:"))
         scroll = QScrollArea(dialog)
@@ -2046,29 +2072,57 @@ class AutoStudioWindow(QMainWindow):
     def manage_scene_pool_group_batch(self, scene_group: Optional[SceneGroupData]):
         if not self.project or not scene_group:
             return
-        scene_names = self._scene_group_scene_names(scene_group)
-        if not scene_names:
-            QMessageBox.information(self, "提示", "当前分组里还没有场景。")
+        default_group = self._pending_scene_group(self.project)
+        source_groups = [scene_group]
+        if default_group and default_group is not scene_group:
+            source_groups.append(default_group)
+        if not any(group.scenes for group in source_groups):
+            QMessageBox.information(self, "提示", "当前没有可管理的场景。")
             return
 
         dialog = QDialog(self)
         dialog.setWindowTitle(f"批量管理 - {scene_group.name}")
         layout = QVBoxLayout(dialog)
         tree = QTreeWidget(dialog)
-        tree.setHeaderLabels(["场景", "分辨率数量"])
+        tree.setHeaderLabels(["场景", "所在分组", "分辨率数量"])
         tree.setSelectionMode(QTreeWidget.SelectionMode.NoSelection)
         scene_items = []
-        for scene_name in scene_names:
-            resolution_count = sum(1 for scene in scene_group.scenes if scene.name == scene_name)
-            scene_item = QTreeWidgetItem(tree)
-            scene_item.setText(0, scene_name)
-            scene_item.setText(1, str(resolution_count))
-            scene_item.setFlags(scene_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            scene_item.setCheckState(0, Qt.CheckState.Unchecked)
-            scene_item.setData(0, Qt.ItemDataRole.UserRole, scene_name)
-            scene_items.append(scene_item)
+        for source_group in source_groups:
+            for scene_name in self._scene_group_scene_names(source_group):
+                scene = self._first_pool_scene_resolution(source_group, scene_name)
+                resolution_count = sum(1 for item in source_group.scenes if item.name == scene_name)
+                scene_item = QTreeWidgetItem(tree)
+                scene_item.setText(0, scene_name)
+                scene_item.setText(1, source_group.name)
+                scene_item.setText(2, str(resolution_count))
+                scene_item.setFlags(scene_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                scene_item.setCheckState(0, Qt.CheckState.Unchecked)
+                scene_item.setData(0, Qt.ItemDataRole.UserRole, {
+                    "scene_name": scene_name,
+                    "source_group": source_group,
+                    "scene": scene,
+                })
+                scene_items.append(scene_item)
+
+        def preview_batch_scene(item: Optional[QTreeWidgetItem], _column=0):
+            if item is None:
+                return
+            payload = item.data(0, Qt.ItemDataRole.UserRole)
+            if not isinstance(payload, dict):
+                return
+            scene = payload.get("scene")
+            if not isinstance(scene, SceneData):
+                return
+            self.current_stage = self._find_stage_for_scene(scene)
+            self.set_current_work_stage(self.current_stage)
+            self.current_scene = scene
+            self.show_scene_image(scene)
+            self.status_label.setText(f"正在预览场景 {scene.name}。")
+
+        tree.itemClicked.connect(preview_batch_scene)
         tree.resizeColumnToContents(0)
         tree.resizeColumnToContents(1)
+        tree.resizeColumnToContents(2)
         layout.addWidget(tree)
 
         stage_row = QHBoxLayout()
@@ -2080,25 +2134,33 @@ class AutoStudioWindow(QMainWindow):
         layout.addLayout(stage_row)
 
         button_row = QHBoxLayout()
+        add_to_group_btn = QPushButton("加入当前分组")
+        return_to_default_btn = QPushButton(f"移回{DEFAULT_SCENE_GROUP_NAME}")
         import_btn = QPushButton("导入到阶段")
         delete_btn = QPushButton("删除选中")
         close_btn = QPushButton("关闭")
+        button_row.addWidget(add_to_group_btn)
+        button_row.addWidget(return_to_default_btn)
         button_row.addWidget(import_btn)
         button_row.addWidget(delete_btn)
         button_row.addStretch()
         button_row.addWidget(close_btn)
         layout.addLayout(button_row)
+        can_move_with_default = bool(default_group and default_group is not scene_group)
+        add_to_group_btn.setEnabled(can_move_with_default)
+        return_to_default_btn.setEnabled(can_move_with_default)
 
-        def selected_names():
+        def selected_payloads():
             return [
                 item.data(0, Qt.ItemDataRole.UserRole)
                 for item in scene_items
                 if item.checkState(0) == Qt.CheckState.Checked
+                and isinstance(item.data(0, Qt.ItemDataRole.UserRole), dict)
             ]
 
         def import_selected():
-            names = selected_names()
-            if not names:
+            payloads = selected_payloads()
+            if not payloads:
                 QMessageBox.information(dialog, "提示", "请先选择场景。")
                 return
             stage_id = stage_combo.currentData()
@@ -2106,7 +2168,22 @@ class AutoStudioWindow(QMainWindow):
             if not target_stage:
                 QMessageBox.warning(dialog, "提示", "请选择目标阶段。")
                 return
-            added_scenes = self._add_scene_group_scenes_to_stage(self.project, scene_group, target_stage, names)
+            added_scenes = []
+            grouped_payloads = {}
+            for payload in payloads:
+                source_group = payload["source_group"]
+                grouped_payloads.setdefault(id(source_group), {"group": source_group, "names": []})
+                if payload["scene_name"] not in grouped_payloads[id(source_group)]["names"]:
+                    grouped_payloads[id(source_group)]["names"].append(payload["scene_name"])
+            for grouped in grouped_payloads.values():
+                added_scenes.extend(
+                    self._add_scene_group_scenes_to_stage(
+                        self.project,
+                        grouped["group"],
+                        target_stage,
+                        grouped["names"],
+                    )
+                )
             if not added_scenes:
                 QMessageBox.information(dialog, "提示", "选中的场景已经在目标阶段中。")
                 return
@@ -2123,19 +2200,68 @@ class AutoStudioWindow(QMainWindow):
             )
             dialog.accept()
 
-        def delete_selected():
-            names = selected_names()
+        def move_selected(source_group: SceneGroupData, target_group: SceneGroupData, empty_text: str, status_text: str):
+            payloads = selected_payloads()
+            names = [
+                payload["scene_name"]
+                for payload in payloads
+                if payload.get("source_group") is source_group
+            ]
             if not names:
+                QMessageBox.information(dialog, "提示", empty_text)
+                return
+            moved_scenes = self._move_scene_group_scene_names(self.project, source_group, target_group, names)
+            if not moved_scenes:
+                QMessageBox.information(dialog, "提示", "没有可移动的场景。")
+                return
+            self._autosave_imported_project_state()
+            self.update_tree_view()
+            self.status_label.setText(status_text.format(count=len(moved_scenes), group=target_group.name))
+            dialog.accept()
+
+        def add_selected_to_current_group():
+            if not default_group or default_group is scene_group:
+                return
+            move_selected(
+                default_group,
+                scene_group,
+                f"请先选择来自{DEFAULT_SCENE_GROUP_NAME}的场景。",
+                "已将 {count} 个场景分辨率加入分组 {group}。",
+            )
+
+        def return_selected_to_default_group():
+            if not default_group or default_group is scene_group:
+                return
+            move_selected(
+                scene_group,
+                default_group,
+                "请先选择当前分组中的场景。",
+                "已将 {count} 个场景分辨率移回 {group}。",
+            )
+
+        def delete_selected():
+            payloads = selected_payloads()
+            if not payloads:
                 QMessageBox.information(dialog, "提示", "请先选择场景。")
                 return
             reply = QMessageBox.question(
                 dialog,
                 "删除场景",
-                f"确认从分组 {scene_group.name} 删除选中的 {len(names)} 个场景？该操作会同步移除所有阶段引用。",
+                f"确认删除选中的 {len(payloads)} 个场景？该操作会同步移除所有阶段引用。",
             )
             if reply != QMessageBox.StandardButton.Yes:
                 return
-            deleted_scenes = self._delete_scene_group_scene_names(self.project, scene_group, names)
+            deleted_scenes = []
+            grouped_payloads = {}
+            for payload in payloads:
+                source_group = payload["source_group"]
+                grouped_payloads.setdefault(id(source_group), {"group": source_group, "names": []})
+                if payload["scene_name"] not in grouped_payloads[id(source_group)]["names"]:
+                    grouped_payloads[id(source_group)]["names"].append(payload["scene_name"])
+            for grouped in grouped_payloads.values():
+                deleted_scenes.extend(
+                    self._delete_scene_group_scene_names(self.project, grouped["group"], grouped["names"])
+                )
             if not deleted_scenes:
                 QMessageBox.information(dialog, "提示", "没有可删除的场景。")
                 return
@@ -2150,6 +2276,8 @@ class AutoStudioWindow(QMainWindow):
             )
             dialog.accept()
 
+        add_to_group_btn.clicked.connect(add_selected_to_current_group)
+        return_to_default_btn.clicked.connect(return_selected_to_default_group)
         import_btn.clicked.connect(import_selected)
         delete_btn.clicked.connect(delete_selected)
         close_btn.clicked.connect(dialog.reject)
@@ -2533,19 +2661,25 @@ class AutoStudioWindow(QMainWindow):
             btn_add_scene = QPushButton("新建池内场景")
             btn_add_scene.clicked.connect(lambda: self.add_pool_scene(scene_group))
             self.action_layout.addWidget(btn_add_scene)
-            pending_group = self._pending_scene_group(self.project) if self.project else None
-            is_pending_group = bool(scene_group and scene_group.name == DEFAULT_SCENE_GROUP_NAME)
             is_system_group = bool(
                 scene_group
                 and scene_group.name in (DEFAULT_SCENE_GROUP_NAME, DEFAULT_GLOBAL_SCENE_GROUP_NAME)
             )
-            btn_select_scene = QPushButton("选择场景")
-            btn_select_scene.clicked.connect(lambda: self.select_pending_scenes_for_group(scene_group))
-            btn_select_scene.setEnabled(bool(scene_group and not is_pending_group and pending_group and pending_group.scenes))
-            self.action_layout.addWidget(btn_select_scene)
             btn_batch_manage = QPushButton("批量管理")
             btn_batch_manage.clicked.connect(lambda: self.manage_scene_pool_group_batch(scene_group))
-            btn_batch_manage.setEnabled(bool(scene_group and scene_group.scenes))
+            default_group = self._pending_scene_group(self.project) if self.project else None
+            can_batch_manage = bool(
+                scene_group
+                and (
+                    scene_group.scenes
+                    or (
+                        default_group
+                        and default_group is not scene_group
+                        and default_group.scenes
+                    )
+                )
+            )
+            btn_batch_manage.setEnabled(can_batch_manage)
             self.action_layout.addWidget(btn_batch_manage)
             btn_rename = QPushButton("✏️ 修改分组名称")
             btn_rename.clicked.connect(lambda: self.rename_scene_pool_group(scene_group))
@@ -2753,8 +2887,19 @@ class AutoStudioWindow(QMainWindow):
             menu.addSeparator()
         elif isinstance(data, dict) and data.get("kind") == "scene_pool_group":
             scene_group = data.get("scene_group")
+            default_group = self._pending_scene_group(self.project) if self.project else None
             batch_action = QAction("批量管理", self)
-            batch_action.setEnabled(bool(scene_group and scene_group.scenes))
+            batch_action.setEnabled(bool(
+                scene_group
+                and (
+                    scene_group.scenes
+                    or (
+                        default_group
+                        and default_group is not scene_group
+                        and default_group.scenes
+                    )
+                )
+            ))
             batch_action.triggered.connect(lambda: self.manage_scene_pool_group_batch(scene_group))
             menu.addAction(batch_action)
             menu.addSeparator()

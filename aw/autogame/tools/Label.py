@@ -31,6 +31,8 @@ DEFAULT_GLOBAL_SCENE_GROUP_NAME = "全局分组"
 LEGACY_DEFAULT_SCENE_GROUP_NAME = "未分组"
 LEGACY_GLOBAL_SCENE_GROUP_NAME = "默认分组"
 GROUPABLE_ITEM_TYPES = ("area", "special_area")
+EDITOR_STATE_FILENAME = ".label_project_state.json"
+EDITOR_STATE_VERSION = 1
 ITEM_TYPE_LABELS = {
     "area": "区域",
     "control": "控点",
@@ -426,6 +428,7 @@ class AutoStudioWindow(QMainWindow):
         self.resize(1200, 800)
         self.project = None
         self.imported_resource_dir = None
+        self.imported_project_dir = None
         self.current_stage = None
         self.current_work_stage = None
         self.current_scene = None
@@ -564,6 +567,7 @@ class AutoStudioWindow(QMainWindow):
             self.project = ProjectData(name=name)
             self._ensure_project_scene_pool(self.project)
             self.imported_resource_dir = None
+            self.imported_project_dir = None
             self.current_stage = None
             self.set_current_work_stage(None)
             self.current_scene = None
@@ -721,6 +725,263 @@ class AutoStudioWindow(QMainWindow):
             groups.append(GroupData(name=name, items=items))
             seen_names.add(name)
         return groups
+
+    @staticmethod
+    def _editor_state_path(project_dir: str) -> str:
+        return os.path.join(project_dir, EDITOR_STATE_FILENAME)
+
+    @staticmethod
+    def _rect_to_state(rect: Optional[RectData]):
+        if rect is None:
+            return None
+        return {"x": rect.x, "y": rect.y, "w": rect.w, "h": rect.h}
+
+    @staticmethod
+    def _rect_from_state(data) -> Optional[RectData]:
+        if not isinstance(data, dict):
+            return None
+        return RectData(
+            float(data.get("x", 0)),
+            float(data.get("y", 0)),
+            float(data.get("w", 0)),
+            float(data.get("h", 0)),
+        )
+
+    @staticmethod
+    def _path_to_state(path: str, project_dir: str) -> str:
+        if not path:
+            return ""
+        try:
+            rel_path = os.path.relpath(path, project_dir)
+            if not rel_path.startswith("..") and not os.path.isabs(rel_path):
+                return rel_path
+        except ValueError:
+            pass
+        return path
+
+    @staticmethod
+    def _path_from_state(path: str, project_dir: str) -> str:
+        if not path:
+            return ""
+        if os.path.isabs(path):
+            return path
+        return os.path.join(project_dir, path)
+
+    @staticmethod
+    def _stage_groups_to_state(stage: StageData):
+        groups = []
+        for group in stage.groups:
+            groups.append({
+                "name": group.name,
+                "includes_all": group.includes_all,
+                "items": [
+                    {
+                        "scene": ref.scene_name,
+                        "type": ref.item_type,
+                        "name": ref.item_name,
+                    }
+                    for ref in group.items
+                ],
+            })
+        return groups
+
+    @staticmethod
+    def _stage_groups_from_state(groups_data, stage: StageData) -> List[GroupData]:
+        if not isinstance(groups_data, list):
+            return default_stage_groups()
+        valid_refs = set(AutoStudioWindow._iter_groupable_item_refs(stage))
+        has_valid_ref_catalog = bool(valid_refs)
+        groups = []
+        seen_names = set()
+        for raw_group in groups_data:
+            if not isinstance(raw_group, dict):
+                continue
+            name = str(raw_group.get("name", "")).strip()
+            if not name or name in seen_names:
+                continue
+            includes_all = bool(raw_group.get("includes_all"))
+            refs = []
+            for raw_ref in raw_group.get("items", []):
+                if not isinstance(raw_ref, dict):
+                    continue
+                ref = GroupItemRef(
+                    scene_name=str(raw_ref.get("scene", "")).strip(),
+                    item_type=str(raw_ref.get("type", "")).strip(),
+                    item_name=str(raw_ref.get("name", "")).strip(),
+                )
+                if ref.item_type not in GROUPABLE_ITEM_TYPES or not ref.scene_name or not ref.item_name:
+                    continue
+                if has_valid_ref_catalog and ref not in valid_refs:
+                    continue
+                if ref not in refs:
+                    refs.append(ref)
+            groups.append(GroupData(name=name, includes_all=includes_all, items=refs))
+            seen_names.add(name)
+        if not any(group.includes_all or group.name == DEFAULT_GROUP_NAME for group in groups):
+            groups.insert(0, GroupData(name=DEFAULT_GROUP_NAME, includes_all=True))
+        return groups or default_stage_groups()
+
+    @staticmethod
+    def _project_to_editor_state(project: ProjectData, project_dir: str) -> Dict:
+        scene_by_id = {}
+
+        def collect_scene(scene: SceneData):
+            if not scene or scene.id in scene_by_id:
+                return
+            scene_by_id[scene.id] = scene
+
+        for group in project.scene_groups:
+            for scene in group.scenes:
+                collect_scene(scene)
+        for stage in project.stages:
+            for scene in stage.scenes:
+                collect_scene(scene)
+
+        scenes = {}
+        for scene_id, scene in scene_by_id.items():
+            scenes[scene_id] = {
+                "id": scene.id,
+                "name": scene.name,
+                "image_path": AutoStudioWindow._path_to_state(scene.image_path, project_dir),
+                "image_width": scene.image_width,
+                "image_height": scene.image_height,
+                "items": [
+                    {
+                        "id": item.id,
+                        "name": item.name,
+                        "item_type": item.item_type,
+                        "rect": AutoStudioWindow._rect_to_state(item.rect),
+                        "search_scope": AutoStudioWindow._rect_to_state(item.search_scope),
+                        "visible": item.visible,
+                        "match_mode": item.match_mode or "gray",
+                    }
+                    for item in scene.items
+                ],
+            }
+
+        return {
+            "version": EDITOR_STATE_VERSION,
+            "project": {
+                "name": project.name,
+                "scenes": scenes,
+                "scene_groups": [
+                    {
+                        "id": group.id,
+                        "name": group.name,
+                        "scenes": [scene.id for scene in group.scenes],
+                    }
+                    for group in project.scene_groups
+                ],
+                "stages": [
+                    {
+                        "id": stage.id,
+                        "name": stage.name,
+                        "scenes": [scene.id for scene in stage.scenes],
+                        "groups": AutoStudioWindow._stage_groups_to_state(stage),
+                        "active_group_name": stage.active_group_name,
+                    }
+                    for stage in project.stages
+                ],
+            },
+        }
+
+    @staticmethod
+    def _project_from_editor_state(state: Dict, project_dir: str) -> ProjectData:
+        if not isinstance(state, dict) or state.get("version") != EDITOR_STATE_VERSION:
+            raise ValueError("编辑状态版本不兼容。")
+        raw_project = state.get("project")
+        if not isinstance(raw_project, dict):
+            raise ValueError("编辑状态缺少工程数据。")
+
+        scenes_by_id = {}
+        for scene_id, raw_scene in (raw_project.get("scenes") or {}).items():
+            if not isinstance(raw_scene, dict):
+                continue
+            scene = SceneData(
+                id=str(raw_scene.get("id") or scene_id),
+                name=str(raw_scene.get("name") or ""),
+                image_path=AutoStudioWindow._path_from_state(str(raw_scene.get("image_path") or ""), project_dir),
+                image_width=int(raw_scene.get("image_width") or 0),
+                image_height=int(raw_scene.get("image_height") or 0),
+            )
+            if scene.image_path and os.path.exists(scene.image_path):
+                pixmap = QPixmap(scene.image_path)
+                if not pixmap.isNull():
+                    scene.pixmap = pixmap
+                    if scene.image_width <= 0 or scene.image_height <= 0:
+                        scene.image_width = pixmap.width()
+                        scene.image_height = pixmap.height()
+            for raw_item in raw_scene.get("items", []):
+                if not isinstance(raw_item, dict):
+                    continue
+                rect = AutoStudioWindow._rect_from_state(raw_item.get("rect")) or RectData(0, 0, 0, 0)
+                scene.items.append(ItemData(
+                    id=str(raw_item.get("id") or random.randint(10000, 99999)),
+                    name=str(raw_item.get("name") or ""),
+                    item_type=str(raw_item.get("item_type") or ""),
+                    rect=rect,
+                    search_scope=AutoStudioWindow._rect_from_state(raw_item.get("search_scope")),
+                    visible=bool(raw_item.get("visible", True)),
+                    match_mode=str(raw_item.get("match_mode") or "gray"),
+                ))
+            scenes_by_id[scene.id] = scene
+
+        project = ProjectData(name=str(raw_project.get("name") or ""))
+        project.scene_groups = []
+        for raw_group in raw_project.get("scene_groups", []):
+            if not isinstance(raw_group, dict):
+                continue
+            group = SceneGroupData(
+                id=str(raw_group.get("id") or random.randint(1000, 9999)),
+                name=str(raw_group.get("name") or DEFAULT_SCENE_GROUP_NAME),
+                scenes=[scenes_by_id[scene_id] for scene_id in raw_group.get("scenes", []) if scene_id in scenes_by_id],
+            )
+            project.scene_groups.append(group)
+
+        project.stages = []
+        for raw_stage in raw_project.get("stages", []):
+            if not isinstance(raw_stage, dict):
+                continue
+            stage = StageData(
+                id=str(raw_stage.get("id") or random.randint(1000, 9999)),
+                name=str(raw_stage.get("name") or ""),
+                scenes=[scenes_by_id[scene_id] for scene_id in raw_stage.get("scenes", []) if scene_id in scenes_by_id],
+            )
+            stage.groups = AutoStudioWindow._stage_groups_from_state(raw_stage.get("groups"), stage)
+            stage.active_group_name = str(raw_stage.get("active_group_name") or DEFAULT_GROUP_NAME)
+            project.stages.append(stage)
+
+        AutoStudioWindow._ensure_project_scene_pool(project)
+        return project
+
+    @staticmethod
+    def _save_editor_state_to_dir(project: ProjectData, project_dir: str) -> str:
+        project_dir = os.path.abspath(os.fspath(project_dir))
+        os.makedirs(project_dir, exist_ok=True)
+        state_path = AutoStudioWindow._editor_state_path(project_dir)
+        state = AutoStudioWindow._project_to_editor_state(project, project_dir)
+        fd, temp_path = tempfile.mkstemp(prefix=".label_project_state_", suffix=".json", dir=project_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+            os.replace(temp_path, state_path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        return state_path
+
+    @staticmethod
+    def _load_editor_state_from_dir(project_dir: str) -> Optional[ProjectData]:
+        project_dir = os.path.abspath(os.fspath(project_dir))
+        state_path = AutoStudioWindow._editor_state_path(project_dir)
+        if not os.path.exists(state_path):
+            return None
+        info_path = os.path.join(project_dir, "info.py")
+        if os.path.exists(info_path) and os.path.getmtime(state_path) < os.path.getmtime(info_path):
+            return None
+        with open(state_path, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        return AutoStudioWindow._project_from_editor_state(state, project_dir)
 
     @staticmethod
     def _rename_group_item_refs(stage: Optional[StageData], old_ref: GroupItemRef, new_ref: GroupItemRef):
@@ -1891,6 +2152,8 @@ class AutoStudioWindow(QMainWindow):
         if result["added"]:
             self.current_scene = result["added"][0]
             self.last_expand_scene_id = self.current_scene.id
+        if result["added"] or result["removed"]:
+            self._autosave_imported_project_state()
         self.current_stage = stage
         self.set_current_work_stage(stage)
         self.last_expand_stage_id = stage.id
@@ -1969,6 +2232,17 @@ class AutoStudioWindow(QMainWindow):
     def _warn_scene_global_control_conflicts(self, scene: Optional[SceneData]) -> bool:
         return self._warn_scene_global_item_conflicts(scene)
 
+    def _autosave_imported_project_state(self) -> bool:
+        imported_project_dir = getattr(self, "imported_project_dir", None)
+        if not self.project or not imported_project_dir:
+            return False
+        try:
+            self._save_editor_state_to_dir(self.project, imported_project_dir)
+            return True
+        except Exception as exc:
+            QMessageBox.warning(self, "保存编辑状态失败", f"本次修改暂未保存到导入目录：\n{exc}")
+            return False
+
     def preview_stage_scene_pool_item(self, item: Optional[QTreeWidgetItem]):
         if item is None:
             return
@@ -2003,6 +2277,7 @@ class AutoStudioWindow(QMainWindow):
         if self.current_scene and self.current_scene.name == scene_name:
             self.current_scene = None
             self.clear_scene_display()
+        self._autosave_imported_project_state()
         self.update_tree_view()
         self.status_label.setText(f"已从场景池删除场景 {scene_name}，并同步移除所有阶段引用。")
 
@@ -3060,6 +3335,7 @@ class AutoStudioWindow(QMainWindow):
         if self.current_scene and self.current_scene.name == scene_name:
             self.current_scene = None
             self.clear_scene_display()
+        self._autosave_imported_project_state()
         self.status_label.setText(f"已从当前阶段移除场景 {scene_name}。场景池内数据已保留。")
         self.update_tree_view()
 
@@ -3079,6 +3355,7 @@ class AutoStudioWindow(QMainWindow):
             self.canvas.crosshair_v = None
             self.canvas.hide_crosshair()
             self.update_coord_display(None, None)
+        self._autosave_imported_project_state()
         self.update_tree_view()
     def get_stage_item_names(self, stage_data: StageData, item_type: str):
         if not stage_data:
@@ -3866,6 +4143,7 @@ class AutoStudioWindow(QMainWindow):
         new_project = self._load_project_model_from_dir(import_dir)
         project_name = new_project.name
         self.project = new_project
+        self.imported_project_dir = import_dir
         resource_dir = os.path.join(import_dir, "resource")
         self.imported_resource_dir = resource_dir if os.path.isdir(resource_dir) else None
         self.current_stage = None
@@ -3889,6 +4167,9 @@ class AutoStudioWindow(QMainWindow):
     @staticmethod
     def _load_project_model_from_dir(import_dir):
         import_dir = os.path.abspath(os.fspath(import_dir))
+        editor_state_project = AutoStudioWindow._load_editor_state_from_dir(import_dir)
+        if editor_state_project is not None:
+            return editor_state_project
         py_path = os.path.join(import_dir, "info.py")
         if not os.path.exists(py_path):
             raise FileNotFoundError("未找到 info.py。")

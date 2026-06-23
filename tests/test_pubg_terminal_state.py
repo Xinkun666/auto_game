@@ -1,7 +1,16 @@
 import unittest
 import importlib
 import sys
+import types
 from unittest import mock
+
+
+sklearn_module = types.ModuleType("sklearn")
+cluster_module = types.ModuleType("sklearn.cluster")
+cluster_module.DBSCAN = object
+sklearn_module.cluster = cluster_module
+sys.modules.setdefault("sklearn", sklearn_module)
+sys.modules.setdefault("sklearn.cluster", cluster_module)
 
 
 class FakeFrameWorker:
@@ -123,12 +132,16 @@ class FakeSearchManager:
     def __init__(self):
         self.stop_calls = []
         self.history_locations = []
+        self.r_city_landing_target = None
+        self.r_city_pre_search_target = None
+        self.r_city_recovery_route_callback = None
+        self.r_city_pre_search_route_callback = None
 
     def configure_r_city_landing_target(self, target):
-        pass
+        self.r_city_landing_target = target
 
     def configure_r_city_pre_search_target(self, target, arrival_distance=3.0):
-        pass
+        self.r_city_pre_search_target = target
 
     def stop_auto_forward(self, w):
         self.stop_calls.append(w)
@@ -186,6 +199,14 @@ def load_auto_pubg_with_fakes():
 
 
 class PubgTerminalStateTests(unittest.TestCase):
+    def test_auto_pubg_does_not_configure_forced_r_city_pre_search_or_recovery(self):
+        auto_pubg = load_auto_pubg_with_fakes()
+
+        self.assertIsNone(auto_pubg.searching_house_manager.r_city_landing_target)
+        self.assertIsNone(auto_pubg.searching_house_manager.r_city_pre_search_target)
+        self.assertIsNone(auto_pubg.searching_house_manager.r_city_recovery_route_callback)
+        self.assertIsNone(auto_pubg.searching_house_manager.r_city_pre_search_route_callback)
+
     def test_rank_finish_waits_two_seconds_before_spectating(self):
         auto_pubg = load_auto_pubg_with_fakes()
         w = FakeFrameWorker("结束阶段", {"个人排名": True})
@@ -200,6 +221,20 @@ class PubgTerminalStateTests(unittest.TestCase):
             events + w.events,
         )
         self.assertFalse(auto_pubg.rank_finish_pending)
+
+    def test_priority_jump_suppresses_immediate_duplicate_click(self):
+        auto_pubg = load_auto_pubg_with_fakes()
+        w = FakeFrameWorker("跑图阶段", {"跳跃": True})
+
+        with mock.patch.object(auto_pubg.time, "monotonic", side_effect=[100.0, 100.3]), \
+            mock.patch.object(auto_pubg.time, "sleep"):
+            first_handled = auto_pubg.handle_priority_stage_jump_forward(w, "跑图阶段")
+            second_handled = auto_pubg.handle_priority_stage_jump_forward(w, "跑图阶段")
+
+        self.assertTrue(first_handled)
+        self.assertTrue(second_handled)
+        self.assertEqual(1, w.events.count(("click", "跳跃")))
+        self.assertEqual(1, len([event for event in w.events if event[0] == "tap_single"]))
 
     def test_running_stage_terminal_rank_preempts_jump_and_running_logic(self):
         auto_pubg = load_auto_pubg_with_fakes()

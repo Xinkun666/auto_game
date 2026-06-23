@@ -142,6 +142,11 @@ class HouseSceneSearchManager(HouseSearchManager):
     ROTATE_FRAME_CHANGED_PIXEL_THRESHOLD = 12
     R_CITY_DEFAULT_NEAR_DISTANCE = 30.0
     R_CITY_PRE_SEARCH_DISTANCE = 3.0
+    FORBIDDEN_ESCAPE_SEARCH_RADIUS = 120
+    FORBIDDEN_ESCAPE_ARRIVAL_DISTANCE = 3.0
+    FORBIDDEN_ESCAPE_FORWARD_Y_BIAS = -300
+    FORBIDDEN_ESCAPE_FORWARD_DURA = 360
+    FORBIDDEN_ESCAPE_FORWARD_WAIT = 700
 
     EXIT_DOOR_CLASS_IDS = {0, 4}
     EXIT_WINDOW_CLASS_IDS = {2}
@@ -189,6 +194,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_pre_search_distance = self.R_CITY_PRE_SEARCH_DISTANCE
         self.r_city_pre_search_route_callback = None
         self.r_city_pre_search_completed = False
+        self.forbidden_escape_target = None
 
     def configure_r_city_landing_target(self, target):
         loc = check_location(target)
@@ -209,6 +215,80 @@ class HouseSceneSearchManager(HouseSearchManager):
     def reset(self):
         super().reset()
         self.r_city_pre_search_completed = False
+        self.forbidden_escape_target = None
+
+    @staticmethod
+    def _location_tuple(value):
+        loc = check_location(value)
+        if loc is None:
+            return None
+        return (int(loc[0]), int(loc[1]))
+
+    def _is_walkable(self, loc) -> bool:
+        map_tool = getattr(self, "map_tool", None)
+        checker = getattr(map_tool, "is_walkable", None)
+        if not callable(checker):
+            return True
+        return bool(checker(loc))
+
+    def _find_forbidden_escape_target(self, current_loc):
+        target = self.forbidden_escape_target
+        if target is not None and get_distance(current_loc, target) > self.FORBIDDEN_ESCAPE_ARRIVAL_DISTANCE:
+            return target
+
+        map_tool = getattr(self, "map_tool", None)
+        finder = getattr(map_tool, "nearest_walkable_within_radius", None)
+        if callable(finder):
+            result = finder(current_loc, self.FORBIDDEN_ESCAPE_SEARCH_RADIUS)
+            if isinstance(result, (tuple, list)) and len(result) >= 1:
+                target = self._location_tuple(result[0])
+            else:
+                target = self._location_tuple(result)
+        else:
+            safe_finder = getattr(map_tool, "get_nearest_safe_point", None)
+            target = self._location_tuple(
+                safe_finder(current_loc, max_search_dist=self.FORBIDDEN_ESCAPE_SEARCH_RADIUS)
+                if callable(safe_finder)
+                else None
+            )
+
+        self.forbidden_escape_target = target
+        return target
+
+    def _handle_forbidden_escape(self, w: "FrameWorker", current_loc, current_direction) -> bool:
+        loc = check_location(current_loc)
+        if loc is None:
+            return False
+
+        if self._is_walkable(loc):
+            self.forbidden_escape_target = None
+            return False
+
+        safe_target = self._find_forbidden_escape_target(loc)
+        self.stop_auto_forward(w)
+        self.history_locations = []
+        self.initial_location_samples = []
+
+        if safe_target is None:
+            print("[SceneSearch] 当前不可通行且未找到安全点，执行通用避障脱离")
+            self.execute_unstuck_logic(w, loc)
+            return True
+
+        dist = get_distance(loc, safe_target)
+        print(f"[SceneSearch] 当前不可通行，先脱离到最近安全点 {safe_target}，dist={dist:.2f}")
+        if self._maybe_bypass_front_house_on_route(w, loc, safe_target, dist, "ForbiddenEscape"):
+            return True
+
+        self.align_direction(w, safe_target)
+        w.tap_single(
+            "摇杆",
+            y_bias=self.FORBIDDEN_ESCAPE_FORWARD_Y_BIAS,
+            dura=self.FORBIDDEN_ESCAPE_FORWARD_DURA,
+            wait=self.FORBIDDEN_ESCAPE_FORWARD_WAIT,
+        )
+        self.handle_jump_logic(w)
+        w.refresh_frame()
+        return True
 
     def _handle_r_city_pre_search_route(self, w: "FrameWorker", current_loc) -> bool:
         if self.r_city_pre_search_completed:
@@ -258,6 +338,9 @@ class HouseSceneSearchManager(HouseSearchManager):
             return
 
         self.indoor_stuck_frames = 0
+
+        if self._handle_forbidden_escape(w, current_loc, current_direction):
+            return
 
         if self.current_house_id is None and self._handle_r_city_pre_search_route(w, current_loc):
             return

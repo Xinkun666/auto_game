@@ -60,6 +60,7 @@ STAGE_PRIORITY_JUMP_FORWARD_Y_BIAS = -400
 STAGE_PRIORITY_JUMP_FORWARD_DURA = 100
 STAGE_PRIORITY_JUMP_FORWARD_WAIT = 300
 STAGE_PRIORITY_JUMP_SETTLE_SECONDS = 0.2
+STAGE_PRIORITY_JUMP_REPEAT_SUPPRESS_SECONDS = 1.0
 RANK_FINISH_SPECTATE_WAIT_SECONDS = 2.0
 SP_SAVE_LONG_PRESS_MS = 3000
 SP_RECORDING_ENABLED = should_use_sp_recording_for_profile(
@@ -92,15 +93,11 @@ searching_to_running_notified = False
 searching_exit_retry_count = 0
 last_popup_close_time = 0.0
 lobby_house_confirm_count = 0
+last_stage_priority_jump_time = None
 parachute_manager = ParachuteManager()
 running_manager = RunningManager()
 driving_manager = DrivingManager()
 searching_house_manager = HouseSceneSearchManager()
-searching_house_manager.configure_r_city_landing_target(DROP_TARGET_R_CITY)
-searching_house_manager.configure_r_city_pre_search_target(
-    DROP_TARGET_R_CITY_SEARCH_START,
-    arrival_distance=3.0,
-)
 house_exit_manager = HouseExitManager()
 phase_timer = PhaseTimeManager(PHASE_DURATIONS, PHASE_STAGE_MAP)
 phase_timer.configure_case_loop_count(
@@ -122,7 +119,7 @@ driving_manager.pause_sp_callback = pause_sp_after_death
 
 
 def prepare_round():
-    global searching_view_synced, rank_finish_pending
+    global searching_view_synced, rank_finish_pending, last_stage_priority_jump_time
     global searching_phase_finishing, searching_to_running_notified, searching_exit_retry_count
 
     phase_timer.start_new_round()
@@ -132,6 +129,7 @@ def prepare_round():
     searching_to_running_notified = False
     searching_exit_retry_count = 0
     rank_finish_pending = False
+    last_stage_priority_jump_time = None
 
     need_drive = phase_timer.need_drive()
     need_searching = not phase_timer.is_completed(PHASE_SEARCHING)
@@ -272,9 +270,6 @@ def recover_bad_landing_to_r_city(w: "FrameWorker", target, reason: str):
     return True
 
 
-searching_house_manager.r_city_recovery_route_callback = recover_bad_landing_to_r_city
-
-
 def route_to_r_city_search_start(
     w: "FrameWorker",
     target,
@@ -300,9 +295,6 @@ def route_to_r_city_search_start(
     searching_to_running_notified = True
     w.change_stage("跑图阶段")
     return True
-
-
-searching_house_manager.r_city_pre_search_route_callback = route_to_r_city_search_start
 
 
 def _should_find_car_after_searching() -> bool:
@@ -468,13 +460,24 @@ def maybe_report_phase_remaining():
 
 
 def handle_priority_stage_jump_forward(w: "FrameWorker", stage_label: str) -> bool:
+    global last_stage_priority_jump_time
+
     if not w.get_info("跳跃"):
         return False
+
+    now = time.monotonic()
+    if (
+        last_stage_priority_jump_time is not None
+        and now - last_stage_priority_jump_time < STAGE_PRIORITY_JUMP_REPEAT_SUPPRESS_SECONDS
+    ):
+        print(f"[Jump] {stage_label} 刚执行过跳跃前推，跳过重复点击")
+        return True
 
     print(f"[Jump] {stage_label} 检测到跳跃按钮，第一优先级点击跳跃并前推")
     searching_house_manager.stop_auto_forward(w)
     running_manager.stop_auto_forward(w)
     w.click("跳跃")
+    last_stage_priority_jump_time = now
     time.sleep(STAGE_PRIORITY_JUMP_SETTLE_SECONDS)
     w.tap_single(
         "摇杆",

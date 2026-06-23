@@ -3,6 +3,9 @@ import time
 from typing import TYPE_CHECKING
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_navigation import MapNavigator
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import *
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_entry_filter import (
+    filter_house_entry_data,
+)
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_manager import HouseExitManager
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import TimeoutTracker
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import autogame_print as print
@@ -151,8 +154,8 @@ class HouseSearchManager:
 
     def __init__(self):
         self.map_tool = MapNavigator()
-        self.house_data = load_json(
-            r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/house_entry/house_entries_summary.json')
+        self.house_data = filter_house_entry_data(load_json(
+            r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/house_entry/house_entries_summary.json'))
         self.excluded_house_ids = self._build_excluded_house_ids()
 
         self.completed_houses = set()

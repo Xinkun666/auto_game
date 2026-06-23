@@ -77,7 +77,22 @@ class ParachuteManager:
         if not self.is_active:
             return
 
-        location = w.get_info('location')[0]
+        location_info = w.get_info('location')
+        if (
+            isinstance(location_info, (tuple, list))
+            and len(location_info) >= 2
+            and not isinstance(location_info[0], (tuple, list))
+        ):
+            location = check_location(location_info)
+        elif isinstance(location_info, (tuple, list)) and len(location_info) > 0:
+            location = check_location(location_info[0])
+        else:
+            location = check_location(location_info)
+
+        if location is None:
+            self.jump_confirm_distances = []
+            print("[Parachute] location 无效，跳过本帧跳伞距离判断")
+            return {}
 
         # 持续修正飞机上的视角朝向，确保测距准确（假设依赖视角）
         align_direction(w, self.target_pos)
@@ -85,7 +100,8 @@ class ParachuteManager:
         current_dist = get_distance(location, self.target_pos)
 
         # 4. 距离趋势检查 (判断是否飞过了/飞远了)
-        self._check_flight_path(current_dist, w)
+        if self._check_flight_path(current_dist, w):
+            return self._perform_jump_sequence(w)
 
 
         # 5. 判定是否到达跳伞点：用前后各一帧确认，避免单帧误判导致误跳伞
@@ -109,7 +125,7 @@ class ParachuteManager:
             self.prior_dist = current_dist
             self.last_dist = current_dist
             self.increase_streak = 0
-            return
+            return False
         else:
             last_dist_text = f"{self.last_dist:.2f}" if self.last_dist is not None else "None"
             print(
@@ -136,11 +152,12 @@ class ParachuteManager:
             and self.increase_streak >= self.OVERSHOOT_INCREASE_FRAMES
         ):
             print(
-                f"[Parachute] 警告：航线偏离。历史最近距离 {self.prior_dist:.2f} > 阈值 {self.TRIGGER_DIST}，"
-                f"且已连续 {self.increase_streak} 帧远离目标，判定飞过最佳跳伞点。"
+                f"[Parachute] 航线偏离但继续跳伞：历史最近距离 {self.prior_dist:.2f} > 阈值 {self.TRIGGER_DIST}，"
+                f"且已连续 {self.increase_streak} 帧远离目标，立即朝目标方向跳伞。"
             )
-            self.reset()
-            w.change_stage('结束阶段')
+            return True
+
+        return False
 
     def _confirm_jump_window(self, current_dist: float) -> bool:
         """

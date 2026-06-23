@@ -1,515 +1,1062 @@
 {
-    "1": [
-        {
-            "image": "frame_00056.jpg",
-            "direction": 355,
-            "location": [
-                986,
-                711
-            ]
-        },
-        {
-            "image": "frame_00090.jpg",
-            "direction": 275,
-            "location": [
-                991,
-                709
-            ]
-        },
-        {
-            "image": "frame_00120.jpg",
-            "direction": 75,
-            "location": [
-                988,
-                704
-            ]
-        }
-    ],
-    "10": [
-        {
-            "image": "frame_00651.jpg",
-            "direction": 255,
-            "location": [
-                1001,
-                748
-            ]
-        },
-        {
-            "image": "frame_00673.jpg",
-            "direction": 350,
-            "location": [
-                998,
-                751
-            ]
-        }
-    ],
-    "11": [
-        {
-            "image": "frame_00714.jpg",
-            "direction": 85,
-            "location": [
-                1003,
-                750
-            ]
-        }
-    ],
-    "12": [
-        {
-            "image": "frame_00747.jpg",
-            "direction": 355,
-            "location": [
-                1011,
-                753
-            ]
-        },
-        {
-            "image": "frame_00978.jpg",
-            "direction": 270,
-            "location": [
-                1013,
-                751
-            ]
-        }
-    ],
-    "13": [
-        {
-            "image": "frame_00791.jpg",
-            "direction": 350,
-            "location": [
-                1012,
-                745
-            ]
-        },
-        {
-            "image": "frame_00837.jpg",
-            "direction": 1,
-            "location": [
-                1012,
-                738
-            ]
-        }
-    ],
-    "14": [
-        {
-            "image": "frame_00887.jpg",
-            "direction": 80,
-            "location": [
-                1016,
-                747
-            ]
-        },
-        {
-            "image": "frame_00914.jpg",
-            "direction": 350,
-            "location": [
-                1019,
-                750
-            ]
-        }
-    ],
-    "15": [
-        {
-            "image": "frame_01041.jpg",
-            "direction": 85,
-            "location": [
-                1026,
-                742
-            ]
-        },
-        {
-            "image": "frame_01113.jpg",
-            "direction": 355,
-            "location": [
-                1031,
-                744
-            ]
-        }
-    ],
-    "16": [
-        {
-            "image": "frame_01062.jpg",
-            "direction": 90,
-            "location": [
-                1026,
-                747
-            ]
-        },
-        {
-            "image": "frame_01085.jpg",
-            "direction": 355,
-            "location": [
-                1028,
-                750
-            ]
-        }
-    ],
-    "17": [
-        {
-            "image": "frame_01113.jpg",
-            "direction": 355,
-            "location": [
-                1031,
-                744
-            ]
-        }
-    ],
-    "18": [
-        {
-            "image": "frame_01195.jpg",
-            "direction": 115,
-            "location": [
-                1042,
-                743
-            ]
-        }
-    ],
-    "19": [
-        {
-            "image": "frame_01223.jpg",
-            "direction": 55,
-            "location": [
-                1045,
-                743
-            ]
-        },
-        {
-            "image": "frame_01248.jpg",
-            "direction": 300,
-            "location": [
-                1047,
-                740
-            ]
-        }
-    ],
-    "2": [
-        {
-            "image": "frame_00165.jpg",
-            "direction": 85,
-            "location": [
-                995,
-                707
-            ]
-        },
-        {
-            "image": "frame_00254.jpg",
-            "direction": 200,
-            "location": [
-                1006,
-                706
-            ]
-        }
-    ],
-    "20": [
-        {
-            "image": "frame_01281.jpg",
-            "direction": 355,
-            "location": [
-                1042,
-                737
-            ]
-        }
-    ],
-    "21": [
-        {
-            "image": "frame_01309.jpg",
-            "direction": 0,
-            "location": [
-                1038,
-                733
-            ]
-        }
-    ],
-    "22": [
-        {
-            "image": "frame_01340.jpg",
-            "direction": 355,
-            "location": [
-                1033,
-                734
-            ]
-        },
-        {
-            "image": "frame_01360.jpg",
-            "direction": 85,
-            "location": [
-                1030,
-                731
-            ]
-        }
-    ],
-    "23": [
-        {
-            "image": "frame_01395.jpg",
-            "direction": 265,
-            "location": [
-                1035,
-                724
-            ]
-        },
-        {
-            "image": "frame_01427.jpg",
-            "direction": 95,
-            "location": [
-                1030,
-                724
-            ]
-        }
-    ],
-    "24": [
-        {
-            "image": "frame_01464.jpg",
-            "direction": 90,
-            "location": [
-                1035,
-                729
-            ]
-        },
-        {
-            "image": "frame_01551.jpg",
-            "direction": 0,
-            "location": [
-                1038,
-                733
-            ]
-        }
-    ],
-    "25": [
-        {
-            "image": "frame_01695.jpg",
-            "direction": 0,
-            "location": [
-                1039,
-                725
-            ]
-        },
-        {
-            "image": "frame_01718.jpg",
-            "direction": 80,
-            "location": [
-                1037,
-                721
-            ]
-        }
-    ],
-    "26": [
-        {
-            "image": "frame_01779.jpg",
-            "direction": 265,
-            "location": [
-                1035,
-                724
-            ]
-        },
-        {
-            "image": "frame_01809.jpg",
-            "direction": 90,
-            "location": [
-                1030,
-                724
-            ]
-        }
-    ],
-    "27": [
-        {
-            "image": "frame_01851.jpg",
-            "direction": 175,
-            "location": [
-                1021,
-                721
-            ]
-        },
-        {
-            "image": "frame_01876.jpg",
-            "direction": 85,
-            "location": [
-                1017,
-                724
-            ]
-        }
-    ],
-    "28": [
-        {
-            "image": "frame_01924.jpg",
-            "direction": 355,
-            "location": [
-                1015,
-                729
-            ]
-        },
-        {
-            "image": "frame_01974.jpg",
-            "direction": 180,
-            "location": [
-                1014,
-                724
-            ]
-        }
-    ],
-    "29": [
-        {
-            "image": "frame_01991.jpg",
-            "direction": 95,
-            "location": [
-                1017,
-                724
-            ]
-        }
-    ],
-    "3": [
-        {
-            "image": "frame_00196.jpg",
-            "direction": 265,
-            "location": [
-                998,
-                714
-            ]
-        }
-    ],
-    "30": [
-        {
-            "image": "frame_02161.jpg",
-            "direction": 140,
-            "location": [
-                1052,
-                740
-            ]
-        },
-        {
-            "image": "frame_02184.jpg",
-            "direction": 40,
-            "location": [
-                1051,
-                745
-            ]
-        }
-    ],
-    "31": [
-        {
-            "image": "frame_02240.jpg",
-            "direction": 105,
-            "location": [
-                1053,
-                752
-            ]
-        }
-    ],
-    "32": [
-        {
-            "image": "frame_02306.jpg",
-            "direction": 100,
-            "location": [
-                1071,
-                756
-            ]
-        },
-        {
-            "image": "frame_02330.jpg",
-            "direction": 10,
-            "location": [
-                1074,
-                759
-            ]
-        }
-    ],
-    "33": [
-        {
-            "image": "frame_02392.jpg",
-            "direction": 180,
-            "location": [
-                1080,
-                750
-            ]
-        },
-        {
-            "image": "frame_02411.jpg",
-            "direction": 95,
-            "location": [
-                1076,
-                751
-            ]
-        }
-    ],
-    "4": [
-        {
-            "image": "frame_00273.jpg",
-            "direction": 170,
-            "location": [
-                1010,
-                705
-            ]
-        }
-    ],
-    "5": [
-        {
-            "image": "frame_00352.jpg",
-            "direction": 175,
-            "location": [
-                1001,
-                726
-            ]
-        },
-        {
-            "image": "frame_00388.jpg",
-            "direction": 345,
-            "location": [
-                1001,
-                732
-            ]
-        }
-    ],
-    "6": [],
-    "7": [
-        {
-            "image": "frame_00411.jpg",
-            "direction": 350,
-            "location": [
-                996,
-                733
-            ]
-        },
-        {
-            "image": "frame_00518.jpg",
-            "direction": 165,
-            "location": [
-                995,
-                726
-            ]
-        }
-    ],
-    "8": [
-        {
-            "image": "frame_00445.jpg",
-            "direction": 350,
-            "location": [
-                989,
-                734
-            ]
-        },
-        {
-            "image": "frame_00471.jpg",
-            "direction": 70,
-            "location": [
-                986,
-                730
-            ]
-        }
-    ],
-    "9": [
-        {
-            "image": "frame_00606.jpg",
-            "direction": 80,
-            "location": [
-                1000,
-                744
-            ]
-        },
-        {
-            "image": "frame_00633.jpg",
-            "direction": 355,
-            "location": [
-                1004,
-                746
-            ]
-        }
-    ]
+  "R城_1": [
+    {
+      "image": "20260623101155-385.png",
+      "direction": 350,
+      "location": [
+        1000,
+        750
+      ]
+    },
+    {
+      "image": "20260623101200-634.png",
+      "direction": 260,
+      "location": [
+        1003,
+        747
+      ]
+    }
+  ],
+  "R城_2": [
+    {
+      "image": "20260623101208-673.png",
+      "direction": 85,
+      "location": [
+        1001,
+        742
+      ]
+    },
+    {
+      "image": "20260623101216-518.png",
+      "direction": 355,
+      "location": [
+        1006,
+        746
+      ]
+    }
+  ],
+  "R城_3": [
+    {
+      "image": "20260623101221-988.png",
+      "direction": 85,
+      "location": [
+        1005,
+        749
+      ]
+    }
+  ],
+  "R城_4": [
+    {
+      "image": "20260623101231-360.png",
+      "direction": 0,
+      "location": [
+        1012,
+        753
+      ]
+    }
+  ],
+  "R城_5": [
+    {
+      "image": "20260623101240-579.png",
+      "direction": 0,
+      "location": [
+        1013,
+        745
+      ]
+    },
+    {
+      "image": "20260623101251-216.png",
+      "direction": 175,
+      "location": [
+        1013,
+        738
+      ]
+    }
+  ],
+  "R城_6": [
+    {
+      "image": "20260623101301-729.png",
+      "direction": 85,
+      "location": [
+        1017,
+        746
+      ]
+    },
+    {
+      "image": "20260623101309-725.png",
+      "direction": 0,
+      "location": [
+        1019,
+        749
+      ]
+    }
+  ],
+  "R城_7": [
+    {
+      "image": "20260623101322-972.png",
+      "direction": 85,
+      "location": [
+        1027,
+        741
+      ]
+    },
+    {
+      "image": "20260623101328-231.png",
+      "direction": 350,
+      "location": [
+        1032,
+        744
+      ]
+    }
+  ],
+  "R城_8": [
+    {
+      "image": "20260623101344-064.png",
+      "direction": 310,
+      "location": [
+        1042,
+        748
+      ]
+    }
+  ],
+  "R城_9": [
+    {
+      "image": "20260623101353-507.png",
+      "direction": 35,
+      "location": [
+        1044,
+        746
+      ]
+    }
+  ],
+  "R城_10": [
+    {
+      "image": "20260623101406-774.png",
+      "direction": 30,
+      "location": [
+        1046,
+        743
+      ]
+    },
+    {
+      "image": "20260623101412-066.png",
+      "direction": 305,
+      "location": [
+        1048,
+        739
+      ]
+    }
+  ],
+  "R城_11": [
+    {
+      "image": "20260623101427-912.png",
+      "direction": 235,
+      "location": [
+        1059,
+        736
+      ]
+    },
+    {
+      "image": "20260623101433-191.png",
+      "direction": 325,
+      "location": [
+        1058,
+        740
+      ]
+    }
+  ],
+  "R城_12": [
+    {
+      "image": "20260623101451-796.png",
+      "direction": 285,
+      "location": [
+        1069,
+        738
+      ]
+    }
+  ],
+  "R城_13": [
+    {
+      "image": "20260623101458-352.png",
+      "direction": 10,
+      "location": [
+        1073,
+        736
+      ]
+    },
+    {
+      "image": "20260623101510-222.png",
+      "direction": 195,
+      "location": [
+        1074,
+        729
+      ]
+    }
+  ],
+  "R城_14": [
+    {
+      "image": "20260623101522-247.png",
+      "direction": 105,
+      "location": [
+        1076,
+        740
+      ]
+    }
+  ],
+  "R城_15": [
+    {
+      "image": "20260623101536-793.png",
+      "direction": 195,
+      "location": [
+        1081,
+        748
+      ]
+    },
+    {
+      "image": "20260623101543-392.png",
+      "direction": 100,
+      "location": [
+        1077,
+        751
+      ]
+    }
+  ],
+  "R城_16": [
+    {
+      "image": "20260623101559-364.png",
+      "direction": 105,
+      "location": [
+        1072,
+        755
+      ]
+    },
+    {
+      "image": "20260623101607-353.png",
+      "direction": 111,
+      "location": [
+        1076,
+        759
+      ]
+    }
+  ],
+  "R城_17": [
+    {
+      "image": "20260623101636-750.png",
+      "direction": 220,
+      "location": [
+        1048,
+        765
+      ]
+    },
+    {
+      "image": "20260623101644-647.png",
+      "direction": 310,
+      "location": [
+        1048,
+        769
+      ]
+    }
+  ],
+  "R城_18": [
+    {
+      "image": "20260623101651-279.png",
+      "direction": 275,
+      "location": [
+        1044,
+        770
+      ]
+    }
+  ],
+  "R城_19": [
+    {
+      "image": "20260623101703-323.png",
+      "direction": 270,
+      "location": [
+        1040,
+        767
+      ]
+    },
+    {
+      "image": "20260623101716-632.png",
+      "direction": 185,
+      "location": [
+        1038,
+        763
+      ]
+    }
+  ],
+  "R城_20": [
+    {
+      "image": "20260623101731-202.png",
+      "direction": 5,
+      "location": [
+        1031,
+        767
+      ]
+    },
+    {
+      "image": "20260623101739-135.png",
+      "direction": 95,
+      "location": [
+        1027,
+        764
+      ]
+    }
+  ],
+  "R城_21": [
+    {
+      "image": "20260623101747-095.png",
+      "direction": 270,
+      "location": [
+        1027,
+        765
+      ]
+    }
+  ],
+  "R城_22": [
+    {
+      "image": "20260623101814-985.png",
+      "direction": 180,
+      "location": [
+        1021,
+        767
+      ]
+    },
+    {
+      "image": "20260623101821-525.png",
+      "direction": 270,
+      "location": [
+        1024,
+        770
+      ]
+    }
+  ],
+  "R城_23": [
+    {
+      "image": "20260623101832-171.png",
+      "direction": 0,
+      "location": [
+        1017,
+        773
+      ]
+    },
+    {
+      "image": "20260623101838-797.png",
+      "direction": 85,
+      "location": [
+        1014,
+        770
+      ]
+    }
+  ],
+  "R城_24": [
+    {
+      "image": "20260623101846-668.png",
+      "direction": 275,
+      "location": [
+        1016,
+        768
+      ]
+    },
+    {
+      "image": "20260623101904-036.png",
+      "direction": 185,
+      "location": [
+        1013,
+        764
+      ]
+    }
+  ],
+  "R城_25": [
+    {
+      "image": "20260623101910-626.png",
+      "direction": 275,
+      "location": [
+        1010,
+        764
+      ]
+    }
+  ],
+  "学校和其他小房区_1": [
+    {
+      "image": "20260623140843-297.png",
+      "direction": 0,
+      "location": [
+        1105,
+        864
+      ]
+    },
+    {
+      "image": "20260623140848-572.png",
+      "direction": 111,
+      "location": [
+        1110,
+        864
+      ]
+    },
+    {
+      "image": "20260623140901-825.png",
+      "direction": 0,
+      "location": [
+        1108,
+        855
+      ]
+    }
+  ],
+  "学校和其他小房区_2": [
+    {
+      "image": "20260623140911-184.png",
+      "direction": 95,
+      "location": [
+        1106,
+        846
+      ]
+    },
+    {
+      "image": "20260623140927-163.png",
+      "direction": 275,
+      "location": [
+        1115,
+        844
+      ]
+    },
+    {
+      "image": "20260623140933-739.png",
+      "direction": 275,
+      "location": [
+        1114,
+        849
+      ]
+    }
+  ],
+  "学校和其他小房区_3": [
+    {
+      "image": "20260623140944-406.png",
+      "direction": 90,
+      "location": [
+        1116,
+        846
+      ]
+    },
+    {
+      "image": "20260623141004-279.png",
+      "direction": 275,
+      "location": [
+        1125,
+        844
+      ]
+    },
+    {
+      "image": "20260623141011-020.png",
+      "direction": 270,
+      "location": [
+        1125,
+        849
+      ]
+    }
+  ],
+  "学校和其他小房区_4": [
+    {
+      "image": "20260623141027-089.png",
+      "direction": 270,
+      "location": [
+        1135,
+        849
+      ]
+    },
+    {
+      "image": "20260623141035-069.png",
+      "direction": 270,
+      "location": [
+        1136,
+        853
+      ]
+    },
+    {
+      "image": "20260623141049-810.png",
+      "direction": 4,
+      "location": [
+        1126,
+        851
+      ]
+    }
+  ],
+  "学校和其他小房区_5": [
+    {
+      "image": "20260623141104-453.png",
+      "direction": 4,
+      "location": [
+        1126,
+        837
+      ]
+    },
+    {
+      "image": "20260623141117-864.png",
+      "direction": 275,
+      "location": [
+        1135,
+        835
+      ]
+    },
+    {
+      "image": "20260623141128-460.png",
+      "direction": 270,
+      "location": [
+        1135,
+        840
+      ]
+    }
+  ],
+  "学校和其他小房区_6": [
+    {
+      "image": "20260623141154-987.png",
+      "direction": 270,
+      "location": [
+        1115,
+        844
+      ]
+    },
+    {
+      "image": "20260623141201-652.png",
+      "direction": 270,
+      "location": [
+        1115,
+        849
+      ]
+    },
+    {
+      "image": "20260623141216-356.png",
+      "direction": 95,
+      "location": [
+        1106,
+        846
+      ]
+    }
+  ],
+  "学校和其他小房区_7": [
+    {
+      "image": "20260623141229-730.png",
+      "direction": 185,
+      "location": [
+        1108,
+        855
+      ]
+    },
+    {
+      "image": "20260623141241-745.png",
+      "direction": 0,
+      "location": [
+        1105,
+        863
+      ]
+    },
+    {
+      "image": "20260623141251-048.png",
+      "direction": 5,
+      "location": [
+        1110,
+        864
+      ]
+    }
+  ],
+  "学校和其他小房区_8": [
+    {
+      "image": "20260623141313-759.png",
+      "direction": 0,
+      "location": [
+        1104,
+        842
+      ]
+    }
+  ],
+  "学校和其他小房区_9": [
+    {
+      "image": "20260623141323-007.png",
+      "direction": 0,
+      "location": [
+        1107,
+        835
+      ]
+    },
+    {
+      "image": "20260623141329-638.png",
+      "direction": 95,
+      "location": [
+        1103,
+        830
+      ]
+    }
+  ],
+  "学校和其他小房区_10": [
+    {
+      "image": "20260623141622-208.png",
+      "direction": 235,
+      "location": [
+        1251,
+        883
+      ]
+    },
+    {
+      "image": "20260623141638-045.png",
+      "direction": 145,
+      "location": [
+        1246,
+        882
+      ]
+    }
+  ],
+  "学校和其他小房区_11": [
+    {
+      "image": "20260623141644-793.png",
+      "direction": 320,
+      "location": [
+        1244,
+        883
+      ]
+    },
+    {
+      "image": "20260623141654-015.png",
+      "direction": 55,
+      "location": [
+        1240,
+        886
+      ]
+    }
+  ],
+  "学校和其他小房区_12": [
+    {
+      "image": "20260623141703-343.png",
+      "direction": 235,
+      "location": [
+        1243,
+        878
+      ]
+    },
+    {
+      "image": "20260623141712-565.png",
+      "direction": 140,
+      "location": [
+        1238,
+        877
+      ]
+    }
+  ],
+  "学校和其他小房区_13": [
+    {
+      "image": "20260623143047-063.png",
+      "direction": 90,
+      "location": [
+        932,
+        918
+      ]
+    },
+    {
+      "image": "20260623143057-502.png",
+      "direction": 0,
+      "location": [
+        936,
+        922
+      ]
+    },
+    {
+      "image": "20260623143104-070.png",
+      "direction": 270,
+      "location": [
+        938,
+        917
+      ]
+    }
+  ],
+  "学校和其他小房区_14": [
+    {
+      "image": "20260623143111-967.png",
+      "direction": 100,
+      "location": [
+        939,
+        913
+      ]
+    },
+    {
+      "image": "20260623143119-935.png",
+      "direction": 270,
+      "location": [
+        945,
+        914
+      ]
+    }
+  ],
+  "学校和其他小房区_15": [
+    {
+      "image": "20260623143125-194.png",
+      "direction": 275,
+      "location": [
+        945,
+        910
+      ]
+    },
+    {
+      "image": "20260623143137-019.png",
+      "direction": 90,
+      "location": [
+        939,
+        910
+      ]
+    }
+  ],
+  "学校和其他小房区_16": [
+    {
+      "image": "20260623143150-328.png",
+      "direction": 85,
+      "location": [
+        940,
+        920
+      ]
+    },
+    {
+      "image": "20260623143202-085.png",
+      "direction": 0,
+      "location": [
+        942,
+        923
+      ]
+    }
+  ],
+  "学校和其他小房区_17": [
+    {
+      "image": "20260623143220-526.png",
+      "direction": 270,
+      "location": [
+        953,
+        918
+      ]
+    },
+    {
+      "image": "20260623143232-266.png",
+      "direction": 90,
+      "location": [
+        946,
+        920
+      ]
+    }
+  ],
+  "学校和其他小房区_18": [
+    {
+      "image": "20260623143241-562.png",
+      "direction": 0,
+      "location": [
+        951,
+        915
+      ]
+    }
+  ],
+  "学校和其他小房区_19": [
+    {
+      "image": "20260623143257-510.png",
+      "direction": 0,
+      "location": [
+        945,
+        911
+      ]
+    },
+    {
+      "image": "20260623143305-395.png",
+      "direction": 80,
+      "location": [
+        943,
+        908
+      ]
+    }
+  ],
+  "学校和其他小房区_20": [
+    {
+      "image": "20260623143419-718.png",
+      "direction": 155,
+      "location": [
+        1005,
+        901
+      ]
+    },
+    {
+      "image": "20260623143431-580.png",
+      "direction": 335,
+      "location": [
+        1008,
+        906
+      ]
+    }
+  ],
+  "学校和其他小房区_21": [
+    {
+      "image": "20260623143447-591.png",
+      "direction": 155,
+      "location": [
+        1011,
+        897
+      ]
+    },
+    {
+      "image": "20260623143458-136.png",
+      "direction": 330,
+      "location": [
+        985,
+        858
+      ]
+    }
+  ],
+  "学校和其他小房区_22": [
+    {
+      "image": "20260623143504-797.png",
+      "direction": 340,
+      "location": [
+        1023,
+        891
+      ]
+    },
+    {
+      "image": "20260623143518-096.png",
+      "direction": 155,
+      "location": [
+        1015,
+        893
+      ]
+    }
+  ],
+  "学校和其他小房区_23": [
+    {
+      "image": "20260623143601-910.png",
+      "direction": 330,
+      "location": [
+        1003,
+        889
+      ]
+    },
+    {
+      "image": "20260623143617-910.png",
+      "direction": 60,
+      "location": [
+        997,
+        905
+      ]
+    }
+  ],
+  "学校和其他小房区_24": [
+    {
+      "image": "20260623143629-842.png",
+      "direction": 335,
+      "location": [
+        995,
+        893
+      ]
+    },
+    {
+      "image": "20260623143644-326.png",
+      "direction": 60,
+      "location": [
+        990,
+        892
+      ]
+    }
+  ],
+  "学校和其他小房区_25": [
+    {
+      "image": "20260623143753-371.png",
+      "direction": 155,
+      "location": [
+        1021,
+        1018
+      ]
+    },
+    {
+      "image": "20260623143801-346.png",
+      "direction": 65,
+      "location": [
+        1020,
+        1022
+      ]
+    }
+  ],
+  "学校和其他小房区_26": [
+    {
+      "image": "20260623143810-587.png",
+      "direction": 70,
+      "location": [
+        1021,
+        1025
+      ]
+    },
+    {
+      "image": "20260623143821-256.png",
+      "direction": 165,
+      "location": [
+        1024,
+        1022
+      ]
+    }
+  ],
+  "学校和其他小房区_27": [
+    {
+      "image": "20260623143838-625.png",
+      "direction": 140,
+      "location": [
+        1016,
+        1036
+      ]
+    },
+    {
+      "image": "20260623143851-960.png",
+      "direction": 335,
+      "location": [
+        1029,
+        1046
+      ]
+    }
+  ],
+  "学校和其他小房区_28": [
+    {
+      "image": "20260623143857-333.png",
+      "direction": 140,
+      "location": [
+        1021,
+        1042
+      ]
+    },
+    {
+      "image": "20260623143917-073.png",
+      "direction": 325,
+      "location": [
+        1026,
+        1048
+      ]
+    }
+  ],
+  "学校和其他小房区_29": [
+    {
+      "image": "20260623144026-234.png",
+      "direction": 290,
+      "location": [
+        1101,
+        1126
+      ]
+    }
+  ],
+  "学校和其他小房区_30": [
+    {
+      "image": "20260623144040-756.png",
+      "direction": 290,
+      "location": [
+        1103,
+        1131
+      ]
+    },
+    {
+      "image": "20260623144058-066.png",
+      "direction": 20,
+      "location": [
+        1110,
+        1137
+      ]
+    }
+  ],
+  "学校和其他小房区_31": [
+    {
+      "image": "20260623144116-608.png",
+      "direction": 120,
+      "location": [
+        1084,
+        1142
+      ]
+    }
+  ],
+  "学校和其他小房区_32": [
+    {
+      "image": "20260623144127-205.png",
+      "direction": 95,
+      "location": [
+        1099,
+        1146
+      ]
+    },
+    {
+      "image": "20260623144137-918.png",
+      "direction": 275,
+      "location": [
+        1106,
+        1147
+      ]
+    }
+  ],
+  "学校和其他小房区_33": [
+    {
+      "image": "20260623144147-198.png",
+      "direction": 185,
+      "location": [
+        1104,
+        1148
+      ]
+    }
+  ],
+  "学校和其他小房区_34": [
+    {
+      "image": "20260623144157-910.png",
+      "direction": 5,
+      "location": [
+        1106,
+        1144
+      ]
+    },
+    {
+      "image": "20260623144207-128.png",
+      "direction": 185,
+      "location": [
+        1106,
+        1138
+      ]
+    }
+  ],
+  "学校和其他小房区_35": [
+    {
+      "image": "20260623144235-042.png",
+      "direction": 275,
+      "location": [
+        1111,
+        1141
+      ]
+    }
+  ],
+  "学校和其他小房区_36": [
+    {
+      "image": "20260623144256-156.png",
+      "direction": 5,
+      "location": [
+        1118,
+        1138
+      ]
+    },
+    {
+      "image": "20260623144306-673.png",
+      "direction": 175,
+      "location": [
+        1118,
+        1132
+      ]
+    }
+  ],
+  "学校和其他小房区_37": [
+    {
+      "image": "20260623144316-010.png",
+      "direction": 5,
+      "location": [
+        1114,
+        1131
+      ]
+    },
+    {
+      "image": "20260623144326-665.png",
+      "direction": 185,
+      "location": [
+        1115,
+        1125
+      ]
+    }
+  ]
 }

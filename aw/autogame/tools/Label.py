@@ -31,6 +31,11 @@ DEFAULT_GLOBAL_SCENE_GROUP_NAME = "全局分组"
 LEGACY_DEFAULT_SCENE_GROUP_NAME = "未分组"
 LEGACY_GLOBAL_SCENE_GROUP_NAME = "默认分组"
 GROUPABLE_ITEM_TYPES = ("area", "special_area")
+ITEM_TYPE_LABELS = {
+    "area": "区域",
+    "control": "控点",
+    "special_area": "特殊区域",
+}
 
 
 @dataclass
@@ -1064,6 +1069,7 @@ class AutoStudioWindow(QMainWindow):
             target_group.scenes.append(scene)
         if target_group.name == DEFAULT_GLOBAL_SCENE_GROUP_NAME:
             AutoStudioWindow._sync_global_scenes_to_stages(project)
+            AutoStudioWindow._remove_duplicate_global_controls(project)
         return scene
 
     @staticmethod
@@ -1084,6 +1090,78 @@ class AutoStudioWindow(QMainWindow):
             if group.name == DEFAULT_GLOBAL_SCENE_GROUP_NAME:
                 return group
         return None
+
+    @staticmethod
+    def _is_scene_in_global_group(project: Optional[ProjectData], scene: Optional[SceneData]) -> bool:
+        if not project or not scene:
+            return False
+        global_group = AutoStudioWindow._global_scene_group(project)
+        return bool(global_group and any(existing is scene for existing in global_group.scenes))
+
+    @staticmethod
+    def _global_control_names(project: Optional[ProjectData]) -> set:
+        global_group = AutoStudioWindow._global_scene_group(project)
+        if not global_group:
+            return set()
+        return {
+            item.name
+            for scene in global_group.scenes
+            for item in scene.items
+            if item.item_type == "control" and item.name
+        }
+
+    @staticmethod
+    def _is_global_control_name_conflict(
+        project: Optional[ProjectData],
+        scene: Optional[SceneData],
+        control_name: str,
+    ) -> bool:
+        if not project or not scene or not control_name:
+            return False
+        if AutoStudioWindow._is_scene_in_global_group(project, scene):
+            return False
+        return control_name in AutoStudioWindow._global_control_names(project)
+
+    @staticmethod
+    def _scene_global_control_conflicts(project: Optional[ProjectData], scene: Optional[SceneData]) -> List[str]:
+        if not project or not scene or AutoStudioWindow._is_scene_in_global_group(project, scene):
+            return []
+        global_names = AutoStudioWindow._global_control_names(project)
+        return sorted({
+            item.name
+            for item in scene.items
+            if item.item_type == "control" and item.name in global_names
+        })
+
+    @staticmethod
+    def _remove_duplicate_global_controls(project: Optional[ProjectData]) -> int:
+        if not project:
+            return 0
+        global_group = AutoStudioWindow._global_scene_group(project)
+        if not global_group:
+            return 0
+        global_scene_ids = {id(scene) for scene in global_group.scenes}
+        global_names = AutoStudioWindow._global_control_names(project)
+        if not global_names:
+            return 0
+        removed_count = 0
+        visited_scene_ids = set()
+        for group in project.scene_groups:
+            for scene in group.scenes:
+                scene_id = id(scene)
+                if scene_id in visited_scene_ids:
+                    continue
+                visited_scene_ids.add(scene_id)
+                if scene_id in global_scene_ids:
+                    continue
+                kept_items = []
+                for item in scene.items:
+                    if item.item_type == "control" and item.name in global_names:
+                        removed_count += 1
+                        continue
+                    kept_items.append(item)
+                scene.items = kept_items
+        return removed_count
 
     @staticmethod
     def _sync_global_scenes_to_stage(project: Optional[ProjectData], stage: Optional[StageData]) -> None:
@@ -1172,6 +1250,7 @@ class AutoStudioWindow(QMainWindow):
         pending_group.scenes = remaining_scenes
         if target_group.name == DEFAULT_GLOBAL_SCENE_GROUP_NAME:
             AutoStudioWindow._sync_global_scenes_to_stages(project)
+            AutoStudioWindow._remove_duplicate_global_controls(project)
         return moved_scenes
 
     @staticmethod
@@ -1258,13 +1337,13 @@ class AutoStudioWindow(QMainWindow):
         return scenes[0] if scenes else None
 
     @staticmethod
-    def _apply_stage_scene_pool_selection(
+    def _stage_scene_pool_selection_changes(
         project: Optional[ProjectData],
         stage: Optional[StageData],
         selected_scene_keys,
     ) -> Dict[str, List[SceneData]]:
         if not project or not stage:
-            return {"added": [], "removed": []}
+            return {"added": [], "removed": [], "final": []}
         entries = AutoStudioWindow._stage_scene_pool_selection_entries(project, stage)
         managed_scene_ids = {id(scene) for entry in entries for scene in entry["scenes"]}
         selected_scene_ids = {
@@ -1278,6 +1357,65 @@ class AutoStudioWindow(QMainWindow):
             for scene in stage.scenes
             if id(scene) in managed_scene_ids and id(scene) not in selected_scene_ids
         ]
+        current_ids = {id(scene) for scene in stage.scenes}
+        added_scenes = [
+            scene
+            for entry in entries
+            if (entry["group_id"], entry["scene_name"]) in selected_scene_keys
+            for scene in entry["scenes"]
+            if id(scene) not in current_ids
+        ]
+        removed_ids = {id(scene) for scene in removed_scenes}
+        final_scenes = [scene for scene in stage.scenes if id(scene) not in removed_ids]
+        final_ids = {id(scene) for scene in final_scenes}
+        for scene in added_scenes:
+            if id(scene) in final_ids:
+                continue
+            final_scenes.append(scene)
+            final_ids.add(id(scene))
+        return {"added": added_scenes, "removed": removed_scenes, "final": final_scenes}
+
+    @staticmethod
+    def _stage_item_conflicts_for_new_scenes(
+        stage: Optional[StageData],
+        new_scenes: List[SceneData],
+        final_scenes: List[SceneData],
+    ) -> List[Dict]:
+        if not stage or not new_scenes or not final_scenes:
+            return []
+        new_scene_ids = {id(scene) for scene in new_scenes}
+        item_scenes = {}
+        for scene in final_scenes:
+            for item in scene.items:
+                if item.item_type not in ITEM_TYPE_LABELS or not item.name:
+                    continue
+                key = (item.item_type, item.name)
+                item_scenes.setdefault(key, []).append(scene)
+        conflicts = []
+        for (item_type, item_name), scenes in item_scenes.items():
+            scene_names = sorted({scene.name for scene in scenes})
+            if len(scene_names) < 2:
+                continue
+            if not any(id(scene) in new_scene_ids for scene in scenes):
+                continue
+            conflicts.append({
+                "item_type": item_type,
+                "item_name": item_name,
+                "scene_names": scene_names,
+            })
+        conflicts.sort(key=lambda item: (item["item_type"], item["item_name"], item["scene_names"]))
+        return conflicts
+
+    @staticmethod
+    def _apply_stage_scene_pool_selection(
+        project: Optional[ProjectData],
+        stage: Optional[StageData],
+        selected_scene_keys,
+    ) -> Dict[str, List[SceneData]]:
+        if not project or not stage:
+            return {"added": [], "removed": []}
+        changes = AutoStudioWindow._stage_scene_pool_selection_changes(project, stage, selected_scene_keys)
+        removed_scenes = changes["removed"]
         if removed_scenes:
             removed_ids = {id(scene) for scene in removed_scenes}
             removed_names = {scene.name for scene in removed_scenes}
@@ -1287,15 +1425,12 @@ class AutoStudioWindow(QMainWindow):
                     AutoStudioWindow._remove_group_item_refs(stage, lambda ref, name=scene_name: ref.scene_name == name)
         added_scenes = []
         current_ids = {id(scene) for scene in stage.scenes}
-        for entry in entries:
-            if (entry["group_id"], entry["scene_name"]) not in selected_scene_keys:
+        for scene in changes["added"]:
+            if id(scene) in current_ids:
                 continue
-            for scene in entry["scenes"]:
-                if id(scene) in current_ids:
-                    continue
-                stage.scenes.append(scene)
-                current_ids.add(id(scene))
-                added_scenes.append(scene)
+            stage.scenes.append(scene)
+            current_ids.add(id(scene))
+            added_scenes.append(scene)
         return {"added": added_scenes, "removed": removed_scenes}
 
     def _group_scenes_by_name(self, stage: StageData) -> Dict[str, List[SceneData]]:
@@ -1667,6 +1802,10 @@ class AutoStudioWindow(QMainWindow):
             for item in scene_items
             if item.checkState(0) == Qt.CheckState.Checked
         }
+        changes = self._stage_scene_pool_selection_changes(self.project, stage, selected_keys)
+        conflicts = self._stage_item_conflicts_for_new_scenes(stage, changes["added"], changes["final"])
+        if conflicts and not self.confirm_stage_scene_item_conflicts(stage, conflicts):
+            return
         result = self._apply_stage_scene_pool_selection(self.project, stage, selected_keys)
         if self.current_scene and self.current_scene not in stage.scenes:
             self.current_scene = None
@@ -1683,6 +1822,50 @@ class AutoStudioWindow(QMainWindow):
         self.status_label.setText(
             f"场景管理已更新：添加 {len(result['added'])} 个分辨率，移除 {len(result['removed'])} 个分辨率。"
         )
+
+    def confirm_stage_scene_item_conflicts(self, stage: StageData, conflicts: List[Dict]) -> bool:
+        preview_lines = []
+        for conflict in conflicts[:8]:
+            item_type = ITEM_TYPE_LABELS.get(conflict["item_type"], conflict["item_type"])
+            scene_names = "、".join(
+                self._stage_scene_display_name(stage, scene_name)
+                for scene_name in conflict["scene_names"]
+            )
+            preview_lines.append(f"{item_type}「{conflict['item_name']}」：{scene_names}")
+        if len(conflicts) > len(preview_lines):
+            preview_lines.append(f"还有 {len(conflicts) - len(preview_lines)} 项重复。")
+
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Icon.Warning)
+        msg.setWindowTitle("重复标注提醒")
+        msg.setText("本次添加的场景与阶段内其他场景存在同名区域或控点。")
+        msg.setInformativeText("\n".join(preview_lines))
+        msg.setDetailedText(
+            "这些重复不会阻止场景引用，但后续按阶段查找控件时可能产生歧义。\n"
+            "确认这些同名标注属于不同场景后，可以继续添加。"
+        )
+        continue_btn = msg.addButton("继续添加", QMessageBox.ButtonRole.AcceptRole)
+        msg.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        return msg.clickedButton() == continue_btn
+
+    def _control_existing_names_for_scene(self, scene: Optional[SceneData], base_names: List[str]) -> List[str]:
+        names = set(base_names)
+        if self.project and scene and not self._is_scene_in_global_group(self.project, scene):
+            names.update(self._global_control_names(self.project))
+        return sorted(names)
+
+    def _warn_scene_global_control_conflicts(self, scene: Optional[SceneData]) -> bool:
+        conflicts = self._scene_global_control_conflicts(self.project, scene)
+        if not conflicts:
+            return False
+        QMessageBox.critical(
+            self,
+            "全局控点重复",
+            "该场景包含已在全局场景中定义的控点，不能作为普通场景添加：\n"
+            + "、".join(conflicts),
+        )
+        return True
 
     def preview_stage_scene_pool_item(self, item: Optional[QTreeWidgetItem]):
         if item is None:
@@ -1742,10 +1925,17 @@ class AutoStudioWindow(QMainWindow):
         for scene in moved_scenes:
             if not any(existing is scene for existing in target_group.scenes):
                 target_group.scenes.append(scene)
+        removed_controls = 0
         if target_group.name == DEFAULT_GLOBAL_SCENE_GROUP_NAME:
             self._sync_global_scenes_to_stages(self.project)
+            removed_controls = self._remove_duplicate_global_controls(self.project)
         self.update_tree_view()
-        self.status_label.setText(f"已将场景 {scene_name} 移动到分组 {target_group.name}。")
+        if removed_controls:
+            self.status_label.setText(
+                f"已将场景 {scene_name} 移动到分组 {target_group.name}，并清理 {removed_controls} 个重复全局控点。"
+            )
+        else:
+            self.status_label.setText(f"已将场景 {scene_name} 移动到分组 {target_group.name}。")
 
     def expand_all_tree(self):
         if not self.project:
@@ -2401,6 +2591,8 @@ class AutoStudioWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "当前没有可粘贴的场景。")
             return
         pasted_scene = self._clone_scene(self.scene_clipboard)
+        if self._warn_scene_global_control_conflicts(pasted_scene):
+            return
         if self.project:
             self._add_scene_to_project_pool(self.project, pasted_scene)
         self._add_scene_reference_to_stage(stage, pasted_scene)
@@ -2626,6 +2818,8 @@ class AutoStudioWindow(QMainWindow):
             if mode == 'special_area':
                 name_prefix = "特殊区域"
             existing_names = self.get_stage_item_names(self.current_stage, mode)
+            if mode == "control":
+                existing_names = self._control_existing_names_for_scene(self.current_scene, existing_names)
             name = self.prompt_unique_name("命名", f"{name_prefix}名称:", existing_names=existing_names)
             if not name:
                 self.status_label.setText("已取消添加。")
@@ -2661,6 +2855,7 @@ class AutoStudioWindow(QMainWindow):
             existing_names = self.get_stage_item_names(self.current_stage, "special_area")
         elif item_data.item_type == "control":
             existing_names = self.get_stage_item_names(self.current_stage, "control")
+            existing_names = self._control_existing_names_for_scene(self.current_scene, existing_names)
         else:
             existing_names = self.get_stage_item_names(self.current_stage, "area")
         existing_names = [n for n in existing_names if n != item_data.name]

@@ -1745,6 +1745,26 @@ class AutoStudioWindow(QMainWindow):
         return deleted_scenes
 
     @staticmethod
+    def _remove_stage_scenes_missing_from_pool(project: Optional[ProjectData]) -> List[SceneData]:
+        if not project or not project.scene_groups:
+            return []
+        pool_scene_ids = {id(scene) for group in project.scene_groups for scene in group.scenes}
+        if not pool_scene_ids:
+            return []
+        removed_scenes = []
+        for stage in project.stages:
+            stage_removed = [scene for scene in stage.scenes if id(scene) not in pool_scene_ids]
+            if not stage_removed:
+                continue
+            removed_scenes.extend(stage_removed)
+            removed_names = {scene.name for scene in stage_removed}
+            stage.scenes = [scene for scene in stage.scenes if id(scene) in pool_scene_ids]
+            for scene_name in removed_names:
+                if not any(scene.name == scene_name for scene in stage.scenes):
+                    AutoStudioWindow._remove_group_item_refs(stage, lambda ref, name=scene_name: ref.scene_name == name)
+        return removed_scenes
+
+    @staticmethod
     def _stage_scene_pool_selection_entries(project: Optional[ProjectData], stage: Optional[StageData]) -> List[Dict]:
         if not project or not stage:
             return []
@@ -4169,6 +4189,7 @@ class AutoStudioWindow(QMainWindow):
     # ==========================================
     def export_project(self):
         if not self.project: return
+        self._remove_stage_scenes_missing_from_pool(self.project)
         project_root_dir = self.get_project_root_dir()
         default_export_dir = os.path.join(project_root_dir, "customs_examples")
         os.makedirs(default_export_dir, exist_ok=True)

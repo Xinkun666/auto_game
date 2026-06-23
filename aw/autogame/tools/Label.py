@@ -967,7 +967,46 @@ class AutoStudioWindow(QMainWindow):
                     continue
                 default_group.scenes.append(scene)
                 existing_ids.add(id(scene))
+        AutoStudioWindow._prefix_duplicate_stage_scene_names(project)
         return default_group
+
+    @staticmethod
+    def _stage_scene_base_name(stage: Optional[StageData], scene_name: str) -> str:
+        if stage and scene_name.startswith(f"{stage.name}_"):
+            return scene_name[len(stage.name) + 1:]
+        return scene_name
+
+    @staticmethod
+    def _stage_scene_prefixed_name(stage: StageData, scene_name: str) -> str:
+        base_name = AutoStudioWindow._stage_scene_base_name(stage, scene_name)
+        return f"{stage.name}_{base_name}"
+
+    @staticmethod
+    def _stage_scene_display_name(stage: Optional[StageData], scene_name: str) -> str:
+        return AutoStudioWindow._stage_scene_base_name(stage, scene_name)
+
+    @staticmethod
+    def _prefix_duplicate_stage_scene_names(project: Optional[ProjectData]) -> int:
+        if not project:
+            return 0
+        occurrences_by_base_name = {}
+        for stage in project.stages:
+            for scene in stage.scenes:
+                base_name = AutoStudioWindow._stage_scene_base_name(stage, scene.name)
+                occurrences_by_base_name.setdefault(base_name, []).append((stage, scene))
+        renamed_count = 0
+        for base_name, occurrences in occurrences_by_base_name.items():
+            stage_names = {stage.name for stage, _scene in occurrences}
+            scene_ids = {id(scene) for _stage, scene in occurrences}
+            if len(stage_names) <= 1 or len(scene_ids) <= 1:
+                continue
+            for stage, scene in occurrences:
+                prefixed_name = AutoStudioWindow._stage_scene_prefixed_name(stage, base_name)
+                if scene.name == prefixed_name:
+                    continue
+                scene.name = prefixed_name
+                renamed_count += 1
+        return renamed_count
 
     @staticmethod
     def _rect_signature(rect: Optional[RectData]):
@@ -1382,7 +1421,7 @@ class AutoStudioWindow(QMainWindow):
             stage_items[stage.id] = s_node
             for scene_name, scenes in self._group_scenes_by_name(stage).items():
                 group_node = QTreeWidgetItem(s_node)
-                scene_text = f"场景: {scene_name}"
+                scene_text = f"场景: {self._stage_scene_display_name(stage, scene_name)}"
                 group_node.setText(0, scene_text)
                 group_node.setToolTip(0, scene_text)
                 group_node.setData(0, Qt.ItemDataRole.UserRole, {
@@ -1820,7 +1859,7 @@ class AutoStudioWindow(QMainWindow):
                 self.show_scene_image(first_scene)
             else:
                 self.clear_scene_display()
-            lbl = QLabel(f"当前场景: {scene_name}")
+            lbl = QLabel(f"当前场景: {self._stage_scene_display_name(self.current_stage, scene_name)}")
             self.action_layout.addWidget(lbl)
             btn_delete = QPushButton("从当前阶段移除")
             btn_delete.clicked.connect(lambda: self.delete_scene_group(self.current_stage, scene_name))
@@ -3575,7 +3614,7 @@ class AutoStudioWindow(QMainWindow):
                         scene_version_data,
                         stage_control_names,
                     )
-                    signature = AutoStudioWindow._scene_pool_signature(imported_scene)
+                    signature = (stage_name, AutoStudioWindow._scene_pool_signature(imported_scene))
                     scene = scene_catalog.get(signature)
                     if scene is None:
                         scene = imported_scene

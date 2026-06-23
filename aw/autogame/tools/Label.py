@@ -972,6 +972,18 @@ class AutoStudioWindow(QMainWindow):
         return state_path
 
     @staticmethod
+    def _save_export_editor_state_to_dir(project: ProjectData, project_dir: str) -> str:
+        state_path = AutoStudioWindow._save_editor_state_to_dir(project, project_dir)
+        info_path = os.path.join(os.path.abspath(os.fspath(project_dir)), "info.py")
+        if os.path.exists(info_path):
+            info_mtime = os.path.getmtime(info_path)
+            state_mtime = os.path.getmtime(state_path)
+            if state_mtime <= info_mtime:
+                new_mtime = info_mtime + 0.001
+                os.utime(state_path, (new_mtime, new_mtime))
+        return state_path
+
+    @staticmethod
     def _load_editor_state_from_dir(project_dir: str) -> Optional[ProjectData]:
         project_dir = os.path.abspath(os.fspath(project_dir))
         state_path = AutoStudioWindow._editor_state_path(project_dir)
@@ -4210,7 +4222,7 @@ class AutoStudioWindow(QMainWindow):
                         return
             progress_total = self._estimate_export_generation_steps()
             progress_total += self._estimate_tree_copy_steps(export_resource_source) if export_resource_source else 1
-            progress_total += 4
+            progress_total += 5
             progress_dialog = self._create_export_progress_dialog(progress_total)
             progress_state = {"current": 0, "total": progress_total}
             self._advance_export_progress(progress_dialog, progress_state, "正在创建导出暂存目录...", 0)
@@ -4379,6 +4391,8 @@ class AutoStudioWindow(QMainWindow):
             with open(file_path, "w", encoding='utf-8') as f:
                 f.write("\n".join(code_lines))
             self._advance_export_progress(progress_dialog, progress_state, "正在生成 info.py", 1)
+            self._save_export_editor_state_to_dir(self.project, staging_project_dir)
+            self._advance_export_progress(progress_dialog, progress_state, "正在保存标注编辑状态", 1)
             if imported_resource_source:
                 self.ensure_special_scene_handler(staging_project_dir, special_area_names)
             else:

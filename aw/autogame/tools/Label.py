@@ -34,6 +34,7 @@ LEGACY_GLOBAL_SCENE_GROUP_NAME = "默认分组"
 GROUPABLE_ITEM_TYPES = ("area", "special_area")
 EDITOR_STATE_FILENAME = ".label_project_state.json"
 EDITOR_STATE_VERSION = 1
+INFO_EDITOR_STATE_NAME = "LABEL_EDITOR_STATE"
 ITEM_TYPE_LABELS = {
     "area": "区域",
     "control": "控点",
@@ -823,7 +824,12 @@ class AutoStudioWindow(QMainWindow):
         return groups or default_stage_groups()
 
     @staticmethod
-    def _project_to_editor_state(project: ProjectData, project_dir: str) -> Dict:
+    def _project_to_editor_state(
+        project: ProjectData,
+        project_dir: str,
+        image_path_overrides: Optional[Dict[str, str]] = None,
+    ) -> Dict:
+        image_path_overrides = image_path_overrides or {}
         scene_by_id = {}
 
         def collect_scene(scene: SceneData):
@@ -843,7 +849,10 @@ class AutoStudioWindow(QMainWindow):
             scenes[scene_id] = {
                 "id": scene.id,
                 "name": scene.name,
-                "image_path": AutoStudioWindow._path_to_state(scene.image_path, project_dir),
+                "image_path": AutoStudioWindow._path_to_state(
+                    image_path_overrides.get(scene.id, scene.image_path),
+                    project_dir,
+                ),
                 "image_width": scene.image_width,
                 "image_height": scene.image_height,
                 "items": [
@@ -982,6 +991,11 @@ class AutoStudioWindow(QMainWindow):
                 new_mtime = info_mtime + 0.001
                 os.utime(state_path, (new_mtime, new_mtime))
         return state_path
+
+    @staticmethod
+    def _editor_state_code_line(project: ProjectData, project_dir: str, image_path_overrides: Optional[Dict[str, str]] = None) -> str:
+        state = AutoStudioWindow._project_to_editor_state(project, project_dir, image_path_overrides)
+        return f"{INFO_EDITOR_STATE_NAME} = {repr(state)}"
 
     @staticmethod
     def _load_editor_state_from_dir(project_dir: str) -> Optional[ProjectData]:
@@ -4252,6 +4266,7 @@ class AutoStudioWindow(QMainWindow):
             stage_dict = {}
             stage_info = {}
             special_area_names = set()
+            exported_scene_image_paths = {}
 
             def safe_filename(name):
                 safe = name.strip()
@@ -4323,6 +4338,7 @@ class AutoStudioWindow(QMainWindow):
                             scene_pixmap.save(scene_image_path)
                         elif scene.image_path and os.path.exists(scene.image_path):
                             shutil.copy(scene.image_path, scene_image_path)
+                        exported_scene_image_paths[scene.id] = scene_image_path
                         scene_entry = {
                             "image": os.path.join("scenes", stage_safe_name, scene_image_name),
                             "width": scene_width,
@@ -4387,6 +4403,14 @@ class AutoStudioWindow(QMainWindow):
             for stage_name, data in stage_info.items():
                 code_lines.append(f"    {repr(stage_name)}: {repr(data)},")
             code_lines.append("}")
+            code_lines.append("")
+            code_lines.append(
+                self._editor_state_code_line(
+                    self.project,
+                    staging_project_dir,
+                    exported_scene_image_paths,
+                )
+            )
 
             with open(file_path, "w", encoding='utf-8') as f:
                 f.write("\n".join(code_lines))
@@ -4503,6 +4527,9 @@ class AutoStudioWindow(QMainWindow):
         data_env = {}
         with open(py_path, "r", encoding="utf-8") as f:
             exec(f.read(), data_env)
+        editor_state = data_env.get(INFO_EDITOR_STATE_NAME)
+        if isinstance(editor_state, dict):
+            return AutoStudioWindow._project_from_editor_state(editor_state, import_dir)
         project_name = data_env.get("PROJECT_NAME") or os.path.basename(import_dir.rstrip(os.sep))
         stage_info = data_env.get("STAGE_INFO", {})
         if not isinstance(stage_info, dict):

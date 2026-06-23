@@ -2356,6 +2356,15 @@ class HouseSearchManager:
 
     def select_nearest_entry(self, current_loc):
         """落地后根据当前位置，从 house_data 中计算距离最近的进门点。"""
+        best_id, best_entry, _ = self._find_nearest_entry(current_loc)
+        self.current_house_id = best_id
+        self.active_entry = best_entry
+        self.avoid_angle_ref = None
+        self.avoid_mode = None
+        self._reset_route_stuck_bypass()
+
+    def _find_nearest_entry(self, current_loc):
+        """Return (house_id, entry, distance) for the nearest available entry."""
         best_dist = float('inf')
         best_id = None
         best_entry = None
@@ -2372,11 +2381,7 @@ class HouseSearchManager:
                     best_id = house_id
                     best_entry = entry
 
-        self.current_house_id = best_id
-        self.active_entry = best_entry
-        self.avoid_angle_ref = None
-        self.avoid_mode = None
-        self._reset_route_stuck_bypass()
+        return best_id, best_entry, best_dist
 
     def select_smart_target(self, current_loc, current_direction):
         best_dist = float('inf')

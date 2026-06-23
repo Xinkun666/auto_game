@@ -28,6 +28,7 @@ class MapNavigator:
 
         # 获取地图尺寸 (高度=rows, 宽度=cols)
         self.height, self.width = self.binary_map.shape
+        self._forbidden_component_labels = None
 
     def _is_walkable(self, x, y):
         """内部辅助函数：检查某个坐标是否可通行"""
@@ -41,6 +42,35 @@ class MapNavigator:
         if pos is None or len(pos) < 2:
             return False
         return self._is_walkable(int(pos[0]), int(pos[1]))
+
+    def _ensure_forbidden_components(self):
+        if self._forbidden_component_labels is None:
+            forbidden_mask = (self.binary_map != 255).astype("uint8")
+            _, labels = cv2.connectedComponents(forbidden_mask, connectivity=8)
+            self._forbidden_component_labels = labels
+        return self._forbidden_component_labels
+
+    def forbidden_region_id(self, pos):
+        if pos is None or len(pos) < 2:
+            return None
+        try:
+            x = int(pos[0])
+            y = int(pos[1])
+        except (TypeError, ValueError):
+            return None
+        if x < 0 or x >= self.width or y < 0 or y >= self.height:
+            return None
+        if self._is_walkable(x, y):
+            return None
+        labels = self._ensure_forbidden_components()
+        region_id = int(labels[y, x])
+        return region_id if region_id > 0 else None
+
+    def same_forbidden_region(self, start, end):
+        start_region = self.forbidden_region_id(start)
+        if start_region is None:
+            return False
+        return start_region == self.forbidden_region_id(end)
 
     def nearest_walkable_within_radius(self, pos, radius):
         """在当前位置映射到 mask 后，只扫描局部半径内的可通行像素。"""

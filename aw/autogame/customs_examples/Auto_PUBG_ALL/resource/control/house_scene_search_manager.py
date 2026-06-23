@@ -231,6 +231,13 @@ class HouseSceneSearchManager(HouseSearchManager):
             return True
         return bool(checker(loc))
 
+    def _same_forbidden_region(self, start_loc, target_loc) -> bool:
+        map_tool = getattr(self, "map_tool", None)
+        checker = getattr(map_tool, "same_forbidden_region", None)
+        if not callable(checker):
+            return False
+        return bool(checker(start_loc, target_loc))
+
     def _find_forbidden_escape_target(self, current_loc):
         target = self.forbidden_escape_target
         if target is not None and get_distance(current_loc, target) > self.FORBIDDEN_ESCAPE_ARRIVAL_DISTANCE:
@@ -255,6 +262,64 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.forbidden_escape_target = target
         return target
 
+    def _prepare_initial_forbidden_entry_route(self, w: "FrameWorker", current_loc):
+        loc = check_location(current_loc)
+        if loc is None or self._is_walkable(loc):
+            return "skip"
+        if self.current_house_id is not None or not self.initial_target_pending:
+            return "skip"
+
+        house_id, entry, dist = self._find_nearest_entry(loc)
+        if entry is None:
+            return "skip"
+
+        entry_loc = self._location_tuple(entry.get("location"))
+        if entry_loc is None or self._is_walkable(entry_loc):
+            return "skip"
+        if not self._same_forbidden_region(loc, entry_loc):
+            print(
+                f"[SceneSearch] 当前不可通行，最近入门点 {entry_loc} 也不可通行，"
+                "但不在同一块不可通行区域，先脱离当前位置所在区域"
+            )
+            return "skip"
+
+        stable_loc = self._get_stable_initial_location(loc)
+        if stable_loc is None:
+            self.stop_auto_forward(w)
+            w.refresh_frame()
+            return "waiting"
+
+        house_id, entry, dist = self._find_nearest_entry(stable_loc)
+        if entry is None:
+            return "skip"
+
+        entry_loc = self._location_tuple(entry.get("location"))
+        if entry_loc is None or self._is_walkable(entry_loc):
+            return "skip"
+        if not self._same_forbidden_region(stable_loc, entry_loc):
+            print(
+                f"[SceneSearch] 稳定定位后，最近入门点 {entry_loc} 与当前位置 "
+                "不在同一块不可通行区域，先脱离当前位置所在区域"
+            )
+            return "skip"
+
+        self.current_house_id = house_id
+        self.active_entry = entry
+        self.avoid_angle_ref = None
+        self.avoid_mode = None
+        self._reset_route_stuck_bypass()
+        self.forbidden_escape_target = None
+        self.initial_target_pending = False
+        self.status = "FAST_NAV"
+        self.history_locations = []
+        self.initial_location_samples = []
+        self.stop_auto_forward(w)
+        print(
+            f"[SceneSearch] 当前不可通行，但最近入门点 {entry_loc} 也在不可通行区域，"
+            f"不先跑安全点，直接朝房子方向快速导航 | house={house_id} | dist={dist:.2f}"
+        )
+        return "locked"
+
     def _handle_forbidden_escape(self, w: "FrameWorker", current_loc, current_direction) -> bool:
         loc = check_location(current_loc)
         if loc is None:
@@ -264,28 +329,41 @@ class HouseSceneSearchManager(HouseSearchManager):
             self.forbidden_escape_target = None
             return False
 
+        previous_target = self.forbidden_escape_target
         safe_target = self._find_forbidden_escape_target(loc)
-        self.stop_auto_forward(w)
-        self.history_locations = []
         self.initial_location_samples = []
 
         if safe_target is None:
+            self.stop_auto_forward(w)
+            self.history_locations = []
             print("[SceneSearch] 当前不可通行且未找到安全点，执行通用避障脱离")
             self.execute_unstuck_logic(w, loc)
             return True
 
+        if previous_target != safe_target:
+            self.history_locations = []
+
         dist = get_distance(loc, safe_target)
-        print(f"[SceneSearch] 当前不可通行，先脱离到最近安全点 {safe_target}，dist={dist:.2f}")
+        print(f"[SceneSearch] 当前不可通行，自动前进脱离到最近安全点 {safe_target}，dist={dist:.2f}")
+
+        if self._is_house_bypass_unstuck_paused():
+            self.history_locations = []
+            print("[SceneSearch] 不可通行脱离绕房冷却中，跳过通用卡住检测")
+        elif self.update_and_check_stuck(loc):
+            if self._maybe_bypass_front_house_on_route(w, loc, safe_target, dist, "ForbiddenEscape"):
+                return True
+            print("[SceneSearch] 不可通行脱离检测到卡住，启动避障")
+            if not self.execute_unstuck_logic(w, loc):
+                self.history_locations = []
+            return True
+
         if self._maybe_bypass_front_house_on_route(w, loc, safe_target, dist, "ForbiddenEscape"):
             return True
 
         self.align_direction(w, safe_target)
-        w.tap_single(
-            "摇杆",
-            y_bias=self.FORBIDDEN_ESCAPE_FORWARD_Y_BIAS,
-            dura=self.FORBIDDEN_ESCAPE_FORWARD_DURA,
-            wait=self.FORBIDDEN_ESCAPE_FORWARD_WAIT,
-        )
+        if not self.auto_forward:
+            w.click("自动前进")
+            self.auto_forward = True
         self.handle_jump_logic(w)
         w.refresh_frame()
         return True
@@ -339,7 +417,11 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         self.indoor_stuck_frames = 0
 
-        if self._handle_forbidden_escape(w, current_loc, current_direction):
+        forbidden_entry_route = self._prepare_initial_forbidden_entry_route(w, current_loc)
+        if forbidden_entry_route == "waiting":
+            return
+
+        if forbidden_entry_route != "locked" and self._handle_forbidden_escape(w, current_loc, current_direction):
             return
 
         if self.current_house_id is None and self._handle_r_city_pre_search_route(w, current_loc):

@@ -1,3 +1,4 @@
+import builtins
 import json
 import os
 import random
@@ -9,8 +10,10 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_navigati
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import *
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_manager import HouseExitManager
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import TimeoutTracker
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import autogame_print as print
 from aw.autogame.tools.Utils import *
+
+def print(*values, sep=" ", end="\n", file=None, flush=False, **_kwargs):
+    builtins.print(*values, sep=sep, end=end, file=file, flush=flush)
 
 if TYPE_CHECKING:
     # 假设你的框架类定义在 framework.py 文件中
@@ -1623,8 +1626,8 @@ class HouseSearchManager:
             return True
 
         print(
-            f"[{phase_label}] 距离进门点<={self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:g}，"
-            f"先对准进门点方向: {ideal_angle}"
+            f"[{phase_label}] 当前已在入门点附近，入门方向应为 {ideal_angle}，"
+            f"开始把视角对齐到入门方向"
         )
         aligned = self._align_near_entry_direction(w, ideal_angle)
         if aligned:
@@ -1659,7 +1662,10 @@ class HouseSearchManager:
             return False
 
         if dist_val <= self.ENTRY_NEAR_MICRO_DONE_DISTANCE:
-            print(f"[{phase_label}] 距离进门点 {dist_val:.2f}，无需左右位置修正")
+            print(
+                f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist_val:.2f}，"
+                f"已经足够贴近，不再左右微调摇杆"
+            )
             return False
 
         refreshed_loc = self._get_current_location(w) or current_loc
@@ -1693,9 +1699,12 @@ class HouseSearchManager:
             else -self.ENTRY_NEAR_LATERAL_CORRECT_X_BIAS
         )
         print(
-            f"[{phase_label}] 对准入门方向后做一次左右位置修正: "
-            f"dist={dist_val:.2f}, target_angle={target_angle:.1f}, "
-            f"current_dir={float(current_dir):.1f}, relative={relative:.1f}, 向{side}推"
+            f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist_val:.2f}，"
+            f"入门点在人物{side}侧 relative={relative:.1f}，"
+            f"已对准入门方向，轻推摇杆向{side}微调："
+            f"x_bias={x_bias}, dura={self.ENTRY_NEAR_LATERAL_CORRECT_DURA}, "
+            f"wait={self.ENTRY_NEAR_LATERAL_CORRECT_WAIT}, "
+            f"target_angle={target_angle:.1f}, current_dir={float(current_dir):.1f}"
         )
         w.tap_single(
             '摇杆',
@@ -1711,9 +1720,9 @@ class HouseSearchManager:
     def _handle_near_entry_point(self, w: 'FrameWorker', current_loc, target_loc, dist: float, phase_label='Nav') -> str:
         self.stop_auto_forward(w)
         print(
-            f"[{phase_label}] 已经到达入门点附近: "
-            f"dist={dist:.2f} <= {self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:g}, "
-            f"entry={target_loc}，停止自动前进"
+            f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist:.2f} "
+            f"<= {self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:g}，已经到达入门点附近，"
+            f"停止自动前进，准备对齐入门方向并微调位置"
         )
 
         if not self._align_entry_direction_at_near_point(w, phase_label):
@@ -1927,7 +1936,7 @@ class HouseSearchManager:
                     self.handle_jump_logic(w)
                     return
 
-                print(f"[Nav] 已到达进门点 (距离 {dist:.2f})")
+                print(f"[Nav] 当前距离入门点 {target_loc} 为 {dist:.2f}，近门处理结果={near_result}")
                 if near_result == "indoor":
                     self._complete_current_house_search(w, "自动开门直推进房成功")
                     return
@@ -1945,7 +1954,10 @@ class HouseSearchManager:
             self._reset_entry_near_micro_adjust()
 
             if dist <= self.ENTRY_ARRIVAL_DISTANCE:
-                print(f"[Nav] 已到达进门点 (距离 {dist:.2f})")
+                print(
+                    f"[Nav] 当前距离入门点 {target_loc} 为 {dist:.2f} "
+                    f"<= {self.ENTRY_ARRIVAL_DISTANCE:g}，已经完全到达入门点，开始找门并对准"
+                )
                 arrival_result = self._align_entry_door_after_arrival(w, "Nav")
                 if arrival_result == "indoor":
                     self._complete_current_house_search(w, "自动开门直推进房成功")
@@ -1968,7 +1980,11 @@ class HouseSearchManager:
             before_dist = dist
             mode = self._entry_forward_mode(dist)
             y_bias, dura, wait = self._get_entry_move_params(dist)
-            print(f"[Nav] 分段推进到进门点: dist={dist:.2f}, y_bias={y_bias}, dura={dura}, wait={wait}")
+            print(
+                f"[Nav] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
+                f"需要{self._entry_forward_mode_label(mode)}靠近入门点："
+                f"y_bias={y_bias}, dura={dura}, wait={wait}"
+            )
             w.tap_single('摇杆', y_bias=y_bias, dura=dura, wait=wait)
             self._refresh_frame_and_handle_jump(w)
             after_loc = self._get_current_location(w)
@@ -3787,9 +3803,9 @@ class HouseSceneSearchManager(HouseSearchManager):
             self.status = "FAST_NAV"
             target_dist = get_distance(current_loc, self.active_entry["location"])
             print(
-                f"[RCitySearch] 锁定最近入门点: house={self.current_house_id}, "
-                f"entry={self.active_entry['location']}, "
-                f"direction={self.active_entry['direction']}, dist={target_dist:.2f}"
+                f"[RCitySearch] 落地后锁定最近入门点 {self.active_entry['location']}，"
+                f"房屋={self.current_house_id}，入门方向={self.active_entry['direction']}，"
+                f"当前距离={target_dist:.2f}"
             )
             self.history_locations = []
 
@@ -3846,8 +3862,8 @@ class HouseSceneSearchManager(HouseSearchManager):
 
             if self._should_start_r_city_entry(current_loc, house_scene, dist):
                 print(
-                    f"[RCitySearch] 已到达房点/墙门附近 "
-                    f"(dist={dist:.2f}, house_scene={house_scene})，进入 house_scene 进门流程"
+                    f"[RCitySearch] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
+                    f"house_scene={house_scene}，已经到房点/墙门附近，停止导航并进入 house_scene 进门流程"
                 )
                 self.stop_auto_forward(w)
                 self.status = self.STATUS_SCENE_ENTRY
@@ -3865,8 +3881,9 @@ class HouseSceneSearchManager(HouseSearchManager):
                 y_bias, dura, wait = self._get_entry_move_params(dist)
                 mode = self._entry_forward_mode(dist)
                 print(
-                    f"[SceneSearch] 分段推进到进门点: "
-                    f"dist={dist:.2f}, y_bias={y_bias}, dura={dura}, wait={wait}"
+                    f"[SceneSearch] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
+                    f"未完成精准推进，补一次{self._entry_forward_mode_label(mode)}："
+                    f"y_bias={y_bias}, dura={dura}, wait={wait}"
                 )
                 self._tap_entry_forward_with_learning(w, target_loc, dist, mode, y_bias, dura, wait)
             self.handle_jump_logic(w)
@@ -4755,16 +4772,17 @@ class HouseSceneSearchManager(HouseSearchManager):
         )
         if not aligned:
             print(
-                f"[SceneSearch] 距离进门点 {dist:.2f}，角度未对准 "
-                f"threshold={align_threshold}，本轮不前推"
+                f"[SceneSearch] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
+                f"视角还没对准入门点，允许误差={align_threshold}，本轮不推摇杆"
             )
             return True
         mode = self._entry_forward_mode(dist)
         y_bias, dura, wait = self._get_entry_move_params(dist)
         print(
-            f"[SceneSearch] {self._entry_forward_mode_label(mode)}到进门点: "
-            f"dist={dist:.2f}, target_angle={target_angle}, diff={diff:.1f}, "
-            f"y_bias={y_bias}, dura={dura}, wait={wait}"
+            f"[SceneSearch] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
+            f"需要{self._entry_forward_mode_label(mode)}靠近入门点："
+            f"y_bias={y_bias}, dura={dura}, wait={wait}, "
+            f"目标角={target_angle}, 当前角差={diff:.1f}"
         )
         return self._tap_entry_forward_with_learning(w, target_loc, dist, mode, y_bias, dura, wait)
 
@@ -4827,6 +4845,10 @@ class HouseSceneSearchManager(HouseSearchManager):
             if current_dist is None:
                 current_dist = previous_dist
             if current_dist <= self.ENTRY_ARRIVAL_DISTANCE:
+                print(
+                    f"[SceneSearch] 当前距离入门点 {target_loc} 为 {current_dist:.2f} "
+                    f"<= {self.ENTRY_ARRIVAL_DISTANCE:g}，已经到达入门点，停止继续前推"
+                )
                 return True
 
             desired_step_dist = max(0.2, float(current_dist))
@@ -4839,9 +4861,9 @@ class HouseSceneSearchManager(HouseSearchManager):
             )
 
             print(
-                f"[SceneSearch] 执行{self._entry_forward_mode_label(mode)}小步 "
-                f"{step + 1}/{self.ENTRY_FORWARD_MAX_STEPS}: model_dist={distance_key}, "
-                f"before={current_dist:.2f}, y_bias={y_bias}, dura={dura}, wait={wait}"
+                f"[SceneSearch] 当前距离入门点 {target_loc} 为 {current_dist:.2f}，"
+                f"执行{self._entry_forward_mode_label(mode)}小步 {step + 1}/{self.ENTRY_FORWARD_MAX_STEPS}："
+                f"模型距离={distance_key}, y_bias={y_bias}, dura={dura}, wait={wait}"
             )
             w.tap_single("摇杆", y_bias=y_bias, dura=dura, wait=wait)
             self._refresh_frame_and_handle_jump(w)
@@ -4861,8 +4883,9 @@ class HouseSceneSearchManager(HouseSearchManager):
 
             moved = current_dist - after_dist
             print(
-                f"[SceneSearch] 推进反馈: mode={mode}, model_dist={distance_key}, "
-                f"after={after_dist:.2f}, moved={moved:.2f}"
+                f"[SceneSearch] 推进入门点 {target_loc} 后，"
+                f"距离从 {current_dist:.2f} 变为 {after_dist:.2f}，"
+                f"实际靠近={moved:.2f}，模式={self._entry_forward_mode_label(mode)}，模型距离={distance_key}"
             )
             if after_dist <= self.ENTRY_ARRIVAL_DISTANCE or moved <= 0:
                 break

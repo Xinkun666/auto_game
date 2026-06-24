@@ -45,7 +45,11 @@ from PyQt6.QtWidgets import (
 )
 
 from aw.autogame.tools.ProcessUtils import hidden_subprocess_context, hidden_subprocess_kwargs, install_hidden_subprocess_patch, resolve_hdc_executable, start_hidden_subprocess_window_suppressor
-from aw.autogame.tools.GameLaunchProfile import DEFAULT_SP_PACKAGE, should_use_sp_recording_for_profile
+from aw.autogame.tools.GameLaunchProfile import (
+    DEFAULT_PUBG_GAME_PACKAGE,
+    DEFAULT_SP_PACKAGE,
+    should_use_sp_recording_for_profile,
+)
 from aw.autogame.tools.Utils import archive_run_artifacts, get_resolution, resolve_run_archive_dir, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 
@@ -131,6 +135,7 @@ TEST_PROFILE_SCREEN_MODES = {
 PUBG_CASE_KEYWORDS = ("和平精英", "pubg")
 PUBG_CASE_DEFAULT_LOOP_COUNT = 2
 PUBG_CASE_RUNTIME_DESCRIPTION = "和平精英用例默认10分钟搜房、10分钟开车、10分钟跑图，总测试时长60分钟，要循环2次。"
+STARTUP_FORCE_STOP_PACKAGES = (DEFAULT_SP_PACKAGE, DEFAULT_PUBG_GAME_PACKAGE)
 LOG_FILTER_ALL = "总的"
 LOG_CATEGORY_SYSTEM = "系统日志"
 LOG_CATEGORY_TIME = "时间日志"
@@ -1154,6 +1159,7 @@ def run_testcase_entry(testcase_label: str):
     install_hidden_subprocess_patch()
     start_hidden_subprocess_window_suppressor()
     LOGGER.info("run_testcase_entry: testcase_label=%s", testcase_label)
+    force_stop_startup_apps("run-testcase 启动前清理")
     from xdevice.__main__ import main_process
 
     with hidden_subprocess_context(
@@ -1171,6 +1177,7 @@ def run_direct_entry(project_case: str, target_case: str):
         project_case,
         target_case,
     )
+    force_stop_startup_apps("run-direct 启动前清理")
     os.environ["TARGET_PROJECT_CASE"] = project_case
     os.environ["TARGET_GAME_CASE"] = target_case
 
@@ -1281,6 +1288,12 @@ def force_stop_apps(apps: list[str]) -> list[str]:
         run_hdc_shell(f"aa force-stop {app}")
         stopped.append(app)
     return stopped
+
+
+def force_stop_startup_apps(reason: str = "启动前清理") -> list[str]:
+    apps = list(STARTUP_FORCE_STOP_PACKAGES)
+    LOGGER.info("%s: force-stop startup apps=%s", reason, apps)
+    return force_stop_apps(apps)
 
 
 class LauncherWindow(QWidget):
@@ -3283,6 +3296,7 @@ class LauncherWindow(QWidget):
         if not should_use_sp_recording_for_profile(test_profile):
             cleanup_apps.discard(DEFAULT_SP_PACKAGE)
         screen_mode = resolve_screen_mode_for_test_profile(test_profile)
+        cleanup_apps.update(STARTUP_FORCE_STOP_PACKAGES)
         runtime_description = ""
         if is_pubg_testcase_keyword_match(testcase_label, project_case, target_case):
             runtime_description = PUBG_CASE_RUNTIME_DESCRIPTION

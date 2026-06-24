@@ -38,6 +38,7 @@ from launcher import (
     resolve_screen_mode_for_test_profile,
     resolve_label_project_dir,
     resolve_runtime_temp_dir,
+    run_direct_entry,
     run_testcase_entry,
     run_hdc_shell,
     write_screen_mode_config,
@@ -946,7 +947,7 @@ class LauncherLabelToolTests(unittest.TestCase):
             with mock.patch(
                 "launcher.start_hidden_subprocess_window_suppressor",
                 return_value=True,
-            ) as suppressor:
+            ) as suppressor, mock.patch("launcher.force_stop_apps", return_value=[]):
                 run_testcase_entry("testcases/pubg/pubg_full_flow/auto_pubg")
 
         suppressor.assert_called_once_with()
@@ -959,6 +960,48 @@ class LauncherLabelToolTests(unittest.TestCase):
         xdevice_main_module.main_process.assert_called_once_with(
             "run -l testcases/pubg/pubg_full_flow/auto_pubg"
         )
+
+    def test_run_testcase_entry_force_stops_sp_and_pubg_before_launch(self):
+        xdevice_module = types.ModuleType("xdevice")
+        xdevice_main_module = types.ModuleType("xdevice.__main__")
+        xdevice_main_module.main_process = mock.Mock()
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "xdevice": xdevice_module,
+                "xdevice.__main__": xdevice_main_module,
+            },
+        ), mock.patch("launcher.force_stop_apps", return_value=[]) as force_stop, mock.patch(
+            "launcher.hidden_subprocess_context",
+            return_value=mock.MagicMock(),
+        ), mock.patch(
+            "launcher.start_hidden_subprocess_window_suppressor",
+            return_value=False,
+        ):
+            run_testcase_entry("testcases/pubg/pubg_full_flow/auto_pubg")
+
+        force_stop.assert_called_once_with(
+            ["com.huawei.hmsapp.hismartperf", "com.tencent.tmgp.pubgmhd.hw"]
+        )
+        xdevice_main_module.main_process.assert_called_once()
+
+    def test_run_direct_entry_force_stops_sp_and_pubg_before_launch(self):
+        automator = mock.MagicMock()
+        game_automator_module = types.ModuleType("aw.autogame.tools.GameAutomator")
+        game_automator_module.GameAutomator = mock.Mock(return_value=automator)
+
+        with mock.patch("launcher.force_stop_apps", return_value=[]) as force_stop, mock.patch.dict(
+            sys.modules,
+            {"aw.autogame.tools.GameAutomator": game_automator_module},
+        ):
+            run_direct_entry("Auto_PUBG_ALL", "auto_pubg")
+
+        force_stop.assert_called_once_with(
+            ["com.huawei.hmsapp.hismartperf", "com.tencent.tmgp.pubgmhd.hw"]
+        )
+        game_automator_module.GameAutomator.assert_called_once_with(driver=None, logger=None)
+        automator.start.assert_called_once_with()
 
     def test_run_testcase_entry_wraps_xdevice_with_icpm_xdc_hidden_context_without_window_suppressor_patch(self):
         xdevice_module = types.ModuleType("xdevice")
@@ -978,7 +1021,7 @@ class LauncherLabelToolTests(unittest.TestCase):
         ), mock.patch(
             "launcher.start_hidden_subprocess_window_suppressor",
             return_value=False,
-        ):
+        ), mock.patch("launcher.force_stop_apps", return_value=[]):
             run_testcase_entry("testcases/pubg/pubg_full_flow/auto_pubg")
 
         xdevice_main_module.main_process.assert_called_once_with(

@@ -3501,15 +3501,6 @@ class HouseSceneSearchManager(HouseSearchManager):
     HOUSE_NEAR_ENTRY_SCENES = {HOUSE_NEAR_DOOR, HOUSE_NEAR_WALL}
     HOUSE_EXIT_SCENES = {HOUSE_OUTDOOR, HOUSE_ROOFTOP}
 
-    R_CITY_AREA_CONFIG_PATH = os.path.join(
-        "aw",
-        "autogame",
-        "customs_examples",
-        "Auto_PUBG_ALL",
-        "resource",
-        "house_entry",
-        "r_city_house_area.json",
-    )
     R_CITY_FALLBACK_CENTER = (1036, 745)
     R_CITY_FALLBACK_LANDING_TARGET = (990, 757)
     R_CITY_DEFAULT_NEAR_DISTANCE = 30.0
@@ -3721,7 +3712,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def __init__(self):
         super().__init__()
-        self.r_city_config = self._load_r_city_area_config()
+        self.r_city_config = {}
         self.r_city_center = self._load_r_city_center()
         self.r_city_landing_target = self._load_r_city_landing_target()
         self.r_city_near_distance = self._load_r_city_threshold(
@@ -3736,10 +3727,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             "early_entry_scene_distance",
             self.R_CITY_DEFAULT_EARLY_ENTRY_SCENE_DISTANCE,
         )
-        self.r_city_side_candidate_ids = (
-            self.r_city_config.get("route_entry_strategy", {})
-            .get("side_candidate_ids", {})
-        )
+        self.r_city_side_candidate_ids = {}
         self.r_city_targets = self._build_r_city_targets()
         self.r_city_recovery_route_callback = None
         self.r_city_pre_search_target = None
@@ -3912,14 +3900,6 @@ class HouseSceneSearchManager(HouseSearchManager):
 
             self._complete_current_house_search(w, "house_scene 进门成功")
 
-    def _load_r_city_area_config(self):
-        try:
-            with open(self.R_CITY_AREA_CONFIG_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (OSError, json.JSONDecodeError) as exc:
-            print(f"[RCitySearch] R城配置读取失败，使用空配置: {exc}")
-            return {}
-
     def _load_r_city_center(self):
         center = self.r_city_config.get("geometry", {}).get("center")
         if isinstance(center, (list, tuple)) and len(center) >= 2:
@@ -3967,28 +3947,67 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _build_r_city_targets(self):
         targets = []
-        for index, point in enumerate(self.r_city_config.get("points", []), start=1):
-            loc = self._location_tuple(point.get("location") or point.get("raw_location"))
-            if loc is None:
-                continue
-            approach_loc = self._resolve_r_city_approach_location(loc)
-            nearest_entry = point.get("nearest_existing_entry") or {}
-            entry_direction = self._resolve_r_city_entry_direction(
-                approach_loc,
-                nearest_entry.get("direction"),
-            )
-            target = {
-                "id": str(point.get("id") or f"r_city_{index:03d}"),
-                "location": loc,
-                "approach_location": approach_loc,
-                "side": str(point.get("side") or self._side_from_location(loc)),
-                "quality": str(point.get("quality") or "accepted"),
-                "existing_house_id": nearest_entry.get("house_id"),
-                "entry_direction": entry_direction,
-                "nearest_existing_entry": nearest_entry,
-            }
-            targets.append(target)
+        for house_id in sorted(self.house_data, key=lambda value: int(value) if str(value).isdigit() else str(value)):
+            entries = self.house_data.get(house_id) or []
+            for entry_index, entry in enumerate(entries, start=1):
+                loc = self._entry_location_tuple(entry)
+                if loc is None or self._is_excluded_entry(entry):
+                    continue
+                try:
+                    entry_direction = int(float(entry.get("direction"))) % 360
+                except (TypeError, ValueError, AttributeError):
+                    entry_direction = self._resolve_r_city_entry_direction(loc, None)
+
+                target_id = f"house_{house_id}_entry_{entry_index}"
+                targets.append(
+                    {
+                        "id": target_id,
+                        "house_id": str(house_id),
+                        "entry_index": entry_index,
+                        "location": loc,
+                        "approach_location": loc,
+                        "side": self._side_from_location(loc),
+                        "quality": "house_entry",
+                        "entry_direction": entry_direction,
+                        "nearest_existing_entry": entry,
+                        "source": "house_entry",
+                    }
+                )
+        print(f"[RCitySearch] 使用 house_entries_summary 入门点生成搜房目标: {len(targets)} 个")
         return targets
+
+    @staticmethod
+    def _r_city_target_house_id(target) -> Optional[str]:
+        if not target:
+            return None
+        house_id = target.get("house_id") or target.get("existing_house_id") or target.get("id")
+        return str(house_id) if house_id is not None else None
+
+    def _is_r_city_target_completed(self, target) -> bool:
+        target_id = target.get("id")
+        house_id = self._r_city_target_house_id(target)
+        return (
+            target_id in self.r_city_completed_targets
+            or house_id in self.completed_houses
+            or house_id in self.r_city_completed_targets
+        )
+
+    def _is_r_city_target_available(self, target) -> bool:
+        if self._is_r_city_target_completed(target):
+            return False
+        entry_loc = self._location_tuple(target.get("approach_location") or target.get("location"))
+        if entry_loc is not None and entry_loc in self.temp_skip_entries:
+            return False
+        return self.r_city_failed_counts.get(target.get("id"), 0) < self.R_CITY_FAILED_TARGET_LIMIT
+
+    def _mark_r_city_house_completed(self, house_id: Optional[str]):
+        if house_id is None:
+            return
+        house_id = str(house_id)
+        self.completed_houses.add(house_id)
+        for target in self.r_city_targets:
+            if self._r_city_target_house_id(target) == house_id:
+                self.r_city_completed_targets.add(target["id"])
 
     def _resolve_r_city_approach_location(self, loc):
         if self._is_walkable(loc):
@@ -4398,8 +4417,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         loc = self._location_tuple(current_loc)
         candidates = [
             item for item in self.r_city_targets
-            if item["id"] not in self.r_city_completed_targets
-            and self.r_city_failed_counts.get(item["id"], 0) < self.R_CITY_FAILED_TARGET_LIMIT
+            if self._is_r_city_target_available(item)
         ]
         if not candidates or loc is None:
             self.current_house_id = None
@@ -4422,11 +4440,12 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _lock_r_city_target(self, target):
         self.current_r_city_target = target
-        self.current_house_id = target["id"]
+        self.current_house_id = self._r_city_target_house_id(target)
         self.active_entry = {
             "location": target["approach_location"],
             "direction": target["entry_direction"],
             "r_city_target_id": target["id"],
+            "house_id": self.current_house_id,
         }
         self.r_city_route_target = None
         self.r_city_route_path = []
@@ -4448,15 +4467,16 @@ class HouseSceneSearchManager(HouseSearchManager):
         if target is None:
             return False
 
-        if self.current_house_id != target["id"]:
+        target_house_id = self._r_city_target_house_id(target)
+        if self.current_house_id != target_house_id:
             print(
-                f"[RCitySearch] 人物已贴近另一栋R城房体，改锁 {target['id']} "
+                f"[RCitySearch] 人物已贴近另一栋R城入门点，改锁 {target['id']} "
                 f"body_dist={distance:.2f}"
             )
             self._lock_r_city_target(target)
         else:
             print(
-                f"[RCitySearch] 人物已贴近当前R城房体 {target['id']} "
+                f"[RCitySearch] 人物已贴近当前R城入门点 {target['id']} "
                 f"body_dist={distance:.2f}"
             )
 
@@ -4473,12 +4493,12 @@ class HouseSceneSearchManager(HouseSearchManager):
         return True
 
     def _maybe_enter_visible_r_city_entry_target(self, w: "FrameWorker", current_loc) -> bool:
-        door, window = self._find_r_city_entry_visual_targets(w)
-        label, visual_target = self._choose_r_city_entry_visual_target(door, window)
-        if label is None:
+        door = self.find_largest_door(w)
+        if door is None:
             return False
 
-        return self._enter_visible_r_city_entry_target(w, current_loc, label, visual_target)
+        print("[RCityEntry] 视野中发现门，只按门入口策略处理，忽略窗户候选")
+        return self._enter_visible_r_city_entry_target(w, current_loc, "door", door)
 
     def _maybe_enter_visible_r_city_door(self, w: "FrameWorker", current_loc) -> bool:
         return self._maybe_enter_visible_r_city_entry_target(w, current_loc)
@@ -4498,9 +4518,9 @@ class HouseSceneSearchManager(HouseSearchManager):
             return False
 
         label_text = "门" if label == "door" else "窗"
-        if target is not None and self.current_house_id != target["id"]:
+        if target is not None and self.current_house_id != self._r_city_target_house_id(target):
             print(
-                f"[RCityEntry] R城内视野已见{label_text}，就近改锁 {target['id']} "
+                f"[RCityEntry] R城内视野已见{label_text}，就近改锁入门点 {target['id']} "
                 f"body_dist={distance:.2f}"
             )
             self._lock_r_city_target(target)
@@ -4535,10 +4555,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         candidates = []
         for target in self.r_city_targets:
-            target_id = target["id"]
-            if target_id in self.r_city_completed_targets:
-                continue
-            if self.r_city_failed_counts.get(target_id, 0) >= self.R_CITY_FAILED_TARGET_LIMIT:
+            if not self._is_r_city_target_available(target):
                 continue
             distance = get_distance(loc, target["location"])
             if distance <= max_distance:
@@ -4553,13 +4570,16 @@ class HouseSceneSearchManager(HouseSearchManager):
         if self.current_r_city_target:
             target_id = self.current_r_city_target["id"]
             self.r_city_failed_counts[target_id] = self.r_city_failed_counts.get(target_id, 0) + 1
+            entry_loc = self.current_r_city_target.get("approach_location")
+            if entry_loc is not None:
+                self.temp_skip_entries.add(tuple(entry_loc))
             print(
-                f"[RCitySearch] {reason}: {target_id} "
-                f"fail={self.r_city_failed_counts[target_id]}/{self.R_CITY_FAILED_TARGET_LIMIT}"
+                f"[RCitySearch] {reason}: 跳过当前入门点 {target_id} "
+                f"entry={entry_loc} fail={self.r_city_failed_counts[target_id]}/{self.R_CITY_FAILED_TARGET_LIMIT}；"
+                "同房其他入门点继续保留"
             )
         elif self.current_house_id:
             print(f"[RCitySearch] {reason}: {self.current_house_id}")
-        self.temp_skip_houses.add(self.current_house_id)
         self.current_house_id = None
         self.current_r_city_target = None
         self.active_entry = None
@@ -4594,9 +4614,8 @@ class HouseSceneSearchManager(HouseSearchManager):
             return False
         candidates = [
             item for item in self.r_city_targets
-            if item["id"] not in self.r_city_completed_targets
-            and item["id"] != self.current_house_id
-            and self.r_city_failed_counts.get(item["id"], 0) < self.R_CITY_FAILED_TARGET_LIMIT
+            if self._is_r_city_target_available(item)
+            and self._r_city_target_house_id(item) != self.current_house_id
             and get_distance(loc, item["location"]) <= self.R_CITY_FORWARD_HOUSE_BYPASS_DISTANCE
         ]
         if not candidates:
@@ -4626,7 +4645,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             return
         candidates = [
             item for item in self.r_city_targets
-            if item["id"] not in self.r_city_completed_targets
+            if self._is_r_city_target_available(item)
             and get_distance(loc, item["location"]) <= self.r_city_early_entry_scene_distance
         ]
         if not candidates:
@@ -4650,7 +4669,7 @@ class HouseSceneSearchManager(HouseSearchManager):
     def _should_start_search_from_indoor(self) -> bool:
         return (
             self.current_house_id is not None
-            and self.current_house_id not in self.r_city_completed_targets
+            and self.current_house_id not in self.completed_houses
         )
 
     def _confirm_indoor_before_search(self, w: "FrameWorker", reason: str) -> bool:
@@ -4681,12 +4700,26 @@ class HouseSceneSearchManager(HouseSearchManager):
             return False
 
         if self.current_house_id is not None:
-            self.completed_houses.add(self.current_house_id)
-            self.r_city_completed_targets.add(self.current_house_id)
+            self._mark_r_city_house_completed(self.current_house_id)
         self.searching_number += 1
+        completed_house_count = len(
+            {
+                self._r_city_target_house_id(target)
+                for target in self.r_city_targets
+                if self._is_r_city_target_completed(target)
+            }
+        )
+        total_house_count = len(
+            {
+                self._r_city_target_house_id(target)
+                for target in self.r_city_targets
+                if self._r_city_target_house_id(target) is not None
+            }
+        )
         print(
             f"[RCitySearch] 房屋 {self.current_house_id} 完成，"
-            f"已搜 {len(self.r_city_completed_targets)}/{len(self.r_city_targets)}"
+            f"已搜 {completed_house_count}/{total_house_count} 栋，"
+            f"入口完成 {len(self.r_city_completed_targets)}/{len(self.r_city_targets)}"
         )
         self._refresh_frame_and_handle_jump(w)
         exit_direction = w.get_info("direction")
@@ -5908,9 +5941,8 @@ class HouseSceneSearchManager(HouseSearchManager):
             return None
         candidates = [
             item for item in self.r_city_targets
-            if item["id"] != self.current_house_id
-            and item["id"] not in self.r_city_completed_targets
-            and self.r_city_failed_counts.get(item["id"], 0) < self.R_CITY_FAILED_TARGET_LIMIT
+            if self._r_city_target_house_id(item) != self.current_house_id
+            and self._is_r_city_target_available(item)
         ]
         if not candidates:
             return None
@@ -6278,12 +6310,18 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _enter_house_by_scene(self, w: "FrameWorker") -> Optional[bool]:
         self.stop_auto_forward(w)
-        if self.current_r_city_target:
+        if (
+            self.current_r_city_target
+            and self.current_r_city_target.get("source") != "house_entry"
+        ):
             return self._enter_r_city_house_by_free_search(w)
 
         if self.active_entry:
             ideal_angle = self.active_entry["direction"]
-            print(f"[SceneEntry] 调整至进门方向: {ideal_angle}")
+            print(
+                f"[SceneEntry] 使用入门点+入门方向进门: "
+                f"entry={self.active_entry.get('location')}, direction={ideal_angle}"
+            )
             aligned = self.align_direction_blocking(
                 w,
                 w.get_info("direction"),

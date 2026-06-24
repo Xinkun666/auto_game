@@ -334,13 +334,16 @@ class StreamClient:
 
                     reconnect_attempt += 1
                     delay = self._get_reconnect_delay(reconnect_attempt)
-                    message = (
-                        "[Stream] Receive loop ended unexpectedly. "
-                        "Reconnect in %.1fs (attempt=%d)." % (delay, reconnect_attempt)
-                    )
-                    print(message, flush=True)
-                    self._write_disconnect_signal("receive_loop_ended", message, reconnect_attempt)
-                    if self._should_exit_on_disconnect():
+                    if self._maybe_write_disconnect_signal(
+                        "receive_loop_ended",
+                        (
+                            "[Stream] Receive loop ended unexpectedly. "
+                            "Reconnect in %.1fs (attempt=%d)." % (delay, reconnect_attempt)
+                        ),
+                        reconnect_attempt,
+                        transient_label="Receive loop ended unexpectedly",
+                        delay=delay,
+                    ) and self._should_exit_on_disconnect():
                         print("[Stream] Exit on stream disconnect requested.", flush=True)
                         break
                     if self._stop_event.wait(delay):
@@ -352,9 +355,13 @@ class StreamClient:
                     reconnect_attempt += 1
                     delay = self._get_reconnect_delay(reconnect_attempt)
                     message = "[Stream] Channel ready timeout. Reconnect in %.1fs (attempt=%d)." % (delay, reconnect_attempt)
-                    print(message, flush=True)
-                    self._write_disconnect_signal("channel_ready_timeout", message, reconnect_attempt)
-                    if self._should_exit_on_disconnect():
+                    if self._maybe_write_disconnect_signal(
+                        "channel_ready_timeout",
+                        message,
+                        reconnect_attempt,
+                        transient_label="Channel ready timeout",
+                        delay=delay,
+                    ) and self._should_exit_on_disconnect():
                         print("[Stream] Exit on stream disconnect requested.", flush=True)
                         break
                     if self._stop_event.wait(delay):
@@ -367,10 +374,13 @@ class StreamClient:
                     status = e.code() if hasattr(e, "code") else "UNKNOWN"
                     details = e.details() if hasattr(e, "details") else str(e)
                     message = "[Stream] gRPC Error: code=%s details=%s" % (status, details)
-                    print(message, flush=True)
-                    print("[Stream] Reconnect in %.1fs (attempt=%d)." % (delay, reconnect_attempt), flush=True)
-                    self._write_disconnect_signal("grpc_error", message, reconnect_attempt)
-                    if self._should_exit_on_disconnect():
+                    if self._maybe_write_disconnect_signal(
+                        "grpc_error",
+                        message,
+                        reconnect_attempt,
+                        transient_label="gRPC Error",
+                        delay=delay,
+                    ) and self._should_exit_on_disconnect():
                         print("[Stream] Exit on stream disconnect requested.", flush=True)
                         break
                     if self._stop_event.wait(delay):
@@ -381,10 +391,13 @@ class StreamClient:
                     reconnect_attempt += 1
                     delay = self._get_reconnect_delay(reconnect_attempt)
                     message = "[Stream] Runtime Error: %s" % e
-                    print(message, flush=True)
-                    print("[Stream] Reconnect in %.1fs (attempt=%d)." % (delay, reconnect_attempt), flush=True)
-                    self._write_disconnect_signal("runtime_error", message, reconnect_attempt)
-                    if self._should_exit_on_disconnect():
+                    if self._maybe_write_disconnect_signal(
+                        "runtime_error",
+                        message,
+                        reconnect_attempt,
+                        transient_label="Runtime Error",
+                        delay=delay,
+                    ) and self._should_exit_on_disconnect():
                         print("[Stream] Exit on stream disconnect requested.", flush=True)
                         break
                     if self._stop_event.wait(delay):
@@ -508,6 +521,49 @@ class StreamClient:
             self.save_queue.put_nowait(None)
         except Exception:
             pass
+
+    @staticmethod
+    def _stream_disconnect_signal_attempts():
+        raw = os.environ.get("AUTOGAME_STREAM_DISCONNECT_RETRIES_BEFORE_SIGNAL", "2")
+        try:
+            retries_before_signal = max(0, int(raw))
+        except (TypeError, ValueError):
+            retries_before_signal = 2
+        return retries_before_signal + 1
+
+    @staticmethod
+    def _build_transient_disconnect_message(label, attempt, delay):
+        return (
+            "[Stream] Transient %s; reconnect in %.1fs "
+            "(attempt=%d, signal_threshold=%d)."
+            % (
+                label,
+                float(delay),
+                int(attempt),
+                StreamClient._stream_disconnect_signal_attempts(),
+            )
+        )
+
+    def _should_signal_stream_disconnect(self, attempt):
+        try:
+            attempt = int(attempt)
+        except (TypeError, ValueError):
+            return False
+        return attempt >= self._stream_disconnect_signal_attempts()
+
+    def _maybe_write_disconnect_signal(self, reason, message, attempt, transient_label=None, delay=0.0):
+        if not self._should_signal_stream_disconnect(attempt):
+            print(
+                self._build_transient_disconnect_message(transient_label or reason, attempt, delay),
+                flush=True,
+            )
+            return False
+
+        print(message, flush=True)
+        if "Reconnect in" not in str(message):
+            print("[Stream] Reconnect in %.1fs (attempt=%d)." % (float(delay), int(attempt)), flush=True)
+        self._write_disconnect_signal(reason, message, attempt)
+        return True
 
     def _write_disconnect_signal(self, reason, message, attempt):
         archive_dir = os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()

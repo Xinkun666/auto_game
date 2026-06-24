@@ -119,9 +119,9 @@ STREAM_DISCONNECT_PATTERNS = (
     "[Stream] Runtime Error:",
 )
 SP_RECORD_EVER_STARTED_MARKERS = (
-    "[Timer] sp 记录已开始",
-    "[Timer] sp 记录已停止",
-    "[Timer] sp 数据已保存",
+    "sp 记录已开始",
+    "sp 记录已停止",
+    "sp 数据已保存",
 )
 DISMISS_REBOOT_PROMPT_ENV = "AUTOGAME_DISMISS_REBOOT_PROMPT"
 DEVICE_LOG_SETTLE_TIMEOUT_SECONDS = 3.0

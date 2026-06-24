@@ -18,6 +18,7 @@ LOG_CATEGORIES = {
 }
 EMPTY_FIELD = "-"
 PREFIX_RE = re.compile(r"^\[(?P<prefix>[^\]]+)\]\s*(?P<body>.*)$")
+BRACKET_FIELD_RE = re.compile(r"\[(?P<key>[^:\]]+):(?P<value>[^\]]*)\]")
 PREFIX_TARGETS = {
     "Parachute": "跳伞阶段",
     "Searching": "搜房阶段",
@@ -28,8 +29,10 @@ PREFIX_TARGETS = {
     "SceneExit": "出房流程",
     "HouseExit": "出房流程",
     "Nav": "导航到目标",
+    "NavAlign": "导航对齐",
     "NavBypass": "路线绕房避障",
     "Unstuck": "脱困避障",
+    "AdaptiveMotion": "自适应动作参数",
     "Running": "跑图阶段",
     "Driving": "开车阶段",
     "Entry": "进门确认",
@@ -41,6 +44,13 @@ PREFIX_TARGETS = {
     "Smart": "智能导航",
     "TurnCalibration": "转向校准",
     "Flow": "全流程阶段",
+    "Round": "全流程阶段",
+    "Terminal": "结束阶段",
+    "Popup": "关闭弹窗阶段",
+    "StartGame": "开始游戏阶段",
+    "Timer": "时间管理",
+    "End": "结束阶段",
+    "Resolution": "分辨率检测",
 }
 ACTION_WORDS = (
     "启动",
@@ -114,10 +124,61 @@ def _looks_like_result(text):
     return any(word in text for word in RESULT_WORDS)
 
 
+def _infer_method(action, target=None):
+    action_text = _clean_field(action)
+    target_text = _clean_field(target)
+    if action_text == EMPTY_FIELD:
+        return EMPTY_FIELD
+    if "避障" in action_text or "脱困" in action_text:
+        return "按当前脱困策略执行"
+    if "跳跃" in action_text or "翻窗" in action_text:
+        return "点击跳跃并按配置前推"
+    if "出房" in action_text:
+        return "按门窗识别和 house_scene 状态执行出房流程"
+    if "进房" in action_text or "进门" in action_text:
+        return "对齐入口后按进门流程执行"
+    if "点击" in action_text:
+        return "点击对应控件并刷新画面"
+    if "切换" in action_text:
+        return "调用阶段切换并同步状态"
+    if "等待" in action_text:
+        return "保持当前状态等待下一帧"
+    if target_text != EMPTY_FIELD:
+        return f"按{target_text}当前策略执行"
+    return "按当前策略执行"
+
+
+def _parse_bracket_state_decision(text):
+    fields = {
+        match.group("key").strip(): match.group("value").strip()
+        for match in BRACKET_FIELD_RE.finditer(text)
+    }
+    if not {"情况", "状态", "决策"} & set(fields):
+        return None
+
+    situation = fields.get("情况")
+    state = fields.get("状态")
+    decision = fields.get("决策")
+    status_parts = [part for part in (situation, state) if part]
+    status = "；".join(status_parts) if status_parts else text
+    action = f"执行决策 {decision}" if decision else None
+    return (
+        status,
+        "开车阶段",
+        action,
+        "根据当前状态执行驾驶控制" if decision else _infer_method(action, "开车阶段"),
+        "等待后续判断" if action else None,
+    )
+
+
 def infer_log_fields(message):
     text = _clean_field(message)
     target = None
     body = text
+
+    bracket_fields = _parse_bracket_state_decision(text)
+    if bracket_fields is not None:
+        return bracket_fields
 
     match = PREFIX_RE.match(text)
     if match:
@@ -129,7 +190,7 @@ def infer_log_fields(message):
     action = None
     result = None
 
-    for separator in ("，", ",", "。", ";", "；"):
+    for separator in ("，", "。", "；"):
         if separator in body:
             first, second = body.split(separator, 1)
             observation = first.strip() or body
@@ -141,16 +202,24 @@ def infer_log_fields(message):
                     action = remainder
             break
 
-    return observation, target, action, result
+    if action is None:
+        action = "记录当前状态"
+        method = "输出当前阶段的状态数据供后续判断"
+        result = result or "已记录"
+    else:
+        method = _infer_method(action, target)
+        result = result or "等待后续判断"
+    return observation, target, action, method, result
 
 
-def format_log_line(observation, target=None, action=None, result=None, *, category=LOG_CATEGORY_LOGIC):
+def format_log_line(observation, target=None, action=None, method=None, result=None, *, category=LOG_CATEGORY_LOGIC):
     category_text = _clean_category(category)
     return (
         f"{LOG_PREFIX}[{category_text}] "
-        f"观察现象={_clean_field(observation)} | "
+        f"当前状态={_clean_field(observation)} | "
         f"当前目标={_clean_field(target)} | "
-        f"要做的事={_clean_field(action)} | "
+        f"要做什么={_clean_field(action)} | "
+        f"怎么做={_clean_field(method)} | "
         f"结果={_clean_field(result)}"
     )
 
@@ -159,6 +228,7 @@ def log_step(
     observation,
     target=None,
     action=None,
+    method=None,
     result=None,
     *,
     category=LOG_CATEGORY_LOGIC,
@@ -170,6 +240,7 @@ def log_step(
             observation,
             target=target,
             action=action,
+            method=method,
             result=result,
             category=category,
         ),
@@ -178,18 +249,31 @@ def log_step(
     )
 
 
-def autogame_print(*values, sep=" ", end="\n", file=None, flush=False, category=LOG_CATEGORY_LOGIC):
+def autogame_print(
+    *values,
+    sep=" ",
+    end="\n",
+    file=None,
+    flush=False,
+    category=LOG_CATEGORY_LOGIC,
+    target=None,
+    action=None,
+    method=None,
+    result=None,
+    status=None,
+):
     message = sep.join(str(value) for value in values)
     if message.startswith(LOG_PREFIX):
         builtins.print(message, end=end, file=sys.stdout if file is None else file, flush=flush)
         return
-    observation, target, action, result = infer_log_fields(message)
+    inferred_status, inferred_target, inferred_action, inferred_method, inferred_result = infer_log_fields(message)
     builtins.print(
         format_log_line(
-            observation,
-            target=target,
-            action=action,
-            result=result,
+            status if status is not None else inferred_status,
+            target=target if target is not None else inferred_target,
+            action=action if action is not None else inferred_action,
+            method=method if method is not None else inferred_method,
+            result=result if result is not None else inferred_result,
             category=category,
         ),
         end=end,

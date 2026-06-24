@@ -201,7 +201,10 @@ class LauncherLabelToolTests(unittest.TestCase):
         self.assertEqual(LOG_CATEGORY_LOGIC, classify_output_line("[Parachute] 检测到跳伞按钮，开始监控航线距离"))
         self.assertEqual(
             LOG_CATEGORY_LOGIC,
-            classify_output_line("[AutoLog][逻辑日志] 观察现象=发现房体 | 当前目标=进门点 | 要做的事=绕行 | 结果=等待"),
+            classify_output_line(
+                "[AutoLog][逻辑日志] 当前状态=发现房体 | 当前目标=进门点 | "
+                "要做什么=绕行 | 怎么做=绕过当前障碍点 | 结果=等待"
+            ),
         )
         self.assertEqual(LOG_CATEGORY_UI, classify_output_line("执行点击: open_door"))
         self.assertEqual(LOG_CATEGORY_OTHER, classify_output_line("plain unclassified line"))
@@ -210,7 +213,7 @@ class LauncherLabelToolTests(unittest.TestCase):
         text = (
             "[Launcher] 开始执行\n"
             "[Timer] 搜房阶段开始\n"
-            "[AutoLog][逻辑日志] 观察现象=发现房体 | 当前目标=进门点 | 要做的事=绕行 | 结果=等待\n"
+            "[AutoLog][逻辑日志] 当前状态=发现房体 | 当前目标=进门点 | 要做什么=绕行 | 怎么做=绕过当前障碍点 | 结果=等待\n"
             "执行点击: open_door\n"
             "plain unclassified line\n"
         )
@@ -226,7 +229,7 @@ class LauncherLabelToolTests(unittest.TestCase):
         text = (
             "[Launcher] 开始执行\n"
             "[Timer] 搜房阶段开始\n"
-            "[AutoLog][逻辑日志] 观察现象=发现房体 | 当前目标=进门点 | 要做的事=绕行 | 结果=等待\n"
+            "[AutoLog][逻辑日志] 当前状态=发现房体 | 当前目标=进门点 | 要做什么=绕行 | 怎么做=绕过当前障碍点 | 结果=等待\n"
         )
 
         LauncherWindow._record_output_text(window, text)
@@ -333,6 +336,19 @@ class LauncherLabelToolTests(unittest.TestCase):
             LauncherWindow._archive_run_outputs(window, 1, 0)
 
         self.assertTrue(archive_mock.call_args.kwargs["generate_preview_video"])
+
+    def test_structured_sp_log_marks_current_run_sp_started(self):
+        window = LauncherWindow.__new__(LauncherWindow)
+        window.current_run_sp_started = False
+        window.current_run_sp_state = {}
+
+        LauncherWindow._handle_sp_output(
+            window,
+            "[AutoLog][逻辑日志] 当前状态=sp 记录已开始 | 当前目标=性能记录 | "
+            "要做什么=标记 sp 开始 | 怎么做=点击 sp 后更新记录状态 | 结果=recording=True",
+        )
+
+        self.assertTrue(window.current_run_sp_started)
 
     def test_is_multiprocessing_child_detects_pyinstaller_worker_argv(self):
         self.assertTrue(

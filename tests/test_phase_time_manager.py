@@ -76,8 +76,16 @@ class PhaseTimeManagerLoopTests(unittest.TestCase):
         self.assertIn(f"enter_{PHASE_SEARCHING}", events)
         self.assertIn(f"completed_{PHASE_SEARCHING}", events)
         printed_lines = [call.args[0] for call in print_mock.call_args_list]
-        self.assertIn("[Timer] 搜房阶段开始，计划 10 分钟", printed_lines)
-        self.assertIn("[Timer] 搜房阶段结束，已累计 10 分钟", printed_lines)
+        self.assertIn(
+            "[AutoLog][逻辑日志] 当前状态=搜房阶段开始 | 当前目标=时间管理 | "
+            "要做什么=记录阶段开始 | 怎么做=启动搜房阶段计时器，计划 10 分钟 | 结果=计时中",
+            printed_lines,
+        )
+        self.assertIn(
+            "[AutoLog][逻辑日志] 当前状态=搜房阶段结束 | 当前目标=时间管理 | "
+            "要做什么=记录阶段结束 | 怎么做=累计搜房阶段计时 10 分钟 | 结果=阶段计时完成",
+            printed_lines,
+        )
 
     def test_pubg_demo_phase_durations_are_five_minutes_each(self):
         auto_pubg_path = (
@@ -123,7 +131,8 @@ class PhaseTimeManagerLoopTests(unittest.TestCase):
 
         printed_lines = [call.args[0] for call in print_mock.call_args_list]
         self.assertIn(
-            "[Timer] 15 分钟总时长已圆满结束 | 总计=00:00 | 搜房=05:00 | 跑图=05:00 | 开车=05:00",
+            "[AutoLog][逻辑日志] 当前状态=总计=00:00 | 搜房=05:00 | 跑图=05:00 | 开车=05:00 | "
+            "当前目标=时间管理 | 要做什么=结束本轮阶段计时 | 怎么做=汇总 15 分钟阶段预算并报告剩余时间 | 结果=总时长已结束",
             printed_lines,
         )
 

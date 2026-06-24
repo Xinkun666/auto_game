@@ -4,6 +4,8 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Set
 
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import log_step
+
 
 PHASE_RUNNING = "跑图"
 PHASE_DRIVING = "开车"
@@ -65,7 +67,15 @@ class PhaseTimeManager:
         if state.started:
             return
         state.started = True
-        print(f"[Timer] {self._phase_label(phase_name)}开始，计划 {self._format_phase_minutes(state.duration)} 分钟")
+        phase_label = self._phase_label(phase_name)
+        duration_text = self._format_phase_minutes(state.duration)
+        log_step(
+            f"{phase_label}开始",
+            target="时间管理",
+            action="记录阶段开始",
+            method=f"启动{phase_label}计时器，计划 {duration_text} 分钟",
+            result="计时中",
+        )
 
     def _mark_phase_completed(self, phase_name: str) -> bool:
         state = self.phase_states[phase_name]
@@ -73,7 +83,15 @@ class PhaseTimeManager:
             return False
         state.completed = True
         state.elapsed = state.duration
-        print(f"[Timer] {self._phase_label(phase_name)}结束，已累计 {self._format_phase_minutes(state.duration)} 分钟")
+        phase_label = self._phase_label(phase_name)
+        duration_text = self._format_phase_minutes(state.duration)
+        log_step(
+            f"{phase_label}结束",
+            target="时间管理",
+            action="记录阶段结束",
+            method=f"累计{phase_label}计时 {duration_text} 分钟",
+            result="阶段计时完成",
+        )
         return True
 
     def _write_sp_state(self, event_name: str):
@@ -99,7 +117,13 @@ class PhaseTimeManager:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
             os.replace(tmp_path, signal_path)
         except Exception as exc:
-            print(f"[Timer] 写入 sp 状态失败: {exc}")
+            log_step(
+                "写入 sp 状态失败",
+                target="时间管理",
+                action="记录 sp 状态",
+                method="写入 sp_recording_state.json",
+                result=str(exc),
+            )
 
     def _phase_for_stage(self, stage_name: Optional[str]) -> Optional[str]:
         return self.stage_phase_map.get(stage_name)
@@ -108,7 +132,13 @@ class PhaseTimeManager:
         self.case_loop_count = parse_case_loop_count(count)
         if self.case_loop_index > self.case_loop_count:
             self.case_loop_index = self.case_loop_count
-        print(f"[Timer] 单次用例循环次数: {self.case_loop_count}")
+        log_step(
+            f"单次用例循环次数={self.case_loop_count}",
+            target="时间管理",
+            action="配置循环次数",
+            method="读取 AUTOGAME_SINGLE_CASE_LOOPS 后按最小 1 次校正",
+            result="配置已更新",
+        )
 
     def _reset_phase_progress(self):
         for state in self.phase_states.values():
@@ -216,7 +246,13 @@ class PhaseTimeManager:
         self.round_index += 1
         self.landed = False
         self.start_game_time = None
-        print(f"[Timer] 开始第 {self.case_loop_index}/{self.case_loop_count} 次循环，第 {self.round_index} 局")
+        log_step(
+            f"第 {self.case_loop_index}/{self.case_loop_count} 次循环，第 {self.round_index} 局开始",
+            target="时间管理",
+            action="开始新一局",
+            method="重置落地时间并递增局数",
+            result="新局计时待落地后启动",
+        )
 
     def has_next_case_loop(self) -> bool:
         return self.case_loop_index < self.case_loop_count
@@ -229,7 +265,13 @@ class PhaseTimeManager:
         self.case_loop_index += 1
         self.sp_recording = False
         self.sp_saved = False
-        print(f"[Timer] 准备进入第 {self.case_loop_index}/{self.case_loop_count} 次循环")
+        log_step(
+            f"准备进入第 {self.case_loop_index}/{self.case_loop_count} 次循环",
+            target="时间管理",
+            action="进入下一次循环",
+            method="重置阶段计时和 sp 保存状态",
+            result="等待返回大厅后继续",
+        )
         self._write_sp_state("case_loop_advanced")
         return True
 
@@ -267,18 +309,36 @@ class PhaseTimeManager:
     def mark_sp_started(self):
         self.sp_started_ever = True
         self.sp_recording = True
-        print("[Timer] sp 记录已开始")
+        log_step(
+            "sp 记录已开始",
+            target="性能记录",
+            action="标记 sp 开始",
+            method="点击 sp 后更新记录状态",
+            result="recording=True",
+        )
         self._write_sp_state("sp_started")
 
     def mark_sp_stopped(self):
         if self.sp_recording:
-            print("[Timer] sp 记录已停止")
+            log_step(
+                "sp 记录已停止",
+                target="性能记录",
+                action="标记 sp 停止",
+                method="点击 sp 后更新记录状态",
+                result="recording=False",
+            )
         self.sp_recording = False
         self._write_sp_state("sp_stopped")
 
     def mark_sp_saved(self):
         self.sp_saved = True
-        print("[Timer] sp 数据已保存")
+        log_step(
+            "sp 数据已保存",
+            target="性能记录",
+            action="标记 sp 保存",
+            method="长按 sp 保存后更新保存状态",
+            result="saved=True",
+        )
         self._write_sp_state("sp_saved")
 
 
@@ -323,8 +383,20 @@ class PhaseTimeReporter:
         )
 
     def _print_remaining(self, timer: PhaseTimeManager):
-        print(f"[Timer] 阶段剩余时间 | {self._remaining_parts(timer)}")
+        log_step(
+            self._remaining_parts(timer),
+            target="时间管理",
+            action="报告阶段剩余时间",
+            method="读取总计、搜房、跑图、开车剩余秒数并格式化",
+            result="继续当前阶段",
+        )
 
     def _print_all_done(self, timer: PhaseTimeManager):
         total_minutes = timer._format_phase_minutes(timer.total_duration)
-        print(f"[Timer] {total_minutes} 分钟总时长已圆满结束 | {self._remaining_parts(timer)}")
+        log_step(
+            self._remaining_parts(timer),
+            target="时间管理",
+            action="结束本轮阶段计时",
+            method=f"汇总 {total_minutes} 分钟阶段预算并报告剩余时间",
+            result="总时长已结束",
+        )

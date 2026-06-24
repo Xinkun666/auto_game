@@ -20,6 +20,10 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.phase_time_mana
     PhaseTimeReporter,
     parse_case_loop_count,
 )
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import (
+    autogame_print as print,
+    log_step,
+)
 from aw.autogame.tools.GameLaunchProfile import should_use_sp_recording_for_profile
 
 """
@@ -82,6 +86,16 @@ CLOSE_POPUP_INFOS = (
     "关闭活动2",
     "关闭活动3",
 )
+STAGE_LOG_METHODS = {
+    "关闭弹窗阶段": "按优先级识别并关闭弹窗，确认大厅稳定后进入选图",
+    "选择地图阶段": "点击地图、经典模式、切换、海岛、确定后进入开始游戏",
+    "开始游戏阶段": "处理加速礼包和提示，点击开始游戏并等待拳头画面",
+    "跳伞阶段": "交给 ParachuteManager 监控航线距离并执行跳伞",
+    "搜房阶段": "先处理 sp 和终止态，再按搜房导航、进房、室内搜房、出房链路执行",
+    "跑图阶段": "同步视角和 sp，按跑图/找车/进圈逻辑推进",
+    "开车阶段": "同步剩余开车时间，按出库、巡航、避障、进圈逻辑推进",
+    "结束阶段": "停止 sp，处理观战/返回大厅，并按是否终局决定下一阶段",
+}
 
 start_game = False
 start_game_click_time = None
@@ -104,6 +118,25 @@ phase_timer.configure_case_loop_count(
     parse_case_loop_count(os.environ.get("AUTOGAME_SINGLE_CASE_LOOPS"))
 )
 phase_reporter = PhaseTimeReporter()
+
+
+def log_stage_step(stage_name: str, status: str, action: str, method: str, result: str = "进入阶段逻辑"):
+    log_step(
+        status,
+        target=stage_name,
+        action=action,
+        method=method,
+        result=result,
+    )
+
+
+def log_stage_entry(stage_name: str):
+    log_stage_step(
+        stage_name or "未知阶段",
+        f"当前阶段={stage_name}",
+        "执行当前阶段主逻辑",
+        STAGE_LOG_METHODS.get(stage_name, "按当前阶段配置继续处理"),
+    )
 
 
 def pause_sp_after_death(w: "FrameWorker"):
@@ -407,6 +440,13 @@ def reset_lobby_confirm(mark_popup_closed: bool = False):
 
 
 def click_popup_and_refresh(w: "FrameWorker", target):
+    log_stage_step(
+        "关闭弹窗阶段",
+        f"识别到弹窗控件={target}",
+        "关闭当前弹窗",
+        "点击识别到的弹窗控件，重置大厅确认计数，然后刷新画面",
+        "等待大厅图标稳定出现",
+    )
     w.click(target)
     reset_lobby_confirm(mark_popup_closed=True)
     w.refresh_frame()
@@ -448,7 +488,13 @@ def prepare_rank_finish_for_lobby(w: "FrameWorker"):
     if not rank_finish_pending and not _has_rank_finish_info(w):
         return
 
-    print("[End] 检测到排名界面，等待2s后点击观战对手再返回大厅")
+    log_stage_step(
+        "结束阶段",
+        "检测到个人排名或队伍排名界面",
+        "进入观战界面以便返回大厅",
+        "等待 2 秒让结算控件稳定，点击观战对手并刷新画面",
+        "准备执行返回大厅流程",
+    )
     time.sleep(RANK_FINISH_SPECTATE_WAIT_SECONDS)
     w.click("观战对手")
     w.refresh_frame()
@@ -498,6 +544,7 @@ def on_stage(w: "FrameWorker"):
     previous_stage = phase_timer.last_stage
     stage_events = phase_timer.sync_stage(w.current_stage)
     stage_events |= phase_timer.refresh()
+    log_stage_entry(w.current_stage)
 
     if previous_stage == "开车阶段" and w.current_stage == "跑图阶段":
         finding_car = driving_manager.consume_running_transition_finding_car(
@@ -571,6 +618,13 @@ def on_stage(w: "FrameWorker"):
             return
 
     if w.current_stage == "选择地图阶段":
+        log_stage_step(
+            "选择地图阶段",
+            "进入地图选择流程",
+            "选择海岛经典模式",
+            "依次点击地图、经典模式、切换、海岛、自动匹配和确定",
+            "完成后切到开始游戏阶段",
+        )
         w.click("地图")
         time.sleep(2)
         w.click("经典模式")
@@ -595,30 +649,64 @@ def on_stage(w: "FrameWorker"):
 
     if w.current_stage == "开始游戏阶段":
         if w.get_info("加速礼包"):
+            log_stage_step(
+                "开始游戏阶段",
+                "检测到加速礼包弹窗",
+                "关闭加速礼包",
+                "点击放弃并刷新画面",
+                "继续查找开始游戏按钮",
+            )
             w.click("放弃")
             w.refresh_frame()
 
         if start_game and start_game_click_time is not None:
             if time.time() - start_game_click_time >= START_GAME_VERIFY_DELAY:
                 if w.get_info("开始游戏"):
-                    print("[StartGame] 开始游戏按钮仍可识别，判定上次点击未生效，准备重试")
+                    log_stage_step(
+                        "开始游戏阶段",
+                        "开始游戏按钮仍可识别",
+                        "重试开始游戏点击",
+                        "清空上次点击状态，下一轮重新点击开始游戏",
+                        "等待重新点击",
+                    )
                     start_game = False
                     start_game_click_time = None
 
         if w.get_info("房子"):
             if not start_game:
+                log_stage_step(
+                    "开始游戏阶段",
+                    "大厅房子图标已识别，尚未发起开始游戏",
+                    "点击开始游戏",
+                    "点击开始游戏控件并记录点击时间，后续用按钮是否仍存在来确认是否生效",
+                    "等待进入对局",
+                )
                 w.click("开始游戏")
                 start_game = True
                 start_game_click_time = time.time()
             w.refresh_frame()
 
         if w.get_info("提示"):
+            log_stage_step(
+                "开始游戏阶段",
+                "检测到提示弹窗",
+                "关闭提示弹窗",
+                "依次点击不提示和不需要",
+                "继续等待进入对局",
+            )
             w.click("不提示")
             time.sleep(1)
             w.click("不需要")
             time.sleep(1)
 
         if w.get_info("拳头"):
+            log_stage_step(
+                "开始游戏阶段",
+                "检测到拳头画面，确认已进入对局",
+                "初始化本局阶段管理",
+                "准备本局计时、落点、跑图/搜房/开车管理器，然后切到跳伞阶段",
+                "进入跳伞阶段",
+            )
             prepare_round()
             w.change_stage("跳伞阶段")
             start_game = False
@@ -676,6 +764,13 @@ def on_stage(w: "FrameWorker"):
 
     if w.current_stage == "结束阶段":
         if final_shutdown_pending:
+            log_stage_step(
+                "结束阶段",
+                "最终结束标记已置位",
+                "返回大厅并结束自动化",
+                "停止 sp，处理结算观战，点击设置、返回大厅、确定，再切到关闭弹窗阶段",
+                "等待大厅确认后停止",
+            )
             handle_sp_stop(w)
             prepare_rank_finish_for_lobby(w)
             w.click("设置")
@@ -687,6 +782,13 @@ def on_stage(w: "FrameWorker"):
             w.change_stage("关闭弹窗阶段")
             return
 
+        log_stage_step(
+            "结束阶段",
+            "本轮结束但仍需继续循环或回到开始游戏",
+            "返回大厅准备下一局",
+            "停止 sp，处理结算观战，点击设置、返回大厅、确定，再切到开始游戏阶段",
+            "等待下一局开始",
+        )
         handle_sp_stop(w)
         prepare_rank_finish_for_lobby(w)
 

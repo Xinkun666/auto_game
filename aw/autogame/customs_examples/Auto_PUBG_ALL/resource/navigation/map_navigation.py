@@ -5,6 +5,8 @@ import heapq
 from collections import deque
 import os
 
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import autogame_print as print
+
 RESOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_ROUTE_IMAGE_PATH = os.path.join(RESOURCE_DIR, "map", "hpjy.png")
 DEFAULT_ROUTE_OUTPUT_PATH = os.path.join("aw", "autogame", "temp", "road", "route.jpg")

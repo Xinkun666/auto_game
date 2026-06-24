@@ -1,17 +1,13 @@
 import unittest
-import tempfile
-from pathlib import Path
 
 from aw.autogame.tools.Label import (
     AutoStudioWindow,
-    DEFAULT_SCENE_GROUP_NAME,
     GroupData,
     GroupItemRef,
     ItemData,
     ProjectData,
     RectData,
     SceneData,
-    SceneGroupData,
     StageData,
 )
 
@@ -35,7 +31,6 @@ class LabelResolutionCaptureTests(unittest.TestCase):
     def _window_with_stage(self, stage):
         window = AutoStudioWindow.__new__(AutoStudioWindow)
         window.project = ProjectData(name="demo", stages=[stage])
-        AutoStudioWindow._ensure_project_scene_pool(window.project)
         window.current_stage = stage
         return window
 
@@ -215,137 +210,6 @@ class LabelResolutionCaptureTests(unittest.TestCase):
         ]
 
         self.assertEqual(["开始", "点击"], visible_names)
-
-    def test_old_info_project_imports_into_default_scene_pool(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            project_dir = Path(tmp)
-            (project_dir / "info.py").write_text(
-                "\n".join(
-                    [
-                        "PROJECT_NAME = 'demo'",
-                        "STAGE_INFO = {",
-                        "    '开始阶段': {",
-                        "        'scenes': {",
-                        "            '大厅': {",
-                        "                'image': '',",
-                        "                'width': 100,",
-                        "                'height': 50,",
-                        "                'areas': {'开始': {'rect': [0, 0, 0.1, 0.2], 'search_scope': [0, 0, 0.2, 0.4]}},",
-                        "                'points': {'点击': {'rect': [0.4, 0.4, 0.5, 0.5]}},",
-                        "                'special_areas': {},",
-                        "            }",
-                        "        },",
-                        "        'groups': {'默认': {'all': True}},",
-                        "    },",
-                        "    '跑圈阶段': {",
-                        "        'scenes': {",
-                        "            '大厅': {",
-                        "                'image': '',",
-                        "                'width': 100,",
-                        "                'height': 50,",
-                        "                'areas': {'开始': {'rect': [0, 0, 0.1, 0.2], 'search_scope': [0, 0, 0.2, 0.4]}},",
-                        "                'points': {'点击': {'rect': [0.4, 0.4, 0.5, 0.5]}},",
-                        "                'special_areas': {},",
-                        "            }",
-                        "        },",
-                        "        'groups': {'默认': {'all': True}},",
-                        "    },",
-                        "}",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-
-            project = AutoStudioWindow._load_project_model_from_dir(str(project_dir))
-
-        self.assertEqual("demo", project.name)
-        self.assertEqual(["待分组场景"], [group.name for group in project.scene_groups])
-        self.assertEqual("待分组场景", DEFAULT_SCENE_GROUP_NAME)
-        self.assertEqual(1, len(project.scene_groups[0].scenes))
-        shared_scene = project.scene_groups[0].scenes[0]
-        self.assertIs(project.stages[0].scenes[0], shared_scene)
-        self.assertIs(project.stages[1].scenes[0], shared_scene)
-        self.assertEqual(["开始", "点击"], [item.name for item in shared_scene.items])
-
-    def test_existing_stage_scene_lists_are_registered_in_default_scene_pool(self):
-        shared_scene = SceneData(
-            id="scene-1",
-            name="大厅",
-            image_width=100,
-            image_height=50,
-            items=[ItemData(id="item-1", name="开始", item_type="area", rect=RectData(0, 0, 1, 1))],
-        )
-        project = ProjectData(
-            name="demo",
-            stages=[
-                StageData(id="stage-1", name="开始阶段", scenes=[shared_scene]),
-                StageData(id="stage-2", name="跑圈阶段", scenes=[shared_scene]),
-            ],
-        )
-
-        AutoStudioWindow._ensure_project_scene_pool(project)
-
-        self.assertEqual(["待分组场景"], [group.name for group in project.scene_groups])
-        self.assertEqual([shared_scene], project.scene_groups[0].scenes)
-
-    def test_stage_scene_references_share_pool_scene_without_cloning(self):
-        pool_scene = SceneData(
-            id="scene-1",
-            name="游戏内主界面",
-            items=[ItemData(id="point-1", name="跳跃", item_type="control", rect=RectData(1, 2, 3, 4))],
-        )
-        stage_a = StageData(id="stage-a", name="搜房阶段")
-        stage_b = StageData(id="stage-b", name="跑圈阶段")
-        project = ProjectData(name="demo", stages=[stage_a, stage_b])
-
-        AutoStudioWindow._add_scene_to_project_pool(project, pool_scene, "游戏场景")
-        AutoStudioWindow._add_scene_reference_to_stage(stage_a, pool_scene)
-        AutoStudioWindow._add_scene_reference_to_stage(stage_b, pool_scene)
-        pool_scene.items[0].name = "跳跃按钮"
-
-        self.assertIs(stage_a.scenes[0], pool_scene)
-        self.assertIs(stage_b.scenes[0], pool_scene)
-        self.assertEqual("跳跃按钮", stage_a.scenes[0].items[0].name)
-        self.assertEqual(["游戏场景"], [group.name for group in project.scene_groups])
-
-    def test_removing_stage_scene_reference_keeps_pool_scene(self):
-        pool_scene = SceneData(id="scene-1", name="确认弹窗")
-        stage = StageData(id="stage-1", name="启动阶段", scenes=[pool_scene])
-        project = ProjectData(name="demo", stages=[stage])
-        AutoStudioWindow._add_scene_to_project_pool(project, pool_scene, "弹窗")
-
-        removed = AutoStudioWindow._remove_scene_reference_from_stage(stage, pool_scene)
-
-        self.assertTrue(removed)
-        self.assertEqual([], stage.scenes)
-        self.assertEqual([pool_scene], project.scene_groups[0].scenes)
-
-    def test_first_pool_scene_resolution_returns_first_matching_scene(self):
-        first_resolution = SceneData(id="scene-1", name="大厅", image_width=100, image_height=50)
-        second_resolution = SceneData(id="scene-2", name="大厅", image_width=200, image_height=100)
-        other_scene = SceneData(id="scene-3", name="设置", image_width=100, image_height=50)
-        scene_group = SceneGroupData(
-            id="group-1",
-            name="游戏场景",
-            scenes=[first_resolution, second_resolution, other_scene],
-        )
-
-        selected = AutoStudioWindow._first_pool_scene_resolution(scene_group, "大厅")
-
-        self.assertIs(first_resolution, selected)
-
-    def test_move_selected_pending_scenes_into_target_group(self):
-        pending_a = SceneData(id="scene-1", name="大厅", image_width=100, image_height=50)
-        pending_b = SceneData(id="scene-2", name="设置", image_width=100, image_height=50)
-        pending = SceneGroupData(id="group-1", name=DEFAULT_SCENE_GROUP_NAME, scenes=[pending_a, pending_b])
-        target = SceneGroupData(id="group-2", name="游戏场景")
-        project = ProjectData(name="demo", scene_groups=[pending, target])
-
-        moved = AutoStudioWindow._move_pending_scenes_to_group(project, target, ["大厅"])
-
-        self.assertEqual([pending_a], moved)
-        self.assertEqual([pending_b], pending.scenes)
-        self.assertEqual([pending_a], target.scenes)
 
 
 if __name__ == "__main__":

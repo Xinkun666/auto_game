@@ -18,18 +18,36 @@ from aw.autogame.tools.ProcessUtils import hdc_command_args, hidden_subprocess_k
 ROOT_DIR = Path(__file__).resolve().parents[3]
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else ROOT_DIR
 TEMP_DIR = APP_DIR / "aw" / "autogame" / "temp"
-LOG_DIR = TEMP_DIR / "logs"
+
+
+def _resolve_env_path(env_name: str, default_path: Path) -> Path:
+    value = os.environ.get(env_name)
+    if value:
+        return Path(value).expanduser().resolve()
+    return default_path
+
+
+def resolve_log_dir() -> Path:
+    return _resolve_env_path("AUTOGAME_LOG_DIR", TEMP_DIR / "logs")
+
+
+LOG_DIR = resolve_log_dir()
 
 
 def resolve_process_temp_logs_dir() -> Path:
-    preview_dir = os.environ.get("AUTOGAME_PREVIEW_DIR")
-    if preview_dir:
-        return Path(preview_dir).expanduser().resolve()
-    return LOG_DIR / "process_temp_logs"
+    return _resolve_env_path("AUTOGAME_PREVIEW_DIR", resolve_log_dir() / "process_temp_logs")
+
+
+def resolve_process_save_frames_dir() -> Path:
+    return _resolve_env_path("AUTOGAME_SAVE_FRAMES_DIR", resolve_log_dir() / "process_save_frames")
+
+
+def resolve_tmp_frames_dir() -> Path:
+    return _resolve_env_path("AUTOGAME_TMP_FRAMES_DIR", TEMP_DIR / "tmp_frames")
 
 
 PROCESS_TEMP_LOGS_DIR = resolve_process_temp_logs_dir()
-PROCESS_SAVE_FRAMES_DIR = LOG_DIR / "process_save_frames"
+PROCESS_SAVE_FRAMES_DIR = resolve_process_save_frames_dir()
 
 
 def _safe_write_text(path: Path, content: str):

@@ -10,6 +10,7 @@ import grpc
 import numpy as np
 from PIL import Image
 from aw.autogame.tools.ProcessUtils import hdc_command_args, hidden_subprocess_kwargs
+from aw.autogame.tools.Utils import resolve_process_save_frames_dir, resolve_tmp_frames_dir
 
 # 假设这些是你的本地 proto 生成文件
 PROTO_IMPORT_ERROR = None
@@ -128,7 +129,7 @@ class StreamClient:
         self.save_queue = queue.Queue(maxsize=100)
         self.save_worker = None
 
-        self.save_dir = r"aw/autogame/temp/logs/process_save_frames"
+        self.save_dir = str(resolve_process_save_frames_dir())
 
         # ---------- 线程/状态保护 ----------
         self._state_lock = threading.Lock()
@@ -598,8 +599,8 @@ class HDCSnapshotClient:
         self.save_queue = queue.Queue(maxsize=100)
         self.save_worker = None
 
-        self.local_tmp_dir = r"aw/autogame/temp/tmp_frames"
-        self.save_dir = r"aw/autogame/temp/logs/process_save_frames"
+        self.local_tmp_dir = str(resolve_tmp_frames_dir())
+        self.save_dir = str(resolve_process_save_frames_dir())
         self.first_frame_received = False
         self.consecutive_capture_failures = 0
         self.startup_frame_timeout = float(os.environ.get("AUTOGAME_HDC_FRAME_READY_TIMEOUT", "10"))

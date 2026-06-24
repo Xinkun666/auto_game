@@ -31,9 +31,8 @@ class GameAutomator:
         self._clear_temp_logs()
 
     def _clear_temp_logs(self):
-        log_dir = r'aw/autogame/temp/logs'
-        temp_log_dir = os.path.join(log_dir, "process_temp_logs")
-        temp_save_dir = os.path.join(log_dir, "process_save_frames")
+        temp_log_dir = str(resolve_process_temp_logs_dir())
+        temp_save_dir = str(resolve_process_save_frames_dir())
 
         try:
             if os.path.exists(temp_log_dir):
@@ -70,7 +69,7 @@ class GameAutomator:
                         print(f"无法删除 {file_path}: {e}")
             else:
                 # 如果目录不存在，则创建它，确保后续写入不报错
-                os.makedirs(temp_log_dir, exist_ok=True)
+                os.makedirs(temp_save_dir, exist_ok=True)
                 print(f"【系统】创建临时保存目录: {temp_save_dir}")
         except Exception as e:
             print(f"清空保存目录时出错: {e}")

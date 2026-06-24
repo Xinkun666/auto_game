@@ -19,6 +19,7 @@ from hypium import *
 from hypium import UiDriver
 from hypium.action.os_hypium.device_logger import DeviceLogger
 from aw.autogame.tools.GameAutomator import GameAutomator
+from aw.autogame.tools.Utils import resolve_process_save_frames_dir
 from aw.autogame.tools.GameLaunchProfile import (
     DEFAULT_PUBG_GAME_PACKAGE,
     DEFAULT_SP_PACKAGE,
@@ -44,7 +45,7 @@ class auto_pubg(TestCase):
         self.device_logger = DeviceLogger(self.driver)
         self.device_log_started = False
         self.log_path = os.environ.get("AUTOGAME_DEVICE_LOG_PATH") or f'aw/autogame/temp/logs/{self.task_name}.txt'
-        self.frame_path = f"aw/autogame/temp/logs/process_save_frames"
+        self.frame_path = str(resolve_process_save_frames_dir())
         self.game_display_name = '和平精英'
         self.game_package = GAME_PACKAGE_NAME
         self.perf_tool_package = PERF_TOOL_PACKAGE

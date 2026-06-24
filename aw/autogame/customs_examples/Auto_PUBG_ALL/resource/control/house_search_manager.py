@@ -1,3 +1,4 @@
+import math
 import random
 import time
 from typing import TYPE_CHECKING
@@ -98,7 +99,7 @@ class HouseSearchManager:
     ROUTE_STUCK_BACKOFF_WAIT_STEP = 300
     ROUTE_STUCK_BACKOFF_MAX_WAIT = 1800
     HOUSE_SEARCH_TIMEOUT_SECONDS = 60
-    ENTRY_NEAR_MICRO_ADJUST_DISTANCE = 1.5
+    ENTRY_NEAR_MICRO_ADJUST_DISTANCE = 3.0
     ENTRY_NEAR_MICRO_DONE_DISTANCE = 0.25
     ENTRY_NEAR_MICRO_MAX_ATTEMPTS = 3
     ENTRY_NEAR_MICRO_X_BIAS = 120
@@ -1090,13 +1091,42 @@ class HouseSearchManager:
             return None
 
         relative = (target_angle - current_dir + 540) % 360 - 180
-        if abs(relative) <= 45:
-            return "forward", 0, -self.ENTRY_NEAR_MICRO_Y_BIAS, relative
-        if abs(relative) >= 135:
-            return "back", 0, self.ENTRY_NEAR_MICRO_Y_BIAS, relative
-        if relative < 0:
-            return "left", -self.ENTRY_NEAR_MICRO_X_BIAS, 0, relative
-        return "right", self.ENTRY_NEAR_MICRO_X_BIAS, 0, relative
+        abs_relative = abs(relative)
+        if abs_relative > 90:
+            return "turn", 0, 0, relative
+
+        radians = math.radians(abs_relative)
+        x_mag = int(round(self.ENTRY_NEAR_MICRO_X_BIAS * math.sin(radians)))
+        y_bias = -int(round(self.ENTRY_NEAR_MICRO_Y_BIAS * math.cos(radians)))
+
+        if x_mag <= 0:
+            return "forward", 0, y_bias, relative
+
+        x_sign = self._entry_near_micro_x_sign(current_dir, target_angle, relative)
+        x_bias = x_sign * x_mag
+        if abs(y_bias) <= 2:
+            y_bias = 0
+
+        if y_bias < 0 and x_bias > 0:
+            direction = "right_forward"
+        elif y_bias < 0 and x_bias < 0:
+            direction = "left_forward"
+        elif x_bias > 0:
+            direction = "right"
+        else:
+            direction = "left"
+        return direction, x_bias, y_bias, relative
+
+    @staticmethod
+    def _entry_near_micro_x_sign(current_dir, target_angle, relative):
+        if abs(relative) <= 1.0:
+            return 0
+
+        current_norm = float(current_dir) % 360
+        target_norm = float(target_angle) % 360
+        if target_norm == 0 and 0 < current_norm <= 90 and relative < 0:
+            return 1
+        return 1 if relative > 0 else -1
 
     @staticmethod
     def _entry_micro_direction_label(direction: str) -> str:
@@ -1105,6 +1135,9 @@ class HouseSearchManager:
             "back": "后方",
             "left": "左边",
             "right": "右边",
+            "left_forward": "左上方",
+            "right_forward": "右上方",
+            "turn": "身后",
         }
         return labels.get(direction, direction)
 
@@ -1541,6 +1574,9 @@ class HouseSearchManager:
 
     def _handle_near_entry_point(self, w: 'FrameWorker', current_loc, target_loc, dist: float, phase_label='Nav') -> str:
         self.stop_auto_forward(w)
+        if self._micro_adjust_near_entry_point(w, current_loc, target_loc, dist):
+            return "adjusting"
+
         if not self._align_entry_direction_at_near_point(w, phase_label):
             print(f"[{phase_label}] 进门点方向尚未对准，等待下一轮继续对准")
             return "aligning"
@@ -1587,13 +1623,8 @@ class HouseSearchManager:
             )
             return False
 
-        ideal_angle = self.active_entry.get('direction') if self.active_entry else None
-        if ideal_angle is not None:
-            self._align_near_entry_direction(w, ideal_angle)
-            w.refresh_frame()
-
         refreshed_loc = self._get_current_location(w) or current_loc
-        current_dir = w.get_info('direction') or ideal_angle
+        current_dir = w.get_info('direction')
         target_angle = calculate_angle(refreshed_loc, target_loc)
         move_params = self._entry_near_micro_move_params(current_dir, target_angle)
         if move_params is None:
@@ -1601,9 +1632,30 @@ class HouseSearchManager:
 
         direction, x_bias, y_bias, relative = move_params
         self.entry_near_micro_adjust_attempts += 1
+        if direction == "turn":
+            print(
+                f"[Nav] 距离进门点 {dist_val:.2f}<={self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:g}，"
+                f"目标点不在当前朝向左右90度内，先调整方向再微调 "
+                f"{self.entry_near_micro_adjust_attempts}/{self.ENTRY_NEAR_MICRO_MAX_ATTEMPTS} "
+                f"(current={float(current_dir):.1f}, target={float(target_angle):.1f}, "
+                f"relative={relative:.1f})"
+            )
+            self.align_direction_blocking(
+                w,
+                current_dir,
+                target_angle,
+                threshold=self.ENTRY_NEAR_ALIGN_TOLERANCE,
+                max_steps=1,
+                wait=self.ENTRY_NEAR_ALIGN_WAIT,
+                min_dura=self.ENTRY_NEAR_ALIGN_MIN_DURA,
+            )
+            w.refresh_frame()
+            self.history_locations = []
+            return True
+
         print(
             f"[Nav] 距离进门点 {dist_val:.2f}<={self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:g}，"
-            f"未识别到门，已对准进门方向 {ideal_angle}，"
+            f"按当前位置到目标点做快速微调，"
             f"目标点在{self._entry_micro_direction_label(direction)}，轻推摇杆微调 "
             f"{self.entry_near_micro_adjust_attempts}/{self.ENTRY_NEAR_MICRO_MAX_ATTEMPTS} "
             f"(relative={relative:.1f}, x_bias={x_bias}, y_bias={y_bias})"

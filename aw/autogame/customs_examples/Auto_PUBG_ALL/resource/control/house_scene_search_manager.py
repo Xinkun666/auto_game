@@ -195,6 +195,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_pre_search_route_callback = None
         self.r_city_pre_search_completed = False
         self.forbidden_escape_target = None
+        self.forbidden_entry_direct_target = None
 
     def configure_r_city_landing_target(self, target):
         loc = check_location(target)
@@ -216,6 +217,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         super().reset()
         self.r_city_pre_search_completed = False
         self.forbidden_escape_target = None
+        self.forbidden_entry_direct_target = None
 
     @staticmethod
     def _location_tuple(value):
@@ -237,6 +239,34 @@ class HouseSceneSearchManager(HouseSearchManager):
         if not callable(checker):
             return False
         return bool(checker(start_loc, target_loc))
+
+    def _mark_forbidden_entry_direct_route(self, entry_loc):
+        target = self._location_tuple(entry_loc)
+        if target is not None and not self._is_walkable(target):
+            self.forbidden_entry_direct_target = target
+            return True
+        self.forbidden_entry_direct_target = None
+        return False
+
+    def _should_skip_forbidden_escape_for_active_entry(self, current_loc) -> bool:
+        loc = check_location(current_loc)
+        if loc is None:
+            return False
+
+        target = getattr(self, "forbidden_entry_direct_target", None)
+        if target is None and self.active_entry:
+            target = self._location_tuple(self.active_entry.get("location"))
+        if target is None or self._is_walkable(target):
+            return False
+
+        if not self._same_forbidden_region(loc, target):
+            return False
+
+        print(
+            f"[SceneSearch] 当前与目标入门点 {target} 位于同一块不可通行区域，"
+            "继续直奔入门点，不执行黑区脱离"
+        )
+        return True
 
     def _find_forbidden_escape_target(self, current_loc):
         target = self.forbidden_escape_target
@@ -309,6 +339,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.avoid_mode = None
         self._reset_route_stuck_bypass()
         self.forbidden_escape_target = None
+        self._mark_forbidden_entry_direct_route(entry_loc)
         self.initial_target_pending = False
         self.status = "FAST_NAV"
         self.history_locations = []
@@ -421,7 +452,11 @@ class HouseSceneSearchManager(HouseSearchManager):
         if forbidden_entry_route == "waiting":
             return
 
-        if forbidden_entry_route != "locked" and self._handle_forbidden_escape(w, current_loc, current_direction):
+        skip_forbidden_escape = (
+            forbidden_entry_route == "locked"
+            or self._should_skip_forbidden_escape_for_active_entry(current_loc)
+        )
+        if not skip_forbidden_escape and self._handle_forbidden_escape(w, current_loc, current_direction):
             return
 
         if self.current_house_id is None and self._handle_r_city_pre_search_route(w, current_loc):
@@ -436,11 +471,16 @@ class HouseSceneSearchManager(HouseSearchManager):
                     return
                 current_loc = stable_loc
                 self.select_nearest_entry(current_loc)
+                if self.active_entry:
+                    self._mark_forbidden_entry_direct_route(self.active_entry.get("location"))
                 self.initial_target_pending = False
             else:
                 self.select_smart_target(current_loc, current_direction)
+                if self.active_entry:
+                    self._mark_forbidden_entry_direct_route(self.active_entry.get("location"))
 
             if not self.current_house_id:
+                self.forbidden_entry_direct_target = None
                 self._continue_searching_until_timer(w, "当前区域无合适目标或已搜完")
                 return
 
@@ -469,6 +509,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 if not self.execute_unstuck_logic(w, current_loc):
                     self.handle_failed_entry_logic(self.active_entry["direction"])
                     self.status = "IDLE"
+                    self.forbidden_entry_direct_target = None
                 self.history_locations = []
                 return
 
@@ -504,6 +545,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 if not self.execute_unstuck_logic(w, current_loc):
                     self.handle_failed_entry_logic(self.active_entry["direction"])
                     self.status = "IDLE"
+                    self.forbidden_entry_direct_target = None
                 self.history_locations = []
                 return
 
@@ -521,6 +563,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                     if self.active_entry:
                         self.handle_failed_entry_logic(self.active_entry["direction"])
                     self.status = "IDLE"
+                    self.forbidden_entry_direct_target = None
                     return
                 if near_result in {"aborted", "aligning"}:
                     return
@@ -541,6 +584,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                     if self.active_entry:
                         self.handle_failed_entry_logic(self.active_entry["direction"])
                     self.status = "IDLE"
+                    self.forbidden_entry_direct_target = None
                     return
                 if arrival_result in {"aborted", "adjusting"}:
                     return
@@ -576,6 +620,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 else:
                     self.current_house_id = None
                 self.status = "IDLE"
+                self.forbidden_entry_direct_target = None
                 return
 
             self._complete_current_house_search(w, "house_scene 进门成功")
@@ -627,6 +672,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.active_entry = None
         self.status = "IDLE"
         self.history_locations = []
+        self.forbidden_entry_direct_target = None
         self._reset_route_stuck_bypass()
         self._lock_next_entry_after_house_exit(w, exit_direction)
         return True
@@ -650,6 +696,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.status = "FAST_NAV"
         self.history_locations = []
         self.initial_target_pending = False
+        self._mark_forbidden_entry_direct_route(target_loc)
         print(
             f"[SceneSearch] 出房后立即锁定下一个进门点: {self.current_house_id} | "
             f"入口={target_loc} | dist={dist:.2f} | exit_direction={exit_direction}"

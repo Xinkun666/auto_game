@@ -3733,7 +3733,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_pre_search_target = None
         self.r_city_pre_search_distance = self.R_CITY_PRE_SEARCH_DISTANCE
         self.r_city_pre_search_route_callback = None
-        self.r_city_pre_search_completed = False
+        self.r_city_pre_search_completed = True
         self._reset_r_city_runtime()
 
     def reset(self):
@@ -3762,9 +3762,6 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         self.indoor_stuck_frames = 0
 
-        if self.current_house_id is None and self._handle_r_city_pre_search_route(w, current_loc):
-            return
-
         if self.initial_target_pending:
             stable_loc = self._get_stable_initial_location(current_loc)
             if stable_loc is None:
@@ -3774,25 +3771,13 @@ class HouseSceneSearchManager(HouseSearchManager):
             current_loc = stable_loc
             self.initial_target_pending = False
 
-        distance_to_landing_target = self._distance_to_r_city_landing_target(current_loc)
-        if (
-            self.current_house_id is None
-            and distance_to_landing_target is not None
-            and distance_to_landing_target > self.r_city_near_distance
-        ):
-            reason = (
-                f"距离R城落点 {distance_to_landing_target:.2f} "
-                f"> {self.r_city_near_distance:.2f}，判定跳伞落点偏离"
-            )
-            if self._request_r_city_recovery_route(w, reason):
-                return
-            if not self._is_walkable(current_loc):
-                self._handle_forbidden_escape(w, current_loc, current_direction)
-                return
-            self._handle_route_to_r_city(w, current_loc, current_direction)
+        if self.current_house_id is None and not self._is_walkable(current_loc):
+            print("[RCitySearch] 落地位置不可通行，先脱离到可通行点，再锁定最近入门点")
+            self._handle_forbidden_escape(w, current_loc, current_direction)
             return
 
         if self.current_house_id is None:
+            print("[RCitySearch] 落地后直接从入门点列表选择最近目标，不再前往R城中转点")
             self._select_next_r_city_house(current_loc, current_direction)
 
             if not self.current_house_id:
@@ -3802,8 +3787,9 @@ class HouseSceneSearchManager(HouseSearchManager):
             self.status = "FAST_NAV"
             target_dist = get_distance(current_loc, self.active_entry["location"])
             print(
-                f"[RCitySearch] 锁定目标: {self.current_house_id} | "
-                f"靠近点={self.active_entry['location']} | 距离={target_dist:.2f}"
+                f"[RCitySearch] 锁定最近入门点: house={self.current_house_id}, "
+                f"entry={self.active_entry['location']}, "
+                f"direction={self.active_entry['direction']}, dist={target_dist:.2f}"
             )
             self.history_locations = []
 
@@ -4043,7 +4029,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.water_escape_side_attempts = 0
         self.water_escape_total_attempts = 0
         self.water_escape_last_loc = None
-        self.r_city_pre_search_completed = False
+        self.r_city_pre_search_completed = True
 
     def _handle_r_city_pre_search_route(self, w: "FrameWorker", current_loc) -> bool:
         if self.r_city_pre_search_completed:

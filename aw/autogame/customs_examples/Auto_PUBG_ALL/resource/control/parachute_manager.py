@@ -21,7 +21,7 @@ class ParachuteManager:
 
     # --- 配置常量 (Configuration) ---
     TARGET_POS: Tuple[int, int] = (990, 757)  # 默认目标落点
-    TRIGGER_DIST: int = 450  # 触发跳伞的距离阈值
+    TRIGGER_DIST: int = 550  # 触发跳伞的距离阈值
     SAFE_BUFFER: int = 550  # 有效靠近的判定缓冲值
     OVERSHOOT_INCREASE_FRAMES: int = 5  # 连续多少帧递增才判定为飞过最佳跳伞点
     DIVE_DURATION_MS: int = 47500  # 俯冲/滑行持续时间 (根据地图大小调整)

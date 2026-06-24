@@ -1102,7 +1102,7 @@ def _preview_frame_sort_key(path: Path):
         mtime = path.stat().st_mtime
     except OSError:
         mtime = -1.0
-    return (_preview_frame_sequence(path), mtime, path.name)
+    return (mtime, _preview_frame_sequence(path), path.name)
 
 
 def find_latest_preview_frame(preview_dir: Path) -> Optional[Path]:

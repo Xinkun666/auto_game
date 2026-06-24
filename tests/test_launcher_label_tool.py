@@ -1,5 +1,6 @@
 import unittest
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -1023,9 +1024,26 @@ class LauncherLabelToolTests(unittest.TestCase):
             (preview_dir / "frame_00009.png").write_text("new", encoding="utf-8")
             (preview_dir / "frame_00008.jpeg").write_text("middle", encoding="utf-8")
             (preview_dir / "frame_00010.json").write_text("metadata", encoding="utf-8")
+            for path in preview_dir.iterdir():
+                os.utime(path, (1000, 1000))
 
             self.assertEqual(
                 preview_dir / "frame_00009.png",
+                find_latest_preview_frame(preview_dir),
+            )
+
+    def test_find_latest_preview_frame_prefers_newer_file_over_stale_high_sequence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            preview_dir = Path(temp_dir)
+            stale_high_sequence = preview_dir / "frame_99998.jpg"
+            current_low_sequence = preview_dir / "frame_00002.jpg"
+            stale_high_sequence.write_text("stale", encoding="utf-8")
+            current_low_sequence.write_text("current", encoding="utf-8")
+            os.utime(stale_high_sequence, (1000, 1000))
+            os.utime(current_low_sequence, (2000, 2000))
+
+            self.assertEqual(
+                current_low_sequence,
                 find_latest_preview_frame(preview_dir),
             )
 

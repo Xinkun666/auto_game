@@ -50,6 +50,28 @@ PROCESS_TEMP_LOGS_DIR = resolve_process_temp_logs_dir()
 PROCESS_SAVE_FRAMES_DIR = resolve_process_save_frames_dir()
 
 
+def write_image_unicode(path, image, params=None) -> bool:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    params = [] if params is None else params
+    path_text = str(path)
+
+    try:
+        if cv2.imwrite(path_text, image, params):
+            return True
+    except Exception:
+        pass
+
+    suffix = path.suffix or ".jpg"
+    ok, encoded = cv2.imencode(suffix, image, params)
+    if not ok:
+        return False
+
+    with open(path, "wb") as image_file:
+        image_file.write(encoded.tobytes())
+    return True
+
+
 def _safe_write_text(path: Path, content: str):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -1094,7 +1116,8 @@ def visualizer_process(queue, visual=True):
 
             # 4. 存储原始图
             base_filename = os.path.join(log_dir, f"frame_{index:05d}")
-            cv2.imwrite(f"{base_filename}.jpg", frame_rotated)
+            if not write_image_unicode(f"{base_filename}.jpg", frame_rotated):
+                raise RuntimeError(f"preview image write failed: {base_filename}.jpg")
             with open(f"{base_filename}.json", "w", encoding="utf-8") as f:
                 json.dump({"index": index, "stage": stage, "info": safe_info}, f, ensure_ascii=False, indent=4)
 

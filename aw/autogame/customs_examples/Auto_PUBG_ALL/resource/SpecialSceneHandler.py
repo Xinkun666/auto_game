@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.direction_service import Get_Direction
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.direction_ctc_service import Get_Direction as Get_Direction_CTC
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.location_service import LocatePoints
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.yolo_detector import YOLO26Detector
@@ -9,13 +8,9 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.scene_predic
 
 from aw.autogame.tools.Utils import *
 
-import os
-import cv2
 import time
 from functools import wraps
-from datetime import datetime
 
-dire_tool = Get_Direction(model_weight=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/direction.pt')
 dire_tool_ctc = Get_Direction_CTC(model_weight=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/direction_ctc.pt')
 loc_tool = LocatePoints()
 yolo_detector = YOLO26Detector(model_path=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/best.pt')
@@ -48,51 +43,6 @@ def direction(img):
 
 def location(img):
     return loc_tool.get_location(img)
-
-
-def save_img_png(img):
-    """
-    保存输入图像到中文路径：
-    D:\\Resource\\数据集\\和平精英yolo数据集汇总\\totals
-
-    保存要求：
-    1. 格式为 png
-    2. 文件名格式：年月日时分秒-毫秒
-       例如：20260421153045-123.png
-    3. 使用 cv2.imencode + tofile 方式，确保中文路径可正常保存
-    4. 注意通道格式：
-       - 如果输入是 3 通道图像，默认按 RGB -> BGR 转换后保存
-       - 如果本身是单通道或 4 通道，则直接保存
-    """
-    save_dir = r'D:\Resource\数据集\和平精英yolo数据集汇总\totals'
-    os.makedirs(save_dir, exist_ok=True)
-
-    now = datetime.now()
-    filename = now.strftime('%Y%m%d%H%M%S') + '-{:03d}.png'.format(now.microsecond // 1000)
-    save_path = os.path.join(save_dir, filename)
-
-    # 处理通道格式
-    # 如果是3通道，默认认为输入是RGB，转成BGR再用opencv保存
-    if len(img.shape) == 3 and img.shape[2] == 3:
-        save_img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-    else:
-        save_img = img.copy()
-
-    # 使用 imencode + tofile，兼容中文路径
-    success, buffer = cv2.imencode('.png', save_img)
-    if success:
-        buffer.tofile(save_path)
-    else:
-        print("图片保存失败:", save_path)
-
-
-def forward_scene_save_image(img):
-    """
-    当前仅保留保存图像逻辑，不再执行原来的检测与坐标映射。
-    调用该函数时，会将输入 img 保存到指定目录。
-    """
-    save_img_png(img)
-    return []
 
 
 def forward_scene(img):

@@ -1,27 +1,5 @@
 {
     "screen_mode": "0",
     "touch_backend": "sendevent",
-    "width": 768,
-    "pubg_room_search": {
-        "enabled": false,
-        "mode": "mixed_yolo",
-        "pubg_test_path": "",
-        "yolo_host": "localhost",
-        "yolo_port": 6666,
-        "sam3_host": "localhost",
-        "sam3_port": 12345,
-        "door_calibration_backend": "sam3",
-        "fallback_to_legacy": true,
-        "finish_stage": "跑图阶段",
-        "frame_refresh_interval_sec": 0.12,
-        "frame_refresh_mode": "worker_refresh",
-        "move_radius_px": 300,
-        "button_mapping": {
-            "jump": "跳跃",
-            "door": "开门",
-            "pick_btn": "拾取",
-            "map": "地图",
-            "attack": "攻击"
-        }
-    }
+    "width": 768
 }

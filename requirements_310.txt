@@ -20,26 +20,6 @@ iopath
 huggingface-hub
 typing_extensions
 
-# 搜房 pubg_room_search 适配层
-# 代码位置: aw/autogame/customs_examples/Auto_PUBG_ALL/resource/pubg_room_search/
-# 内嵌感知模块位置:
-# aw/autogame/customs_examples/Auto_PUBG_ALL/resource/pubg_room_search/perception/
-# YOLO 感知模块放在 auto_game 内；SAM3 通过远端 HTTP 算法服务调用。
-#
-# 额外环境配置:
-# 1. 开启搜房:
-#    export AUTOGAME_PUBG_ROOM_SEARCH=1
-#    或在 aw/autogame/config/config.json 的 pubg_room_search.enabled 配置为 true
-# 2. 内嵌 YOLO 默认读取:
-#    aw/autogame/customs_examples/Auto_PUBG_ALL/resource/pubg_room_search/perception/models/yolo/26x_det.pt
-#    aw/autogame/customs_examples/Auto_PUBG_ALL/resource/pubg_room_search/perception/models/yolo/26x_cls.pt
-#    可用 AUTOGAME_PUBG_YOLO_DETECT_MODEL / AUTOGAME_PUBG_YOLO_CLASSIFY_MODEL 覆盖。
-# 3. SAM3 分割默认调用远端 HTTP 服务:
-#    http://10.41.182.148:8001
-#    可用 AUTOGAME_PUBG_SAM3_HTTP_URL 覆盖。
-# 4. 旧版 pubg_test 适配路径暂时仍保留在代码中，但默认不启用；
-#    如需临时回退外部 pubg_test，可配置 pubg_room_search.external_pubg_test_enabled=true。
-#
 # 拉流相关
 grpcio
 protobuf

@@ -6,7 +6,7 @@ from aw.autogame.tools.Utils import *
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.parachute_manager import ParachuteManager
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.running_manager import RunningManager
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.driving_manager import DrivingManager
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_scene_search_manager import (
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_search_manager import (
     HouseSceneSearchManager,
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_manager import (

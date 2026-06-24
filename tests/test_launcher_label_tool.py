@@ -406,6 +406,14 @@ class LauncherLabelToolTests(unittest.TestCase):
         self.assertEqual("function", env_values["AUTOGAME_TEST_PROFILE"])
         self.assertEqual("1", env_values["AUTOGAME_SCREEN_MODE"])
         self.assertEqual("2", env_values["AUTOGAME_SINGLE_CASE_LOOPS"])
+        self.assertEqual(str(resolve_preview_frame_dir()), env_values["AUTOGAME_PREVIEW_DIR"])
+
+    def test_visualizer_process_temp_logs_dir_prefers_launcher_preview_env(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            preview_dir = Path(temp_dir) / "launcher-preview"
+
+            with mock.patch.dict(os.environ, {"AUTOGAME_PREVIEW_DIR": str(preview_dir)}):
+                self.assertEqual(preview_dir.resolve(), autogame_utils.resolve_process_temp_logs_dir())
 
     def test_safety_check_logs_retry_when_device_status_unavailable(self):
         window = LauncherWindow.__new__(LauncherWindow)

@@ -480,6 +480,7 @@ def build_launcher_plan_env_values(plan: Optional[dict]) -> dict[str, str]:
         "AUTOGAME_SCREEN_MODE": screen_mode,
         "AUTOGAME_SINGLE_CASE_LOOPS": str(max(1, case_loop_count)),
         "AUTOGAME_SP_RECORDING_ENABLED": "1" if should_use_sp_recording_for_profile(test_profile) else "0",
+        "AUTOGAME_PREVIEW_DIR": str(PREVIEW_DIR),
     }
 
 

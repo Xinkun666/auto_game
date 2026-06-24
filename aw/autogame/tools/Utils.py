@@ -19,7 +19,16 @@ ROOT_DIR = Path(__file__).resolve().parents[3]
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else ROOT_DIR
 TEMP_DIR = APP_DIR / "aw" / "autogame" / "temp"
 LOG_DIR = TEMP_DIR / "logs"
-PROCESS_TEMP_LOGS_DIR = LOG_DIR / "process_temp_logs"
+
+
+def resolve_process_temp_logs_dir() -> Path:
+    preview_dir = os.environ.get("AUTOGAME_PREVIEW_DIR")
+    if preview_dir:
+        return Path(preview_dir).expanduser().resolve()
+    return LOG_DIR / "process_temp_logs"
+
+
+PROCESS_TEMP_LOGS_DIR = resolve_process_temp_logs_dir()
 PROCESS_SAVE_FRAMES_DIR = LOG_DIR / "process_save_frames"
 
 
@@ -840,7 +849,8 @@ def visualizer_process(queue, visual=True):
     show_window = visual and vis_mode != "launcher"
     print(f"[Visualizer] 显示进程已启动, 可视化状态: {visual}, mode: {vis_mode}")
     window_name = "Frame Monitor"
-    log_dir = str(PROCESS_TEMP_LOGS_DIR)
+    log_dir = str(resolve_process_temp_logs_dir())
+    print(f"[Visualizer] 预览帧输出目录: {log_dir}")
     if not os.path.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True)
 

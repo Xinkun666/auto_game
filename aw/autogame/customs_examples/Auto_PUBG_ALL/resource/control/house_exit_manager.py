@@ -385,14 +385,14 @@ class HouseExitManager:
             return False
 
         if self.trusted_exit_signal:
-            print("[HouseExit] 已通过门/窗明确出房，跳过回头二次确认")
-            self.reset()
-            return True
+            print("[HouseExit] 已通过门/窗看到屋外信号，但仍执行二次确认，避免窗外/门外视野误判")
+        else:
+            print("[HouseExit] 首次判定已在屋外，执行二次确认")
 
-        print("[HouseExit] 首次判定已在屋外，执行二次确认")
         self._move_forward(w, dura=self.EXIT_CONFIRM_FORWARD_DURA, wait=self.EXIT_CONFIRM_FORWARD_WAIT)
         current_dir = w.get_info("direction")
         if current_dir is None:
+            print("[HouseExit] 二次确认缺少方向，继续尝试出房")
             return False
 
         self._align_direction_blocking(

@@ -6776,7 +6776,24 @@ class HouseSceneSearchManager(HouseSearchManager):
         return self._get_house_scene(w) == self.HOUSE_INDOOR
 
     def _is_out_of_house(self, w: "FrameWorker") -> bool:
-        return self._get_house_scene(w) in self.HOUSE_EXIT_SCENES
+        first_scene = self._get_house_scene(w)
+        if first_scene not in self.HOUSE_EXIT_SCENES:
+            return False
+
+        self._refresh_frame_and_handle_jump(w, "出房单帧信号复核")
+        second_scene = self._get_house_scene(w)
+        if second_scene in self.HOUSE_EXIT_SCENES:
+            print(
+                f"[SceneExit] 连续确认屋外信号 first={first_scene}, "
+                f"second={second_scene}，判定已出房"
+            )
+            return True
+
+        print(
+            f"[SceneExit] 单帧屋外信号 first={first_scene} 后复核为 "
+            f"{second_scene}，判定仍未出房，继续出房逻辑"
+        )
+        return False
 
     @staticmethod
     def _move_mode_label(move_mode: str) -> str:

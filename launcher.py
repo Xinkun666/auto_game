@@ -1223,6 +1223,75 @@ def run_hdc_shell(command: str) -> Optional[str]:
     return output
 
 
+_POWER_SUPPLY_BATTERY_PATHS = (
+    "/sys/class/power_supply/Battery",
+    "/sys/class/power_supply/battery",
+)
+
+
+def _extract_sysfs_number(raw: str, key: Optional[str] = None) -> Optional[float]:
+    text = (raw or "").strip()
+    if not text:
+        return None
+
+    if key:
+        match = re.search(rf"(?:^|\n)\s*{re.escape(key)}\s*=\s*([+-]?\d+(?:\.\d+)?)", text)
+        if match:
+            return float(match.group(1))
+
+    match = re.search(r"=\s*([+-]?\d+(?:\.\d+)?)\s*(?:\r?\n|$)", text)
+    if match:
+        return float(match.group(1))
+
+    match = re.search(r"^\s*([+-]?\d+(?:\.\d+)?)\s*(?:\r?\n|$)", text)
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def _parse_battery_temperature_c(raw: str) -> Optional[float]:
+    value = _extract_sysfs_number(raw, "POWER_SUPPLY_TEMP")
+    if value is None:
+        return None
+
+    if abs(value) > 1000:
+        temperature = value / 1000.0
+    elif abs(value) > 100:
+        temperature = value / 10.0
+    else:
+        temperature = value
+
+    if -40.0 <= temperature <= 125.0:
+        return temperature
+    return None
+
+
+def _parse_battery_capacity(raw: str) -> Optional[int]:
+    value = _extract_sysfs_number(raw, "POWER_SUPPLY_CAPACITY")
+    if value is None:
+        return None
+    capacity = int(float(value))
+    if 0 <= capacity <= 100:
+        return capacity
+    return None
+
+
+def _read_device_value_with_fallback(label: str, commands: list[str], parser):
+    for command in commands:
+        raw = run_hdc_shell(command)
+        if not raw:
+            LOGGER.debug("%s read empty: command=%s", label, command)
+            continue
+        value = parser(raw)
+        if value is not None:
+            LOGGER.info("%s read success: command=%s value=%s raw=%s", label, command, value, raw[:200])
+            return value
+        LOGGER.warning("%s parse failed: command=%s raw=%s", label, command, raw[:200])
+
+    LOGGER.warning("%s unavailable after fallback commands: %s", label, commands)
+    return None
+
+
 def build_restart_device_commands(hdc_executable: Optional[str] = None):
     hdc = hdc_executable or resolve_hdc_executable()
     return [
@@ -1248,24 +1317,27 @@ def install_helper_signal_handlers():
 
 
 def get_battery_temperature_c() -> Optional[float]:
-    raw = run_hdc_shell("cat /sys/class/power_supply/Battery/temp")
-    if not raw:
-        return None
-    try:
-        value = float(raw)
-    except ValueError:
-        return None
-    return value / 10.0 if value > 100 else value
+    commands = [f"cat {path}/temp" for path in _POWER_SUPPLY_BATTERY_PATHS]
+    commands.extend(f"cat {path}/uevent" for path in _POWER_SUPPLY_BATTERY_PATHS)
+    commands.extend(
+        [
+            'for p in /sys/class/power_supply/*; do [ -f "$p/temp" ] && printf "%s=%s\\n" "$p" "$(cat "$p/temp")"; done; true',
+            "for p in /sys/class/power_supply/*; do [ -f \"$p/uevent\" ] && grep -E 'POWER_SUPPLY_TEMP=' \"$p/uevent\"; done; true",
+        ]
+    )
+    return _read_device_value_with_fallback("battery_temperature", commands, _parse_battery_temperature_c)
 
 
 def get_battery_capacity() -> Optional[int]:
-    raw = run_hdc_shell("cat /sys/class/power_supply/Battery/capacity")
-    if not raw:
-        return None
-    try:
-        return int(float(raw))
-    except ValueError:
-        return None
+    commands = [f"cat {path}/capacity" for path in _POWER_SUPPLY_BATTERY_PATHS]
+    commands.extend(f"cat {path}/uevent" for path in _POWER_SUPPLY_BATTERY_PATHS)
+    commands.extend(
+        [
+            'for p in /sys/class/power_supply/*; do [ -f "$p/capacity" ] && printf "%s=%s\\n" "$p" "$(cat "$p/capacity")"; done; true',
+            "for p in /sys/class/power_supply/*; do [ -f \"$p/uevent\" ] && grep -E 'POWER_SUPPLY_CAPACITY=' \"$p/uevent\"; done; true",
+        ]
+    )
+    return _read_device_value_with_fallback("battery_capacity", commands, _parse_battery_capacity)
 
 
 def set_hiz_mode(active: bool):

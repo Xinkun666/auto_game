@@ -326,4 +326,5 @@ class PhaseTimeReporter:
         print(f"[Timer] 阶段剩余时间 | {self._remaining_parts(timer)}")
 
     def _print_all_done(self, timer: PhaseTimeManager):
-        print(f"[Timer] 30 分钟总时长已圆满结束 | {self._remaining_parts(timer)}")
+        total_minutes = timer._format_phase_minutes(timer.total_duration)
+        print(f"[Timer] {total_minutes} 分钟总时长已圆满结束 | {self._remaining_parts(timer)}")

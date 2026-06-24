@@ -372,7 +372,7 @@ class HouseSearchManager:
             self._reset_entry_near_micro_adjust()
             return self._finish_searching_phase(w, reason)
 
-        print(f"[Searching] {reason}，但搜房未满10分钟，重置本轮目标继续搜房")
+        print(f"[Searching] {reason}，但搜房计时未满，重置本轮目标继续搜房")
         self.searching_number = 0
         self.completed_houses.clear()
         self.temp_skip_houses.clear()

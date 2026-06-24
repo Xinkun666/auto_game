@@ -46,9 +46,9 @@ PHASE_STAGE_MAP = {
 
 # 单位：分钟
 PHASE_DURATIONS = {
-    PHASE_SEARCHING: 10,
-    PHASE_RUNNING: 10,
-    PHASE_DRIVING: 10,
+    PHASE_SEARCHING: 5,
+    PHASE_RUNNING: 5,
+    PHASE_DRIVING: 5,
 }
 
 DROP_TARGET_R_CITY = (990, 757)
@@ -235,7 +235,7 @@ def should_abort_searching(w: "FrameWorker"):
         return False
 
     if phase_timer.is_completed(PHASE_SEARCHING):
-        print("[Timer] 搜房阶段 600s 已用完，强制切换到跑图阶段")
+        print("[Timer] 搜房阶段计时已用完，强制切换到跑图阶段")
         finish_searching_and_enter_running(w, "搜房阶段计时已用完")
         return True
 

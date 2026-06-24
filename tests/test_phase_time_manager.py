@@ -1,4 +1,6 @@
 import unittest
+import ast
+from pathlib import Path
 from unittest import mock
 
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.phase_time_manager import (
@@ -6,6 +8,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.phase_time_mana
     PHASE_RUNNING,
     PHASE_SEARCHING,
     PhaseTimeManager,
+    PhaseTimeReporter,
     parse_case_loop_count,
 )
 
@@ -75,6 +78,54 @@ class PhaseTimeManagerLoopTests(unittest.TestCase):
         printed_lines = [call.args[0] for call in print_mock.call_args_list]
         self.assertIn("[Timer] 搜房阶段开始，计划 10 分钟", printed_lines)
         self.assertIn("[Timer] 搜房阶段结束，已累计 10 分钟", printed_lines)
+
+    def test_pubg_demo_phase_durations_are_five_minutes_each(self):
+        auto_pubg_path = (
+            Path(__file__).resolve().parents[1]
+            / "aw/autogame/customs_game_examples/Auto_PUBG_ALL/auto_pubg.py"
+        )
+        module = ast.parse(auto_pubg_path.read_text(encoding="utf-8"))
+        phase_durations_node = next(
+            node.value
+            for node in module.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "PHASE_DURATIONS" for target in node.targets)
+        )
+        phase_durations = {
+            key.id: value.value
+            for key, value in zip(phase_durations_node.keys, phase_durations_node.values)
+        }
+
+        self.assertEqual(
+            {
+                "PHASE_SEARCHING": 5,
+                "PHASE_RUNNING": 5,
+                "PHASE_DRIVING": 5,
+            },
+            phase_durations,
+        )
+
+    def test_all_done_report_uses_configured_total_minutes(self):
+        timer = PhaseTimeManager(
+            {
+                PHASE_SEARCHING: 5,
+                PHASE_RUNNING: 5,
+                PHASE_DRIVING: 5,
+            },
+            {},
+        )
+        timer.start_game_time = 1.0
+        timer.total_elapsed = timer.total_duration
+        reporter = PhaseTimeReporter()
+
+        with mock.patch("builtins.print") as print_mock:
+            reporter.maybe_report(timer)
+
+        printed_lines = [call.args[0] for call in print_mock.call_args_list]
+        self.assertIn(
+            "[Timer] 15 分钟总时长已圆满结束 | 总计=00:00 | 搜房=05:00 | 跑图=05:00 | 开车=05:00",
+            printed_lines,
+        )
 
 
 if __name__ == "__main__":

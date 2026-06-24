@@ -188,10 +188,10 @@ class LauncherLabelToolTests(unittest.TestCase):
 
     def test_pubg_case_runtime_description_documents_default_loop_plan(self):
         self.assertEqual(2, PUBG_CASE_DEFAULT_LOOP_COUNT)
-        self.assertIn("10分钟搜房", PUBG_CASE_RUNTIME_DESCRIPTION)
-        self.assertIn("10分钟开车", PUBG_CASE_RUNTIME_DESCRIPTION)
-        self.assertIn("10分钟跑图", PUBG_CASE_RUNTIME_DESCRIPTION)
-        self.assertIn("总测试时长60分钟", PUBG_CASE_RUNTIME_DESCRIPTION)
+        self.assertIn("5分钟搜房", PUBG_CASE_RUNTIME_DESCRIPTION)
+        self.assertIn("5分钟开车", PUBG_CASE_RUNTIME_DESCRIPTION)
+        self.assertIn("5分钟跑图", PUBG_CASE_RUNTIME_DESCRIPTION)
+        self.assertIn("总测试时长30分钟", PUBG_CASE_RUNTIME_DESCRIPTION)
         self.assertIn("循环2次", PUBG_CASE_RUNTIME_DESCRIPTION)
 
     def test_classify_output_line_groups_launcher_logs(self):

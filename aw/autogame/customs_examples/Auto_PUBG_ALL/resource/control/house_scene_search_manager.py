@@ -147,6 +147,8 @@ class HouseSceneSearchManager(HouseSearchManager):
     FORBIDDEN_ESCAPE_FORWARD_Y_BIAS = -300
     FORBIDDEN_ESCAPE_FORWARD_DURA = 360
     FORBIDDEN_ESCAPE_FORWARD_WAIT = 700
+    FORBIDDEN_ENTRY_ASTAR_ENDPOINT_RADIUS = 120
+    ENTRY_ASTAR_WAYPOINT_ARRIVAL_DISTANCE = 3.0
 
     EXIT_DOOR_CLASS_IDS = {0, 4}
     EXIT_WINDOW_CLASS_IDS = {2}
@@ -196,6 +198,9 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_pre_search_completed = False
         self.forbidden_escape_target = None
         self.forbidden_entry_direct_target = None
+        self.entry_astar_path = []
+        self.entry_astar_target = None
+        self.entry_astar_endpoint = None
 
     def configure_r_city_landing_target(self, target):
         loc = check_location(target)
@@ -218,6 +223,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_pre_search_completed = False
         self.forbidden_escape_target = None
         self.forbidden_entry_direct_target = None
+        self._clear_entry_astar_route()
 
     @staticmethod
     def _location_tuple(value):
@@ -290,6 +296,119 @@ class HouseSceneSearchManager(HouseSearchManager):
             )
 
         self.forbidden_escape_target = target
+        return target
+
+    def _clear_entry_astar_route(self):
+        self.entry_astar_path = []
+        self.entry_astar_target = None
+        self.entry_astar_endpoint = None
+
+    def _find_entry_astar_endpoint(self, entry_loc):
+        target = self._location_tuple(entry_loc)
+        if target is None:
+            return None
+        if self._is_walkable(target):
+            return target
+
+        map_tool = getattr(self, "map_tool", None)
+        finder = getattr(map_tool, "nearest_walkable_within_radius", None)
+        endpoint = None
+        if callable(finder):
+            result = finder(target, self.FORBIDDEN_ENTRY_ASTAR_ENDPOINT_RADIUS)
+            if isinstance(result, (tuple, list)) and len(result) >= 1:
+                endpoint = self._location_tuple(result[0])
+            else:
+                endpoint = self._location_tuple(result)
+        else:
+            safe_finder = getattr(map_tool, "get_nearest_safe_point", None)
+            endpoint = self._location_tuple(
+                safe_finder(target, max_search_dist=self.FORBIDDEN_ENTRY_ASTAR_ENDPOINT_RADIUS)
+                if callable(safe_finder)
+                else None
+            )
+
+        if endpoint is None or not self._is_walkable(endpoint):
+            return None
+        return endpoint
+
+    def _build_entry_astar_route(self, current_loc, entry_loc):
+        loc = check_location(current_loc)
+        target = self._location_tuple(entry_loc)
+        if loc is None or target is None:
+            self._clear_entry_astar_route()
+            return False
+        if not self._is_walkable(loc):
+            self._clear_entry_astar_route()
+            return False
+
+        endpoint = self._find_entry_astar_endpoint(target)
+        planner = getattr(getattr(self, "map_tool", None), "plan_path", None)
+        if endpoint is None or not callable(planner):
+            self._clear_entry_astar_route()
+            return False
+
+        raw_path = planner(loc, endpoint)
+        path = []
+        for point in raw_path or []:
+            point_loc = self._location_tuple(point)
+            if point_loc is not None:
+                path.append(point_loc)
+        if endpoint not in path:
+            path.append(endpoint)
+
+        while path and get_distance(loc, path[0]) <= self.ENTRY_ASTAR_WAYPOINT_ARRIVAL_DISTANCE:
+            path.pop(0)
+
+        self.entry_astar_target = target
+        self.entry_astar_endpoint = endpoint
+        self.entry_astar_path = path
+        print(
+            f"[SceneSearch] 入门点 {target} 位于另一块不可通行区域，"
+            f"先用A*规避黑区到附近白区点 {endpoint}，waypoints={path}"
+        )
+        return True
+
+    def _advance_entry_astar_route(self, current_loc, entry_loc):
+        path = list(getattr(self, "entry_astar_path", []) or [])
+        loc = check_location(current_loc)
+        target = self._location_tuple(entry_loc)
+        if loc is None or target is None:
+            self._clear_entry_astar_route()
+            return target
+
+        while path and get_distance(loc, path[0]) <= self.ENTRY_ASTAR_WAYPOINT_ARRIVAL_DISTANCE:
+            path.pop(0)
+
+        self.entry_astar_path = path
+        if path:
+            return path[0]
+
+        self._clear_entry_astar_route()
+        print(f"[SceneSearch] A*白区路径已到终点附近，最后直奔入门点 {target}")
+        return target
+
+    def _resolve_entry_astar_navigation_target(self, current_loc, entry_loc):
+        loc = check_location(current_loc)
+        target = self._location_tuple(entry_loc)
+        if loc is None or target is None:
+            return entry_loc
+
+        if self._is_walkable(target):
+            self._clear_entry_astar_route()
+            return target
+        if not self._is_walkable(loc):
+            self._clear_entry_astar_route()
+            return target
+        if self._same_forbidden_region(loc, target):
+            self._clear_entry_astar_route()
+            return target
+
+        if getattr(self, "entry_astar_target", None) == target:
+            return self._advance_entry_astar_route(loc, target)
+
+        if self._build_entry_astar_route(loc, target):
+            return self._advance_entry_astar_route(loc, target)
+
         return target
 
     def _prepare_initial_forbidden_entry_route(self, w: "FrameWorker", current_loc):
@@ -481,6 +600,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
             if not self.current_house_id:
                 self.forbidden_entry_direct_target = None
+                self._clear_entry_astar_route()
                 self._continue_searching_until_timer(w, "当前区域无合适目标或已搜完")
                 return
 
@@ -492,7 +612,8 @@ class HouseSceneSearchManager(HouseSearchManager):
             )
             self.history_locations = []
 
-        target_loc = self.active_entry["location"]
+        entry_target_loc = self.active_entry["location"]
+        target_loc = self._resolve_entry_astar_navigation_target(current_loc, entry_target_loc)
         dist = get_distance(current_loc, target_loc)
 
         if self.status == "FAST_NAV":
@@ -510,6 +631,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                     self.handle_failed_entry_logic(self.active_entry["direction"])
                     self.status = "IDLE"
                     self.forbidden_entry_direct_target = None
+                    self._clear_entry_astar_route()
                 self.history_locations = []
                 return
 
@@ -546,6 +668,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                     self.handle_failed_entry_logic(self.active_entry["direction"])
                     self.status = "IDLE"
                     self.forbidden_entry_direct_target = None
+                    self._clear_entry_astar_route()
                 self.history_locations = []
                 return
 
@@ -564,6 +687,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                         self.handle_failed_entry_logic(self.active_entry["direction"])
                     self.status = "IDLE"
                     self.forbidden_entry_direct_target = None
+                    self._clear_entry_astar_route()
                     return
                 if near_result in {"aborted", "aligning"}:
                     return
@@ -585,6 +709,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                         self.handle_failed_entry_logic(self.active_entry["direction"])
                     self.status = "IDLE"
                     self.forbidden_entry_direct_target = None
+                    self._clear_entry_astar_route()
                     return
                 if arrival_result in {"aborted", "adjusting"}:
                     return
@@ -621,6 +746,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                     self.current_house_id = None
                 self.status = "IDLE"
                 self.forbidden_entry_direct_target = None
+                self._clear_entry_astar_route()
                 return
 
             self._complete_current_house_search(w, "house_scene 进门成功")
@@ -673,6 +799,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.status = "IDLE"
         self.history_locations = []
         self.forbidden_entry_direct_target = None
+        self._clear_entry_astar_route()
         self._reset_route_stuck_bypass()
         self._lock_next_entry_after_house_exit(w, exit_direction)
         return True
@@ -725,6 +852,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             self.indoor_stuck_frames = 0
             self.current_house_id = None
             self.status = "IDLE"
+            self._clear_entry_astar_route()
             self._continue_searching_until_timer(w, "意外进房后已出房")
 
     def _move_precisely_to_entry_point(self, w: "FrameWorker", current_loc, target_loc, dist: float) -> bool:

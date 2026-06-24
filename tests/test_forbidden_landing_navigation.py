@@ -105,6 +105,53 @@ class ForbiddenLandingNavigationTests(unittest.TestCase):
         manager._get_current_location = lambda w: (0, 0)
         return manager
 
+    def _make_astar_entry_manager(self):
+        class MapTool:
+            def __init__(self):
+                self.safe_queries = []
+                self.plan_queries = []
+
+            def is_walkable(self, pos):
+                return tuple(pos) != (500, 0)
+
+            def same_forbidden_region(self, start, end):
+                return False
+
+            def nearest_walkable_within_radius(self, pos, radius):
+                self.safe_queries.append((tuple(pos), radius))
+                return (490, 100), 10.0
+
+            def plan_path(self, start, end):
+                self.plan_queries.append((tuple(start), tuple(end)))
+                return [(10, 0), (10, 100), (490, 100)]
+
+        manager = HouseSceneSearchManager.__new__(HouseSceneSearchManager)
+        manager.map_tool = MapTool()
+        manager.current_house_id = "house_forbidden_entry"
+        manager.active_entry = {"location": (500, 0), "direction": 90}
+        manager.status = "FAST_NAV"
+        manager.auto_forward = False
+        manager.initial_target_pending = False
+        manager.initial_location_samples = []
+        manager.history_locations = []
+        manager.forbidden_escape_target = None
+        manager.forbidden_entry_direct_target = None
+        manager.route_stuck_reference_loc = None
+        manager.route_stuck_bypass_attempts = 0
+        manager.house_bypass_unstuck_pause_until = 0.0
+        manager.entry_near_micro_adjust_attempts = 0
+        manager.max_history_len = 5
+        manager.stuck_threshold = 0.5
+        manager.aligned_targets = []
+        manager._should_abort = lambda w: False
+        manager._get_house_scene = lambda w: manager.HOUSE_OUTDOOR
+        manager.update_and_check_stuck = lambda loc: False
+        manager._maybe_bypass_front_house_on_route = lambda *args, **kwargs: False
+        manager.align_direction = lambda w, target: manager.aligned_targets.append(target) or True
+        manager.handle_jump_logic = lambda w: None
+        manager.stop_auto_forward = lambda w: setattr(manager, "auto_forward", False)
+        return manager
+
     def test_entry_micro_adjust_uses_right_up_vector_inside_three_units(self):
         manager = self._make_micro_adjust_manager()
         worker = self.Worker({"direction": 30})
@@ -136,6 +183,37 @@ class ForbiddenLandingNavigationTests(unittest.TestCase):
         self.assertTrue(result)
         self.assertTrue(any(action[0] == "tap" and action[1] == "视角" for action in worker.actions))
         self.assertFalse(any(action[0] == "tap" and action[1] == "摇杆" for action in worker.actions))
+
+    def test_different_forbidden_region_entry_uses_astar_waypoint_after_escape(self):
+        manager = self._make_astar_entry_manager()
+
+        nav_target = manager._resolve_entry_astar_navigation_target((10, 0), (500, 0))
+
+        self.assertEqual(nav_target, (10, 100))
+        self.assertEqual(manager.map_tool.safe_queries, [((500, 0), manager.FORBIDDEN_ENTRY_ASTAR_ENDPOINT_RADIUS)])
+        self.assertEqual(manager.map_tool.plan_queries, [((10, 0), (490, 100))])
+
+    def test_entry_astar_waypoints_advance_before_final_forbidden_entry_push(self):
+        manager = self._make_astar_entry_manager()
+        manager.entry_astar_path = [(10, 100), (490, 100)]
+        manager.entry_astar_target = (500, 0)
+        manager.entry_astar_endpoint = (490, 100)
+
+        first_target = manager._resolve_entry_astar_navigation_target((10, 100), (500, 0))
+        final_target = manager._resolve_entry_astar_navigation_target((490, 100), (500, 0))
+
+        self.assertEqual(first_target, (490, 100))
+        self.assertEqual(final_target, (500, 0))
+        self.assertEqual(manager.entry_astar_path, [])
+
+    def test_fast_nav_uses_astar_waypoint_instead_of_forbidden_entry(self):
+        manager = self._make_astar_entry_manager()
+        worker = self.Worker()
+
+        manager.searching_logic(worker, (10, 0), 0)
+
+        self.assertEqual(manager.aligned_targets, [(10, 100)])
+        self.assertNotIn((500, 0), manager.aligned_targets)
 
     def test_forbidden_landing_locks_nearest_forbidden_entry_without_safe_escape(self):
         manager = self._make_forbidden_entry_manager()

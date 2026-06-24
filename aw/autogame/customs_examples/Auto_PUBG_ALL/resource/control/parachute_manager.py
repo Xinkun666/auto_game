@@ -83,6 +83,11 @@ class ParachuteManager:
         align_direction(w, self.target_pos)
 
         current_dist = get_distance(location, self.target_pos)
+        if not self._is_valid_distance(current_dist):
+            print("[Parachute] 当前小地图坐标无效，暂不计算R城距离或触发跳伞")
+            self.jump_confirm_distances = []
+            self.last_dist = None
+            return {}
 
         # 4. 距离趋势检查 (判断是否飞过了/飞远了)
         self._check_flight_path(current_dist, w)
@@ -98,6 +103,9 @@ class ParachuteManager:
         """激活跳伞监控模式"""
         self.is_active = True
         print("[Parachute] 检测到跳伞按钮，开始监控航线距离...")
+
+    def _is_valid_distance(self, distance) -> bool:
+        return distance is not None and distance >= 0
 
     def _check_flight_path(self, current_dist: float, w: 'FrameWorker'):
         """

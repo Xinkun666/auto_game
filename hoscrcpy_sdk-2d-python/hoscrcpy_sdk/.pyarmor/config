@@ -1,3 +1,0 @@
-[finder]
-data_files = *.so */setup.py */__init__.py
-excludes = */__init__.py */setup.py

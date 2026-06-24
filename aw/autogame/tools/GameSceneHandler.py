@@ -124,7 +124,7 @@ class GameImageProcessor:
             return result
         return [result, [timing_ms]]
 
-    def process(self, raw_frame, tasks_config, buffer_ratio=0.1):
+    def process(self, raw_frame, tasks_config, buffer_ratio=0.3):
         self.task_config = tasks_config
         curr_h, curr_w = raw_frame.shape[:2]
         results = {}
@@ -389,7 +389,7 @@ class StageLogicController:
         if not tasks_config:
             return {}
 
-        final_results = self.processor.process(frame_img, tasks_config, buffer_ratio=0.1)
+        final_results = self.processor.process(frame_img, tasks_config, buffer_ratio=0.3)
 
         return final_results
 

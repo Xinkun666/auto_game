@@ -6338,7 +6338,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         if approach_result != "near":
             return False
 
-        self._realign_to_entry_direction(w, "未发现门按钮，左右震荡探门前")
+        print("[SceneEntry] 已到达入门点附近但未看到门，不再左右调整视角，改为左右滑动摇杆找门")
         button_state = self._sweep_for_door_button(w)
         if button_state == "indoor":
             print("[SceneEntry] 左右探门时检测到 indoor，确认已进房")
@@ -6629,7 +6629,10 @@ class HouseSceneSearchManager(HouseSearchManager):
 
             dura = (step + 1) * self.SWEEP_STEP_MS
             x_bias = -self.BUTTON_SWEEP_X_BIAS if side == "left" else self.BUTTON_SWEEP_X_BIAS
-            print(f"[SceneEntry] 水平向{self._side_label(side)}探门 {dura}ms")
+            print(
+                f"[SceneEntry] 不转视角，水平向{self._side_label(side)}滑动摇杆找门 "
+                f"{dura}ms"
+            )
             w.tap_single(
                 "摇杆",
                 x_bias=x_bias,

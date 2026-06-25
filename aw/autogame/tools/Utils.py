@@ -170,6 +170,163 @@ def resolve_run_archive_dir(
     return archive_dir
 
 
+def _is_timed_special_value_for_frame_log(value):
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return False
+    timing = value[1]
+    if not isinstance(timing, (list, tuple)) or len(timing) != 1:
+        return False
+    try:
+        float(timing[0])
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _sanitize_frame_log_value(value):
+    if _is_timed_special_value_for_frame_log(value):
+        return [_sanitize_frame_log_value(value[0]), [value[1][0]]]
+    if isinstance(value, dict):
+        sanitized = {}
+        for key, child in value.items():
+            if key == "__visualizations__":
+                sanitized[key] = f"{len(child) if isinstance(child, list) else 0} visualizations"
+            else:
+                sanitized[key] = _sanitize_frame_log_value(child)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_frame_log_value(child) for child in value]
+    return value
+
+
+def sanitize_frame_info_for_json(info):
+    if isinstance(info, dict):
+        safe_info = {}
+        for key, value in info.items():
+            safe_info[str(key)] = str(_sanitize_frame_log_value(value))
+        return safe_info
+    return str(info)
+
+
+def _non_empty_info_keys(info):
+    if not isinstance(info, dict):
+        return []
+    keys = []
+    for key, value in info.items():
+        text = str(value).strip()
+        if not text or text in {"None", "[]", "{}", "False"}:
+            continue
+        keys.append(str(key))
+    return keys
+
+
+def _normalize_frame_log_entries(entries):
+    if not isinstance(entries, list):
+        return []
+    normalized = []
+    allowed_keys = {
+        "seq",
+        "created_at",
+        "category",
+        "message",
+        "raw_message",
+        "observation",
+        "target",
+        "action",
+        "method",
+        "result",
+    }
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        normalized.append({str(key): value for key, value in entry.items() if key in allowed_keys})
+    return normalized
+
+
+def _select_frame_code_branch(runtime_logs):
+    if not isinstance(runtime_logs, dict):
+        return {}
+    branch = runtime_logs.get("current_branch")
+    if isinstance(branch, dict) and branch:
+        return dict(branch)
+    logic_logs = _normalize_frame_log_entries(runtime_logs.get("logic_logs"))
+    if logic_logs:
+        return dict(logic_logs[-1])
+    recent_logs = _normalize_frame_log_entries(runtime_logs.get("recent_logs"))
+    return dict(recent_logs[-1]) if recent_logs else {}
+
+
+def _select_next_action(runtime_logs, code_branch):
+    if isinstance(runtime_logs, dict):
+        explicit = str(runtime_logs.get("next_action") or "").strip()
+        if explicit and explicit != "-":
+            return explicit
+    if isinstance(code_branch, dict):
+        for key in ("action", "result", "observation"):
+            value = str(code_branch.get(key) or "").strip()
+            if value and value != "-":
+                return value
+    return ""
+
+
+def _build_frame_summary(stage, info_keys, code_branch, next_action):
+    stage_text = str(stage or "未知阶段")
+    if info_keys:
+        seen_text = "看到 " + ", ".join(info_keys)
+    else:
+        seen_text = "未识别到有效 info"
+
+    branch_target = ""
+    branch_observation = ""
+    if isinstance(code_branch, dict):
+        branch_target = str(code_branch.get("target") or "").strip()
+        branch_observation = str(code_branch.get("observation") or "").strip()
+
+    branch_text = branch_target if branch_target and branch_target != "-" else branch_observation
+    if not branch_text or branch_text == "-":
+        branch_text = "暂无明确代码分支"
+    action_text = next_action or "等待下一轮逻辑判断"
+    return f"当前帧处于{stage_text}，{seen_text}；代码分支：{branch_text}；下一步：{action_text}"
+
+
+def build_frame_log_payload(stage, info, index, runtime_logs=None, group_name=None, frame_name=None):
+    safe_info = sanitize_frame_info_for_json(info)
+    info_keys = _non_empty_info_keys(safe_info)
+    runtime_logs = runtime_logs if isinstance(runtime_logs, dict) else {}
+    code_branch = _select_frame_code_branch(runtime_logs)
+    next_action = _select_next_action(runtime_logs, code_branch)
+    frame_name = frame_name or f"frame_{int(index):05d}.jpg"
+
+    return {
+        "schema_version": 2,
+        "index": index,
+        "frame": {
+            "index": index,
+            "image": frame_name,
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        },
+        "stage": {
+            "name": stage or "",
+            "group": group_name or "",
+        },
+        "phase": {
+            "stage": stage or "",
+            "group": group_name or "",
+        },
+        "info": safe_info,
+        "seen": {
+            "summary": "看到 " + ", ".join(info_keys) if info_keys else "未识别到有效 info",
+            "info_keys": info_keys,
+        },
+        "time_logs": _normalize_frame_log_entries(runtime_logs.get("time_logs")),
+        "logic_logs": _normalize_frame_log_entries(runtime_logs.get("logic_logs")),
+        "recent_logs": _normalize_frame_log_entries(runtime_logs.get("recent_logs")),
+        "code_branch": code_branch,
+        "next_action": next_action,
+        "frame_summary": _build_frame_summary(stage, info_keys, code_branch, next_action),
+    }
+
+
 def _build_archive_dir(
     run_index: int,
     extra_metadata: Optional[dict] = None,
@@ -1038,7 +1195,12 @@ def visualizer_process(queue, visual=True):
             if data == "STOP":
                 break
 
-            frame_rgb, stage, info, index = data
+            if isinstance(data, (list, tuple)) and len(data) == 5:
+                frame_rgb, stage, info, index, frame_meta = data
+            else:
+                frame_rgb, stage, info, index = data
+                frame_meta = {}
+            frame_meta = frame_meta if isinstance(frame_meta, dict) else {}
             if not isinstance(frame_rgb, np.ndarray):
                 frame_rgb = np.array(frame_rgb, copy=True)
             else:
@@ -1058,11 +1220,8 @@ def visualizer_process(queue, visual=True):
             def get_scaled_size(base_size):
                 return int(base_size / scale)
 
-            # 调整后的基础参数
-            font_main = get_scaled_size(24)  # 标题字号
-            font_info = get_scaled_size(18)  # 信息字号
-            y_offset = int(20 / scale)
-            line_height = int(30 / scale)
+            # 调整后的基础参数。图片不再叠加 ID / Stage / info 文本，只保留检测框标注字号。
+            font_info = get_scaled_size(18)
             # ---------------------------
 
             # 2. 可视化检测框
@@ -1086,40 +1245,21 @@ def visualizer_process(queue, visual=True):
                         font_info,
                     )
 
-            safe_info = {}
-            if visual:
-                base_text = f"ID: {index} | Stage: {stage}"
-                frame_rotated = draw_chinese_text(frame_rotated, base_text, (int(10 / scale), y_offset),
-                                                  "simhei.ttf", font_main, (255, 255, 255))
-                y_offset += line_height
-
-            if isinstance(info, dict):
-                for k, v in sorted_info_items:
-                    display_value = sanitize_info_for_log(v)
-                    raw_str = str(display_value)
-                    safe_info[k] = raw_str
-
-                    if visual:
-                        if k in detection_keys:
-                            continue
-                        val_str = raw_str
-                        if len(val_str) > 50:
-                            val_str = val_str[:50] + "..."
-                        info_line = f"{k}: {val_str}"
-                        frame_rotated = draw_chinese_text(
-                            frame_rotated, info_line, (int(10 / scale), y_offset),
-                            "simhei.ttf", font_info, (0, 255, 255)
-                        )
-                        y_offset += line_height
-            else:
-                safe_info = str(info)
-
             # 4. 存储原始图
             base_filename = os.path.join(log_dir, f"frame_{index:05d}")
+            frame_name = f"frame_{index:05d}.jpg"
             if not write_image_unicode(f"{base_filename}.jpg", frame_rotated):
                 raise RuntimeError(f"preview image write failed: {base_filename}.jpg")
+            payload = build_frame_log_payload(
+                stage,
+                info,
+                index,
+                runtime_logs=frame_meta.get("runtime_logs"),
+                group_name=frame_meta.get("group_name"),
+                frame_name=frame_name,
+            )
             with open(f"{base_filename}.json", "w", encoding="utf-8") as f:
-                json.dump({"index": index, "stage": stage, "info": safe_info}, f, ensure_ascii=False, indent=4)
+                json.dump(payload, f, ensure_ascii=False, indent=4)
 
             # 5. 缩放显示 (此时文字会因为前面的反向补偿，在显示窗口中看起来大小适中)
             if show_window:

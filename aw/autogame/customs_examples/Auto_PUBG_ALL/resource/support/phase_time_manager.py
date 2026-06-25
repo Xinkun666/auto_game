@@ -4,6 +4,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Set
 
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import autogame_print as print
+
 
 PHASE_RUNNING = "跑图"
 PHASE_DRIVING = "开车"

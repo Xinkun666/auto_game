@@ -1003,6 +1003,12 @@ def _count_files(path: Path) -> int:
     return sum(1 for child in path.rglob("*") if child.is_file())
 
 
+def _count_frame_json_files(path: Path) -> int:
+    if not path.exists() or not path.is_dir():
+        return 0
+    return sum(1 for child in path.glob("frame_*.json") if child.is_file())
+
+
 def _read_history_text(path: Path, max_chars: int = 200000) -> str:
     if not path.exists() or not path.is_file():
         return ""
@@ -1055,6 +1061,7 @@ def discover_history_outputs(temp_dir: Path = TEMP_DIR) -> list[dict]:
             "log_file_count": _count_files(logs_dir),
             "process_temp_file_count": _count_files(archive_dir / "process_temp_logs"),
             "process_save_frame_count": _count_files(archive_dir / "process_save_frames"),
+            "frame_log_count": _count_frame_json_files(archive_dir / "process_temp_logs"),
             "preview_video_path": preview_video,
             "preview_video_exists": preview_video.exists() and preview_video.is_file(),
             "mtime": info_path.stat().st_mtime,
@@ -1088,6 +1095,7 @@ def format_history_record_summary(record: dict) -> str:
         f"log_file_count: {value('log_file_count', '0')}",
         f"process_temp_file_count: {value('process_temp_file_count', '0')}",
         f"process_save_frame_count: {value('process_save_frame_count', '0')}",
+        f"frame_log_count: {value('frame_log_count', '0')}",
         f"preview_10fps.mp4: {preview_text}",
         f"archive_dir: {archive_dir}",
     ]
@@ -1126,6 +1134,132 @@ def find_latest_preview_frame(preview_dir: Path) -> Optional[Path]:
     if not candidates:
         return None
     return max(candidates, key=_preview_frame_sort_key)
+
+
+def _history_frame_sort_key(path: Path):
+    return (_preview_frame_sequence(path), path.name)
+
+
+def _read_json_payload(path: Path):
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"error": "json 读取失败", "path": str(path)}
+    return payload if isinstance(payload, dict) else {"raw": payload}
+
+
+def load_history_frame_records(record: dict) -> list[dict]:
+    if not isinstance(record, dict):
+        return []
+    archive_dir = Path(record.get("archive_dir") or "")
+    frame_dir = archive_dir / "process_temp_logs"
+    if not frame_dir.exists():
+        frame_dir = archive_dir / "process_save_frames"
+    if not frame_dir.exists():
+        return []
+
+    frames = []
+    image_paths = [
+        path
+        for path in frame_dir.glob("frame_*")
+        if path.is_file() and path.suffix.lower() in PREVIEW_FRAME_SUFFIXES
+    ]
+    for image_path in sorted(image_paths, key=_history_frame_sort_key):
+        json_path = image_path.with_suffix(".json")
+        payload = _read_json_payload(json_path) if json_path.exists() else {
+            "schema_version": 1,
+            "frame": {"image": image_path.name, "index": _preview_frame_sequence(image_path)},
+            "stage": {"name": ""},
+            "info": {},
+            "frame_summary": "未找到同名帧 JSON。",
+        }
+        frames.append({
+            "index": _preview_frame_sequence(image_path),
+            "image_path": image_path,
+            "json_path": json_path,
+            "payload": payload,
+        })
+    return frames
+
+
+def _format_history_log_entries(entries: list[dict]) -> list[str]:
+    lines = []
+    if not isinstance(entries, list):
+        return lines
+    for entry in entries[-8:]:
+        if not isinstance(entry, dict):
+            continue
+        message = str(entry.get("message") or entry.get("raw_message") or "").strip()
+        if message:
+            lines.append(f"- {message}")
+            continue
+        observation = str(entry.get("observation") or "").strip()
+        action = str(entry.get("action") or "").strip()
+        if observation or action:
+            lines.append(f"- {observation} {action}".strip())
+    return lines
+
+
+def format_history_frame_details(frame_record: dict) -> str:
+    payload = frame_record.get("payload") if isinstance(frame_record, dict) else {}
+    payload = payload if isinstance(payload, dict) else {}
+    frame_info = payload.get("frame") if isinstance(payload.get("frame"), dict) else {}
+    stage_info = payload.get("stage")
+    if isinstance(stage_info, dict):
+        stage_name = stage_info.get("name") or "-"
+        stage_group = stage_info.get("group") or "-"
+    else:
+        stage_name = payload.get("stage") or "-"
+        stage_group = "-"
+
+    seen = payload.get("seen") if isinstance(payload.get("seen"), dict) else {}
+    info_payload = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+    code_branch = payload.get("code_branch") if isinstance(payload.get("code_branch"), dict) else {}
+    next_action = str(payload.get("next_action") or "").strip() or "-"
+
+    lines = [
+        f"帧: {frame_info.get('image') or Path(str(frame_record.get('image_path') or '')).name}",
+        f"序号: {frame_info.get('index', frame_record.get('index', '-'))}",
+        "",
+        "阶段信息",
+        f"- 阶段: {stage_name}",
+        f"- 分组: {stage_group}",
+        "",
+        "这一帧看到了",
+        f"- {seen.get('summary') or payload.get('frame_summary') or '-'}",
+    ]
+
+    if info_payload:
+        lines.append("- info:")
+        for key, value in list(info_payload.items())[:80]:
+            lines.append(f"  {key}: {value}")
+
+    lines.extend([
+        "",
+        "代码分支",
+        f"- 目标/分支: {code_branch.get('target') or '-'}",
+        f"- 观察: {code_branch.get('observation') or '-'}",
+        f"- 决策: {code_branch.get('action') or '-'}",
+        f"- 控制: {code_branch.get('method') or '-'}",
+        f"- 结果: {code_branch.get('result') or '-'}",
+        "",
+        "下一步",
+        f"- {next_action}",
+    ])
+
+    time_lines = _format_history_log_entries(payload.get("time_logs", []))
+    if time_lines:
+        lines.extend(["", "时间日志", *time_lines])
+
+    logic_lines = _format_history_log_entries(payload.get("logic_logs", []))
+    if logic_lines:
+        lines.extend(["", "逻辑日志", *logic_lines])
+
+    summary = str(payload.get("frame_summary") or "").strip()
+    if summary:
+        lines.extend(["", "帧摘要", f"- {summary}"])
+
+    return "\n".join(lines)
 
 
 def discover_project_cases() -> list[str]:
@@ -1408,6 +1542,8 @@ class LauncherWindow(QWidget):
         self.label_tool_project_dir: Optional[Path] = None
         self.history_records: list[dict] = []
         self.selected_history_record: Optional[dict] = None
+        self.history_frame_records: list[dict] = []
+        self.history_frame_index = -1
         self.process_launch_tracer = WindowsProcessLaunchTracer(LOG_DIR)
 
         self.setWindowTitle("Auto Game 启动器")
@@ -2374,6 +2510,39 @@ class LauncherWindow(QWidget):
         self.history_summary_edit.setPlaceholderText("选择一条历史输出后显示摘要...")
         summary_layout.addWidget(self.history_summary_edit)
 
+        frame_group = QGroupBox("逐帧场景日志")
+        frame_layout = QVBoxLayout(frame_group)
+        frame_layout.setContentsMargins(12, 10, 12, 12)
+        frame_layout.setSpacing(8)
+        frame_nav_layout = QHBoxLayout()
+        frame_nav_layout.setContentsMargins(0, 0, 0, 0)
+        frame_nav_layout.setSpacing(8)
+        self.history_prev_frame_button = QPushButton("上一帧")
+        self.history_next_frame_button = QPushButton("下一帧")
+        self.history_frame_counter_label = QLabel("未加载帧")
+        self.history_frame_counter_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        frame_nav_layout.addWidget(self.history_prev_frame_button)
+        frame_nav_layout.addWidget(self.history_next_frame_button)
+        frame_nav_layout.addWidget(self.history_frame_counter_label, 1)
+        frame_layout.addLayout(frame_nav_layout)
+
+        frame_splitter = QSplitter(Qt.Orientation.Horizontal)
+        frame_splitter.setChildrenCollapsible(False)
+        frame_splitter.setHandleWidth(8)
+        self.history_frame_image_label = QLabel("选择历史输出后显示帧画面")
+        self.history_frame_image_label.setObjectName("previewSurface")
+        self.history_frame_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.history_frame_image_label.setMinimumSize(420, 260)
+        self.history_frame_image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.history_frame_log_edit = QPlainTextEdit()
+        self.history_frame_log_edit.setReadOnly(True)
+        self.history_frame_log_edit.setPlaceholderText("选择历史输出后显示这一帧的阶段、info、时间日志和代码分支...")
+        frame_splitter.addWidget(self.history_frame_image_label)
+        frame_splitter.addWidget(self.history_frame_log_edit)
+        frame_splitter.setStretchFactor(0, 3)
+        frame_splitter.setStretchFactor(1, 2)
+        frame_layout.addWidget(frame_splitter, 1)
+
         output_group = QGroupBox("launcher 输出")
         output_layout = QVBoxLayout(output_group)
         output_layout.setContentsMargins(12, 10, 12, 12)
@@ -2383,6 +2552,7 @@ class LauncherWindow(QWidget):
         output_layout.addWidget(self.history_output_edit)
 
         right_layout.addWidget(summary_group, 0)
+        right_layout.addWidget(frame_group, 2)
         right_layout.addWidget(output_group, 1)
 
         splitter.addWidget(left_group)
@@ -2408,6 +2578,8 @@ class LauncherWindow(QWidget):
         self.history_delete_button.clicked.connect(self._delete_selected_history_output)
         self.history_back_button.clicked.connect(self._show_launcher_page)
         self.history_tree.itemSelectionChanged.connect(self._on_history_selection_changed)
+        self.history_prev_frame_button.clicked.connect(self._show_previous_history_frame)
+        self.history_next_frame_button.clicked.connect(self._show_next_history_frame)
         self.keep_process_on_manual_stop_button.toggled.connect(self._toggle_keep_process_on_manual_stop)
         self.generate_preview_video_button.toggled.connect(self._toggle_generate_preview_video)
         self.preview_overlay_button.toggled.connect(self._toggle_preview_overlay)
@@ -2769,14 +2941,69 @@ class LauncherWindow(QWidget):
         if not has_record:
             self.history_summary_edit.clear()
             self.history_output_edit.clear()
+            self.history_frame_records = []
+            self.history_frame_index = -1
+            self._render_history_frame()
             return
 
         self.history_summary_edit.setPlainText(format_history_record_summary(record))
+        self.history_frame_records = load_history_frame_records(record)
+        self.history_frame_index = 0 if self.history_frame_records else -1
+        self._render_history_frame()
         launcher_output = str(record.get("launcher_output") or "").strip()
         if launcher_output:
             self.history_output_edit.setPlainText(launcher_output)
         else:
             self.history_output_edit.setPlainText("未找到 logs/launcher_output.txt。")
+
+    def _render_history_frame(self):
+        frame_count = len(self.history_frame_records)
+        has_frame = frame_count > 0 and 0 <= self.history_frame_index < frame_count
+        self.history_prev_frame_button.setEnabled(has_frame and self.history_frame_index > 0)
+        self.history_next_frame_button.setEnabled(has_frame and self.history_frame_index < frame_count - 1)
+
+        if not has_frame:
+            self.history_frame_counter_label.setText("未找到逐帧日志")
+            self.history_frame_image_label.setPixmap(QPixmap())
+            self.history_frame_image_label.setText("未找到 process_temp_logs/frame_*.jpg")
+            self.history_frame_log_edit.setPlainText("未找到逐帧 JSON。请确认本次运行已生成 process_temp_logs/frame_*.json。")
+            return
+
+        frame_record = self.history_frame_records[self.history_frame_index]
+        image_path = Path(frame_record.get("image_path"))
+        self.history_frame_counter_label.setText(
+            f"{self.history_frame_index + 1}/{frame_count}  {image_path.name}"
+        )
+        self.history_frame_log_edit.setPlainText(format_history_frame_details(frame_record))
+
+        pixmap = QPixmap(str(image_path))
+        if pixmap.isNull():
+            self.history_frame_image_label.setPixmap(QPixmap())
+            self.history_frame_image_label.setText(f"帧图片读取失败：\n{image_path}")
+            return
+
+        available_w = max(1, self.history_frame_image_label.width() - 12)
+        available_h = max(1, self.history_frame_image_label.height() - 12)
+        scaled = pixmap.scaled(
+            available_w,
+            available_h,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.history_frame_image_label.setText("")
+        self.history_frame_image_label.setPixmap(scaled)
+
+    def _show_previous_history_frame(self):
+        if self.history_frame_index <= 0:
+            return
+        self.history_frame_index -= 1
+        self._render_history_frame()
+
+    def _show_next_history_frame(self):
+        if self.history_frame_index >= len(self.history_frame_records) - 1:
+            return
+        self.history_frame_index += 1
+        self._render_history_frame()
 
     def _refresh_history_outputs(self):
         LOGGER.info("refresh_history_outputs")

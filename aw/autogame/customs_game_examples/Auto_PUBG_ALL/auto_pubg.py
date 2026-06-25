@@ -23,6 +23,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.phase_time_mana
 )
 from aw.autogame.tools.GameLaunchProfile import should_use_sp_recording_for_profile
 from aw.autogame.tools.Utils import _read_autogame_config
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import autogame_print as print
 
 """
 1. w.current_stage ： 当前自动化的阶段，可以参考你标注工程导出的info.py里，对应的阶段为True，即表示当前阶段
@@ -546,6 +547,7 @@ def on_stage(w: "FrameWorker"):
             running_manager.notify_searching_exit(finding_car=_should_find_car_after_searching())
 
     if "landed" in stage_events and not phase_timer.all_done():
+        print("[Flow] 当前人物已经落地，接下来同步落地后的搜房/跑图/开车目标")
         if phase_timer.start_game_time is not None:
             running_manager.set_game_time(phase_timer.start_game_time)
             driving_manager.set_game_time(phase_timer.start_game_time)

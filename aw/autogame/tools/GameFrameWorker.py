@@ -1801,6 +1801,7 @@ class FrameWorker(threading.Thread):
         except Exception as exc:
             print(f"加载业务逻辑失败: {exc}")
             raise
+        self.frame_log_snapshotter = self._load_frame_log_snapshotter(project_case)
 
         self.buffer = buffer
         self.driver = driver
@@ -1842,6 +1843,35 @@ class FrameWorker(threading.Thread):
         self.move_press = self._wrap_control_action("move_press", self.controller.move_press)
         self.move_to = self._wrap_control_action("move_to", self.controller.move_to)
         self.move_up = self._wrap_control_action("move_up", self.controller.move_up)
+
+    def _load_frame_log_snapshotter(self, project_case):
+        module_path = f"aw.autogame.customs_examples.{project_case}.resource.support.structured_log"
+        try:
+            module = importlib.import_module(module_path)
+        except Exception:
+            return None
+        snapshotter = getattr(module, "get_recent_frame_log_snapshot", None)
+        return snapshotter if callable(snapshotter) else None
+
+    def _get_frame_runtime_logs(self):
+        if not callable(self.frame_log_snapshotter):
+            return {}
+        try:
+            snapshot = self.frame_log_snapshotter()
+        except Exception as exc:
+            print(f"[FrameWorker] 获取帧日志快照失败: {exc}")
+            return {}
+        return snapshot if isinstance(snapshot, dict) else {}
+
+    def _queue_visual_frame(self):
+        if self.frame is None or not self.viz_proc or self.viz_queue.full():
+            return
+        frame_meta = {
+            "group_name": self.current_group,
+            "runtime_logs": self._get_frame_runtime_logs(),
+        }
+        self.viz_queue.put((self.frame.copy(), self.current_stage, self.stage_info, self.frame_index, frame_meta))
+        self.frame_index += 1
 
     def _is_launcher_mode(self):
         source = os.environ.get("AUTOGAME_RUN_SOURCE", "").strip().lower()
@@ -2020,11 +2050,8 @@ class FrameWorker(threading.Thread):
                     self.current_group,
                 )
 
-                if not self.viz_queue.full() and self.viz_proc:
-                    self.viz_queue.put((self.frame.copy(), self.current_stage, self.stage_info, self.frame_index))
-                    self.frame_index += 1
-
                 self.on_stage_logic(self)
+                self._queue_visual_frame()
                 time.sleep(0.05)
             except Exception as exc:
                 print(f"[Loop Error] 运行时异常: {exc}")
@@ -2137,9 +2164,7 @@ class FrameWorker(threading.Thread):
                 self.current_stage,
                 self.current_group,
             )
-            if self.viz_proc and not self.viz_queue.full():
-                self.viz_queue.put((self.frame.copy(), self.current_stage, self.stage_info, self.frame_index))
-                self.frame_index += 1
+            self._queue_visual_frame()
         return True
 
     def refresh_frame(self):
@@ -2156,8 +2181,6 @@ class FrameWorker(threading.Thread):
             self.current_group,
         )
 
-        if not self.viz_queue.full():
-            self.viz_queue.put((self.frame.copy(), self.current_stage, self.stage_info, self.frame_index))
-            self.frame_index += 1
+        self._queue_visual_frame()
 
         return True

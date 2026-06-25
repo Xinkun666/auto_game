@@ -1,6 +1,9 @@
 import builtins
+from collections import deque
 import re
 import sys
+import threading
+import time
 
 
 LOG_PREFIX = "[AutoLog]"
@@ -19,6 +22,8 @@ LOG_CATEGORIES = {
 EMPTY_FIELD = "-"
 PREFIX_RE = re.compile(r"^\[(?P<prefix>[^\]]+)\]\s*(?P<body>.*)$")
 PREFIX_TARGETS = {
+    "Timer": "阶段计时",
+    "PhaseTimer": "阶段计时",
     "Parachute": "跳伞阶段",
     "Searching": "搜房阶段",
     "搜房": "搜房阶段",
@@ -45,9 +50,15 @@ PREFIX_TARGETS = {
     "Smart": "智能导航",
     "TurnCalibration": "转向校准",
     "Flow": "全流程阶段",
+    "Round": "单局循环准备",
+    "Terminal": "终局检测",
+    "Popup": "弹窗处理",
+    "StartGame": "开始游戏阶段",
     "Control": "设备控制",
     "HDC": "HDC控制命令",
 }
+TIME_PREFIXES = {"Timer", "PhaseTimer"}
+TIME_MARKERS = ("[Timer]", "[PhaseTimer]", "运行信息：", "剩余", "remaining=", "计时")
 ACTION_WORDS = (
     "启动",
     "开始",
@@ -98,6 +109,18 @@ RESULT_WORDS = (
     "确认",
 )
 BRACKET_FIELD_RE = re.compile(r"\[(?P<key>[^:\]]+):(?P<value>[^\]]*)\]")
+FRAME_LOG_HISTORY_LIMIT = 160
+FRAME_LOG_SNAPSHOT_LIMIT = 20
+_FRAME_LOG_HISTORY = deque(maxlen=FRAME_LOG_HISTORY_LIMIT)
+_FRAME_LOG_LOCK = threading.Lock()
+_FRAME_LOG_SEQUENCE = 0
+
+
+def _next_sequence():
+    global _FRAME_LOG_SEQUENCE
+    with _FRAME_LOG_LOCK:
+        _FRAME_LOG_SEQUENCE += 1
+        return _FRAME_LOG_SEQUENCE
 
 
 OBSERVATION_KEYS = {"观察", "观察现象", "现象", "情况", "状态", "当前状态"}
@@ -118,6 +141,26 @@ def _clean_field(value):
 def _clean_category(category):
     text = _clean_field(category)
     return text if text in LOG_CATEGORIES else LOG_CATEGORY_OTHER
+
+
+def infer_log_category(message, default=LOG_CATEGORY_LOGIC):
+    text = _clean_field(message)
+    if text.startswith(LOG_PREFIX):
+        match = re.match(r"^\[AutoLog\]\[(?P<category>[^\]]+)\]", text)
+        if match and match.group("category") in LOG_CATEGORIES:
+            return match.group("category")
+
+    match = PREFIX_RE.match(text)
+    if match:
+        prefix = match.group("prefix")
+        if prefix in TIME_PREFIXES:
+            return LOG_CATEGORY_TIME
+        if prefix in PREFIX_TARGETS:
+            return LOG_CATEGORY_LOGIC
+
+    if any(marker in text for marker in TIME_MARKERS):
+        return LOG_CATEGORY_TIME
+    return _clean_category(default)
 
 
 def _looks_like_action(text):
@@ -219,6 +262,96 @@ def format_log_line(
     )
 
 
+def _record_frame_log(entry):
+    with _FRAME_LOG_LOCK:
+        _FRAME_LOG_HISTORY.append(dict(entry))
+
+
+def _entry_from_fields(
+    raw_message,
+    formatted_message,
+    category,
+    observation,
+    target=None,
+    action=None,
+    method=None,
+    result=None,
+):
+    return {
+        "seq": _next_sequence(),
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "category": _clean_category(category),
+        "message": _clean_field(formatted_message),
+        "raw_message": _clean_field(raw_message),
+        "observation": _clean_field(observation),
+        "target": _clean_field(target),
+        "action": _clean_field(action),
+        "method": _clean_field(method),
+        "result": _clean_field(result),
+    }
+
+
+def _parse_existing_autolog_line(message, category):
+    text = _clean_field(message)
+    observation, target, action, method, result = infer_log_fields(text)
+    parts = {}
+    body = text
+    prefix_match = re.match(r"^\[AutoLog\]\[[^\]]+\]\s*(?P<body>.*)$", text)
+    if prefix_match:
+        body = prefix_match.group("body")
+    for chunk in body.split("|"):
+        chunk = chunk.strip()
+        if "=" not in chunk:
+            continue
+        key, value = chunk.split("=", 1)
+        parts[key.strip()] = value.strip()
+    if parts:
+        observation = parts.get("观察现象", observation)
+        target = parts.get("当前目标", target)
+        action = parts.get("做的决策", action)
+        method = parts.get("具体控制", method)
+        result = parts.get("结果", result)
+    return _entry_from_fields(text, text, category, observation, target, action, method, result)
+
+
+def clear_frame_log_history():
+    global _FRAME_LOG_SEQUENCE
+    with _FRAME_LOG_LOCK:
+        _FRAME_LOG_HISTORY.clear()
+        _FRAME_LOG_SEQUENCE = 0
+
+
+def get_recent_frame_log_snapshot(limit=FRAME_LOG_SNAPSHOT_LIMIT):
+    try:
+        item_limit = max(1, int(limit))
+    except (TypeError, ValueError):
+        item_limit = FRAME_LOG_SNAPSHOT_LIMIT
+
+    with _FRAME_LOG_LOCK:
+        entries = [dict(entry) for entry in _FRAME_LOG_HISTORY]
+
+    recent_logs = entries[-item_limit:]
+    time_logs = [entry for entry in entries if entry.get("category") == LOG_CATEGORY_TIME][-item_limit:]
+    logic_logs = [entry for entry in entries if entry.get("category") == LOG_CATEGORY_LOGIC][-item_limit:]
+
+    current_branch = logic_logs[-1] if logic_logs else (recent_logs[-1] if recent_logs else {})
+    next_action = ""
+    if current_branch:
+        for key in ("action", "result", "observation"):
+            value = current_branch.get(key)
+            if value and value != EMPTY_FIELD:
+                next_action = value
+                break
+
+    return {
+        "recent_logs": recent_logs,
+        "time_logs": time_logs,
+        "logic_logs": logic_logs,
+        "current_branch": dict(current_branch) if current_branch else {},
+        "next_action": next_action,
+    }
+
+
 def log_step(
     observation,
     target=None,
@@ -230,36 +363,57 @@ def log_step(
     file=None,
     flush=False,
 ):
-    builtins.print(
-        format_log_line(
-            observation,
-            target=target,
-            action=action,
-            method=method,
-            result=result,
-            category=category,
-        ),
-        file=sys.stdout if file is None else file,
-        flush=flush,
+    category_text = _clean_category(category)
+    formatted = format_log_line(
+        observation,
+        target=target,
+        action=action,
+        method=method,
+        result=result,
+        category=category_text,
     )
+    _record_frame_log(
+        _entry_from_fields(
+            observation,
+            formatted,
+            category_text,
+            observation,
+            target,
+            action,
+            method,
+            result,
+        )
+    )
+    builtins.print(formatted, file=sys.stdout if file is None else file, flush=flush)
 
 
 def autogame_print(*values, sep=" ", end="\n", file=None, flush=False, category=LOG_CATEGORY_LOGIC):
     message = sep.join(str(value) for value in values)
     if message.startswith(LOG_PREFIX):
+        category_text = infer_log_category(message, default=category)
+        _record_frame_log(_parse_existing_autolog_line(message, category_text))
         builtins.print(message, end=end, file=sys.stdout if file is None else file, flush=flush)
         return
+    category_text = infer_log_category(message, default=category)
     observation, target, action, method, result = infer_log_fields(message)
-    builtins.print(
-        format_log_line(
-            observation,
-            target=target,
-            action=action,
-            method=method,
-            result=result,
-            category=category,
-        ),
-        end=end,
-        file=sys.stdout if file is None else file,
-        flush=flush,
+    formatted = format_log_line(
+        observation,
+        target=target,
+        action=action,
+        method=method,
+        result=result,
+        category=category_text,
     )
+    _record_frame_log(
+        _entry_from_fields(
+            message,
+            formatted,
+            category_text,
+            observation,
+            target,
+            action,
+            method,
+            result,
+        )
+    )
+    builtins.print(formatted, end=end, file=sys.stdout if file is None else file, flush=flush)

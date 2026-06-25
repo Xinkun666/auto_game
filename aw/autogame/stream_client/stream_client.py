@@ -23,6 +23,24 @@ except ImportError as e:
     PROTO_IMPORT_ERROR = e
     print("Warning: gRPC proto files not found. StreamClient will be unavailable.")
 
+
+def _env_truthy(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_float(name, default):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class FrameBuffer:
     def __init__(self, size=5):
         self.size = size
@@ -125,11 +143,19 @@ class StreamClient:
         self.height = 1280
 
         # ---------- 保存相关 ----------
-        self.save_frame = save_frame
+        self.save_frame_disabled = _env_truthy("AUTOGAME_DISABLE_SAVE_FRAMES")
+        self.save_frame = bool(save_frame and not self.save_frame_disabled)
         self.save_queue = queue.Queue(maxsize=100)
         self.save_worker = None
 
         self.save_dir = str(resolve_process_save_frames_dir())
+
+        # ---------- 诊断统计 ----------
+        self.diagnostics_enabled = _env_truthy("AUTOGAME_STREAM_DIAGNOSTICS")
+        self.diagnostics_interval = max(0.0, _env_float("AUTOGAME_STREAM_DIAGNOSTICS_INTERVAL", 1.0))
+        self._diag_lock = threading.Lock()
+        self._diag_window_start = time.monotonic()
+        self._diag = self._new_diag_stats()
 
         # ---------- 线程/状态保护 ----------
         self._state_lock = threading.Lock()
@@ -152,6 +178,11 @@ class StreamClient:
     # =========================================================
     def set_save_frame(self, enable):
         """动态开关保存功能"""
+        if enable and self.save_frame_disabled:
+            self.save_frame = False
+            print("[Stream] Save frame mode disabled by AUTOGAME_DISABLE_SAVE_FRAMES=1")
+            return
+
         self.save_frame = enable
         if enable:
             os.makedirs(self.save_dir, exist_ok=True)
@@ -307,6 +338,7 @@ class StreamClient:
                         if not self.running or self._stop_event.is_set():
                             break
 
+                        frame_start = time.perf_counter()
                         data = message.data
                         if not data:
                             continue
@@ -318,16 +350,32 @@ class StreamClient:
                             print("[Stream] Frame size mismatch: got=%d, expected=%d" % (len(data), expected_size))
                             continue
 
+                        decode_start = time.perf_counter()
                         frame = self.decode_frame(data)
                         frame = apply_rotation(frame, self.rotation_mode)
+                        decode_ms = (time.perf_counter() - decode_start) * 1000.0
                         if frame is None:
                             continue
 
                         # 统一出口，便于后续扩展
+                        buffer_start = time.perf_counter()
                         self.on_frame(frame)
+                        buffer_ms = (time.perf_counter() - buffer_start) * 1000.0
 
+                        enqueue_ms = 0.0
                         if self.save_frame:
+                            enqueue_start = time.perf_counter()
                             self._enqueue_save(frame)
+                            enqueue_ms = (time.perf_counter() - enqueue_start) * 1000.0
+
+                        receive_ms = (decode_start - frame_start) * 1000.0
+                        self._record_stream_frame(
+                            receive_ms=receive_ms,
+                            decode_ms=decode_ms,
+                            buffer_ms=buffer_ms,
+                            enqueue_ms=enqueue_ms,
+                        )
+                        self._maybe_print_stream_diagnostics()
 
                     if not self.running or self._stop_event.is_set():
                         print("[Stream] Receive loop exited.")
@@ -442,6 +490,7 @@ class StreamClient:
             self.save_queue.put_nowait((frame.copy(), ts_str))
         except queue.Full:
             # 风险控制：保存线程来不及，直接丢弃保存任务，保证主流程实时性
+            self._record_save_drop()
             pass
         except Exception as e:
             print("[Stream] Save queue error: %s" % e)
@@ -472,7 +521,9 @@ class StreamClient:
 
                 frame, time_str = item
                 save_path = os.path.join(self.save_dir, "%s.jpg" % time_str)
+                save_start = time.perf_counter()
                 frame.save(save_path, "JPEG")
+                self._record_save_complete((time.perf_counter() - save_start) * 1000.0)
 
             except queue.Empty:
                 # 主线程已停止且队列没活，允许退出
@@ -488,6 +539,81 @@ class StreamClient:
                         pass
 
         print("[Stream] Save worker exited.")
+
+    def _new_diag_stats(self):
+        return {
+            "frames": 0,
+            "receive_ms": 0.0,
+            "decode_ms": 0.0,
+            "buffer_ms": 0.0,
+            "enqueue_ms": 0.0,
+            "save_count": 0,
+            "save_ms": 0.0,
+            "save_dropped": 0,
+        }
+
+    def _record_stream_frame(self, receive_ms, decode_ms, buffer_ms, enqueue_ms):
+        if not self.diagnostics_enabled:
+            return
+        with self._diag_lock:
+            self._diag["frames"] += 1
+            self._diag["receive_ms"] += max(0.0, float(receive_ms))
+            self._diag["decode_ms"] += max(0.0, float(decode_ms))
+            self._diag["buffer_ms"] += max(0.0, float(buffer_ms))
+            self._diag["enqueue_ms"] += max(0.0, float(enqueue_ms))
+
+    def _record_save_drop(self):
+        if not self.diagnostics_enabled:
+            return
+        with self._diag_lock:
+            self._diag["save_dropped"] += 1
+
+    def _record_save_complete(self, save_ms):
+        if not self.diagnostics_enabled:
+            return
+        with self._diag_lock:
+            self._diag["save_count"] += 1
+            self._diag["save_ms"] += max(0.0, float(save_ms))
+
+    def _maybe_print_stream_diagnostics(self):
+        if not self.diagnostics_enabled:
+            return
+
+        now = time.monotonic()
+        with self._diag_lock:
+            elapsed = max(0.001, now - self._diag_window_start)
+            if elapsed < self.diagnostics_interval:
+                return
+            stats = self._diag
+            self._diag = self._new_diag_stats()
+            self._diag_window_start = now
+
+        frames = stats["frames"]
+        saves = stats["save_count"]
+        avg = lambda key, count: (stats[key] / count) if count else 0.0
+        try:
+            save_qsize = self.save_queue.qsize()
+        except Exception:
+            save_qsize = -1
+
+        print(
+            "[StreamDiag] frames=%d fps=%.1f recv_avg_ms=%.2f decode_avg_ms=%.2f "
+            "buffer_avg_ms=%.2f enqueue_avg_ms=%.2f save_count=%d save_avg_ms=%.2f "
+            "save_q=%s save_dropped=%d"
+            % (
+                frames,
+                frames / elapsed,
+                avg("receive_ms", frames),
+                avg("decode_ms", frames),
+                avg("buffer_ms", frames),
+                avg("enqueue_ms", frames),
+                saves,
+                avg("save_ms", saves),
+                save_qsize,
+                stats["save_dropped"],
+            ),
+            flush=True,
+        )
 
     def _cleanup_after_run(self):
         """

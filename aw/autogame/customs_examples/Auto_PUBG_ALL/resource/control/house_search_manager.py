@@ -3558,6 +3558,7 @@ class HouseSceneSearchManager(HouseSearchManager):
     R_CITY_FALLBACK_LANDING_TARGET = (990, 757)
     R_CITY_DEFAULT_NEAR_DISTANCE = 30.0
     R_CITY_PRE_SEARCH_DISTANCE = 3.0
+    R_CITY_ENTRY_RUNNING_ROUTE_DISTANCE = 30.0
     R_CITY_DEFAULT_HOUSE_ARRIVAL_DISTANCE = 2.0
     R_CITY_DEFAULT_EARLY_ENTRY_SCENE_DISTANCE = 5.0
     R_CITY_ROUTE_WAYPOINT_DISTANCE = 3.0
@@ -3786,6 +3787,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_pre_search_target = None
         self.r_city_pre_search_distance = self.R_CITY_PRE_SEARCH_DISTANCE
         self.r_city_pre_search_route_callback = None
+        self.r_city_entry_route_callback = None
         self.r_city_pre_search_completed = True
         self._reset_r_city_runtime()
 
@@ -3824,11 +3826,6 @@ class HouseSceneSearchManager(HouseSearchManager):
             current_loc = stable_loc
             self.initial_target_pending = False
 
-        if self.current_house_id is None and not self._is_walkable(current_loc):
-            print("[RCitySearch] 落地位置不可通行，先脱离到可通行点，再锁定最近入门点")
-            self._handle_forbidden_escape(w, current_loc, current_direction)
-            return
-
         if self.current_house_id is None:
             print("[RCitySearch] 落地后直接从入门点列表选择最近目标，不再前往R城中转点")
             self._select_next_r_city_house(current_loc, current_direction)
@@ -3845,9 +3842,26 @@ class HouseSceneSearchManager(HouseSearchManager):
                 f"当前距离={target_dist:.2f}"
             )
             self.history_locations = []
+            if target_dist > self.R_CITY_ENTRY_RUNNING_ROUTE_DISTANCE:
+                if self._request_r_city_entry_route(w, self.active_entry["location"], target_dist):
+                    return
 
         target_loc = self.active_entry["location"]
         dist = get_distance(current_loc, target_loc)
+
+        if not self._is_walkable(current_loc):
+            if self._same_forbidden_region(current_loc, target_loc):
+                print(
+                    f"[RCitySearch] 当前落点 {current_loc} 与入门点 {target_loc} 在同一不可通行区域，"
+                    f"距离 {dist:.2f}，直接按入门点方向继续冲，不走最近安全点绕路"
+                )
+            else:
+                print(
+                    f"[RCitySearch] 当前落点 {current_loc} 不可通行，且与入门点 {target_loc} "
+                    f"不是同一不可通行区域，先快速脱离当前黑区"
+                )
+                self._handle_forbidden_escape(w, current_loc, current_direction, target_loc=target_loc)
+                return
 
         if (
             self.status != self.STATUS_SCENE_ENTRY
@@ -4149,6 +4163,16 @@ class HouseSceneSearchManager(HouseSearchManager):
             print(f"[RCitySearch] 地图可通行检查失败，按可通行处理: {exc}")
             return True
 
+    def _same_forbidden_region(self, current_loc, target_loc) -> bool:
+        checker = getattr(self.map_tool, "same_forbidden_region", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(current_loc, target_loc))
+        except Exception as exc:
+            print(f"[RCitySearch] 不可通行区域连通判断失败，按不同区域处理: {exc}")
+            return False
+
     def _distance_to_r_city(self, current_loc):
         loc = self._location_tuple(current_loc)
         if loc is None or not self.r_city_targets:
@@ -4179,6 +4203,26 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.status = self.STATUS_ROUTE_TO_R_CITY
         callback(w, self.r_city_landing_target, reason)
         return True
+
+    def _request_r_city_entry_route(self, w: "FrameWorker", target_loc, dist: float) -> bool:
+        callback = self.r_city_entry_route_callback
+        if not callable(callback):
+            print(
+                f"[RCitySearch] 最近入门点 {target_loc} 距离 {dist:.2f} > "
+                f"{self.R_CITY_ENTRY_RUNNING_ROUTE_DISTANCE:.1f}，但未配置跑图回调，继续由搜房模块前往"
+            )
+            return False
+
+        reason = (
+            f"落地后最近入门点 {target_loc} 距离 {dist:.2f} > "
+            f"{self.R_CITY_ENTRY_RUNNING_ROUTE_DISTANCE:.1f}，先计入跑图时间前往入门点附近"
+        )
+        print(f"[RCitySearch] {reason}")
+        self.stop_auto_forward(w)
+        self.history_locations = []
+        self.initial_location_samples = []
+        self.initial_target_pending = True
+        return bool(callback(w, target_loc, reason, self.R_CITY_ENTRY_RUNNING_ROUTE_DISTANCE))
 
     def _side_from_location(self, loc):
         x, y = loc
@@ -4335,7 +4379,28 @@ class HouseSceneSearchManager(HouseSearchManager):
             self.r_city_route_index += 1
         return None
 
-    def _handle_forbidden_escape(self, w: "FrameWorker", current_loc, current_direction):
+    def _handle_forbidden_escape(self, w: "FrameWorker", current_loc, current_direction, target_loc=None):
+        target_loc = self._location_tuple(target_loc)
+        if target_loc is not None and not self._same_forbidden_region(current_loc, target_loc):
+            dist = get_distance(current_loc, target_loc)
+            print(
+                f"[RCityRoute] 当前不可通行，入门点 {target_loc} 不在同一不可通行区域，"
+                f"距离 {dist:.2f}，对准入门点后直接自动前进脱离"
+            )
+            if self.update_and_check_stuck(current_loc):
+                print("[RCityRoute] 直冲脱离当前不可通行区时检测到卡住，先执行避障脱困")
+                self.execute_unstuck_logic(w, current_loc)
+                self.history_locations = []
+                return
+            if current_direction is not None:
+                self.align_direction(w, target_loc)
+            if not self.auto_forward:
+                w.click("自动前进")
+                self.auto_forward = True
+            self.handle_jump_logic(w)
+            self._refresh_frame_and_handle_jump(w)
+            return
+
         safe_target = self.forbidden_escape_target
         if safe_target is None or get_distance(current_loc, safe_target) <= self.FORBIDDEN_ESCAPE_ARRIVAL_DISTANCE:
             finder = getattr(self.map_tool, "nearest_walkable_within_radius", None)

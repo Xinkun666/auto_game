@@ -724,6 +724,29 @@ class RunningManager:
         dist_to_forced_target = get_distance(location, self.forced_route_target)
         return 0 <= dist_to_forced_target <= self.FORCED_ROUTE_FORBIDDEN_DIRECT_DISTANCE
 
+    def _same_forbidden_region(self, location: Tuple[int, int], target: Tuple[int, int]) -> bool:
+        checker = getattr(self.map_tool, "same_forbidden_region", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(location, target))
+        except Exception as exc:
+            print(f"[Running] 不可通行区域连通判断失败，按不同区域处理: {exc}")
+            return False
+
+    def _should_direct_escape_to_forced_route_target(self, location: Tuple[int, int]) -> bool:
+        if not self._has_forced_route() or self.forced_route_target is None:
+            return False
+
+        if self.map_tool.is_walkable(location):
+            return False
+
+        dist_to_forced_target = get_distance(location, self.forced_route_target)
+        if 0 <= dist_to_forced_target <= self.forced_route_arrival_distance:
+            return False
+
+        return not self._same_forbidden_region(location, self.forced_route_target)
+
     def set_game_time(self, game_time: Optional[float] = None):
         started_at = self.match_clock.start(game_time)
         print(f'[Running] 游戏开始时间设置为： {started_at:.3f}')
@@ -1328,6 +1351,40 @@ class RunningManager:
             )
             return False
 
+        if self._should_direct_escape_to_forced_route_target(location):
+            target = self.forced_route_target
+            dist_to_target = get_distance(location, target)
+            print(
+                f"[Running] 当前位于不可通行区域，临时目标 {target} 不在同一不可通行区域，"
+                f"距离 {dist_to_target:.2f}，直接对准目标点自动前进脱离"
+            )
+            self._log_running_state(
+                "不可通行区域直冲临时目标",
+                location,
+                direction,
+                "不同黑区，不走最近安全点，直接自动前进脱离当前黑区",
+                target,
+                dist_to_target,
+            )
+            self.loading_road = False
+            self.road_list = []
+            self.current_segment_start = None
+            self._check_if_stuck(location)
+            self._check_if_trapped(location)
+            if self.stuck or self.trapped:
+                print("[Running] 直冲脱离黑区时检测到卡住/困住，先执行脱困")
+                self._perform_unstuck_action(w, location)
+                return True
+            if direction is not None:
+                aligned = self._align_to_point(w, location, direction, target, threshold=8)
+                if not aligned:
+                    return True
+            self._click_jump_if_available(w, location, direction)
+            if not self.auto_forward:
+                w.click("自动前进")
+                self.auto_forward = True
+            return True
+
         self._check_if_stuck(location)
         if self.stuck:
             print("[Running] 当前位于不可通行区域且人物卡住，先执行避障脱困")
@@ -1481,11 +1538,19 @@ class RunningManager:
             self.loading_road = False
             self.road_list = []
             self.current_segment_start = None
-            self.locations = [location]
-            self.history_locations = [location]
-            self.stuck = False
-            self.trapped = False
-            self._move_towards_target(w, location, direction, target)
+            self._check_if_stuck(location)
+            self._check_if_trapped(location)
+            if self.stuck or self.trapped:
+                print("[Running] 直奔临时目标时检测到卡住/困住，先执行脱困")
+                self._perform_unstuck_action(w, location)
+                return True
+            if direction is not None:
+                aligned = self._align_to_point(w, location, direction, target, threshold=8)
+                if not aligned:
+                    return True
+            if not self.auto_forward:
+                w.click("自动前进")
+                self.auto_forward = True
             return True
 
         if self._handle_location_jump(location):

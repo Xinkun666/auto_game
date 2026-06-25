@@ -305,6 +305,36 @@ def route_to_r_city_search_start(
 searching_house_manager.r_city_pre_search_route_callback = route_to_r_city_search_start
 
 
+def route_to_r_city_entry_point(
+    w: "FrameWorker",
+    target,
+    reason: str,
+    arrival_distance: float,
+):
+    global searching_view_synced, searching_to_running_notified
+
+    route_target = tuple(target or DROP_TARGET_R_CITY_SEARCH_START)
+    print(
+        f"[Flow] 落地后最近入门点仍较远，先按跑图阶段冲到入门点附近: "
+        f"reason={reason}, target={route_target}, arrival={arrival_distance:.1f}"
+    )
+    searching_house_manager.stop_auto_forward(w)
+    running_manager.start_forced_route(
+        target=route_target,
+        finish_stage="搜房阶段",
+        reason=reason,
+        arrival_distance=arrival_distance,
+    )
+    running_manager.set_view_mode(RunningManager.VIEW_MODE_FIRST)
+    searching_view_synced = True
+    searching_to_running_notified = True
+    w.change_stage("跑图阶段")
+    return True
+
+
+searching_house_manager.r_city_entry_route_callback = route_to_r_city_entry_point
+
+
 def _should_find_car_after_searching() -> bool:
     return (
         not phase_timer.is_completed(PHASE_DRIVING)

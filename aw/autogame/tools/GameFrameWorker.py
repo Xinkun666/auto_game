@@ -18,7 +18,6 @@ from aw.autogame.tools.Utils import _parse_display_rotation
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 from aw.autogame.tools.GameSceneHandler import DEFAULT_GROUP_NAME, StageLogicController
 from aw.autogame.tools.ProcessUtils import hdc_command_args, hidden_subprocess_kwargs
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import log_step
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -1348,13 +1347,6 @@ class Controller:
             raise ValueError(f"不支持的触控后端: {self.backend}")
 
     def _run_hdc(self, cmd):
-        log_step(
-            "准备下发HDC触控命令",
-            target="设备控制",
-            action="执行当前分支选定的点击/滑动控制",
-            method=cmd,
-            result="等待设备执行",
-        )
         hdc_args = hdc_command_args(cmd)
         proc = subprocess.Popen(
             hdc_args or cmd,

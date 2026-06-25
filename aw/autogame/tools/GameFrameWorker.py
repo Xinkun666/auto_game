@@ -18,6 +18,7 @@ from aw.autogame.tools.Utils import _parse_display_rotation
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 from aw.autogame.tools.GameSceneHandler import DEFAULT_GROUP_NAME, StageLogicController
 from aw.autogame.tools.ProcessUtils import hdc_command_args, hidden_subprocess_kwargs
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import log_step
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -1347,6 +1348,13 @@ class Controller:
             raise ValueError(f"不支持的触控后端: {self.backend}")
 
     def _run_hdc(self, cmd):
+        log_step(
+            "准备下发HDC触控命令",
+            target="设备控制",
+            action="执行当前分支选定的点击/滑动控制",
+            method=cmd,
+            result="等待设备执行",
+        )
         hdc_args = hdc_command_args(cmd)
         proc = subprocess.Popen(
             hdc_args or cmd,
@@ -1658,7 +1666,6 @@ class Controller:
         pos, label = self._resolve_pos(btn)
         if pos:
             x, y = pos
-            print(f"执行单指操作: {label} @({x},{y})")
             if self.backend == "sendevent":
                 end_pos, _ = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias)
                 if not end_pos:
@@ -1693,7 +1700,6 @@ class Controller:
 
         x, y = pos
         end_x, end_y = end_pos
-        print(f"执行 uinput 单指操作: {label} @({x},{y})")
         cmd = f"hdc shell uinput -T -m {x} {y} {end_x} {end_y} -k {wait} {dura}"
         self._run_hdc(cmd)
 
@@ -1702,7 +1708,6 @@ class Controller:
         pos, label = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias)
         if pos:
             x, y = pos
-            print(f"执行按下: {label} @({x},{y})")
             if self.backend == "sendevent":
                 self.touch_backend.click_down(
                     x,
@@ -1724,7 +1729,6 @@ class Controller:
         pos, label = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias)
         if pos:
             x, y = pos
-            print(f"执行点击: {label} @({x},{y})")
             if self.backend == "sendevent":
                 self.touch_backend.click(
                     x,

@@ -1,4 +1,3 @@
-import builtins
 import json
 import os
 import random
@@ -10,10 +9,8 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_navigati
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import *
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_manager import HouseExitManager
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import TimeoutTracker
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import autogame_print as print
 from aw.autogame.tools.Utils import *
-
-def print(*values, sep=" ", end="\n", file=None, flush=False, **_kwargs):
-    builtins.print(*values, sep=sep, end=end, file=file, flush=flush)
 
 if TYPE_CHECKING:
     # 假设你的框架类定义在 framework.py 文件中

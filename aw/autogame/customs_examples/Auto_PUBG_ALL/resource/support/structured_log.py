@@ -27,6 +27,10 @@ PREFIX_TARGETS = {
     "SceneRotate": "室内旋转搜房",
     "SceneExit": "出房流程",
     "HouseExit": "出房流程",
+    "RCitySearch": "R城搜房目标选择",
+    "RCityRoute": "R城入门点导航",
+    "RCityEntry": "R城进门流程",
+    "RCityWater": "R城水区脱离",
     "Nav": "导航到目标",
     "NavBypass": "路线绕房避障",
     "Unstuck": "脱困避障",
@@ -41,6 +45,8 @@ PREFIX_TARGETS = {
     "Smart": "智能导航",
     "TurnCalibration": "转向校准",
     "Flow": "全流程阶段",
+    "Control": "设备控制",
+    "HDC": "HDC控制命令",
 }
 ACTION_WORDS = (
     "启动",
@@ -91,6 +97,14 @@ RESULT_WORDS = (
     "判定",
     "确认",
 )
+BRACKET_FIELD_RE = re.compile(r"\[(?P<key>[^:\]]+):(?P<value>[^\]]*)\]")
+
+
+OBSERVATION_KEYS = {"观察", "观察现象", "现象", "情况", "状态", "当前状态"}
+TARGET_KEYS = {"目标", "当前目标"}
+ACTION_KEYS = {"决策", "做的决策", "动作", "要做的事", "要做什么"}
+METHOD_KEYS = {"控制", "具体控制", "怎么做", "实施", "method", "命令", "hdc"}
+RESULT_KEYS = {"结果"}
 
 
 def _clean_field(value):
@@ -114,6 +128,36 @@ def _looks_like_result(text):
     return any(word in text for word in RESULT_WORDS)
 
 
+def _assign_bracket_field(fields, key, value):
+    key = key.strip()
+    value = value.strip()
+    if not value:
+        return
+    if key in OBSERVATION_KEYS:
+        fields["observation"] = value
+    elif key in TARGET_KEYS:
+        fields["target"] = value
+    elif key in ACTION_KEYS:
+        fields["action"] = value
+    elif key in METHOD_KEYS:
+        fields["method"] = value
+    elif key in RESULT_KEYS:
+        fields["result"] = value
+
+
+def _parse_bracket_fields(body):
+    fields = {
+        "observation": None,
+        "target": None,
+        "action": None,
+        "method": None,
+        "result": None,
+    }
+    for match in BRACKET_FIELD_RE.finditer(body):
+        _assign_bracket_field(fields, match.group("key"), match.group("value"))
+    return fields if any(fields.values()) else None
+
+
 def infer_log_fields(message):
     text = _clean_field(message)
     target = None
@@ -125,8 +169,19 @@ def infer_log_fields(message):
         body = match.group("body").strip() or text
         target = PREFIX_TARGETS.get(prefix, prefix)
 
+    bracket_fields = _parse_bracket_fields(body)
+    if bracket_fields:
+        return (
+            bracket_fields.get("observation") or body,
+            bracket_fields.get("target") or target,
+            bracket_fields.get("action"),
+            bracket_fields.get("method"),
+            bracket_fields.get("result"),
+        )
+
     observation = body
     action = None
+    method = None
     result = None
 
     for separator in ("，", ",", "。", ";", "；"):
@@ -141,16 +196,25 @@ def infer_log_fields(message):
                     action = remainder
             break
 
-    return observation, target, action, result
+    return observation, target, action, method, result
 
 
-def format_log_line(observation, target=None, action=None, result=None, *, category=LOG_CATEGORY_LOGIC):
+def format_log_line(
+    observation,
+    target=None,
+    action=None,
+    method=None,
+    result=None,
+    *,
+    category=LOG_CATEGORY_LOGIC,
+):
     category_text = _clean_category(category)
     return (
         f"{LOG_PREFIX}[{category_text}] "
         f"观察现象={_clean_field(observation)} | "
         f"当前目标={_clean_field(target)} | "
-        f"要做的事={_clean_field(action)} | "
+        f"做的决策={_clean_field(action)} | "
+        f"具体控制={_clean_field(method)} | "
         f"结果={_clean_field(result)}"
     )
 
@@ -159,6 +223,7 @@ def log_step(
     observation,
     target=None,
     action=None,
+    method=None,
     result=None,
     *,
     category=LOG_CATEGORY_LOGIC,
@@ -170,6 +235,7 @@ def log_step(
             observation,
             target=target,
             action=action,
+            method=method,
             result=result,
             category=category,
         ),
@@ -183,12 +249,13 @@ def autogame_print(*values, sep=" ", end="\n", file=None, flush=False, category=
     if message.startswith(LOG_PREFIX):
         builtins.print(message, end=end, file=sys.stdout if file is None else file, flush=flush)
         return
-    observation, target, action, result = infer_log_fields(message)
+    observation, target, action, method, result = infer_log_fields(message)
     builtins.print(
         format_log_line(
             observation,
             target=target,
             action=action,
+            method=method,
             result=result,
             category=category,
         ),

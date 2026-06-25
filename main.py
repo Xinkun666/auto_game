@@ -3,7 +3,7 @@ from aw.autogame.tools.Utils import archive_run_artifacts
 from xdevice.__main__ import main_process
 
 
-DEFAULT_TESTCASE_LABEL = "testcases/pubg/和平精英全流程/auto_pubg"
+DEFAULT_TESTCASE_LABEL = "testcases/pubg/pubg_full_flow/auto_pubg"
 DEFAULT_PROJECT_CASE = "Auto_PUBG_ALL"
 DEFAULT_TARGET_CASE = "auto_pubg"
 
@@ -12,7 +12,7 @@ DEFAULT_TARGET_CASE = "auto_pubg"
 #
 #     # main_process("run -l testcases/pubg_test/pubg_1") # 启动和平精英测试
 #     # main_process("run -l testcases/sanjiaozhou/sanjiaozhou_changgongxigu") # 启动三角洲
-#     main_process("run -l testcases/pubg/和平精英全流程/auto_pubg")
+#     main_process("run -l testcases/pubg/pubg_full_flow/auto_pubg")
 
 
 # 这种方式是直接开启游戏自动化，需要人工手动点开游戏

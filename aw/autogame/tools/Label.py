@@ -449,7 +449,22 @@ class AutoStudioWindow(QMainWindow):
         # 2. 主布局
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
-        layout = QHBoxLayout(main_widget)
+        layout = QVBoxLayout(main_widget)
+        project_toolbar = QHBoxLayout()
+        self.btn_new_project = QPushButton("新建项目")
+        self.btn_new_project.clicked.connect(self.new_project)
+        self.btn_rename_project = QPushButton("修改项目名")
+        self.btn_rename_project.clicked.connect(self.rename_project)
+        self.btn_import_project = QPushButton("导入项目")
+        self.btn_import_project.clicked.connect(self.import_project)
+        self.btn_export_project = QPushButton("导出项目")
+        self.btn_export_project.clicked.connect(self.export_project)
+        project_toolbar.addWidget(self.btn_new_project)
+        project_toolbar.addWidget(self.btn_rename_project)
+        project_toolbar.addWidget(self.btn_import_project)
+        project_toolbar.addWidget(self.btn_export_project)
+        project_toolbar.addStretch()
+        layout.addLayout(project_toolbar)
         splitter = QSplitter(Qt.Orientation.Horizontal)
         # 3. 左侧：图片工作区
         self.canvas = ImageCanvas(self)
@@ -527,7 +542,7 @@ class AutoStudioWindow(QMainWindow):
         splitter.addWidget(right_container)
         splitter.setStretchFactor(0, 85)
         splitter.setStretchFactor(1, 15)
-        layout.addWidget(splitter)
+        layout.addWidget(splitter, 1)
         self._updating_group_combo = False
         self.update_group_controls()
     def trigger_add_shortcut(self, mode):

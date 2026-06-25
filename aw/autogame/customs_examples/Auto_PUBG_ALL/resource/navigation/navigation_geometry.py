@@ -683,6 +683,7 @@ class AdaptiveForwardMoveTable:
     DEFAULT_MODELS = {
         "slow": {"y_bias": -100, "slope": 60.0, "intercept": 300.0},
         "fast": {"y_bias": -500, "slope": 32.0, "intercept": 220.0},
+        "entry_back": {"y_bias": 100, "slope": 60.0, "intercept": 300.0},
     }
 
     def __init__(self):

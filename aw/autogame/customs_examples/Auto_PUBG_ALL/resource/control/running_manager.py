@@ -2343,6 +2343,11 @@ class RunningManager:
         for label, bias_x, bias_y in (
             ("左后撤", -240, 260),
             ("右后撤", 240, 260),
+        ):
+            if self._try_unstuck_backoff_escape(w, current_loc, label, bias_x, bias_y, level):
+                return
+
+        for label, bias_x, bias_y in (
             ("左侧移", -300, 0),
             ("右侧移", 300, 0),
             ("后撤拉开距离", 0, 300),
@@ -2368,6 +2373,55 @@ class RunningManager:
         self.road_list = []
         self.current_segment_start = None
 
+    def _try_unstuck_backoff_escape(
+        self,
+        w: "FrameWorker",
+        origin: Tuple[int, int],
+        label: str,
+        backoff_x_bias: int,
+        backoff_y_bias: int,
+        escalation_level: int = 0,
+    ) -> bool:
+        if not self._try_unstuck_move(
+            w,
+            origin,
+            label,
+            backoff_x_bias,
+            backoff_y_bias,
+            escalation_level,
+            finalize_success=False,
+        ):
+            return False
+
+        backoff_loc = self._get_location(w) or origin
+        side_x_bias = -300 if backoff_x_bias < 0 else 300
+        side_label = "左后撤后左侧移" if backoff_x_bias < 0 else "右后撤后右侧移"
+        print(
+            f"[Running] {label}已拉开距离，继续同侧侧移绕开原障碍: "
+            f"side_x_bias={side_x_bias}, loc={backoff_loc}"
+        )
+        if not self._try_unstuck_move(
+            w,
+            backoff_loc,
+            side_label,
+            side_x_bias,
+            0,
+            escalation_level,
+            finalize_success=False,
+        ):
+            return False
+
+        side_loc = self._get_location(w) or backoff_loc
+        print(f"[Running] {side_label}后执行前探确认，不再直接撞回原障碍: loc={side_loc}")
+        return self._try_unstuck_move(
+            w,
+            side_loc,
+            f"{side_label}后前探",
+            0,
+            -260,
+            escalation_level,
+        )
+
     def _try_unstuck_move(
         self,
         w: "FrameWorker",
@@ -2376,6 +2430,7 @@ class RunningManager:
         x_bias: int,
         y_bias: int,
         escalation_level: int = 0,
+        finalize_success: bool = True,
     ) -> bool:
         move_x_bias, move_y_bias, dura, wait = self._unstuck_move_motion(
             x_bias,
@@ -2401,6 +2456,9 @@ class RunningManager:
         moved = get_distance(origin, new_loc)
         if moved < self.UNSTUCK_MOVE_THRESHOLD:
             return False
+        if not finalize_success:
+            print(f"[Running] 脱困阶段动作 {label} 产生位移 {moved:.2f}，继续组合动作验证")
+            return True
 
         print(f"[Running] 脱困产生有效位移 {moved:.2f}，从新位置重新规划路径")
         self.stuck = False

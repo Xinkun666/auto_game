@@ -1817,23 +1817,76 @@ class HouseSearchManager:
 
         direction, x_bias, y_bias, relative = move_params
         self.entry_near_micro_adjust_attempts += 1
+        before_dist = get_distance(refreshed_loc, target_loc) if refreshed_loc is not None else dist_val
+        desired_dist = max(0.2, float(before_dist))
+        used_x_bias = x_bias
+        used_y_bias = y_bias
+        used_dura = self.ENTRY_NEAR_MICRO_DURA
+        used_wait = self.ENTRY_NEAR_MICRO_WAIT
+        distance_key = None
+        if direction in ("left", "right"):
+            used_x_bias, used_dura, used_wait, distance_key = get_adaptive_side_motion(
+                direction,
+                desired_dist,
+                x_bias,
+                self.ENTRY_NEAR_MICRO_DURA,
+                self.ENTRY_NEAR_MICRO_WAIT,
+            )
+            used_y_bias = 0
+        else:
+            mode = "entry_back" if direction == "back" else "slow"
+            used_y_bias, used_dura, used_wait, distance_key = get_adaptive_forward_motion(
+                mode,
+                desired_dist,
+                y_bias,
+                self.ENTRY_NEAR_MICRO_DURA,
+                self.ENTRY_NEAR_MICRO_WAIT,
+            )
+            used_x_bias = 0
+            if direction == "back":
+                used_y_bias = abs(int(used_y_bias))
+
         print(
             f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist_val:.2f}，"
             f"人物朝向已按入门方向 {ideal_angle} 对齐，"
             f"当前位置={refreshed_loc}，"
             f"目标点在{self._entry_micro_direction_label(direction)}，轻推摇杆微调 "
             f"{self.entry_near_micro_adjust_attempts}/{self.ENTRY_NEAR_MICRO_MAX_ATTEMPTS} "
-            f"(relative={relative:.1f}, x_bias={x_bias}, y_bias={y_bias}, "
-            f"dura={self.ENTRY_NEAR_MICRO_DURA}, wait={self.ENTRY_NEAR_MICRO_WAIT})"
+            f"(relative={relative:.1f}, bin={distance_key}, "
+            f"x_bias={used_x_bias}, y_bias={used_y_bias}, "
+            f"dura={used_dura}, wait={used_wait})"
         )
         w.tap_single(
             '摇杆',
-            x_bias=x_bias,
-            y_bias=y_bias,
-            dura=self.ENTRY_NEAR_MICRO_DURA,
-            wait=self.ENTRY_NEAR_MICRO_WAIT,
+            x_bias=used_x_bias,
+            y_bias=used_y_bias,
+            dura=used_dura,
+            wait=used_wait,
         )
         self._refresh_frame_and_handle_jump(w)
+        after_loc = self._get_current_location(w)
+        after_dist = get_distance(after_loc, target_loc) if after_loc is not None else None
+        if direction in ("left", "right"):
+            update_adaptive_side_motion(
+                direction,
+                desired_dist,
+                before_dist,
+                after_dist,
+                used_x_bias,
+                used_dura,
+                used_wait,
+            )
+        else:
+            mode = "entry_back" if direction == "back" else "slow"
+            update_adaptive_forward_motion(
+                mode,
+                desired_dist,
+                before_dist,
+                after_dist,
+                used_y_bias,
+                used_dura,
+                used_wait,
+            )
         self.history_locations = []
         return "adjusting"
 

@@ -18,9 +18,11 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.phase_time_mana
     PHASE_SEARCHING,
     PhaseTimeManager,
     PhaseTimeReporter,
+    load_phase_durations_from_config,
     parse_case_loop_count,
 )
 from aw.autogame.tools.GameLaunchProfile import should_use_sp_recording_for_profile
+from aw.autogame.tools.Utils import _read_autogame_config
 
 """
 1. w.current_stage ： 当前自动化的阶段，可以参考你标注工程导出的info.py里，对应的阶段为True，即表示当前阶段
@@ -44,12 +46,8 @@ PHASE_STAGE_MAP = {
     "开车阶段": PHASE_DRIVING,
 }
 
-# 单位：分钟
-PHASE_DURATIONS = {
-    PHASE_SEARCHING: 10,
-    PHASE_RUNNING: 10,
-    PHASE_DRIVING: 10,
-}
+# 单位：分钟。默认 10 分钟，可在 aw/autogame/config/config.json 的 stage_time_minutes 中修改。
+PHASE_DURATIONS = load_phase_durations_from_config(_read_autogame_config())
 
 DROP_TARGET_R_CITY = (990, 757)
 DROP_TARGET_R_CITY_SEARCH_START = (986, 759)
@@ -103,6 +101,12 @@ searching_house_manager.configure_r_city_pre_search_target(
 )
 house_exit_manager = HouseExitManager()
 phase_timer = PhaseTimeManager(PHASE_DURATIONS, PHASE_STAGE_MAP)
+print(
+    "[Timer] 阶段时间配置: "
+    f"搜房={phase_timer.get_duration_minutes_label(PHASE_SEARCHING)}分钟, "
+    f"跑图={phase_timer.get_duration_minutes_label(PHASE_RUNNING)}分钟, "
+    f"开车={phase_timer.get_duration_minutes_label(PHASE_DRIVING)}分钟"
+)
 phase_timer.configure_case_loop_count(
     parse_case_loop_count(os.environ.get("AUTOGAME_SINGLE_CASE_LOOPS"))
 )
@@ -237,7 +241,10 @@ def should_abort_searching(w: "FrameWorker"):
         return False
 
     if phase_timer.is_completed(PHASE_SEARCHING):
-        print("[Timer] 搜房阶段 600s 已用完，强制切换到跑图阶段")
+        print(
+            f"[Timer] 搜房阶段 {phase_timer.get_duration_minutes_label(PHASE_SEARCHING)} 分钟已用完，"
+            "强制切换到跑图阶段"
+        )
         finish_searching_and_enter_running(w, "搜房阶段计时已用完")
         return True
 

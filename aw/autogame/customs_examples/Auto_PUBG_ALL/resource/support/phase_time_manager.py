@@ -2,12 +2,53 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional, Set
+from typing import Any, Dict, Mapping, Optional, Set
 
 
 PHASE_RUNNING = "跑图"
 PHASE_DRIVING = "开车"
 PHASE_SEARCHING = "搜房"
+STAGE_TIME_CONFIG_KEY = "stage_time_minutes"
+DEFAULT_PHASE_DURATIONS_IN_MINUTES = {
+    PHASE_SEARCHING: 10.0,
+    PHASE_RUNNING: 10.0,
+    PHASE_DRIVING: 10.0,
+}
+_PHASE_DURATION_CONFIG_ALIASES = {
+    PHASE_SEARCHING: PHASE_SEARCHING,
+    f"{PHASE_SEARCHING}阶段": PHASE_SEARCHING,
+    PHASE_RUNNING: PHASE_RUNNING,
+    f"{PHASE_RUNNING}阶段": PHASE_RUNNING,
+    PHASE_DRIVING: PHASE_DRIVING,
+    f"{PHASE_DRIVING}阶段": PHASE_DRIVING,
+}
+
+
+def _parse_positive_minutes(value: Any, default: float) -> float:
+    try:
+        minutes = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if minutes <= 0:
+        return float(default)
+    return minutes
+
+
+def load_phase_durations_from_config(config: Optional[Mapping[str, Any]]) -> Dict[str, float]:
+    durations = dict(DEFAULT_PHASE_DURATIONS_IN_MINUTES)
+    if not isinstance(config, Mapping):
+        return durations
+
+    raw_stage_times = config.get(STAGE_TIME_CONFIG_KEY)
+    if not isinstance(raw_stage_times, Mapping):
+        return durations
+
+    for raw_key, raw_value in raw_stage_times.items():
+        phase_name = _PHASE_DURATION_CONFIG_ALIASES.get(str(raw_key).strip())
+        if phase_name not in durations:
+            continue
+        durations[phase_name] = _parse_positive_minutes(raw_value, durations[phase_name])
+    return durations
 
 
 @dataclass
@@ -56,6 +97,10 @@ class PhaseTimeManager:
         if minutes.is_integer():
             return str(int(minutes))
         return f"{minutes:.1f}".rstrip("0").rstrip(".")
+
+    def get_duration_minutes_label(self, phase_name: str) -> str:
+        state = self.phase_states[phase_name]
+        return self._format_phase_minutes(state.duration)
 
     def _phase_label(self, phase_name: str) -> str:
         return f"{phase_name}阶段"

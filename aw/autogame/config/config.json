@@ -4,5 +4,10 @@
     "stream_disable_save_frames": false,
     "stream_diagnostics": false,
     "stream_diagnostics_interval": 1.0,
+    "stage_time_minutes": {
+        "搜房": 10,
+        "跑图": 10,
+        "开车": 10
+    },
     "width": 768
 }

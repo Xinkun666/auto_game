@@ -102,6 +102,13 @@ class HouseSearchManager:
     ROUTE_STUCK_BACKOFF_BASE_WAIT = 850
     ROUTE_STUCK_BACKOFF_WAIT_STEP = 300
     ROUTE_STUCK_BACKOFF_MAX_WAIT = 1800
+    ROUTE_STUCK_HOUSE_BYPASS_TURN_DEGREES = 60
+    ROUTE_STUCK_HOUSE_BYPASS_VIEW_X_BIAS = 360
+    ROUTE_STUCK_HOUSE_BYPASS_VIEW_DURA = 300
+    ROUTE_STUCK_HOUSE_BYPASS_VIEW_WAIT = 500
+    ROUTE_STUCK_HOUSE_BYPASS_FORWARD_Y_BIAS = -520
+    ROUTE_STUCK_HOUSE_BYPASS_FORWARD_DURA = 650
+    ROUTE_STUCK_HOUSE_BYPASS_FORWARD_WAIT = 1000
     HOUSE_SEARCH_TIMEOUT_SECONDS = 60
     ENTRY_NEAR_MICRO_ADJUST_DISTANCE = 1.5
     ENTRY_NEAR_MICRO_DONE_DISTANCE = 0.25
@@ -1073,63 +1080,11 @@ class HouseSearchManager:
         return True
 
     def _maybe_bypass_front_house_on_route(self, w: 'FrameWorker', current_loc, target_loc, dist, phase_label='NAV'):
-        try:
-            dist_val = float(dist)
-        except (TypeError, ValueError):
-            return False
-
-        house_scene = self._get_house_scene(w)
-        if (
-            dist_val <= self.ENTRY_AUTO_FORWARD_DISTANCE
-            and house_scene in self.HOUSE_PROACTIVE_BYPASS_NEAR_ENTRY_SCENES
-        ):
-            print(f"[NavBypass] {phase_label} 已接近门/墙，跳过主动绕房")
-            return False
-
-        self.align_direction(w, target_loc, threshold=10, max_steps=1)
-        self._refresh_frame_and_handle_jump(w)
-        front_summary = self._front_route_obstacle_summary(w)
-
-        if self._is_searching_stage_frame(w) and front_summary["stone_wall"] is not None:
-            return self._handle_front_stone_wall_on_search_route(w, current_loc, phase_label)
-
-        front_block = self._front_house_blocking(w)
-        if not front_block:
-            return False
-
-        if not self._is_searching_stage_frame(w):
-            return self._bypass_front_house_by_view_turn(w, target_loc, phase_label)
-
-        if dist_val <= self.HOUSE_SEARCH_BYPASS_MIN_ENTRY_DISTANCE:
-            print(
-                f"[NavBypass] {phase_label} 前方有房体但距离进门点 {dist_val:.2f}<=10，"
-                f"按当前目标入口处理，不主动绕房"
-            )
-            return False
-
-        if front_summary["has_door"] or w.get_info('开门') or w.get_info('关门') or self.find_largest_door(w):
-            print(
-                f"[NavBypass] {phase_label} 前方有房体且距离进门点 {dist_val:.2f}>10，"
-                f"但已定位到门，改走对准门前推逻辑"
-            )
-            if self._try_enter_visible_non_target_house(w, current_loc, phase_label):
-                return True
-            print(f"[NavBypass] {phase_label} 本轮对门前推未进房，不主动绕房，下一轮继续识别")
-            return False
-
-        if self._is_route_close_to_current_entry(target_loc, dist_val):
-            print(f"[NavBypass] {phase_label} 前方可能是当前目标入门点房体，交给进门流程")
-            return False
-
-        if not front_summary["has_house"] and not front_summary["has_window"]:
-            print(f"[NavBypass] {phase_label} 前方阻挡不是房子/窗户组合，不主动绕房")
-            return False
-
         print(
-            f"[NavBypass] {phase_label} 距离进门点 {dist_val:.2f}>10，"
-            f"前方只有房体/窗且未看到门，执行绕房"
+            f"[NavBypass] {phase_label} 主动绕房已取消；"
+            f"移动中只在卡住且 house_scene=near_wall 时执行后拉、确认前方房体、按目标角度绕开"
         )
-        return self._bypass_front_house_by_view_turn(w, target_loc, phase_label)
+        return False
 
     def _try_lock_visible_door_after_block(self, w: 'FrameWorker') -> bool:
         door = self.find_largest_door(w)
@@ -2415,6 +2370,49 @@ class HouseSearchManager:
         after_dist = get_distance(after_loc, target_loc) if after_loc is not None else None
         update_adaptive_forward_motion(mode, before_dist, before_dist, after_dist, y_bias, dura, wait)
 
+    def _choose_route_stuck_bypass_side_by_target_angle(self, w: 'FrameWorker', current_loc, target_loc):
+        current_dir = w.get_info('direction')
+        refreshed_loc = self._get_current_location(w) or current_loc
+        target = check_location(target_loc)
+        target_angle = calculate_angle(refreshed_loc, target) if refreshed_loc is not None and target is not None else None
+
+        if current_dir is None or target_angle is None:
+            fallback_side = self._choose_house_bypass_side(w)
+            print(
+                f"[Unstuck] 缺少当前方向或目标坐标，无法按目的地角度选边，"
+                f"回退使用房体空隙选择 side={fallback_side}"
+            )
+            return fallback_side, None, target_angle, current_dir
+
+        try:
+            current_dir_float = float(current_dir)
+            target_angle_float = float(target_angle)
+        except (TypeError, ValueError):
+            fallback_side = self._choose_house_bypass_side(w)
+            print(
+                f"[Unstuck] 当前方向/目标角度无效，回退使用房体空隙选择 side={fallback_side}: "
+                f"current_dir={current_dir}, target_angle={target_angle}"
+            )
+            return fallback_side, None, target_angle, current_dir
+
+        relative = (target_angle_float - current_dir_float + 540) % 360 - 180
+        if abs(relative) <= 5:
+            side = self._choose_house_bypass_side(w)
+            print(
+                f"[Unstuck] 目的地基本在正前方 relative={relative:.1f}°，"
+                f"按房体空隙选择 side={side}"
+            )
+            return side, relative, target_angle_float, current_dir_float
+
+        side = "right" if relative > 0 else "left"
+        side_label = "右" if side == "right" else "左"
+        print(
+            f"[Unstuck] 结合目的地和当前方向选择绕房方向："
+            f"current_dir={current_dir_float:.1f}, target_angle={target_angle_float:.1f}, "
+            f"relative={relative:.1f}°，目的地在{side_label}侧，选择 side={side}"
+        )
+        return side, relative, target_angle_float, current_dir_float
+
     def _recover_route_stuck_by_side_forward(
         self,
         w: 'FrameWorker',
@@ -2423,33 +2421,58 @@ class HouseSearchManager:
         backoff_first: bool = True,
     ) -> bool:
         self.stop_auto_forward(w)
+        scene_before = self._get_house_scene(w)
+        if scene_before != self.HOUSE_NEAR_WALL:
+            print(
+                f"[Unstuck] 检测到卡住但 house_scene={scene_before}，"
+                f"新绕房策略只在 near_wall 触发，交给通用脱困"
+            )
+            return False
+
         attempt = self._next_route_stuck_attempt(current_loc)
 
-        if backoff_first:
-            backoff_y_bias, backoff_dura, backoff_wait = self._route_stuck_backoff_motion(attempt)
-            print(
-                f"[Unstuck] 前往进门点卡住，先后退复位 attempt={attempt}, "
-                f"y_bias={backoff_y_bias}, dura={backoff_dura}, wait={backoff_wait}"
+        backoff_y_bias, backoff_dura, backoff_wait = self._route_stuck_backoff_motion(attempt)
+        print(
+            f"[Unstuck] 卡住且 house_scene=near_wall，先后拉再确认前方是否是房子: "
+            f"attempt={attempt}, y_bias={backoff_y_bias}, dura={backoff_dura}, wait={backoff_wait}"
+        )
+        w.tap_single('摇杆', y_bias=backoff_y_bias, dura=backoff_dura, wait=backoff_wait)
+        self._refresh_frame_and_handle_jump(w)
+        if self._get_house_scene(w) == 0:
+            loc_after_back = self._get_current_location(w) or current_loc
+            return self._handle_indoor_during_entry_route(
+                w,
+                loc_after_back,
+                "卡住后后退复核确认误入房",
             )
-            w.tap_single('摇杆', y_bias=backoff_y_bias, dura=backoff_dura, wait=backoff_wait)
-            self._refresh_frame_and_handle_jump(w)
-            if self._get_house_scene(w) == 0:
-                loc_after_back = self._get_current_location(w) or current_loc
-                return self._handle_indoor_during_entry_route(
-                    w,
-                    loc_after_back,
-                    "卡住后后退复核确认误入房",
-                )
 
-        side = self._choose_house_bypass_side(w)
-        current_dir = w.get_info('direction')
-        turn_degrees = self._route_stuck_turn_degrees(attempt)
+        front_block = self._front_house_blocking(w)
+        if not front_block:
+            print("[Unstuck] 后拉后前方未确认是房子，不执行新绕房，交给通用脱困")
+            return False
+
+        print(f"[Unstuck] 后拉后前方确认是房子/入门目标，准备结合目的地角度绕开: target={front_block}")
+        side, relative, target_angle, selected_from_dir = self._choose_route_stuck_bypass_side_by_target_angle(
+            w,
+            self._get_current_location(w) or current_loc,
+            target_loc,
+        )
+        current_dir = selected_from_dir if selected_from_dir is not None else w.get_info('direction')
+        turn_degrees = self.ROUTE_STUCK_HOUSE_BYPASS_TURN_DEGREES
         if current_dir is not None:
+            try:
+                current_dir_float = float(current_dir)
+            except (TypeError, ValueError):
+                current_dir_float = None
+
+        if current_dir is not None and current_dir_float is not None:
             turn_delta = turn_degrees if side == "right" else -turn_degrees
-            target_dir = (float(current_dir) + turn_delta) % 360
+            target_dir = (current_dir_float + turn_delta) % 360
             print(
-                f"[Unstuck] 视野向{side}侧转 {turn_degrees}° "
-                f"复核室内/室外: attempt={attempt}, target={target_dir:.1f}"
+                f"[Unstuck] 前方房体挡路，按目的地角度向{side}侧调整视角: "
+                f"attempt={attempt}, current_dir={current_dir_float:.1f}, "
+                f"target_angle={target_angle}, relative={relative}, "
+                f"turn={turn_delta}°, target_dir={target_dir:.1f}"
             )
             self.align_direction_blocking(
                 w,
@@ -2457,6 +2480,24 @@ class HouseSearchManager:
                 target_dir,
                 threshold=10,
                 max_steps=4,
+            )
+            self._refresh_frame_and_handle_jump(w)
+        else:
+            x_bias = (
+                self.ROUTE_STUCK_HOUSE_BYPASS_VIEW_X_BIAS
+                if side == "right"
+                else -self.ROUTE_STUCK_HOUSE_BYPASS_VIEW_X_BIAS
+            )
+            print(
+                f"[Unstuck] 缺少方向角，直接向{side}侧拨动视角绕房: "
+                f"x_bias={x_bias}, dura={self.ROUTE_STUCK_HOUSE_BYPASS_VIEW_DURA}, "
+                f"wait={self.ROUTE_STUCK_HOUSE_BYPASS_VIEW_WAIT}"
+            )
+            w.tap_single(
+                '视角',
+                x_bias=x_bias,
+                dura=self.ROUTE_STUCK_HOUSE_BYPASS_VIEW_DURA,
+                wait=self.ROUTE_STUCK_HOUSE_BYPASS_VIEW_WAIT,
             )
             self._refresh_frame_and_handle_jump(w)
 
@@ -2468,16 +2509,17 @@ class HouseSearchManager:
                 "卡住后转向复核确认误入房",
             )
 
-        forward_y_bias, forward_dura, wait = self._route_stuck_forward_motion(attempt)
         print(
-            f"[Unstuck] 确认为室外卡住，沿{side}侧前推绕开障碍 "
-            f"attempt={attempt}, y_bias={forward_y_bias}, dura={forward_dura}, wait={wait}"
+            f"[Unstuck] 视角已向{side}侧避开前方房体，快速前推绕开: "
+            f"attempt={attempt}, y_bias={self.ROUTE_STUCK_HOUSE_BYPASS_FORWARD_Y_BIAS}, "
+            f"dura={self.ROUTE_STUCK_HOUSE_BYPASS_FORWARD_DURA}, "
+            f"wait={self.ROUTE_STUCK_HOUSE_BYPASS_FORWARD_WAIT}"
         )
         w.tap_single(
             '摇杆',
-            y_bias=forward_y_bias,
-            dura=forward_dura,
-            wait=wait,
+            y_bias=self.ROUTE_STUCK_HOUSE_BYPASS_FORWARD_Y_BIAS,
+            dura=self.ROUTE_STUCK_HOUSE_BYPASS_FORWARD_DURA,
+            wait=self.ROUTE_STUCK_HOUSE_BYPASS_FORWARD_WAIT,
         )
         self._refresh_frame_and_handle_jump(w)
 
@@ -2518,9 +2560,6 @@ class HouseSearchManager:
             )
 
         if self._recover_route_stuck_by_side_forward(w, current_loc, target_loc):
-            return True
-
-        if self._bypass_front_house_block(w, current_loc, _safe_get_loc):
             return True
 
         if w.get_info('跳跃'):

@@ -1325,6 +1325,43 @@ class HouseSearchManager:
     def _backoff_entry_near_wall_if_needed(self, w: 'FrameWorker', phase_label: str, reason: str) -> bool:
         return self._handle_entry_near_wall_if_needed(w, phase_label, reason) is not None
 
+    def _handle_nav_near_entry_scene_if_needed(self, w: 'FrameWorker', phase_label: str, reason: str):
+        scene = self._get_house_scene(w)
+        if scene not in {self.HOUSE_NEAR_WALL, self.HOUSE_NEAR_DOOR}:
+            return None
+
+        scene_label = "near_wall" if scene == self.HOUSE_NEAR_WALL else "near_door"
+        print(
+            f"[{phase_label}] {reason}检测到 {scene_label}，先后拉脱离门墙，"
+            f"保持当前入门点目标不变: "
+            f"y_bias={self.ENTRY_DOOR_DIRECT_BACKOFF_Y_BIAS}, "
+            f"dura={self.ENTRY_DOOR_DIRECT_BACKOFF_DURA}, "
+            f"wait={self.ENTRY_DOOR_DIRECT_BACKOFF_WAIT}"
+        )
+        self.stop_auto_forward(w)
+        w.tap_single(
+            '摇杆',
+            y_bias=self.ENTRY_DOOR_DIRECT_BACKOFF_Y_BIAS,
+            dura=self.ENTRY_DOOR_DIRECT_BACKOFF_DURA,
+            wait=self.ENTRY_DOOR_DIRECT_BACKOFF_WAIT,
+        )
+        self._refresh_frame_and_handle_jump(w)
+        self.history_locations = []
+
+        scene_after_backoff = self._get_house_scene(w)
+        if scene_after_backoff == self.HOUSE_INDOOR:
+            print(f"[{phase_label}] {scene_label} 后拉后已在 indoor，直接启动当前房搜房")
+            return "indoor"
+
+        if w.get_info('跳跃'):
+            print(f"[{phase_label}] {scene_label} 后拉后仍有跳跃按钮，尝试跳过房体/石墙障碍")
+            self.handle_jump_logic(w, f"{phase_label} {scene_label} 后拉后跳障")
+            if self._get_house_scene(w) == self.HOUSE_INDOOR:
+                print(f"[{phase_label}] 跳障后已在 indoor，直接启动当前房搜房")
+                return "indoor"
+
+        return "adjusting"
+
     def _push_centered_entry_door_without_button(self, w: 'FrameWorker', phase_label='Nav', initial_door=None) -> str:
         failures = 0
         direct_started = False
@@ -1956,6 +1993,13 @@ class HouseSearchManager:
 
         # --- 快速前进 (距离 > 30.0 才使用自动前进) ---
         if self.status == "FAST_NAV":
+            nav_scene_result = self._handle_nav_near_entry_scene_if_needed(w, "FAST_NAV", "导航中")
+            if nav_scene_result == "indoor":
+                self._complete_current_house_search(w, "导航中贴门墙后进入房屋")
+                return
+            if nav_scene_result is not None:
+                return
+
             if self._jump_forward_if_visible_near_house(w, "FAST_NAV 靠近房子"):
                 return
 
@@ -1991,6 +2035,13 @@ class HouseSearchManager:
 
         # --- 分段摇杆逼近 ---
         elif self.status == "PRECISE_NAV":
+            nav_scene_result = self._handle_nav_near_entry_scene_if_needed(w, "PRECISE_NAV", "导航中")
+            if nav_scene_result == "indoor":
+                self._complete_current_house_search(w, "导航中贴门墙后进入房屋")
+                return
+            if nav_scene_result is not None:
+                return
+
             if self._jump_forward_if_visible_near_house(w, "PRECISE_NAV 靠近房子"):
                 return
 
@@ -3963,6 +4014,13 @@ class HouseSceneSearchManager(HouseSearchManager):
                 return
 
         if self.status == "FAST_NAV":
+            nav_scene_result = self._handle_nav_near_entry_scene_if_needed(w, "FAST_NAV", "R城导航中")
+            if nav_scene_result == "indoor":
+                self._complete_current_house_search(w, "R城导航中贴门墙后进入房屋")
+                return
+            if nav_scene_result is not None:
+                return
+
             if self.update_and_check_stuck(current_loc):
                 print("[SceneSearch] 快速导航检测到卡住，启动避障")
                 if not self._recover_r_city_navigation_stuck(w, current_loc):
@@ -3990,6 +4048,13 @@ class HouseSceneSearchManager(HouseSearchManager):
             return
 
         if self.status == "PRECISE_NAV":
+            nav_scene_result = self._handle_nav_near_entry_scene_if_needed(w, "PRECISE_NAV", "R城导航中")
+            if nav_scene_result == "indoor":
+                self._complete_current_house_search(w, "R城导航中贴门墙后进入房屋")
+                return
+            if nav_scene_result is not None:
+                return
+
             if self.update_and_check_stuck(current_loc):
                 print("[SceneSearch] 精细导航检测到卡住，启动避障")
                 if not self._recover_r_city_navigation_stuck(w, current_loc):

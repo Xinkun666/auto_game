@@ -115,6 +115,7 @@ class HouseSearchManager:
     ENTRY_DOOR_FINAL_LATERAL_DURA = 180
     ENTRY_DOOR_FINAL_LATERAL_WAIT = 360
     ENTRY_DOOR_FINAL_VIEW_TOLERANCE_PX = 55
+    ENTRY_DOOR_VIEW_ADJUST_REFRESH_SETTLE_SECONDS = 0.2
     ENTRY_DOOR_DIRECT_CENTER_MIN_RATIO = 0.40
     ENTRY_DOOR_DIRECT_CENTER_MAX_RATIO = 0.60
     ENTRY_DOOR_DIRECT_FORWARD_Y_BIAS = -200
@@ -1239,11 +1240,10 @@ class HouseSearchManager:
                     dura=self.ENTRY_DOOR_FINAL_LATERAL_DURA,
                     wait=self.ENTRY_DOOR_FINAL_LATERAL_WAIT,
                 )
-                self._refresh_frame_and_handle_jump(w)
+                door = self._refresh_door_after_view_adjust(w, f"{phase_label} 门在左侧横移后")
                 wall_result = self._handle_entry_near_wall_if_needed(w, phase_label, "门在左侧横移后")
                 if wall_result is not None:
                     return wall_result if wall_result == "indoor" else "near_wall_backoff"
-                door = self.find_largest_door(w)
                 if door is None:
                     print(f"[{phase_label}] 横移后门目标丢失，继续原进门流程")
                     return None
@@ -1261,11 +1261,10 @@ class HouseSearchManager:
                     dura=self.ENTRY_DOOR_FINAL_LATERAL_DURA,
                     wait=self.ENTRY_DOOR_FINAL_LATERAL_WAIT,
                 )
-                self._refresh_frame_and_handle_jump(w)
+                door = self._refresh_door_after_view_adjust(w, f"{phase_label} 门在右侧横移后")
                 wall_result = self._handle_entry_near_wall_if_needed(w, phase_label, "门在右侧横移后")
                 if wall_result is not None:
                     return wall_result if wall_result == "indoor" else "near_wall_backoff"
-                door = self.find_largest_door(w)
                 if door is None:
                     print(f"[{phase_label}] 横移后门目标丢失，继续原进门流程")
                     return None
@@ -2807,8 +2806,18 @@ class HouseSearchManager:
         if not doors: return None
         return max(doors, key=lambda x: (x[2] - x[0]) * (x[3] - x[1]))
 
-    def _align_to_door_detection(self, w, door, tolerance_px=80):
-        for _ in range(4):
+    def _refresh_door_after_view_adjust(self, w, phase_label="DoorAlign"):
+        print(
+            f"[{phase_label}] 视角/位置调整后等待最新帧再继续判断: "
+            f"settle={self.ENTRY_DOOR_VIEW_ADJUST_REFRESH_SETTLE_SECONDS:.1f}s"
+        )
+        if self.ENTRY_DOOR_VIEW_ADJUST_REFRESH_SETTLE_SECONDS > 0:
+            time.sleep(self.ENTRY_DOOR_VIEW_ADJUST_REFRESH_SETTLE_SECONDS)
+        self._refresh_frame_and_handle_jump(w, f"{phase_label} 等待最新帧")
+        return self.find_largest_door(w)
+
+    def _align_to_door_detection(self, w, door, tolerance_px=80, phase_label="DoorAlign"):
+        for step in range(4):
             inf_w, inf_h = get_wh()
             frame_w = max(inf_w, inf_h)
             scale = self.screen_w / frame_w
@@ -2819,9 +2828,13 @@ class HouseSearchManager:
 
             adjust_val = int(offset_real * 0.33)
             adjust_val = max(-400, min(400, adjust_val))
+            print(
+                f"[{phase_label}] 门中心偏移 {offset_real:.1f}px，"
+                f"第 {step + 1}/4 次调整视角后等待最新帧: "
+                f"x_bias={adjust_val}, dura=500, wait=500"
+            )
             w.tap_single('视角', x_bias=adjust_val, dura=500, wait=500)
-            self._refresh_frame_and_handle_jump(w)
-            refreshed = self.find_largest_door(w)
+            refreshed = self._refresh_door_after_view_adjust(w, phase_label)
             if refreshed is None:
                 return False
             door = refreshed
@@ -3610,7 +3623,7 @@ class HouseSceneSearchManager(HouseSearchManager):
     ROTATE_RESULT_FINISHED = "finished"
     ROTATE_RESULT_EXITED = "exited"
     ROTATE_RESULT_FALLBACK_EXIT = "fallback_exit"
-    ENTRY_DIRECTION_ALIGN_TOLERANCE = 3
+    ENTRY_DIRECTION_ALIGN_TOLERANCE = 5
     ENTRY_DIRECTION_ALIGN_MAX_STEPS = 8
     ENTRY_VISIBLE_DOOR_ALIGN_TOLERANCE_PX = 120
     ENTRY_ARRIVAL_DISTANCE = 0.0

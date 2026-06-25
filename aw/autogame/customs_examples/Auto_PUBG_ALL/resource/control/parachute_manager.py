@@ -21,28 +21,32 @@ class ParachuteManager:
 
     # --- 配置常量 (Configuration) ---
     TARGET_POS: Tuple[int, int] = (990, 757)  # 默认目标落点
-    TRIGGER_DIST: int = 550  # 触发跳伞的距离阈值
-    SAFE_BUFFER: int = 550  # 有效靠近的判定缓冲值
-    OVERSHOOT_INCREASE_FRAMES: int = 5  # 连续多少帧递增才判定为飞过最佳跳伞点
+    TRIGGER_DIST: int = 450  # 触发跳伞的距离阈值
+    OVERSHOOT_INCREASE_FRAMES: int = 1  # 连续多少帧递增才判定为飞过最佳跳伞点
     DIVE_DURATION_MS: int = 47500  # 俯冲/滑行持续时间 (根据地图大小调整)
     JUMP_CONFIRM_TOLERANCE: int = 35  # 跳伞前后帧允许的小幅测距波动
+    JUMP_LOCATION_CONTINUITY_MAX_STEP: int = 120  # 跳伞确认帧之间允许的最大位置跳变
 
     def __init__(self):
         self.is_active = False  # 是否处于监控跳伞距离的激活状态
         self.prior_dist = 0  # 历史最近距离（用于判断是否飞过了）
         self.last_dist: Optional[float] = None  # 上一帧距离（用于判断连续递增）
+        self.last_location: Optional[Tuple[int, int]] = None  # 上一帧坐标（用于过滤坐标跳变）
         self.increase_streak = 0  # 连续递增帧数
         self.target_pos: Tuple[int, int] = self.TARGET_POS
         self.landing_stage: str = "搜房阶段"
         self.jump_confirm_distances: List[float] = []
+        self.jump_confirm_locations: List[Tuple[int, int]] = []
 
     def reset(self):
         """重置跳伞管理器的内部状态"""
         self.is_active = False
         self.prior_dist = 0
         self.last_dist = None
+        self.last_location = None
         self.increase_streak = 0
         self.jump_confirm_distances = []
+        self.jump_confirm_locations = []
         print("[Parachute] 状态已重置!")
 
     def configure(
@@ -86,15 +90,18 @@ class ParachuteManager:
         if not self._is_valid_distance(current_dist):
             print("[Parachute] 当前小地图坐标无效，暂不计算R城距离或触发跳伞")
             self.jump_confirm_distances = []
+            self.jump_confirm_locations = []
             self.last_dist = None
+            self.last_location = None
             return {}
 
         # 4. 距离趋势检查 (判断是否飞过了/飞远了)
-        self._check_flight_path(current_dist, w)
+        if self._check_flight_path(current_dist, location, w):
+            return self._perform_jump_sequence(w)
 
 
         # 5. 判定是否到达跳伞点：用前后各一帧确认，避免单帧误判导致误跳伞
-        if self._confirm_jump_window(current_dist):
+        if self._confirm_jump_window(current_dist, location):
             return self._perform_jump_sequence(w)
 
         return {}
@@ -107,17 +114,18 @@ class ParachuteManager:
     def _is_valid_distance(self, distance) -> bool:
         return distance is not None and distance >= 0
 
-    def _check_flight_path(self, current_dist: float, w: 'FrameWorker'):
+    def _check_flight_path(self, current_dist: float, location, w: 'FrameWorker') -> bool:
         """
         检查飞行路径状态。
-        如果飞机正在远离目标且距离过远，判定为本局航线不佳或死亡。
+        如果飞机已经越过最近点，即使最近距离仍然大于阈值，也立刻跳伞。
         """
         # 初始化最近距离
         if self.prior_dist == 0:
             self.prior_dist = current_dist
             self.last_dist = current_dist
+            self.last_location = tuple(location)
             self.increase_streak = 0
-            return
+            return False
         else:
             last_dist_text = f"{self.last_dist:.2f}" if self.last_dist is not None else "None"
             print(
@@ -126,6 +134,25 @@ class ParachuteManager:
                 f"上一帧距离：{last_dist_text}, "
                 f"连续递增帧数：{self.increase_streak}"
             )
+
+        if self.last_location is not None:
+            location_step = get_distance(self.last_location, location)
+            if (
+                not self._is_valid_distance(location_step)
+                or location_step > self.JUMP_LOCATION_CONTINUITY_MAX_STEP
+            ):
+                print(
+                    f"[Parachute] 当前坐标变化不连续，重置最近点趋势: "
+                    f"last_location={self.last_location}, current_location={location}, "
+                    f"step={location_step}, max_step={self.JUMP_LOCATION_CONTINUITY_MAX_STEP}"
+                )
+                self.prior_dist = current_dist
+                self.last_dist = current_dist
+                self.last_location = tuple(location)
+                self.increase_streak = 0
+                self.jump_confirm_distances = []
+                self.jump_confirm_locations = []
+                return False
 
         # 正常情况：距离在变小，更新最近距离
         if current_dist <= self.prior_dist:
@@ -137,6 +164,7 @@ class ParachuteManager:
             self.increase_streak = 0
 
         self.last_dist = current_dist
+        self.last_location = tuple(location)
 
         if (
             current_dist > self.TRIGGER_DIST
@@ -144,20 +172,23 @@ class ParachuteManager:
             and self.increase_streak >= self.OVERSHOOT_INCREASE_FRAMES
         ):
             print(
-                f"[Parachute] 警告：航线偏离。历史最近距离 {self.prior_dist:.2f} > 阈值 {self.TRIGGER_DIST}，"
-                f"且已连续 {self.increase_streak} 帧远离目标，判定飞过最佳跳伞点。"
+                f"[Parachute] 已经过R城最近点，历史最近距离 {self.prior_dist:.2f} "
+                f"> 跳伞阈值 {self.TRIGGER_DIST}，当前距离 {current_dist:.2f} "
+                f"开始变大，立即跳伞避免越飞越远。"
             )
-            self.reset()
-            w.change_stage('结束阶段')
+            return True
+        return False
 
-    def _confirm_jump_window(self, current_dist: float) -> bool:
+    def _confirm_jump_window(self, current_dist: float, location) -> bool:
         """
         当前帧进入跳伞范围时不立刻跳，等待下一帧后用 [前一帧, 候选帧, 后一帧]
-        做连贯性确认。这样可以过滤一帧定位/识别异常导致的距离突降。
+        做距离和坐标连贯性确认。这样可以过滤一帧定位/识别异常导致的距离突降。
         """
         self.jump_confirm_distances.append(float(current_dist))
+        self.jump_confirm_locations.append(tuple(location))
         if len(self.jump_confirm_distances) > 3:
             self.jump_confirm_distances = self.jump_confirm_distances[-3:]
+            self.jump_confirm_locations = self.jump_confirm_locations[-3:]
 
         if len(self.jump_confirm_distances) < 3:
             if current_dist <= self.TRIGGER_DIST:
@@ -169,9 +200,6 @@ class ParachuteManager:
 
         prev_dist, candidate_dist, next_dist = self.jump_confirm_distances
         if candidate_dist > self.TRIGGER_DIST:
-            return False
-
-        if min(prev_dist, candidate_dist, next_dist) >= self.SAFE_BUFFER:
             return False
 
         if candidate_dist > prev_dist + self.JUMP_CONFIRM_TOLERANCE:
@@ -188,10 +216,41 @@ class ParachuteManager:
             )
             return False
 
+        if not self._confirm_location_continuity():
+            return False
+
         print(
             f"[Parachute] 跳伞三帧确认通过: prev={prev_dist:.2f}, "
             f"candidate={candidate_dist:.2f}, next={next_dist:.2f}"
         )
+        return True
+
+    def _confirm_location_continuity(self) -> bool:
+        if len(self.jump_confirm_locations) < 3:
+            return False
+
+        prev_loc, candidate_loc, next_loc = self.jump_confirm_locations
+        prev_step = get_distance(prev_loc, candidate_loc)
+        next_step = get_distance(candidate_loc, next_loc)
+        if not self._is_valid_distance(prev_step) or not self._is_valid_distance(next_step):
+            print(
+                f"[Parachute] 跳伞确认坐标无效: "
+                f"prev={prev_loc}, candidate={candidate_loc}, next={next_loc}"
+            )
+            return False
+
+        if (
+            prev_step > self.JUMP_LOCATION_CONTINUITY_MAX_STEP
+            or next_step > self.JUMP_LOCATION_CONTINUITY_MAX_STEP
+        ):
+            print(
+                f"[Parachute] 跳伞确认坐标不连续: "
+                f"prev={prev_loc}, candidate={candidate_loc}, next={next_loc}, "
+                f"prev_step={prev_step:.2f}, next_step={next_step:.2f}, "
+                f"max_step={self.JUMP_LOCATION_CONTINUITY_MAX_STEP}"
+            )
+            return False
+
         return True
 
 

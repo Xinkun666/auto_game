@@ -3697,6 +3697,7 @@ class HouseSceneSearchManager(HouseSearchManager):
     ROTATE_SEARCH_SWEEP_TURN_PX = 350
     ROTATE_SEARCH_SWEEP_TURN_DURA = 150
     ROTATE_SEARCH_SWEEP_TURN_WAIT = 3000
+    ROTATE_EXIT_RECHECK_TURN_PX = 220
     ROTATE_SEARCH_SWEEP_CYCLES_PER_DIRECTION = 6
     ROTATE_FRAME_COMPARE_SIZE = (160, 90)
     ROTATE_FRAME_COMPARE_ROI = (0.18, 0.16, 0.82, 0.78)
@@ -4926,9 +4927,15 @@ class HouseSceneSearchManager(HouseSearchManager):
                 self._refresh_frame_and_handle_jump(w)
                 scene = self._get_house_scene(w)
                 if scene in self.HOUSE_EXIT_SCENES:
-                    print(f"[SceneRotate] {phase_label}推进前已出房 house_scene={scene}")
-                    self.stop_auto_forward(w)
-                    return self.ROTATE_RESULT_EXITED
+                    if self._confirm_rotate_exit_or_continue(
+                        w,
+                        phase_label,
+                        "推进前",
+                        scene,
+                        turn_px,
+                    ):
+                        return self.ROTATE_RESULT_EXITED
+                    scene = self._get_house_scene(w)
                 if scene is not None and scene not in {
                     self.HOUSE_INDOOR,
                     self.HOUSE_NEAR_DOOR,
@@ -4948,9 +4955,15 @@ class HouseSceneSearchManager(HouseSearchManager):
                 self._refresh_frame_and_handle_jump(w)
                 scene = self._get_house_scene(w)
                 if scene in self.HOUSE_EXIT_SCENES:
-                    print(f"[SceneRotate] {phase_label}推进后判定出房 house_scene={scene}")
-                    self.stop_auto_forward(w)
-                    return self.ROTATE_RESULT_EXITED
+                    if self._confirm_rotate_exit_or_continue(
+                        w,
+                        phase_label,
+                        "推进后",
+                        scene,
+                        turn_px,
+                    ):
+                        return self.ROTATE_RESULT_EXITED
+                    continue
 
                 print(f"[SceneRotate] {phase_label}推进后原地转视角 {turn_px}px")
                 self._turn_raw_pixels(w, turn_px)
@@ -4958,13 +4971,58 @@ class HouseSceneSearchManager(HouseSearchManager):
                 self._refresh_frame_and_handle_jump(w)
                 scene = self._get_house_scene(w)
                 if scene in self.HOUSE_EXIT_SCENES:
-                    print(f"[SceneRotate] {phase_label}转向后判定出房 house_scene={scene}")
-                    self.stop_auto_forward(w)
-                    return self.ROTATE_RESULT_EXITED
+                    if self._confirm_rotate_exit_or_continue(
+                        w,
+                        phase_label,
+                        "转向后",
+                        scene,
+                        -turn_px,
+                    ):
+                        return self.ROTATE_RESULT_EXITED
+                    continue
 
         self.stop_auto_forward(w)
         print("[SceneRotate] 顺时针+逆时针各一圈后仍未出房，切出房策略")
         return self.ROTATE_RESULT_FALLBACK_EXIT
+
+    def _confirm_rotate_exit_or_continue(
+        self,
+        w: "FrameWorker",
+        phase_label: str,
+        checkpoint: str,
+        first_scene,
+        recheck_turn_px: int,
+    ) -> bool:
+        turn_px = recheck_turn_px
+        if not turn_px:
+            turn_px = self.ROTATE_EXIT_RECHECK_TURN_PX
+        if abs(turn_px) > self.ROTATE_EXIT_RECHECK_TURN_PX:
+            turn_px = self.ROTATE_EXIT_RECHECK_TURN_PX if turn_px > 0 else -self.ROTATE_EXIT_RECHECK_TURN_PX
+
+        print(
+            f"[SceneRotate] {phase_label}{checkpoint}检测到 house_scene={first_scene}，"
+            f"疑似看到窗外/门外或单帧误识别，停止前推并转视角复核: "
+            f"x_bias={turn_px}, dura={self.ROTATE_SEARCH_SWEEP_TURN_DURA}, "
+            f"wait={self.ROTATE_SEARCH_SWEEP_TURN_WAIT}"
+        )
+        self.stop_auto_forward(w)
+        self._turn_raw_pixels(w, turn_px)
+        self._refresh_frame_and_handle_jump(w)
+
+        second_scene = self._get_house_scene(w)
+        if second_scene in self.HOUSE_EXIT_SCENES:
+            print(
+                f"[SceneRotate] {phase_label}{checkpoint}屋外信号复核仍为 house_scene={second_scene}，"
+                "确认已出房，结束旋转搜房"
+            )
+            self.stop_auto_forward(w)
+            return True
+
+        print(
+            f"[SceneRotate] {phase_label}{checkpoint}屋外信号复核后为 house_scene={second_scene}，"
+            "复核后仍在室内/门墙附近，继续未完成的旋转搜房"
+        )
+        return False
 
     def _ensure_rotate_auto_forward(self, w: "FrameWorker", reason: str):
         if self.auto_forward:

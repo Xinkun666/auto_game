@@ -1,8 +1,8 @@
 {
     "screen_mode": "0",
     "touch_backend": "uinput",
-    "stream_disable_save_frames": false,
-    "stream_diagnostics": false,
+    "stream_disable_save_frames": true,
+    "stream_diagnostics": true,
     "stream_diagnostics_interval": 1.0,
     "stage_time_minutes": {
         "搜房": 10,

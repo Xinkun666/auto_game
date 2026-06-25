@@ -70,11 +70,29 @@ class ParachuteManager:
         # 1. 如果检测到还在跟随队友，优先取消跟随
         if w.get_info('取消跟随'):
             print('[Parachute] 点击取消跟随!')
+            if hasattr(w, "set_frame_decision"):
+                w.set_frame_decision(
+                    observation="当前帧出现取消跟随",
+                    target="跳伞阶段",
+                    decision="点击取消跟随，解除队友跟随后继续判断跳伞",
+                    action="点击取消跟随",
+                    method="w.click(取消跟随)",
+                    result="等待下一帧确认跟随状态解除",
+                )
             w.click(w.get_info('取消跟随'))
             time.sleep(1)
 
         # 2. 尝试激活监控状态 (当看到跳伞按钮且未激活时)
         if not self.is_active and w.get_info('离开'):
+            if hasattr(w, "set_frame_decision"):
+                w.set_frame_decision(
+                    observation="当前帧出现离开按钮，说明已进入可跳伞状态",
+                    target="跳伞阶段",
+                    decision="激活航线距离监控",
+                    action="开始监控R城距离",
+                    method="_activate_monitoring()",
+                    result="后续帧根据距离趋势决定跳伞",
+                )
             self._activate_monitoring()
 
         # 3. 如果未激活监控，则无需后续操作
@@ -89,11 +107,30 @@ class ParachuteManager:
         current_dist = get_distance(location, self.target_pos)
         if not self._is_valid_distance(current_dist):
             print("[Parachute] 当前小地图坐标无效，暂不计算R城距离或触发跳伞")
+            if hasattr(w, "set_frame_decision"):
+                w.set_frame_decision(
+                    observation="当前帧小地图坐标无效",
+                    target="跳伞阶段",
+                    decision="暂不跳伞，等待下一帧重新识别坐标",
+                    action="等待下一帧",
+                    method="清空跳伞确认缓存",
+                    result="避免单帧异常导致误跳伞",
+                )
             self.jump_confirm_distances = []
             self.jump_confirm_locations = []
             self.last_dist = None
             self.last_location = None
             return {}
+
+        if hasattr(w, "set_frame_decision"):
+            w.set_frame_decision(
+                observation=f"当前距离R城距离 {current_dist:.2f}，当前位置={tuple(location)}",
+                target="跳伞阶段",
+                decision="继续根据距离趋势判断是否到达跳伞窗口",
+                action="保持跳伞监控",
+                method="检查最近距离趋势和三帧跳伞窗口",
+                result="未确认前不执行跳伞",
+            )
 
         # 4. 距离趋势检查 (判断是否飞过了/飞远了)
         if self._check_flight_path(current_dist, location, w):

@@ -1833,6 +1833,9 @@ class FrameWorker(threading.Thread):
         self.current_stage = None
         self.current_group = DEFAULT_GROUP_NAME
         self.frame = None
+        self.current_frame_observations = []
+        self.current_frame_actions = []
+        self.current_frame_decision = {}
         self.last_gc_time = time.time()
 
         self.click = self._wrap_control_action("click", self.controller.click)
@@ -1869,6 +1872,7 @@ class FrameWorker(threading.Thread):
         frame_meta = {
             "group_name": self.current_group,
             "runtime_logs": self._get_frame_runtime_logs(),
+            "frame_decision": self._build_frame_decision(),
         }
         self.viz_queue.put((self.frame.copy(), self.current_stage, self.stage_info, self.frame_index, frame_meta))
         self.frame_index += 1
@@ -1892,11 +1896,103 @@ class FrameWorker(threading.Thread):
         def _wrapped(*args, **kwargs):
             result = action(*args, **kwargs)
             self._record_control_action(action_name)
+            self._record_frame_action(action_name, args, kwargs)
             return result
         return _wrapped
 
     def _record_control_action(self, action_name=None):
         self.last_control_action_time = time.monotonic()
+
+    def _reset_frame_decision(self):
+        self.current_frame_observations = []
+        self.current_frame_actions = []
+        self.current_frame_decision = {}
+
+    @staticmethod
+    def _frame_value_visible(value):
+        if value is None or value is False:
+            return False
+        if isinstance(value, (list, tuple, dict, set)) and not value:
+            return False
+        return True
+
+    def _record_frame_observation(self, name, value):
+        if not self._frame_value_visible(value):
+            return
+        text_name = str(name)
+        if any(item.get("name") == text_name for item in self.current_frame_observations):
+            return
+        self.current_frame_observations.append({
+            "name": text_name,
+            "value": str(value),
+            "stage": self.current_stage or "",
+        })
+
+    def _describe_frame_action(self, action_name, args, kwargs):
+        target = args[0] if args else kwargs.get("btn", kwargs.get("target", ""))
+        if action_name == "click":
+            return f"点击{target}" if target else "点击"
+        if action_name in {"tap_single", "tap_double", "uinput_tap_single"}:
+            return f"{action_name}({target})" if target else str(action_name)
+        if action_name in {"move_press", "move_to", "move_up"}:
+            return str(action_name)
+        return str(action_name)
+
+    def _record_frame_action(self, action_name, args, kwargs):
+        self.current_frame_actions.append({
+            "name": str(action_name),
+            "description": self._describe_frame_action(action_name, args, kwargs),
+            "args": [str(arg) for arg in args[:3]],
+            "kwargs": {str(key): str(value) for key, value in kwargs.items()},
+        })
+
+    def set_frame_decision(
+        self,
+        observation=None,
+        target=None,
+        decision=None,
+        action=None,
+        method=None,
+        result=None,
+        next_action=None,
+    ):
+        self.current_frame_decision = {
+            "observation": str(observation or ""),
+            "target": str(target or self.current_stage or ""),
+            "decision": str(decision or action or ""),
+            "action": str(action or decision or ""),
+            "method": str(method or ""),
+            "result": str(result or ""),
+            "next_action": str(next_action or action or decision or ""),
+        }
+
+    def _build_frame_decision(self):
+        decision = dict(self.current_frame_decision or {})
+        observations = list(self.current_frame_observations)
+        actions = list(self.current_frame_actions)
+        observed_names = [item.get("name") for item in observations if item.get("name")]
+
+        if not decision.get("target"):
+            decision["target"] = self.current_stage or ""
+        if not decision.get("observation"):
+            if observed_names:
+                decision["observation"] = "当前帧出现 " + ", ".join(observed_names)
+            else:
+                decision["observation"] = f"当前帧处于{self.current_stage or '未知阶段'}"
+        if not decision.get("action"):
+            decision["action"] = actions[-1].get("description", "") if actions else ""
+        if not decision.get("decision"):
+            decision["decision"] = decision.get("action", "")
+        if not decision.get("next_action"):
+            decision["next_action"] = decision.get("action") or decision.get("decision") or ""
+        if "method" not in decision:
+            decision["method"] = actions[-1].get("description", "") if actions else ""
+        if "result" not in decision:
+            decision["result"] = ""
+
+        decision["observed_infos"] = observations
+        decision["control_actions"] = actions
+        return decision
 
     def mark_failed(self, code, reason, **details):
         with self._failure_lock:
@@ -2050,6 +2146,7 @@ class FrameWorker(threading.Thread):
                     self.current_group,
                 )
 
+                self._reset_frame_decision()
                 self.on_stage_logic(self)
                 self._queue_visual_frame()
                 time.sleep(0.05)
@@ -2126,7 +2223,9 @@ class FrameWorker(threading.Thread):
         suffix = f"__{area_name}"
         for key, value in self.stage_info.items():
             if key.endswith(suffix):
-                return _unwrap_timed_special_info(value)
+                value = _unwrap_timed_special_info(value)
+                self._record_frame_observation(area_name, value)
+                return value
         return None
 
     def change_stage(self, stage_name):

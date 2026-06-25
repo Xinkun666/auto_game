@@ -1214,6 +1214,7 @@ def format_history_frame_details(frame_record: dict) -> str:
 
     seen = payload.get("seen") if isinstance(payload.get("seen"), dict) else {}
     info_payload = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+    decision_payload = payload.get("decision") if isinstance(payload.get("decision"), dict) else {}
     code_branch = payload.get("code_branch") if isinstance(payload.get("code_branch"), dict) else {}
     next_action = str(payload.get("next_action") or "").strip() or "-"
 
@@ -1228,6 +1229,16 @@ def format_history_frame_details(frame_record: dict) -> str:
         "这一帧看到了",
         f"- {seen.get('summary') or payload.get('frame_summary') or '-'}",
     ]
+
+    if decision_payload:
+        lines.extend([
+            "",
+            "本帧决策",
+            f"- 观察: {decision_payload.get('observation') or '-'}",
+            f"- 决策: {decision_payload.get('decision') or decision_payload.get('action') or '-'}",
+            f"- 控制: {decision_payload.get('method') or '-'}",
+            f"- 结果: {decision_payload.get('result') or '-'}",
+        ])
 
     if info_payload:
         lines.append("- info:")

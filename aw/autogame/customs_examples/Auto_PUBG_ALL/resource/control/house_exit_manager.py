@@ -79,14 +79,60 @@ class HouseExitManager:
         self.trusted_exit_signal = False
         self.auto_forward_enabled = False
 
+    def _set_frame_decision(
+        self,
+        w: "FrameWorker",
+        observation: str,
+        decision: str,
+        action: Optional[str] = None,
+        method: str = "",
+        result: str = "",
+        target: str = "出房兜底阶段",
+    ):
+        setter = getattr(w, "set_frame_decision", None)
+        if not callable(setter):
+            return
+        setter(
+            observation=observation,
+            target=target,
+            decision=decision,
+            action=action or decision,
+            method=method,
+            result=result,
+        )
+
     def process(self, w: "FrameWorker") -> bool:
         if self._handle_terminal_state(w, "检测到死亡或结算界面，结束出房兜底流程"):
             return True
 
         house_scene = self._get_house_scene(w)
+        self._set_frame_decision(
+            w,
+            f"出房兜底：当前 house_scene={house_scene}",
+            "根据门、窗、贴墙/贴门和室外信号选择出房动作",
+            action="执行出房兜底决策",
+            method="HouseExitManager.process()",
+            result="本帧继续找门窗或确认已出房",
+        )
         if house_scene not in self.HOUSE_ACTIVE_EXIT_SCENES:
             if house_scene in self.HOUSE_EXIT_SCENES:
+                self._set_frame_decision(
+                    w,
+                    f"出房兜底检测到室外/楼顶 house_scene={house_scene}",
+                    "复核出房成功，停止出房兜底流程",
+                    action="确认出房成功",
+                    method="_verify_exit_success()",
+                    result="回到后续阶段",
+                )
                 return self._verify_exit_success(w)
+            self._set_frame_decision(
+                w,
+                f"出房兜底当前 house_scene={house_scene}，不在可出房处理场景",
+                "本帧不接管，让上层搜房/跑图逻辑继续处理",
+                action="不接管本帧",
+                method="return False",
+                result="上层逻辑继续决策",
+            )
             return False
 
         self.trusted_exit_signal = False
@@ -95,6 +141,14 @@ class HouseExitManager:
         if visible_result is not None:
             return visible_result
 
+        self._set_frame_decision(
+            w,
+            f"出房兜底未直接看到门/窗，house_scene={house_scene}",
+            "按扫描锚点继续找出口，必要时转向、绕圈或随机冲出",
+            action="搜索出口",
+            method="_search_for_exit()",
+            result="下一帧继续确认门窗或室外信号",
+        )
         return self._search_for_exit(w)
 
     def _try_visible_exit_target(self, w: "FrameWorker") -> Optional[bool]:
@@ -103,12 +157,28 @@ class HouseExitManager:
         door = self._find_largest_target(detections, self.DOOR_CLASS_IDS)
         if door:
             print("[HouseExit] 发现门，准备出门")
+            self._set_frame_decision(
+                w,
+                f"当前帧 forward_scene 发现门，door={door}",
+                "停止自动前进，对准门，必要时开门后前推出房",
+                action="对准门并出门",
+                method="_exit_via_door()",
+                result="下一帧确认是否已到室外",
+            )
             self._stop_auto_forward(w)
             return self._exit_via_door(w, door)
 
         window = self._find_largest_target(detections, self.WINDOW_CLASS_IDS)
         if window:
             print("[HouseExit] 发现窗，准备翻窗")
+            self._set_frame_decision(
+                w,
+                f"当前帧 forward_scene 发现窗，window={window}",
+                "停止自动前进，对准窗，找跳跃按钮并前推翻窗",
+                action="对准窗并翻窗",
+                method="_exit_via_window()",
+                result="下一帧确认是否已到室外",
+            )
             self._stop_auto_forward(w)
             return self._exit_via_window(w, window)
 

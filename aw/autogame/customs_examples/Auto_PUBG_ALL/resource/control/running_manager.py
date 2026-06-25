@@ -764,10 +764,28 @@ class RunningManager:
         location = self._get_location(w)
         if location is None:
             print("[Running] 位置无效，尝试小幅前探刷新坐标...")
+            if hasattr(w, "set_frame_decision"):
+                w.set_frame_decision(
+                    observation="跑图阶段当前帧位置无效",
+                    target="跑图阶段",
+                    decision="小幅前探刷新坐标",
+                    action="轻推摇杆",
+                    method="w.tap_single(摇杆, y_bias=-250)",
+                    result="等待下一帧重新读取位置",
+                )
             w.tap_single("摇杆", y_bias=-250, dura=250, wait=500)
             return
 
         direction = self._get_scalar(w.get_info("direction"))
+        if hasattr(w, "set_frame_decision"):
+            w.set_frame_decision(
+                observation=f"跑图阶段：当前位置={location}，当前方位={direction}",
+                target="跑图阶段",
+                decision="继续跑图导航，保持自动前进/路线推进",
+                action="执行跑图导航",
+                method="RunningManager.process 根据路径/障碍/载具状态决策",
+                result="本帧继续向目标推进",
+            )
         self._update_circle_angle(w.get_info("white_angle"))
         forced_route_active = self._has_forced_route()
         if not forced_route_active:
@@ -779,6 +797,15 @@ class RunningManager:
         if self._is_in_vehicle(w):
             print("[Running] 检测到已经上车，切换到开车阶段")
             self._log_running_state("检测到已上车", location, direction, "切换到开车阶段")
+            if hasattr(w, "set_frame_decision"):
+                w.set_frame_decision(
+                    observation=f"当前帧检测到已在车上，当前位置={location}，当前方位={direction}",
+                    target="跑图阶段",
+                    decision="切换到开车阶段",
+                    action="停止跑图自动前进并进入开车阶段",
+                    method="w.change_stage(开车阶段)",
+                    result="下一帧由 DrivingManager 接管",
+                )
             entry_source = self.active_vehicle_entry_source or self.VEHICLE_ENTRY_UNKNOWN
             self._ensure_third_person_view(w, location, direction, "检测到已上车，切回第三人称")
             self.stop_auto_forward(w)

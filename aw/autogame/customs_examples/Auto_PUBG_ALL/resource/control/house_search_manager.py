@@ -343,12 +343,42 @@ class HouseSearchManager:
         self._jump_forward_guard = False
         self._jump_forward_wait_until_hidden = False
 
+    def _set_frame_decision(
+        self,
+        w: 'FrameWorker',
+        observation: str,
+        decision: str,
+        action: Optional[str] = None,
+        method: str = "",
+        result: str = "",
+        target: str = "搜房阶段",
+    ):
+        setter = getattr(w, "set_frame_decision", None)
+        if not callable(setter):
+            return
+        setter(
+            observation=observation,
+            target=target,
+            decision=decision,
+            action=action or decision,
+            method=method,
+            result=result,
+        )
+
     def process(self, w: 'FrameWorker'):
         if self._should_abort(w):
             return
 
         # 0. 基础设置：落地后首帧刷新画面 + 切第一人称
         if not self.first_view:
+            self._set_frame_decision(
+                w,
+                "搜房阶段落地后首帧，准备刷新画面并切第一人称",
+                "先刷新两帧处理跳跃提示，然后点击人称，确保后续入门点导航使用稳定视角",
+                action="刷新画面并点击人称",
+                method="_refresh_frame_and_handle_jump() x2 + w.click(人称)",
+                result="下一帧开始读取位置并选择最近入门点",
+            )
             self._refresh_frame_and_handle_jump(w)
             self._refresh_frame_and_handle_jump(w)
             w.click('人称')
@@ -358,6 +388,14 @@ class HouseSearchManager:
         if location_raw is None:
             self.location_missing_frames += 1
             print('位置值是None，等待位置刷新...')
+            self._set_frame_decision(
+                w,
+                f"搜房阶段当前位置缺失，连续缺失 {self.location_missing_frames} 帧",
+                "先刷新画面等待坐标恢复，连续缺失时轻推摇杆刷新小地图坐标",
+                action="刷新画面，必要时轻推摇杆",
+                method="_refresh_frame_and_handle_jump(); tap_single(摇杆)",
+                result="等待下一帧重新识别当前位置",
+            )
             self._refresh_frame_and_handle_jump(w)
             if self.location_missing_frames >= 3:
                 print('位置连续缺失，轻微移动以刷新位置...')
@@ -369,6 +407,14 @@ class HouseSearchManager:
         if location is None:
             self.location_missing_frames += 1
             print('位置值无效，等待位置刷新...')
+            self._set_frame_decision(
+                w,
+                f"搜房阶段位置值无效，原始位置={location_raw}",
+                "先刷新画面等待有效坐标，连续无效时轻推摇杆刷新小地图",
+                action="刷新画面，必要时轻推摇杆",
+                method="_refresh_frame_and_handle_jump(); tap_single(摇杆)",
+                result="避免用异常坐标规划入门点路线",
+            )
             self._refresh_frame_and_handle_jump(w)
             if self.location_missing_frames >= 3:
                 print('位置连续无效，轻微移动以刷新位置...')
@@ -376,6 +422,14 @@ class HouseSearchManager:
             return
 
         self.location_missing_frames = 0
+        self._set_frame_decision(
+            w,
+            f"搜房阶段：status={self.status}，当前位置={location}，当前方位={direction}",
+            "根据当前位置、方位、入门点和房屋场景选择搜房/进门/出房动作",
+            action="进入搜房决策逻辑",
+            method="searching_logic(w, location, direction)",
+            result="本帧由具体搜房分支继续细化决策",
+        )
         self.searching_logic(w, location, direction)
 
     def _should_abort(self, w: 'FrameWorker'):
@@ -399,6 +453,14 @@ class HouseSearchManager:
             return False
 
     def _finish_searching_phase(self, w: 'FrameWorker', reason: str):
+        self._set_frame_decision(
+            w,
+            f"搜房阶段准备结束：{reason}",
+            "切换到跑图阶段，后续继续自动前进/路线推进",
+            action="切换跑图阶段",
+            method="w.change_stage(跑图阶段)",
+            result="下一帧进入跑图阶段",
+        )
         callback = getattr(self, "finish_callback", None)
         if callback is not None:
             try:
@@ -3950,17 +4012,52 @@ class HouseSceneSearchManager(HouseSearchManager):
             return
 
         house_scene = self._get_house_scene(w)
+        self._set_frame_decision(
+            w,
+            (
+                f"R城搜房：status={self.status}，house_scene={house_scene}，"
+                f"当前位置={current_loc}，当前方位={current_direction}"
+            ),
+            "按R城入门点流程选择最近入门点、导航、进门或搜当前房",
+            action="执行R城搜房主决策",
+            method="HouseSceneSearchManager.searching_logic()",
+            result="后续分支会根据当前帧覆盖为更具体决策",
+        )
         if self._finish_callback_configured() and self._can_finish_searching(w):
+            self._set_frame_decision(
+                w,
+                f"R城搜房计时已满，当前位置={current_loc}，house_scene={house_scene}",
+                "结束当前搜房阶段，切到跑图阶段继续路线推进",
+                action="结束搜房并切跑图",
+                method="_continue_searching_until_timer()",
+                result="下一帧进入跑图阶段",
+            )
             self._continue_searching_until_timer(w, "R城搜房计时已满")
             return
 
         if self._is_in_water(w):
+            self._set_frame_decision(
+                w,
+                f"R城搜房检测到上浮/落水，当前位置={current_loc}，当前方位={current_direction}",
+                "优先脱离水域或交给跑图阶段恢复路线，再回到R城入门点",
+                action="执行水边脱困",
+                method="_request_r_city_recovery_route() or _handle_water_escape()",
+                result="避免在水里继续搜房导航",
+            )
             if self._request_r_city_recovery_route(w, "落地后检测到人物在水里，切跑图阶段脱水并回R城"):
                 return
             self._handle_water_escape(w, current_loc, current_direction)
             return
 
         if house_scene == self.HOUSE_INDOOR:
+            self._set_frame_decision(
+                w,
+                f"R城导航过程中已进入房内，house_scene={house_scene}，当前位置={current_loc}",
+                "不再被门/墙干扰导航，直接把当前房作为已进入房屋处理并执行搜房",
+                action="切入当前房搜房",
+                method="_handle_indoor_during_entry_route()",
+                result="进入房内搜房/完成当前房处理",
+            )
             self._adopt_r_city_target_from_location(current_loc)
             self._handle_indoor_during_entry_route(w, current_loc, "导航/进门过程中检测到 indoor")
             return
@@ -3970,6 +4067,14 @@ class HouseSceneSearchManager(HouseSearchManager):
         if self.initial_target_pending:
             stable_loc = self._get_stable_initial_location(current_loc)
             if stable_loc is None:
+                self._set_frame_decision(
+                    w,
+                    f"R城落地初始位置还不稳定，当前采样位置={current_loc}",
+                    "先停止自动前进并刷新画面，等初始坐标稳定后再锁定最近入门点",
+                    action="停止并刷新等待稳定坐标",
+                    method="stop_auto_forward(); _refresh_frame_and_handle_jump()",
+                    result="避免用落地漂移坐标选错入门点",
+                )
                 self.stop_auto_forward(w)
                 self._refresh_frame_and_handle_jump(w)
                 return
@@ -3981,11 +4086,30 @@ class HouseSceneSearchManager(HouseSearchManager):
             self._select_next_r_city_house(current_loc, current_direction)
 
             if not self.current_house_id:
+                self._set_frame_decision(
+                    w,
+                    f"R城没有可用入门点目标，当前位置={current_loc}",
+                    "结束R城搜房，避免在无目标状态继续乱跑",
+                    action="结束R城搜房",
+                    method="_finish_r_city_searching()",
+                    result="切换后续阶段",
+                )
                 self._finish_r_city_searching(w, "R城房点已全部处理或均不可进入")
                 return
 
             self.status = "FAST_NAV"
             target_dist = get_distance(current_loc, self.active_entry["location"])
+            self._set_frame_decision(
+                w,
+                (
+                    f"R城落地后锁定最近入门点 {self.active_entry['location']}，"
+                    f"房屋={self.current_house_id}，当前距离={target_dist:.2f}"
+                ),
+                "先进入FAST_NAV，目标是在不受其他门/房干扰的情况下赶到这个入门点",
+                action="锁定最近入门点并开始快速导航",
+                method="_select_next_r_city_house(); status=FAST_NAV",
+                result="后续帧持续朝该入门点推进",
+            )
             print(
                 f"[RCitySearch] 落地后锁定最近入门点 {self.active_entry['location']}，"
                 f"房屋={self.current_house_id}，入门方向={self.active_entry['direction']}，"
@@ -4001,11 +4125,33 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         if not self._is_walkable(current_loc):
             if self._same_forbidden_region(current_loc, target_loc):
+                self._set_frame_decision(
+                    w,
+                    (
+                        f"当前位置 {current_loc} 不可通行，但和最近入门点 {target_loc} "
+                        f"在同一个不可通行区域，距离={dist:.2f}"
+                    ),
+                    "不先绕安全点，继续执行FAST_NAV/PRECISE_NAV直冲最近入门点",
+                    action="继续朝最近入门点推进",
+                    method="same_forbidden_region=True，保留当前导航状态",
+                    result="目标仍是到达该入门点 <= 1.5",
+                )
                 print(
                     f"[RCitySearch] 当前落点 {current_loc} 与入门点 {target_loc} 在同一不可通行区域，"
                     f"距离 {dist:.2f}，直接按入门点方向继续冲，不走最近安全点绕路"
                 )
             else:
+                self._set_frame_decision(
+                    w,
+                    (
+                        f"当前位置 {current_loc} 不可通行，且和最近入门点 {target_loc} "
+                        f"不是同一不可通行区域，距离={dist:.2f}"
+                    ),
+                    "先脱离当前不可通行区域，再规划路线继续前往最近入门点",
+                    action="执行黑区脱离",
+                    method="_handle_forbidden_escape()",
+                    result="脱离当前黑区后再回到入门点导航",
+                )
                 print(
                     f"[RCitySearch] 当前落点 {current_loc} 不可通行，且与入门点 {target_loc} "
                     f"不是同一不可通行区域，先快速脱离当前黑区"
@@ -4014,15 +4160,50 @@ class HouseSceneSearchManager(HouseSearchManager):
                 return
 
         if self.status == "FAST_NAV":
+            self._set_frame_decision(
+                w,
+                (
+                    f"FAST_NAV：当前位置={current_loc}，目标入门点={target_loc}，"
+                    f"距离={dist:.2f}，方位={current_direction}"
+                ),
+                "继续快速导航到锁定入门点，期间只处理卡住、贴门墙和前方房屋绕行",
+                action="朝入门点自动前进",
+                method="align_direction(); click(自动前进); handle_jump_logic()",
+                result="到达分段导航范围后切PRECISE_NAV",
+            )
             nav_scene_result = self._handle_nav_near_entry_scene_if_needed(w, "FAST_NAV", "R城导航中")
             if nav_scene_result == "indoor":
+                self._set_frame_decision(
+                    w,
+                    f"FAST_NAV中检测到已经进入房内，当前位置={current_loc}",
+                    "认为已不小心进房，立即搜当前房，不再继续追入门点",
+                    action="完成当前房搜房",
+                    method="_complete_current_house_search()",
+                    result="当前房进入搜房完成流程",
+                )
                 self._complete_current_house_search(w, "R城导航中贴门墙后进入房屋")
                 return
             if nav_scene_result is not None:
+                self._set_frame_decision(
+                    w,
+                    f"FAST_NAV中检测到 near_wall/near_door 等贴近场景，当前位置={current_loc}",
+                    "先后拉/调整视野/跳过障碍，保持目标仍是当前锁定入门点",
+                    action="处理贴墙贴门干扰",
+                    method="_handle_nav_near_entry_scene_if_needed()",
+                    result="下一帧继续朝同一入门点导航",
+                )
                 return
 
             if self.update_and_check_stuck(current_loc):
                 print("[SceneSearch] 快速导航检测到卡住，启动避障")
+                self._set_frame_decision(
+                    w,
+                    f"FAST_NAV检测到位置卡住，当前位置={current_loc}",
+                    "启动避障脱困，脱困后仍回到最近入门点导航",
+                    action="执行导航卡住恢复",
+                    method="_recover_r_city_navigation_stuck()",
+                    result="恢复后继续FAST_NAV或重新选择入门点",
+                )
                 if not self._recover_r_city_navigation_stuck(w, current_loc):
                     self._mark_current_r_city_target_failed("快速导航卡住避障失败")
                     self.status = "IDLE"
@@ -4031,11 +4212,27 @@ class HouseSceneSearchManager(HouseSearchManager):
 
             if dist <= self.ENTRY_AUTO_FORWARD_DISTANCE:
                 print(f"[RCitySearch] 进入摇杆分段导航范围 (距离 {dist:.2f})")
+                self._set_frame_decision(
+                    w,
+                    f"距离入门点 {target_loc} 已进入分段导航范围，dist={dist:.2f}",
+                    "停止自动前进并切换PRECISE_NAV，用摇杆精准推进到入门点 <= 1.5",
+                    action="切换PRECISE_NAV",
+                    method="stop_auto_forward(); status=PRECISE_NAV",
+                    result="下一帧开始精细导航",
+                )
                 self.stop_auto_forward(w)
                 self.status = "PRECISE_NAV"
                 return
 
             if self._maybe_bypass_front_house_on_route(w, current_loc, target_loc, dist, "FAST_NAV"):
+                self._set_frame_decision(
+                    w,
+                    f"FAST_NAV前方检测到房子/石墙干扰，当前位置={current_loc}，目标={target_loc}",
+                    "调整视野并绕过前方障碍，避免被其他门或房子吸引",
+                    action="绕过前方房屋/石墙",
+                    method="_maybe_bypass_front_house_on_route()",
+                    result="保持原入门点目标不变",
+                )
                 return
 
             self.align_direction(w, target_loc)
@@ -4048,15 +4245,50 @@ class HouseSceneSearchManager(HouseSearchManager):
             return
 
         if self.status == "PRECISE_NAV":
+            self._set_frame_decision(
+                w,
+                (
+                    f"PRECISE_NAV：当前位置={current_loc}，目标入门点={target_loc}，"
+                    f"距离={dist:.2f}，方位={current_direction}"
+                ),
+                "使用摇杆精准推进到入门点 <= 1.5，再执行入门点角度/进门建模流程",
+                action="精准推进入门点",
+                method="_move_precisely_to_entry_point() or _handle_near_entry_point()",
+                result="到达 <= 1.5 后执行原有入门点逻辑",
+            )
             nav_scene_result = self._handle_nav_near_entry_scene_if_needed(w, "PRECISE_NAV", "R城导航中")
             if nav_scene_result == "indoor":
+                self._set_frame_decision(
+                    w,
+                    f"PRECISE_NAV中检测到已经进入房内，当前位置={current_loc}",
+                    "认为已不小心进房，立即搜当前房",
+                    action="完成当前房搜房",
+                    method="_complete_current_house_search()",
+                    result="当前房进入搜房完成流程",
+                )
                 self._complete_current_house_search(w, "R城导航中贴门墙后进入房屋")
                 return
             if nav_scene_result is not None:
+                self._set_frame_decision(
+                    w,
+                    f"PRECISE_NAV中检测到 near_wall/near_door 等贴近场景，当前位置={current_loc}",
+                    "先后拉/调整视野/跳过障碍，随后继续朝同一入门点精细推进",
+                    action="处理贴墙贴门干扰",
+                    method="_handle_nav_near_entry_scene_if_needed()",
+                    result="下一帧继续PRECISE_NAV",
+                )
                 return
 
             if self.update_and_check_stuck(current_loc):
                 print("[SceneSearch] 精细导航检测到卡住，启动避障")
+                self._set_frame_decision(
+                    w,
+                    f"PRECISE_NAV检测到位置卡住，当前位置={current_loc}",
+                    "执行精细导航避障，避免继续向前撞障碍物",
+                    action="执行精细导航卡住恢复",
+                    method="_recover_r_city_navigation_stuck()",
+                    result="恢复后继续入门点推进或重选目标",
+                )
                 if not self._recover_r_city_navigation_stuck(w, current_loc):
                     self._mark_current_r_city_target_failed("精细导航卡住避障失败")
                     self.status = "IDLE"
@@ -4064,6 +4296,14 @@ class HouseSceneSearchManager(HouseSearchManager):
                 return
 
             if dist <= self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
+                self._set_frame_decision(
+                    w,
+                    f"已到达入门点 <= 1.5，当前位置={current_loc}，目标={target_loc}，dist={dist:.2f}",
+                    "不做慢速原地磨角度，直接进入原有入门点近距建模流程调整角度/找门/进门",
+                    action="执行入门点近距建模流程",
+                    method="_handle_near_entry_point()",
+                    result="进门成功则搜房，失败则重选或继续导航",
+                )
                 near_result = self._handle_near_entry_point(
                     w, current_loc, target_loc, dist, "RCityEntry"
                 )
@@ -4076,6 +4316,14 @@ class HouseSceneSearchManager(HouseSearchManager):
                 return
 
             if self._maybe_bypass_front_house_on_route(w, current_loc, target_loc, dist, "PRECISE_NAV"):
+                self._set_frame_decision(
+                    w,
+                    f"PRECISE_NAV前方检测到房子/石墙干扰，当前位置={current_loc}，目标={target_loc}",
+                    "小幅绕过前方障碍，避免在到达入门点前被其他房屋打断",
+                    action="绕过前方房屋/石墙",
+                    method="_maybe_bypass_front_house_on_route()",
+                    result="保持原入门点目标不变",
+                )
                 return
 
             self.stop_auto_forward(w)
@@ -4256,6 +4504,14 @@ class HouseSceneSearchManager(HouseSearchManager):
                 f"[SceneSearch] 已到达R城搜房起点 {target}，"
                 f"dist={dist:.2f} <= {self.r_city_pre_search_distance:.1f}，开始找房"
             )
+            self._set_frame_decision(
+                w,
+                f"已到达R城搜房起点 {target}，dist={dist:.2f}",
+                "结束前置路线，开始按入门点列表选择最近房屋",
+                action="开始R城搜房选点",
+                method="r_city_pre_search_completed=True",
+                result="下一帧进入最近入门点选择",
+            )
             return False
 
         callback = self.r_city_pre_search_route_callback
@@ -4269,6 +4525,14 @@ class HouseSceneSearchManager(HouseSearchManager):
             f"dist={dist:.2f} > {self.r_city_pre_search_distance:.1f}"
         )
         print(f"[SceneSearch] {reason}")
+        self._set_frame_decision(
+            w,
+            reason,
+            "先用跑图路线前往搜房起点，再开始锁定最近入门点",
+            action="前往R城搜房起点",
+            method="r_city_pre_search_route_callback()",
+            result="到达起点后开始搜房",
+        )
         self.stop_auto_forward(w)
         self.history_locations = []
         self.initial_location_samples = []
@@ -4331,6 +4595,14 @@ class HouseSceneSearchManager(HouseSearchManager):
         callback = self.r_city_recovery_route_callback
         if not callable(callback):
             return False
+        self._set_frame_decision(
+            w,
+            f"R城搜房请求跑图恢复：{reason}",
+            "停止搜房内导航，交给跑图阶段脱困后再回到R城入门点",
+            action="切换跑图恢复路线",
+            method="r_city_recovery_route_callback()",
+            result="跑图阶段接管脱困",
+        )
         self.stop_auto_forward(w)
         self.current_house_id = None
         self.current_r_city_target = None
@@ -4356,6 +4628,14 @@ class HouseSceneSearchManager(HouseSearchManager):
             f"{self.R_CITY_ENTRY_RUNNING_ROUTE_DISTANCE:.1f}，先计入跑图时间前往入门点附近"
         )
         print(f"[RCitySearch] {reason}")
+        self._set_frame_decision(
+            w,
+            reason,
+            "用跑图导航先靠近最近入门点，目标仍然锁定该入门点，不被其他门/房打断",
+            action="Fast_NAV转跑图路线",
+            method="r_city_entry_route_callback()",
+            result="到入门点附近后回到搜房进门流程",
+        )
         self.stop_auto_forward(w)
         self.history_locations = []
         self.initial_location_samples = []
@@ -4446,8 +4726,27 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.status = self.STATUS_ROUTE_TO_R_CITY
 
         distance_to_r_city, nearest = self._distance_to_r_city(current_loc)
+        self._set_frame_decision(
+            w,
+            (
+                f"R城路线导航：当前位置={current_loc}，当前方位={current_direction}，"
+                f"最近R城入门点距离={distance_to_r_city}"
+            ),
+            "继续按规划路线前往R城接入点，到达R城附近后重新选择最近入门点",
+            action="执行R城路线导航",
+            method="_handle_route_to_r_city()",
+            result="接近R城后恢复搜房选点",
+        )
         if distance_to_r_city is not None and distance_to_r_city <= self.r_city_near_distance:
             print(f"[RCityRoute] 已进入R城附近 dist={distance_to_r_city:.2f}，开始选房")
+            self._set_frame_decision(
+                w,
+                f"已进入R城附近，dist={distance_to_r_city:.2f}",
+                "停止跑图路线，回到搜房选最近入门点",
+                action="回到搜房选点",
+                method="status=IDLE",
+                result="下一帧选择最近入门点",
+            )
             self.stop_auto_forward(w)
             self.status = "IDLE"
             self.r_city_route_target = None
@@ -4460,6 +4759,14 @@ class HouseSceneSearchManager(HouseSearchManager):
             if not self.r_city_route_target and nearest:
                 self.r_city_route_target = nearest
             if not self.r_city_route_target:
+                self._set_frame_decision(
+                    w,
+                    f"R城路线导航无法选择接入点，当前位置={current_loc}",
+                    "结束R城搜房，避免无目标导航",
+                    action="结束R城搜房",
+                    method="_finish_r_city_searching()",
+                    result="切换后续阶段",
+                )
                 self._finish_r_city_searching(w, "无法选择R城接入点")
                 return
             if not self.r_city_route_path:
@@ -4486,6 +4793,14 @@ class HouseSceneSearchManager(HouseSearchManager):
             print(
                 f"[RCityRoute] 前往R城卡住 "
                 f"{self.r_city_route_stuck_cycles}/{self.R_CITY_ROUTE_REPLAN_STUCK_CYCLES}"
+            )
+            self._set_frame_decision(
+                w,
+                f"R城路线导航检测到卡住，当前位置={current_loc}，目标路点={waypoint}",
+                "停止自动前进并执行避障，必要时重新规划R城路线",
+                action="R城路线避障",
+                method="execute_unstuck_logic()",
+                result="脱困后继续路线或重规划",
             )
             self.stop_auto_forward(w)
             if self.r_city_route_stuck_cycles >= self.R_CITY_ROUTE_REPLAN_STUCK_CYCLES:
@@ -4525,8 +4840,24 @@ class HouseSceneSearchManager(HouseSearchManager):
                 f"[RCityRoute] 当前不可通行，入门点 {target_loc} 不在同一不可通行区域，"
                 f"距离 {dist:.2f}，对准入门点后直接自动前进脱离"
             )
+            self._set_frame_decision(
+                w,
+                f"当前不可通行且与入门点不是同一区，当前位置={current_loc}，入门点={target_loc}，dist={dist:.2f}",
+                "对准入门点方向自动前进，先快速脱离当前不可通行区域",
+                action="直冲脱离当前黑区",
+                method="align_direction(); click(自动前进); handle_jump_logic()",
+                result="下一帧继续检查是否已脱离黑区",
+            )
             if self.update_and_check_stuck(current_loc):
                 print("[RCityRoute] 直冲脱离当前不可通行区时检测到卡住，先执行避障脱困")
+                self._set_frame_decision(
+                    w,
+                    f"脱离不可通行区域时检测到卡住，当前位置={current_loc}",
+                    "先执行避障脱困，避免继续向前撞障碍",
+                    action="黑区脱困避障",
+                    method="execute_unstuck_logic()",
+                    result="脱困后继续朝入门点方向脱离",
+                )
                 self.execute_unstuck_logic(w, current_loc)
                 self.history_locations = []
                 return
@@ -4549,12 +4880,28 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         if safe_target is None:
             print("[RCityRoute] 当前不可通行且未找到安全点，短后退后刷新")
+            self._set_frame_decision(
+                w,
+                f"当前不可通行且未找到安全点，当前位置={current_loc}",
+                "短后退并刷新，等待下一帧重新寻找安全点",
+                action="短后退刷新",
+                method="tap_single(摇杆, y_bias=300)",
+                result="下一帧重新识别位置和安全点",
+            )
             self.stop_auto_forward(w)
             w.tap_single("摇杆", y_bias=300, dura=450, wait=850)
             self._refresh_frame_and_handle_jump(w)
             return
 
         print(f"[RCityRoute] 当前不在可通行区域，先脱离到安全点 {safe_target}")
+        self._set_frame_decision(
+            w,
+            f"当前不可通行，当前位置={current_loc}，安全点={safe_target}",
+            "对准最近安全点前推，先脱离不可通行区域",
+            action="前往安全点脱离黑区",
+            method="align_direction(); tap_single(摇杆, y_bias=-300)",
+            result="脱离后继续前往最近入门点",
+        )
         self.stop_auto_forward(w)
         self.align_direction(w, safe_target)
         w.tap_single(
@@ -4587,6 +4934,14 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         self.stop_auto_forward(w)
         before_loc = self._location_tuple(current_loc)
+        self._set_frame_decision(
+            w,
+            f"检测到落水/水边受阻，当前位置={current_loc}，目标={target_loc}，脱困方向={side_label}",
+            "先上浮、后拉、沿岸侧移，再对准导航目标前推脱水",
+            action="执行水边脱困组合动作",
+            method="_handle_water_escape()",
+            result="脱水后继续R城入门点导航",
+        )
         print(
             f"[RCityWater] 落水/水边受阻，沿{side_label}侧岸线脱困 "
             f"attempt={self.water_escape_total_attempts + 1}, target={target_loc}"

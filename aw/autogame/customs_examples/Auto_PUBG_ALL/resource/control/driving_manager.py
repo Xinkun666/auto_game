@@ -442,6 +442,15 @@ class DrivingManager:
 
         if self._is_out_of_vehicle(w):
             print("[Driving] 检测到人物已下车，切回跑图阶段")
+            if hasattr(w, "set_frame_decision"):
+                w.set_frame_decision(
+                    observation="开车阶段当前帧检测到人物已下车",
+                    target="开车阶段",
+                    decision="切回跑图阶段",
+                    action="停止驾驶并交给 RunningManager",
+                    method="_handle_unexpected_vehicle_exit(w)",
+                    result="下一帧重新按跑图阶段处理",
+                )
             self._handle_unexpected_vehicle_exit(w)
             self._finalize_frame(w)
             return
@@ -449,8 +458,30 @@ class DrivingManager:
         context = self._build_context(w)
         if context is None:
             print("[Driving] 当前位置或朝向无效，等待下一帧")
+            if hasattr(w, "set_frame_decision"):
+                w.set_frame_decision(
+                    observation="开车阶段当前位置或朝向无效",
+                    target="开车阶段",
+                    decision="等待下一帧重新识别车辆位置和方向",
+                    action="暂不下发驾驶动作",
+                    method="_build_context(w)",
+                    result="避免基于无效坐标误操作",
+                )
             self._finalize_frame(w)
             return
+
+        if hasattr(w, "set_frame_decision"):
+            w.set_frame_decision(
+                observation=(
+                    f"开车阶段：当前位置={context.location}，当前方位={context.direction}，"
+                    f"驾驶子状态={self.current_stage}"
+                ),
+                target="开车阶段",
+                decision="根据道路、目标点、障碍和车辆状态继续驾驶",
+                action="执行驾驶控制",
+                method="DrivingManager.process",
+                result="本帧继续推进驾驶路线",
+            )
 
         if not self.match_clock.is_running():
             self.set_game_time()

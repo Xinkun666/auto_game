@@ -243,9 +243,38 @@ def _normalize_frame_log_entries(entries):
     return normalized
 
 
+def _normalize_frame_decision(runtime_logs):
+    if not isinstance(runtime_logs, dict):
+        return {}
+    decision = runtime_logs.get("frame_decision")
+    if not isinstance(decision, dict):
+        return {}
+    allowed_keys = {
+        "observation",
+        "target",
+        "decision",
+        "action",
+        "method",
+        "result",
+        "next_action",
+        "observed_infos",
+        "control_actions",
+    }
+    return {str(key): value for key, value in decision.items() if key in allowed_keys}
+
+
 def _select_frame_code_branch(runtime_logs):
     if not isinstance(runtime_logs, dict):
         return {}
+    frame_decision = _normalize_frame_decision(runtime_logs)
+    if frame_decision:
+        return {
+            "target": frame_decision.get("target", ""),
+            "observation": frame_decision.get("observation", ""),
+            "action": frame_decision.get("action") or frame_decision.get("decision", ""),
+            "method": frame_decision.get("method", ""),
+            "result": frame_decision.get("result", ""),
+        }
     branch = runtime_logs.get("current_branch")
     if isinstance(branch, dict) and branch:
         return dict(branch)
@@ -258,6 +287,12 @@ def _select_frame_code_branch(runtime_logs):
 
 def _select_next_action(runtime_logs, code_branch):
     if isinstance(runtime_logs, dict):
+        frame_decision = _normalize_frame_decision(runtime_logs)
+        if frame_decision:
+            for key in ("next_action", "action", "decision"):
+                value = str(frame_decision.get(key) or "").strip()
+                if value and value != "-":
+                    return value
         explicit = str(runtime_logs.get("next_action") or "").strip()
         if explicit and explicit != "-":
             return explicit
@@ -282,17 +317,17 @@ def _build_frame_summary(stage, info_keys, code_branch, next_action):
         branch_target = str(code_branch.get("target") or "").strip()
         branch_observation = str(code_branch.get("observation") or "").strip()
 
-    branch_text = branch_target if branch_target and branch_target != "-" else branch_observation
-    if not branch_text or branch_text == "-":
-        branch_text = "暂无明确代码分支"
+    branch_text = branch_target if branch_target and branch_target != "-" else "暂无明确代码分支"
+    observation_text = branch_observation if branch_observation and branch_observation != "-" else seen_text
     action_text = next_action or "等待下一轮逻辑判断"
-    return f"当前帧处于{stage_text}，{seen_text}；代码分支：{branch_text}；下一步：{action_text}"
+    return f"当前帧处于{stage_text}，{seen_text}；判断：{observation_text}；代码分支：{branch_text}；决策：{action_text}"
 
 
 def build_frame_log_payload(stage, info, index, runtime_logs=None, group_name=None, frame_name=None):
     safe_info = sanitize_frame_info_for_json(info)
     info_keys = _non_empty_info_keys(safe_info)
     runtime_logs = runtime_logs if isinstance(runtime_logs, dict) else {}
+    frame_decision = _normalize_frame_decision(runtime_logs)
     code_branch = _select_frame_code_branch(runtime_logs)
     next_action = _select_next_action(runtime_logs, code_branch)
     frame_name = frame_name or f"frame_{int(index):05d}.jpg"
@@ -321,6 +356,7 @@ def build_frame_log_payload(stage, info, index, runtime_logs=None, group_name=No
         "time_logs": _normalize_frame_log_entries(runtime_logs.get("time_logs")),
         "logic_logs": _normalize_frame_log_entries(runtime_logs.get("logic_logs")),
         "recent_logs": _normalize_frame_log_entries(runtime_logs.get("recent_logs")),
+        "decision": frame_decision,
         "code_branch": code_branch,
         "next_action": next_action,
         "frame_summary": _build_frame_summary(stage, info_keys, code_branch, next_action),
@@ -1250,11 +1286,15 @@ def visualizer_process(queue, visual=True):
             frame_name = f"frame_{index:05d}.jpg"
             if not write_image_unicode(f"{base_filename}.jpg", frame_rotated):
                 raise RuntimeError(f"preview image write failed: {base_filename}.jpg")
+            runtime_logs = frame_meta.get("runtime_logs")
+            runtime_logs = dict(runtime_logs) if isinstance(runtime_logs, dict) else {}
+            if isinstance(frame_meta.get("frame_decision"), dict):
+                runtime_logs["frame_decision"] = frame_meta.get("frame_decision")
             payload = build_frame_log_payload(
                 stage,
                 info,
                 index,
-                runtime_logs=frame_meta.get("runtime_logs"),
+                runtime_logs=runtime_logs,
                 group_name=frame_meta.get("group_name"),
                 frame_name=frame_name,
             )

@@ -1679,6 +1679,31 @@ class HouseSearchManager:
             log_prefix="[EntryNearAlign]",
         )
 
+    def _try_visible_entry_door_before_micro_adjust(
+        self,
+        w: 'FrameWorker',
+        target_loc,
+        dist: float,
+        phase_label='Nav',
+    ) -> str:
+        door = self.find_largest_door(w)
+        if door is None:
+            print(
+                f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
+                "方向已对齐但还没看到门，继续慢速微调到入门点"
+            )
+            return "not_visible"
+
+        print(
+            f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
+            f"方向已对齐且已看到门，跳过微调到0，直接对准门前推: door={door}"
+        )
+        self.stop_auto_forward(w)
+        result = self._push_aligned_entry_door_and_check_indoor(w, phase_label, door)
+        if result == "failed":
+            self._mark_current_entry_failed("入门点附近已见门但对准门前推/跳跃翻障后仍未进入室内")
+        return result
+
     def _correct_near_entry_lateral_position_once(
         self,
         w: 'FrameWorker',
@@ -1759,6 +1784,16 @@ class HouseSearchManager:
         if not self._align_entry_direction_at_near_point(w, phase_label):
             print(f"[{phase_label}] 进门点方向尚未对准，等待下一轮继续对准")
             return "aligning"
+
+        visible_door_result = self._try_visible_entry_door_before_micro_adjust(
+            w,
+            target_loc,
+            dist,
+            phase_label,
+        )
+        if visible_door_result != "not_visible":
+            self._reset_entry_near_micro_adjust()
+            return visible_door_result
 
         wall_result = self._handle_entry_near_wall_if_needed(w, phase_label, "对准进门方向后")
         if wall_result == "indoor":

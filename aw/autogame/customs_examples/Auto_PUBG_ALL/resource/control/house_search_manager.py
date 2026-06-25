@@ -3619,6 +3619,16 @@ class HouseSceneSearchManager(HouseSearchManager):
     R_CITY_ENTRY_WALL_SWEEP_DURA = 260
     R_CITY_ENTRY_WALL_SWEEP_WAIT = 50
     R_CITY_ENTRY_WALL_SWEEP_WAIT_STEP = 50
+    R_CITY_ENTRY_ZERO_DISTANCE = 0.25
+    R_CITY_ENTRY_ZERO_BACKOFF_Y_BIAS = 320
+    R_CITY_ENTRY_ZERO_BACKOFF_DURA = 300
+    R_CITY_ENTRY_ZERO_BACKOFF_WAIT = 520
+    R_CITY_ENTRY_ZERO_LEFT_SWEEP_X_BIAS = 240
+    R_CITY_ENTRY_ZERO_LEFT_SWEEP_DURA = 180
+    R_CITY_ENTRY_ZERO_LEFT_SWEEP_WAIT = 420
+    R_CITY_ENTRY_ZERO_RIGHT_SWEEP_X_BIAS = 520
+    R_CITY_ENTRY_ZERO_RIGHT_SWEEP_DURA = 360
+    R_CITY_ENTRY_ZERO_RIGHT_SWEEP_WAIT = 680
     R_CITY_ENTRY_BLIND_FORWARD_Y_BIAS = -350
     R_CITY_ENTRY_BLIND_FORWARD_DURA = 100
     R_CITY_ENTRY_BLIND_FORWARD_WAIT = 3000
@@ -3944,8 +3954,11 @@ class HouseSceneSearchManager(HouseSearchManager):
             if not entry_result:
                 if self._should_abort(w):
                     return
-                print("[RCitySearch] house_scene 进门失败，临时跳过当前R城房点")
-                self._mark_current_r_city_target_failed("house_scene 进门失败")
+                if self.current_r_city_target:
+                    print("[RCitySearch] house_scene 进门失败，临时跳过当前R城房点")
+                    self._mark_current_r_city_target_failed("house_scene 进门失败")
+                else:
+                    print("[RCitySearch] 当前入门点已在进门决策内跳过，回到 IDLE 选择下一个入门点")
                 self.status = "IDLE"
                 return
 
@@ -5699,6 +5712,10 @@ class HouseSceneSearchManager(HouseSearchManager):
         if w.get_info("跳跃"):
             return self._jump_forward_for_r_city_entry(w)
 
+        arrived_result = self._handle_arrived_r_city_entry_without_door(w, current_loc)
+        if arrived_result is not None:
+            return arrived_result
+
         sweep_result = self._sweep_r_city_entry_door_by_lateral_move(w)
         if sweep_result is not None:
             return sweep_result
@@ -5749,6 +5766,88 @@ class HouseSceneSearchManager(HouseSearchManager):
             print("[RCityEntry] 当前画面未识别到门，不使用窗户作为入口候选")
             return None, None
         return "door", door
+
+    def _current_r_city_approach_distance(self, current_loc):
+        loc = self._location_tuple(current_loc)
+        target = self.current_r_city_target or {}
+        entry_loc = self._location_tuple(target.get("approach_location"))
+        if loc is None or entry_loc is None:
+            return None, entry_loc
+        return get_distance(loc, entry_loc), entry_loc
+
+    def _handle_arrived_r_city_entry_without_door(self, w: "FrameWorker", current_loc) -> Optional[str]:
+        dist, entry_loc = self._current_r_city_approach_distance(current_loc)
+        if dist is None or dist > self.R_CITY_ENTRY_ZERO_DISTANCE:
+            return None
+
+        print(
+            f"[RCityEntry] 入门点距离为0但没看到门，先后拉扩视野: "
+            f"entry={entry_loc}, dist={dist:.2f}, "
+            f"y_bias={self.R_CITY_ENTRY_ZERO_BACKOFF_Y_BIAS}, "
+            f"dura={self.R_CITY_ENTRY_ZERO_BACKOFF_DURA}, "
+            f"wait={self.R_CITY_ENTRY_ZERO_BACKOFF_WAIT}"
+        )
+        w.tap_single(
+            "摇杆",
+            y_bias=self.R_CITY_ENTRY_ZERO_BACKOFF_Y_BIAS,
+            dura=self.R_CITY_ENTRY_ZERO_BACKOFF_DURA,
+            wait=self.R_CITY_ENTRY_ZERO_BACKOFF_WAIT,
+        )
+        self._refresh_frame_and_handle_jump(w)
+
+        result = self._check_r_city_entry_door_after_probe(w, "后拉扩视野后")
+        if result is not None:
+            return result
+
+        sweeps = (
+            (
+                "left",
+                -self.R_CITY_ENTRY_ZERO_LEFT_SWEEP_X_BIAS,
+                self.R_CITY_ENTRY_ZERO_LEFT_SWEEP_DURA,
+                self.R_CITY_ENTRY_ZERO_LEFT_SWEEP_WAIT,
+                "先向左滑动摇杆找门",
+            ),
+            (
+                "right",
+                self.R_CITY_ENTRY_ZERO_RIGHT_SWEEP_X_BIAS,
+                self.R_CITY_ENTRY_ZERO_RIGHT_SWEEP_DURA,
+                self.R_CITY_ENTRY_ZERO_RIGHT_SWEEP_WAIT,
+                "再向右更大幅度滑动摇杆找门",
+            ),
+        )
+        for side, x_bias, dura, wait, label in sweeps:
+            print(
+                f"[RCityEntry] {label}: entry={entry_loc}, dist={dist:.2f}, "
+                f"side={self._side_label(side)}, x_bias={x_bias}, dura={dura}, wait={wait}"
+            )
+            w.tap_single("摇杆", x_bias=x_bias, y_bias=0, dura=dura, wait=wait)
+            self._refresh_frame_and_handle_jump(w)
+            result = self._check_r_city_entry_door_after_probe(w, f"{label}后")
+            if result is not None:
+                return result
+
+        self._mark_current_r_city_target_failed("入门点距离为0但后拉/左右侧移仍未看到门")
+        return "failed"
+
+    def _check_r_city_entry_door_after_probe(self, w: "FrameWorker", reason: str) -> Optional[str]:
+        if self._is_indoor(w):
+            print(f"[RCityEntry] {reason} house_scene=indoor，进房成功")
+            return "success"
+
+        button_state = self._door_button_state(w)
+        if button_state:
+            print(f"[RCityEntry] {reason}出现门按钮，按门按钮进房")
+            return (
+                "success"
+                if self._handle_r_city_door_button_then_forward(w, button_state)
+                else "retry"
+            )
+
+        door = self._find_r_city_entry_visual_targets(w)
+        if door is not None:
+            print(f"[RCityEntry] {reason}看到门，开始对准门前推")
+            return self._handle_r_city_door_entry_step(w, door)
+        return None
 
     def _sweep_r_city_entry_door_by_lateral_move(self, w: "FrameWorker") -> Optional[str]:
         print("[RCityEntry] 当前面无门，先不转视角，左右滑动摇杆只找门/门按钮")

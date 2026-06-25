@@ -1,5 +1,5 @@
 {
     "screen_mode": "0",
-    "touch_backend": "sendevent",
+    "touch_backend": "uinput",
     "width": 768
 }

@@ -1,5 +1,8 @@
 {
     "screen_mode": "0",
     "touch_backend": "uinput",
+    "stream_disable_save_frames": false,
+    "stream_diagnostics": false,
+    "stream_diagnostics_interval": 1.0,
     "width": 768
 }

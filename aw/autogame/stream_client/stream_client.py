@@ -10,7 +10,11 @@ import grpc
 import numpy as np
 from PIL import Image
 from aw.autogame.tools.ProcessUtils import hdc_command_args, hidden_subprocess_kwargs
-from aw.autogame.tools.Utils import resolve_process_save_frames_dir, resolve_tmp_frames_dir
+from aw.autogame.tools.Utils import (
+    _read_autogame_config,
+    resolve_process_save_frames_dir,
+    resolve_tmp_frames_dir,
+)
 
 # 假设这些是你的本地 proto 生成文件
 PROTO_IMPORT_ERROR = None
@@ -24,10 +28,11 @@ except ImportError as e:
     print("Warning: gRPC proto files not found. StreamClient will be unavailable.")
 
 
-def _env_truthy(name, default=False):
-    value = os.environ.get(name)
+def _value_truthy(value, default=False):
     if value is None:
         return default
+    if isinstance(value, bool):
+        return value
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
@@ -39,6 +44,33 @@ def _env_float(name, default):
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _env_truthy(name, default=False):
+    return _value_truthy(os.environ.get(name), default)
+
+
+def _config_truthy(config, name, default=False):
+    if not isinstance(config, dict):
+        return default
+    return _value_truthy(config.get(name), default)
+
+
+def _config_float(config, name, default):
+    if not isinstance(config, dict) or name not in config:
+        return default
+    try:
+        return float(config.get(name))
+    except (TypeError, ValueError):
+        return default
+
+
+def _resolve_bool_option(env_name, config, config_name, default=False):
+    return _env_truthy(env_name, _config_truthy(config, config_name, default))
+
+
+def _resolve_float_option(env_name, config, config_name, default):
+    return _env_float(env_name, _config_float(config, config_name, default))
 
 
 class FrameBuffer:
@@ -142,8 +174,15 @@ class StreamClient:
         self.width = 720
         self.height = 1280
 
+        config = _read_autogame_config()
+
         # ---------- 保存相关 ----------
-        self.save_frame_disabled = _env_truthy("AUTOGAME_DISABLE_SAVE_FRAMES")
+        self.save_frame_disabled = _resolve_bool_option(
+            "AUTOGAME_DISABLE_SAVE_FRAMES",
+            config,
+            "stream_disable_save_frames",
+            False,
+        )
         self.save_frame = bool(save_frame and not self.save_frame_disabled)
         self.save_queue = queue.Queue(maxsize=100)
         self.save_worker = None
@@ -151,8 +190,21 @@ class StreamClient:
         self.save_dir = str(resolve_process_save_frames_dir())
 
         # ---------- 诊断统计 ----------
-        self.diagnostics_enabled = _env_truthy("AUTOGAME_STREAM_DIAGNOSTICS")
-        self.diagnostics_interval = max(0.0, _env_float("AUTOGAME_STREAM_DIAGNOSTICS_INTERVAL", 1.0))
+        self.diagnostics_enabled = _resolve_bool_option(
+            "AUTOGAME_STREAM_DIAGNOSTICS",
+            config,
+            "stream_diagnostics",
+            False,
+        )
+        self.diagnostics_interval = max(
+            0.0,
+            _resolve_float_option(
+                "AUTOGAME_STREAM_DIAGNOSTICS_INTERVAL",
+                config,
+                "stream_diagnostics_interval",
+                1.0,
+            ),
+        )
         self._diag_lock = threading.Lock()
         self._diag_window_start = time.monotonic()
         self._diag = self._new_diag_stats()

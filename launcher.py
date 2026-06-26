@@ -1523,8 +1523,6 @@ def build_restart_device_commands(hdc_executable: Optional[str] = None):
     return [
         [hdc, "shell", "reboot", "-D"],
         [hdc, "wait"],
-        [hdc, "shell", "setenforce", "0"],
-        [hdc, "fport", "tcp:12345", "tcp:12345"],
     ]
 
 
@@ -4651,6 +4649,89 @@ class LauncherWindow(QWidget):
             level=logging.ERROR,
         )
 
+    def _reinitialize_stream_service(self) -> bool:
+        self._log_message("[Launcher] 仅执行流服务初始化...\n")
+
+        hdc = resolve_hdc_executable()
+
+        init_commands = [
+            {
+                "cmd": [hdc, "shell", "setenforce", "0"],
+                "required": False,
+                "desc": "关闭 SELinux 强制模式",
+            },
+            {
+                "cmd": [hdc, "fport", "rm", "tcp:12345", "tcp:12345"],
+                "required": False,
+                "desc": "清理旧端口转发",
+            },
+            {
+                "cmd": [hdc, "fport", "tcp:12345", "tcp:12345"],
+                "required": True,
+                "desc": "建立端口转发 tcp:12345 -> tcp:12345",
+            },
+        ]
+
+        for item in init_commands:
+            command = item["cmd"]
+            required = item["required"]
+            desc = item["desc"]
+
+            try:
+                self._log_message(f"[Launcher][init] 执行：{desc}，command={command}\n")
+
+                result = subprocess.run(
+                    command,
+                    cwd=str(APP_DIR),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="ignore",
+                    timeout=30,
+                    **hidden_subprocess_kwargs(),
+                )
+
+                output = (result.stdout or "") + (result.stderr or "")
+                if output.strip():
+                    self._log_message(f"[Launcher][init] {output.rstrip()}\n")
+
+                if result.returncode != 0:
+                    msg = (
+                        f"[Launcher] 初始化命令失败：{desc}，"
+                        f"command={command}，returncode={result.returncode}\n"
+                    )
+
+                    if required:
+                        self._log_message(msg, level=logging.ERROR)
+                        return False
+
+                    self._log_message(msg, level=logging.WARNING)
+                    self._log_message(
+                        "[Launcher] 非关键初始化命令失败，继续执行后续步骤。\n",
+                        level=logging.WARNING,
+                    )
+
+            except Exception as exc:
+                log_exception("reinitialize stream service failed")
+
+                msg = (
+                    f"[Launcher] 初始化命令异常：{desc}，"
+                    f"command={command}，detail={exc}\n"
+                )
+
+                if required:
+                    self._log_message(msg, level=logging.ERROR)
+                    return False
+
+                self._log_message(msg, level=logging.WARNING)
+                self._log_message(
+                    "[Launcher] 非关键初始化命令异常，继续执行后续步骤。\n",
+                    level=logging.WARNING,
+                )
+
+        self._log_message("[Launcher] 流服务初始化完成。\n")
+        return True
+
     def _restart_device_for_stream_disconnect(self) -> bool:
         self._log_message("[Launcher] 开始执行断流恢复命令。\n")
         self._set_runtime("运行信息：检测到断流，正在重启手机并等待开机。")
@@ -4693,6 +4774,9 @@ class LauncherWindow(QWidget):
                     level=logging.ERROR,
                 )
                 return False
+
+        if not self._reinitialize_stream_service():
+            return False
 
         self._log_message("[Launcher] 手机重启与端口恢复完成。\n")
         self._log_message(

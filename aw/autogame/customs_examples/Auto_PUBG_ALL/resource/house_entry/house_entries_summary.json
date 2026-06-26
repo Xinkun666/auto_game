@@ -181,24 +181,6 @@
             ]
         }
     ],
-    "2": [
-        {
-            "image": "frame_00165.jpg",
-            "direction": 85,
-            "location": [
-                995,
-                707
-            ]
-        },
-        {
-            "image": "frame_00254.jpg",
-            "direction": 200,
-            "location": [
-                1006,
-                706
-            ]
-        }
-    ],
     "20": [
         {
             "image": "frame_01281.jpg",

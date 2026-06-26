@@ -21,11 +21,12 @@ class ParachuteManager:
 
     # --- 配置常量 (Configuration) ---
     TARGET_POS: Tuple[int, int] = (990, 757)  # 默认目标落点
-    TRIGGER_DIST: int = 450  # 触发跳伞的距离阈值
+    TRIGGER_DIST: int = 470  # 触发跳伞的距离阈值
     OVERSHOOT_INCREASE_FRAMES: int = 1  # 连续多少帧递增才判定为飞过最佳跳伞点
     DIVE_DURATION_MS: int = 47500  # 俯冲/滑行持续时间 (根据地图大小调整)
     JUMP_CONFIRM_TOLERANCE: int = 35  # 跳伞前后帧允许的小幅测距波动
     JUMP_LOCATION_CONTINUITY_MAX_STEP: int = 120  # 跳伞确认帧之间允许的最大位置跳变
+    ROUTE_MISS_CONFIRM_TOLERANCE: int = 35  # 航线错过R城时，后一帧需要明显远离才确认重开
 
     def __init__(self):
         self.is_active = False  # 是否处于监控跳伞距离的激活状态
@@ -37,6 +38,8 @@ class ParachuteManager:
         self.landing_stage: str = "搜房阶段"
         self.jump_confirm_distances: List[float] = []
         self.jump_confirm_locations: List[Tuple[int, int]] = []
+        self.route_confirm_distances: List[float] = []
+        self.route_confirm_locations: List[Tuple[int, int]] = []
 
     def reset(self):
         """重置跳伞管理器的内部状态"""
@@ -47,6 +50,8 @@ class ParachuteManager:
         self.increase_streak = 0
         self.jump_confirm_distances = []
         self.jump_confirm_locations = []
+        self.route_confirm_distances = []
+        self.route_confirm_locations = []
         print("[Parachute] 状态已重置!")
 
     def configure(
@@ -118,6 +123,8 @@ class ParachuteManager:
                 )
             self.jump_confirm_distances = []
             self.jump_confirm_locations = []
+            self.route_confirm_distances = []
+            self.route_confirm_locations = []
             self.last_dist = None
             self.last_location = None
             return {}
@@ -134,7 +141,7 @@ class ParachuteManager:
 
         # 4. 距离趋势检查 (判断是否飞过了/飞远了)
         if self._check_flight_path(current_dist, location, w):
-            return self._perform_jump_sequence(w)
+            return self._restart_match_for_bad_route(w)
 
 
         # 5. 判定是否到达跳伞点：用前后各一帧确认，避免单帧误判导致误跳伞
@@ -154,8 +161,14 @@ class ParachuteManager:
     def _check_flight_path(self, current_dist: float, location, w: 'FrameWorker') -> bool:
         """
         检查飞行路径状态。
-        如果飞机已经越过最近点，即使最近距离仍然大于阈值，也立刻跳伞。
+        如果飞机已经越过最近点，且三帧动态窗口确认最近距离仍然大于阈值，则重开下一把。
         """
+        self.route_confirm_distances.append(float(current_dist))
+        self.route_confirm_locations.append(tuple(location))
+        if len(self.route_confirm_distances) > 3:
+            self.route_confirm_distances = self.route_confirm_distances[-3:]
+            self.route_confirm_locations = self.route_confirm_locations[-3:]
+
         # 初始化最近距离
         if self.prior_dist == 0:
             self.prior_dist = current_dist
@@ -189,6 +202,8 @@ class ParachuteManager:
                 self.increase_streak = 0
                 self.jump_confirm_distances = []
                 self.jump_confirm_locations = []
+                self.route_confirm_distances = [float(current_dist)]
+                self.route_confirm_locations = [tuple(location)]
                 return False
 
         # 正常情况：距离在变小，更新最近距离
@@ -211,10 +226,42 @@ class ParachuteManager:
             print(
                 f"[Parachute] 已经过R城最近点，历史最近距离 {self.prior_dist:.2f} "
                 f"> 跳伞阈值 {self.TRIGGER_DIST}，当前距离 {current_dist:.2f} "
-                f"开始变大，立即跳伞避免越飞越远。"
+                f"开始变大，等待动态窗口确认是否需要重开。"
             )
-            return True
+            return self._confirm_bad_route_window()
         return False
+
+    def _confirm_bad_route_window(self) -> bool:
+        if len(self.route_confirm_distances) < 3:
+            return False
+
+        prev_dist, candidate_dist, next_dist = self.route_confirm_distances
+        if candidate_dist <= self.TRIGGER_DIST:
+            return False
+
+        if prev_dist < candidate_dist:
+            print(
+                f"[Parachute] 航线重开候选帧前一帧未靠近R城: "
+                f"prev={prev_dist:.2f}, candidate={candidate_dist:.2f}, next={next_dist:.2f}，继续观察"
+            )
+            return False
+
+        if next_dist <= candidate_dist + self.ROUTE_MISS_CONFIRM_TOLERANCE:
+            print(
+                f"[Parachute] 航线重开候选帧后一帧未明显远离R城: "
+                f"prev={prev_dist:.2f}, candidate={candidate_dist:.2f}, next={next_dist:.2f}，继续观察"
+            )
+            return False
+
+        if not self._confirm_location_continuity(self.route_confirm_locations):
+            return False
+
+        print(
+            f"[Parachute] 航线动态窗口确认最近点仍超过跳伞阈值: "
+            f"prev={prev_dist:.2f}, candidate={candidate_dist:.2f}, next={next_dist:.2f}, "
+            f"threshold={self.TRIGGER_DIST}"
+        )
+        return True
 
     def _confirm_jump_window(self, current_dist: float, location) -> bool:
         """
@@ -253,7 +300,7 @@ class ParachuteManager:
             )
             return False
 
-        if not self._confirm_location_continuity():
+        if not self._confirm_location_continuity(self.jump_confirm_locations):
             return False
 
         print(
@@ -262,11 +309,11 @@ class ParachuteManager:
         )
         return True
 
-    def _confirm_location_continuity(self) -> bool:
-        if len(self.jump_confirm_locations) < 3:
+    def _confirm_location_continuity(self, locations) -> bool:
+        if len(locations) < 3:
             return False
 
-        prev_loc, candidate_loc, next_loc = self.jump_confirm_locations
+        prev_loc, candidate_loc, next_loc = locations
         prev_step = get_distance(prev_loc, candidate_loc)
         next_step = get_distance(candidate_loc, next_loc)
         if not self._is_valid_distance(prev_step) or not self._is_valid_distance(next_step):
@@ -289,6 +336,24 @@ class ParachuteManager:
             return False
 
         return True
+
+    def _restart_match_for_bad_route(self, w: 'FrameWorker'):
+        print("[Parachute] 航线最近点超过阈值，放弃本局落点，进入结束阶段重开下一把")
+        if hasattr(w, "set_frame_decision"):
+            w.set_frame_decision(
+                observation=(
+                    f"动态窗口确认航线最近点仍超过 {self.TRIGGER_DIST}，"
+                    f"distances={self.route_confirm_distances}"
+                ),
+                target="跳伞阶段",
+                decision="不跳伞，结束当前局并重开下一把",
+                action="切换结束阶段",
+                method="w.change_stage(结束阶段)",
+                result="结束阶段返回大厅后重新开始下一把",
+            )
+        self.reset()
+        w.change_stage("结束阶段")
+        return {"bad_route_restart": True}
 
 
     def _perform_jump_sequence(self, w: 'FrameWorker'):

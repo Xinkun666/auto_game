@@ -21,6 +21,18 @@ class HouseSearchManager:
     VISUAL_APPROACH_MAX_ATTEMPTS = 12
     UNSTUCK_MAX_CYCLES = 6
     UNSTUCK_FORWARD_STEPS = 5
+    UNSTUCK_SAME_POINT_RADIUS = 3.0
+    UNSTUCK_BACK_Y_BIAS = 300
+    UNSTUCK_SIDE_X_BIAS = 300
+    UNSTUCK_FORWARD_Y_BIAS = -300
+    UNSTUCK_STEP_DURA = 300
+    UNSTUCK_STEP_WAIT = 1500
+    UNSTUCK_FORWARD_WAIT = 2000
+    UNSTUCK_LARGE_VIEW_X_BIAS = 720
+    UNSTUCK_LARGE_VIEW_DURA = 850
+    UNSTUCK_LARGE_VIEW_WAIT = 500
+    UNSTUCK_LARGE_AUTO_FORWARD_SECONDS = 3.0
+    UNSTUCK_LARGE_SIDE_WAIT = 3000
     PICKUP_MAX_PER_DIRECTION = 3
     INITIAL_LOCATION_MIN_SAMPLES = 3
     INITIAL_LOCATION_MAX_SAMPLES = 6
@@ -3687,6 +3699,189 @@ class HouseSearchManager:
         self.history_locations = []
         return True
 
+    def _same_unstuck_point(self, origin, loc) -> bool:
+        if loc is None:
+            return True
+        return get_distance(origin, loc) <= self.UNSTUCK_SAME_POINT_RADIUS
+
+    def _unstuck_point_review_text(self, origin, loc) -> str:
+        if loc is None:
+            return f"origin={origin}, current=None, dist=None, same_point=True"
+        dist = get_distance(origin, loc)
+        return (
+            f"origin={origin}, current={loc}, dist={dist:.2f}, "
+            f"same_point={dist <= self.UNSTUCK_SAME_POINT_RADIUS}"
+        )
+
+    def _tap_unstuck_joystick(
+        self,
+        w: 'FrameWorker',
+        current_loc,
+        target_loc,
+        branch: str,
+        decision: str,
+        action: str,
+        x_bias: int,
+        y_bias: int,
+        wait: int,
+    ):
+        self._set_search_frame_decision(
+            w,
+            branch,
+            self._entry_observation(
+                w,
+                current_loc=current_loc,
+                target_loc=target_loc,
+                extra=(
+                    f"x_bias={x_bias}, y_bias={y_bias}, "
+                    f"dura={self.UNSTUCK_STEP_DURA}, wait={wait}"
+                ),
+            ),
+            decision,
+            action=action,
+            method=f"tap_single(摇杆, x_bias={x_bias}, y_bias={y_bias}, dura={self.UNSTUCK_STEP_DURA}, wait={wait})",
+            result="动作后刷新位置并复核是否仍在同一卡点",
+        )
+        w.tap_single(
+            '摇杆',
+            x_bias=x_bias,
+            y_bias=y_bias,
+            dura=self.UNSTUCK_STEP_DURA,
+            wait=wait,
+        )
+        self._refresh_frame_and_handle_jump(w)
+
+    def _execute_u_unstuck_attempt(self, w: 'FrameWorker', current_loc, target_loc, side: str) -> bool:
+        side_label = "左" if side == "left" else "右"
+        side_bias = -self.UNSTUCK_SIDE_X_BIAS if side == "left" else self.UNSTUCK_SIDE_X_BIAS
+        branch = "当前搜房分支：U型避障左U尝试" if side == "left" else "当前搜房分支：U型避障右U尝试"
+        print(f"[Unstuck] U型避障{side_label}U：后拉 -> {side_label}滑 -> 前冲")
+
+        self._tap_unstuck_joystick(
+            w,
+            self._get_current_location(w) or current_loc,
+            target_loc,
+            branch,
+            f"人物卡住，先后拉拉开空间，再尝试{side_label}侧U型绕开",
+            "U型避障后拉",
+            0,
+            self.UNSTUCK_BACK_Y_BIAS,
+            self.UNSTUCK_STEP_WAIT,
+        )
+        self._tap_unstuck_joystick(
+            w,
+            self._get_current_location(w) or current_loc,
+            target_loc,
+            branch,
+            f"后拉后向{side_label}滑，寻找侧向出口",
+            f"{side_label}滑试探",
+            side_bias,
+            0,
+            self.UNSTUCK_STEP_WAIT,
+        )
+        self._tap_unstuck_joystick(
+            w,
+            self._get_current_location(w) or current_loc,
+            target_loc,
+            branch,
+            f"{side_label}滑后向前冲，验证是否绕过障碍",
+            "U型避障前冲",
+            0,
+            self.UNSTUCK_FORWARD_Y_BIAS,
+            self.UNSTUCK_FORWARD_WAIT,
+        )
+
+        loc_after = self._get_current_location(w)
+        review = self._unstuck_point_review_text(current_loc, loc_after)
+        print(f"[Unstuck] {side_label}U后卡点复核: {review}")
+        self._set_search_frame_decision(
+            w,
+            f"当前搜房分支：U型避障{side_label}U卡点复核",
+            self._entry_observation(w, current_loc=loc_after, target_loc=target_loc, extra=review),
+            f"判断{side_label}U后是否仍在同一卡点：距离 <= {self.UNSTUCK_SAME_POINT_RADIUS:g} 视为仍卡住",
+            action="复核卡点距离",
+            method=f"get_distance(origin, current) <= {self.UNSTUCK_SAME_POINT_RADIUS:g}",
+            result="仍卡住则进入下一U型/大范围避障；已离开则恢复导航",
+        )
+        return not self._same_unstuck_point(current_loc, loc_after)
+
+    def _execute_large_area_unstuck(self, w: 'FrameWorker', current_loc, target_loc) -> bool:
+        print("[Unstuck] 左右U型仍卡住，启动大范围避障")
+        self._set_search_frame_decision(
+            w,
+            "当前搜房分支：大范围避障启动",
+            self._entry_observation(
+                w,
+                current_loc=self._get_current_location(w) or current_loc,
+                target_loc=target_loc,
+                extra=(
+                    f"view_x_bias={self.UNSTUCK_LARGE_VIEW_X_BIAS}, "
+                    f"auto_wait={self.UNSTUCK_LARGE_AUTO_FORWARD_SECONDS:.1f}s"
+                ),
+            ),
+            "左右U型后仍在同一卡点，先把视角往后调，再点击自动前进拉开大范围空间",
+            action="视角往后调并自动前进",
+            method=(
+                f"tap_single(视角, x_bias={self.UNSTUCK_LARGE_VIEW_X_BIAS}, "
+                f"dura={self.UNSTUCK_LARGE_VIEW_DURA}, wait={self.UNSTUCK_LARGE_VIEW_WAIT}); "
+                "click(自动前进)"
+            ),
+            result="自动前进3秒后连续向左滑动扩大绕行半径",
+        )
+        w.tap_single(
+            '视角',
+            x_bias=self.UNSTUCK_LARGE_VIEW_X_BIAS,
+            dura=self.UNSTUCK_LARGE_VIEW_DURA,
+            wait=self.UNSTUCK_LARGE_VIEW_WAIT,
+        )
+        self._refresh_frame_and_handle_jump(w)
+        if not self.auto_forward:
+            w.click('自动前进')
+            self.auto_forward = True
+        time.sleep(self.UNSTUCK_LARGE_AUTO_FORWARD_SECONDS)
+        self._refresh_frame_and_handle_jump(w)
+
+        for step in range(2):
+            self._tap_unstuck_joystick(
+                w,
+                self._get_current_location(w) or current_loc,
+                target_loc,
+                "当前搜房分支：大范围避障左滑",
+                f"自动前进后第 {step + 1}/2 次向左滑，扩大绕障半径",
+                f"大范围左滑{step + 1}/2",
+                -self.UNSTUCK_SIDE_X_BIAS,
+                0,
+                self.UNSTUCK_LARGE_SIDE_WAIT,
+            )
+
+        self.stop_auto_forward(w)
+        if target_loc is not None:
+            self.align_direction(w, target_loc)
+
+        self._tap_unstuck_joystick(
+            w,
+            self._get_current_location(w) or current_loc,
+            target_loc,
+            "当前搜房分支：大范围避障后调整方向前冲",
+            "大范围左滑后重新对准目标方向，向前冲出障碍区",
+            "调整方向后前冲",
+            0,
+            self.UNSTUCK_FORWARD_Y_BIAS,
+            self.UNSTUCK_FORWARD_WAIT,
+        )
+        loc_after = self._get_current_location(w)
+        review = self._unstuck_point_review_text(current_loc, loc_after)
+        self._set_search_frame_decision(
+            w,
+            "当前搜房分支：大范围避障卡点复核",
+            self._entry_observation(w, current_loc=loc_after, target_loc=target_loc, extra=review),
+            "大范围避障后复核是否仍在同一卡点",
+            action="复核大范围避障结果",
+            method=f"get_distance(origin, current) <= {self.UNSTUCK_SAME_POINT_RADIUS:g}",
+            result="若仍卡住则本轮脱困失败；否则恢复原目标导航",
+        )
+        return not self._same_unstuck_point(current_loc, loc_after)
+
     def execute_unstuck_logic(self, w: 'FrameWorker', current_loc):
         self.stop_auto_forward(w)
         target_loc = self.active_entry['location'] if self.active_entry else None
@@ -3714,171 +3909,25 @@ class HouseSearchManager:
         if self._recover_route_stuck_by_side_forward(w, current_loc, target_loc):
             return True
 
-        if w.get_info('跳跃'):
-            print("[Unstuck] 尝试跳跃脱困")
-            self._set_search_frame_decision(
-                w,
-                "当前搜房分支：卡住检测到跳跃，先跳跃脱困",
-                self._entry_observation(
-                    w,
-                    current_loc=current_loc,
-                    target_loc=target_loc,
-                    extra="卡住且识别到跳跃按钮",
-                ),
-                "卡住时检测到可跳跃，先跳跃并前推尝试越过障碍",
-                action="跳跃脱困并前推",
-                method="handle_jump_logic(); tap_single(摇杆, y_bias=-300, dura=500, wait=1000)",
-                result="位移足够则脱困成功，否则进入U型避障",
-            )
-            self.handle_jump_logic(w)
-            w.tap_single('摇杆', y_bias=-300, dura=500, wait=1000)
-            self._refresh_frame_and_handle_jump(w)
-            loc_raw = w.get_info('location')
-            if loc_raw is not None:
-                new_loc = check_location(loc_raw[0])
-                if new_loc and get_distance(current_loc, new_loc) > self.stuck_threshold:
-                    print("[Unstuck] 跳跃脱困成功")
-                    return True
+        print("[Unstuck] 进入U型避障：先左U，仍在同一卡点再右U，仍卡住则大范围避障")
+        if self._should_abort(w):
+            return False
+        if self._execute_u_unstuck_attempt(w, current_loc, target_loc, side="left"):
+            return True
 
-        print("[Unstuck] 跳跃无效，进入 U 型避障移动...")
-        for _ in range(self.UNSTUCK_MAX_CYCLES):
-            if self._should_abort(w):
-                return False
-            print("[Unstuck] 后退...")
-            self._set_search_frame_decision(
-                w,
-                "当前搜房分支：U型避障后退",
-                self._entry_observation(
-                    w,
-                    current_loc=_safe_get_loc() or current_loc,
-                    target_loc=target_loc,
-                    extra="U型避障循环开始，先后退寻找可移动空间",
-                ),
-                "跳跃/绕房无效，执行U型避障第一步：后退",
-                action="U型避障后退",
-                method="tap_single(摇杆, y_bias=300, dura=300, wait=1500)",
-                result="后退后测试左右是否可通行",
-            )
-            w.tap_single('摇杆', y_bias=300, dura=300, wait=1500)
-            self._refresh_frame_and_handle_jump(w)
-            loc_after_back = _safe_get_loc()
-            if not loc_after_back:
-                continue
+        if self._should_abort(w):
+            return False
+        print("[Unstuck] 左U后仍在同一卡点，改为右U")
+        if self._execute_u_unstuck_attempt(w, current_loc, target_loc, side="right"):
+            return True
 
-            print("[Unstuck] 右移试探...")
-            self._set_search_frame_decision(
-                w,
-                "当前搜房分支：U型避障右移试探",
-                self._entry_observation(
-                    w,
-                    current_loc=loc_after_back,
-                    target_loc=target_loc,
-                    extra="后退后先测试右侧是否可通行",
-                ),
-                "后退后先右移试探侧向出口",
-                action="右移试探",
-                method="tap_single(摇杆, x_bias=300, dura=300, wait=1500)",
-                result="右侧可通行则从右侧突破，否则再测左侧",
-            )
-            w.tap_single('摇杆', x_bias=300, dura=300, wait=1500)
-            self._refresh_frame_and_handle_jump(w)
-            loc_after_right = _safe_get_loc()
+        if self._should_abort(w):
+            return False
+        print("[Unstuck] 右U后仍在同一卡点，启动大范围避障")
+        if self._execute_large_area_unstuck(w, current_loc, target_loc):
+            return True
 
-            side_way_clear = False
-            last_valid_loc = loc_after_back
-
-            if loc_after_right and get_distance(loc_after_back, loc_after_right) > 0.5:
-                print("[Unstuck] 右侧可通行")
-                side_way_clear = True
-                last_valid_loc = loc_after_right
-            else:
-                print("[Unstuck] 右侧受阻，左移试探...")
-                self._set_search_frame_decision(
-                    w,
-                    "当前搜房分支：U型避障左移试探",
-                    self._entry_observation(
-                        w,
-                        current_loc=loc_after_right or loc_after_back,
-                        target_loc=target_loc,
-                        extra="右侧位移不足，测试左侧是否可通行",
-                    ),
-                    "右侧受阻，改为左移试探侧向出口",
-                    action="左移试探",
-                    method="tap_single(摇杆, x_bias=-300, dura=300, wait=1500)",
-                    result="左侧可通行则从左侧突破，否则继续后退",
-                )
-                w.tap_single('摇杆', x_bias=-300, dura=300, wait=1500)
-                self._refresh_frame_and_handle_jump(w)
-                loc_after_left = _safe_get_loc()
-
-                side_base_loc = loc_after_right or loc_after_back
-                if loc_after_left and get_distance(side_base_loc, loc_after_left) > 0.5:
-                    print("[Unstuck] 左侧可通行")
-                    side_way_clear = True
-                    last_valid_loc = loc_after_left
-
-            if not side_way_clear:
-                print("[Unstuck] 左右均受阻 (U型死角)，再次后退...")
-                continue
-
-            print("[Unstuck] 尝试向前突破...")
-            for _ in range(self.UNSTUCK_FORWARD_STEPS):
-                if self._should_abort(w):
-                    return False
-                self._set_search_frame_decision(
-                    w,
-                    "当前搜房分支：U型避障向前突破",
-                    self._entry_observation(
-                        w,
-                        current_loc=last_valid_loc,
-                        target_loc=target_loc,
-                        extra=f"forward_step={_ + 1}/{self.UNSTUCK_FORWARD_STEPS}",
-                    ),
-                    "侧向已找到可移动空间，向前尝试突破死角",
-                    action="向前突破",
-                    method="tap_single(摇杆, y_bias=-300, dura=300, wait=2000)",
-                    result="如果产生有效位移则脱困，否则继续侧向移动",
-                )
-                w.tap_single('摇杆', y_bias=-300, dura=300, wait=2000)
-                self._refresh_frame_and_handle_jump(w)
-                loc_after_forward = _safe_get_loc()
-
-                if loc_after_forward and get_distance(last_valid_loc, loc_after_forward) > 0.5:
-                    print("[Unstuck] 脱困成功！")
-                    return True
-                else:
-                    print("[Unstuck] 前方依然受阻，继续侧向移动...")
-                    moved_side = False
-                    for bias in [300, -300]:
-                        if self._should_abort(w):
-                            return False
-                        self._set_search_frame_decision(
-                            w,
-                            "当前搜房分支：U型避障侧向补位",
-                            self._entry_observation(
-                                w,
-                                current_loc=loc_after_forward or last_valid_loc,
-                                target_loc=target_loc,
-                                extra=f"x_bias={bias}",
-                            ),
-                            "前方仍受阻，继续侧向补位寻找可通行空隙",
-                            action="侧向补位",
-                            method=f"tap_single(摇杆, x_bias={bias}, dura=300, wait=1500)",
-                            result="有位移则更新可通行位置，否则重新后退",
-                        )
-                        w.tap_single('摇杆', x_bias=bias, dura=300, wait=1500)
-                        self._refresh_frame_and_handle_jump(w)
-                        temp_loc = _safe_get_loc()
-                        move_base_loc = loc_after_forward or last_valid_loc
-                        if temp_loc and get_distance(move_base_loc, temp_loc) > 0.5:
-                            last_valid_loc = temp_loc
-                            moved_side = True
-                            break
-
-                    if not moved_side:
-                        print("[Unstuck] 前方死路，重新执行后退逻辑")
-                        break
-        print("[Unstuck] 脱困超过最大尝试次数，放弃当前进门点")
+        print("[Unstuck] 大范围避障后仍在同一卡点，放弃当前进门点")
         return False
 
     def handle_jump_logic(self, w: 'FrameWorker', reason: str = "检测到障碍") -> bool:

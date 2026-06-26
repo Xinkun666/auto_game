@@ -339,7 +339,16 @@ class RunningManager:
     UNSTUCK_TURN_BIAS = 360
     UNSTUCK_TURN_DURA = 420
     UNSTUCK_TURN_WAIT = 300
-    UNSTUCK_REPEAT_RADIUS = 4.0
+    UNSTUCK_REPEAT_RADIUS = 3.0
+    UNSTUCK_SAME_POINT_RADIUS = 3.0
+    UNSTUCK_BACK_Y_BIAS = 300
+    UNSTUCK_SIDE_X_BIAS = 300
+    UNSTUCK_FORWARD_Y_BIAS = -300
+    UNSTUCK_LARGE_TURN_BIAS = 720
+    UNSTUCK_LARGE_TURN_DURA = 850
+    UNSTUCK_LARGE_TURN_WAIT = 500
+    UNSTUCK_LARGE_WAIT_SECONDS = 3.0
+    UNSTUCK_LARGE_SIDE_WAIT = 3000
     UNSTUCK_MAX_ESCALATION_LEVEL = 3
     UNSTUCK_ESCALATE_BIAS_STEP = 120
     UNSTUCK_ESCALATE_DURA_STEP = 180
@@ -2369,56 +2378,135 @@ class RunningManager:
 
         self.stop_auto_forward(w)
         attempt = self._record_unstuck_attempt_area(current_loc)
-        level = self._unstuck_escalation_level(attempt)
         print(
             f"[Running] 同一区域脱困 attempt={attempt}, "
-            f"escalation_level={level}, reference={self.unstuck_reference_loc}"
+            f"same_point_radius={self.UNSTUCK_SAME_POINT_RADIUS}, reference={self.unstuck_reference_loc}"
         )
 
-        if w.get_info("跳跃"):
-            print("[Running] 尝试跳跃配合侧移脱困")
-            self._log_running_state("人物卡死", current_loc, None, "跳跃后侧移/斜退脱困")
-            w.click("跳跃")
-            time.sleep(0.15)
-            if self._try_unstuck_move(w, current_loc, "跳跃后左侧移", -280, 0, level):
-                return
-            if self._try_unstuck_move(w, current_loc, "跳跃后右侧移", 280, 0, level):
-                return
+        print("[Running] 执行U型避障：先左U，再右U，仍在同一卡点则大范围避障")
+        self._log_running_state("人物卡死", current_loc, None, "执行U型避障：后拉-左滑-前冲")
+        if self._try_unstuck_u_escape(w, current_loc, "left"):
+            return
 
-        print("[Running] 执行侧退绕障脱困")
-        self._log_running_state("人物卡死", current_loc, None, "执行侧退绕障脱困")
-        for label, bias_x, bias_y in (
-            ("左后撤", -240, 260),
-            ("右后撤", 240, 260),
-        ):
-            if self._try_unstuck_backoff_escape(w, current_loc, label, bias_x, bias_y, level):
-                return
+        self._log_running_state("人物卡死", current_loc, None, "左U后仍在同一卡点，执行右U")
+        if self._try_unstuck_u_escape(w, current_loc, "right"):
+            return
 
-        for label, bias_x, bias_y in (
-            ("左侧移", -300, 0),
-            ("右侧移", 300, 0),
-            ("后撤拉开距离", 0, 300),
-        ):
-            if self._try_unstuck_move(w, current_loc, label, bias_x, bias_y, level):
-                return
-
-        for label, turn_bias in (("左转绕开", -self.UNSTUCK_TURN_BIAS), ("右转绕开", self.UNSTUCK_TURN_BIAS)):
-            scaled_turn_bias, turn_dura, turn_wait = self._unstuck_turn_motion(turn_bias, level)
-            print(
-                f"[Running] {label}，避开原前方障碍后再试探前进 "
-                f"x_bias={scaled_turn_bias}, dura={turn_dura}, wait={turn_wait}"
-            )
-            self._log_running_state("人物卡死", current_loc, None, label)
-            w.tap_single("视角", x_bias=scaled_turn_bias, dura=turn_dura, wait=turn_wait)
-            w.refresh_frame()
-            if self._try_unstuck_move(w, current_loc, f"{label}后前进", 0, -260, level):
-                return
+        self._log_running_state("人物卡死", current_loc, None, "左右U后仍在同一卡点，启动大范围避障")
+        if self._execute_large_area_unstuck(w, current_loc):
+            return
 
         print("[Running] 本轮脱困未产生有效位移，清空路径等待下一帧重新判断")
         self.stuck = False
         self.loading_road = False
         self.road_list = []
         self.current_segment_start = None
+
+    def _same_unstuck_point(self, origin: Tuple[int, int], loc: Optional[Tuple[int, int]]) -> bool:
+        if loc is None:
+            return True
+        return get_distance(origin, loc) <= self.UNSTUCK_SAME_POINT_RADIUS
+
+    def _finish_unstuck_success(self, new_loc: Tuple[int, int], reason: str):
+        print(f"[Running] {reason}产生有效位移，从新位置重新规划路径: loc={new_loc}")
+        self.stuck = False
+        self.trapped = False
+        self.loading_road = False
+        self.road_list = []
+        self.current_segment_start = None
+        self.locations = [new_loc]
+        self.history_locations = [new_loc]
+        self.last_valid_location = new_loc
+
+    def _tap_unstuck_joystick(
+        self,
+        w: "FrameWorker",
+        label: str,
+        x_bias: int,
+        y_bias: int,
+        wait: Optional[int] = None,
+    ):
+        move_wait = self.UNSTUCK_STEP_WAIT if wait is None else wait
+        print(
+            f"[Running] U型避障动作: {label}, x_bias={x_bias}, y_bias={y_bias}, "
+            f"dura={self.UNSTUCK_STEP_DURA}, wait={move_wait}"
+        )
+        w.tap_single(
+            "摇杆",
+            x_bias=x_bias,
+            y_bias=y_bias,
+            dura=self.UNSTUCK_STEP_DURA,
+            wait=move_wait,
+        )
+        w.refresh_frame()
+
+    def _try_unstuck_u_escape(
+        self,
+        w: "FrameWorker",
+        current_loc: Tuple[int, int],
+        side: str,
+    ) -> bool:
+        side_label = "左" if side == "left" else "右"
+        side_bias = -self.UNSTUCK_SIDE_X_BIAS if side == "left" else self.UNSTUCK_SIDE_X_BIAS
+        print(f"[Running] U型避障{side_label}U：先后拉，再{side_label}滑，最后前冲")
+
+        self._tap_unstuck_joystick(w, f"{side_label}U后拉", 0, self.UNSTUCK_BACK_Y_BIAS)
+        self._tap_unstuck_joystick(w, f"{side_label}U{side_label}滑", side_bias, 0)
+        self._tap_unstuck_joystick(w, f"{side_label}U前冲", 0, self.UNSTUCK_FORWARD_Y_BIAS)
+
+        loc_after = self._get_location(w)
+        same_point = self._same_unstuck_point(current_loc, loc_after)
+        dist_text = "None" if loc_after is None else f"{get_distance(current_loc, loc_after):.2f}"
+        print(
+            f"[Running] {side_label}U后卡点复核: origin={current_loc}, current={loc_after}, "
+            f"dist={dist_text}, same_point={same_point}"
+        )
+        if same_point:
+            return False
+
+        self._finish_unstuck_success(loc_after, f"{side_label}U避障")
+        return True
+
+    def _execute_large_area_unstuck(self, w: "FrameWorker", current_loc: Tuple[int, int]) -> bool:
+        print("[Running] 启动大范围避障：视角往后调，自动前进3s，连续左滑，再朝目标前冲")
+        w.tap_single(
+            "视角",
+            x_bias=self.UNSTUCK_LARGE_TURN_BIAS,
+            dura=self.UNSTUCK_LARGE_TURN_DURA,
+            wait=self.UNSTUCK_LARGE_TURN_WAIT,
+        )
+        w.refresh_frame()
+
+        if not self.auto_forward:
+            w.click("自动前进")
+            self.auto_forward = True
+        time.sleep(self.UNSTUCK_LARGE_WAIT_SECONDS)
+        w.refresh_frame()
+
+        for step in range(2):
+            self._tap_unstuck_joystick(
+                w,
+                f"大范围避障左滑{step + 1}/2",
+                -self.UNSTUCK_SIDE_X_BIAS,
+                0,
+                wait=self.UNSTUCK_LARGE_SIDE_WAIT,
+            )
+
+        target = self.road_list[0] if self.road_list else None
+        loc_before_forward = self._get_location(w) or current_loc
+        direction = w.get_info("direction")
+        if target is not None and direction is not None:
+            self._align_to_point(w, loc_before_forward, direction, target, threshold=8, max_steps=2)
+            w.refresh_frame()
+
+        self._tap_unstuck_joystick(w, "大范围避障后朝目标前冲", 0, self.UNSTUCK_FORWARD_Y_BIAS)
+        loc_after = self._get_location(w)
+        if self._same_unstuck_point(current_loc, loc_after):
+            print(f"[Running] 大范围避障后仍在同一卡点: origin={current_loc}, current={loc_after}")
+            return False
+
+        self._finish_unstuck_success(loc_after, "大范围避障")
+        return True
 
     def _try_unstuck_backoff_escape(
         self,

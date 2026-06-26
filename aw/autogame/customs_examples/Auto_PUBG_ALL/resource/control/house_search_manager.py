@@ -5676,6 +5676,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 return
 
         route_waypoint = self._current_r_city_route_waypoint(current_loc)
+        following_route_waypoint = route_waypoint is not None
         if route_waypoint is not None:
             target_loc = route_waypoint
             dist = get_distance(current_loc, target_loc)
@@ -5746,7 +5747,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 self.history_locations = []
                 return
 
-            if dist <= self.ENTRY_AUTO_FORWARD_DISTANCE:
+            if not following_route_waypoint and dist <= self.ENTRY_AUTO_FORWARD_DISTANCE:
                 print(f"[RCitySearch] 进入摇杆分段导航范围 (距离 {dist:.2f})")
                 self._set_frame_decision(
                     w,
@@ -5944,6 +5945,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 loc = self._entry_location_tuple(entry)
                 if loc is None or self._is_excluded_entry(entry):
                     continue
+                approach_loc = self._resolve_r_city_approach_location(loc)
                 try:
                     entry_direction = int(float(entry.get("direction"))) % 360
                 except (TypeError, ValueError, AttributeError):
@@ -5956,8 +5958,8 @@ class HouseSceneSearchManager(HouseSearchManager):
                         "house_id": str(house_id),
                         "entry_index": entry_index,
                         "location": loc,
-                        "approach_location": loc,
-                        "side": self._side_from_location(loc),
+                        "approach_location": approach_loc,
+                        "side": self._side_from_location(approach_loc),
                         "quality": "house_entry",
                         "entry_direction": entry_direction,
                         "nearest_existing_entry": entry,
@@ -6566,7 +6568,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             f"当前不可通行，当前位置={current_loc}，安全点={safe_target}",
             "对准最近安全点前推，先脱离不可通行区域",
             action="前往安全点脱离黑区",
-            method="align_direction(); tap_single(摇杆, y_bias=-300)",
+            method="align_direction(); click(自动前进)",
             result="脱离后继续前往最近入门点",
         )
         self.stop_auto_forward(w)
@@ -6579,24 +6581,17 @@ class HouseSceneSearchManager(HouseSearchManager):
                 current_loc=current_loc,
                 target_loc=safe_target,
                 extra=(
-                    f"y_bias=-300, dura={self.FORBIDDEN_ESCAPE_FORWARD_DURA}, "
-                    f"wait={self.FORBIDDEN_ESCAPE_FORWARD_WAIT}"
+                    "auto_forward=True"
                 ),
             ),
             "已选最近可通行安全点，对准后前推脱离当前不可通行区域",
-            action="前推到安全点",
-            method=(
-                f"tap_single(摇杆, y_bias=-300, dura={self.FORBIDDEN_ESCAPE_FORWARD_DURA}, "
-                f"wait={self.FORBIDDEN_ESCAPE_FORWARD_WAIT})"
-            ),
+            action="启动自动前进到安全点",
+            method="click(自动前进)",
             result="脱离后继续朝最近入门点导航",
         )
-        w.tap_single(
-            "摇杆",
-            y_bias=-300,
-            dura=self.FORBIDDEN_ESCAPE_FORWARD_DURA,
-            wait=self.FORBIDDEN_ESCAPE_FORWARD_WAIT,
-        )
+        if not self.auto_forward:
+            w.click("自动前进")
+            self.auto_forward = True
         self._refresh_frame_and_handle_jump(w)
 
     def _is_in_water(self, w: "FrameWorker") -> bool:

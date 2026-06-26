@@ -758,6 +758,7 @@ class RunningManager:
         return self.match_clock.elapsed()
 
     def process(self, w: "FrameWorker"):
+        self._frame_worker = w
         if self._handle_terminal_state(w, "跑图模块入口"):
             return
 
@@ -965,6 +966,25 @@ class RunningManager:
             f"path_len={len(self.road_list)}, precise={self.precise_entering_car}] "
             f"[决策:{decision}]"
         )
+        worker = getattr(self, "_frame_worker", None)
+        setter = getattr(worker, "set_frame_decision", None)
+        if callable(setter):
+            setter(
+                observation=(
+                    f"跑图阶段：子状态={stage}，情况={situation}，当前位置={location}，"
+                    f"当前方位={direction_text}，目标={target_text}，距离={dist_text}，"
+                    f"圈角={circle_text}，路径点数={len(self.road_list)}，"
+                    f"auto_forward={self.auto_forward}"
+                ),
+                target=f"当前跑图分支：{situation}",
+                decision=decision,
+                action=decision,
+                method=(
+                    "RunningManager._log_running_state "
+                    f"target={target_text}, dist={dist_text}, precise={self.precise_entering_car}"
+                ),
+                result="等待本帧动作执行后由下一帧重新识别位置/场景",
+            )
 
     def _get_location(self, w: "FrameWorker") -> Optional[Tuple[int, int]]:
         info = w.get_info("location")

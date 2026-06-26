@@ -243,6 +243,14 @@ class HouseExitManager:
 
         if w.get_info("开门"):
             print("[HouseExit] 门已关闭，先开门")
+            self._set_frame_decision(
+                w,
+                "当前帧检测到开门按钮，判断门处于关闭状态",
+                "先点击开门，再靠近门口前推出房",
+                action="点击开门",
+                method="w.click(开门)",
+                result="下一帧确认门是否打开并继续前推",
+            )
             w.click("开门")
             self.trusted_exit_signal = True
             time.sleep(0.8)
@@ -251,6 +259,14 @@ class HouseExitManager:
                 return True
         elif w.get_info("关门"):
             print("[HouseExit] 检测到关门按钮，表示门已打开，直接出门")
+            self._set_frame_decision(
+                w,
+                "当前帧检测到关门按钮，判断门已经打开",
+                "不再点击门按钮，直接靠近门口前推出房",
+                action="前推出门",
+                method="_approach_door_with_recovery()",
+                result="下一帧确认是否已到室外",
+            )
             self.trusted_exit_signal = True
 
         approached = self._approach_door_with_recovery(w, door)
@@ -333,12 +349,32 @@ class HouseExitManager:
             )
             if w.get_info("开门"):
                 print("[HouseExit] 顶出前再次看到开门按钮，补点开门")
+                self._set_frame_decision(
+                    w,
+                    "门口顶出前再次看到开门按钮，说明门又处于关闭/未开状态",
+                    "补点开门后继续左右上小幅顶出",
+                    action="补点开门",
+                    method="w.click(开门)",
+                    result="继续门口顶出流程",
+                )
                 w.click("开门")
                 self.trusted_exit_signal = True
                 time.sleep(0.35)
                 w.refresh_frame()
                 if self._handle_terminal_state(w, "门口补开门后检测到死亡或结算界面，结束出房流程"):
                     return True
+            self._set_frame_decision(
+                w,
+                f"门口出房受阻，第 {step + 1} 次左右上顶出，side_sign={side_sign}",
+                "用小幅左上/右上滑动尝试从门边挤出，避免继续原地撞门框",
+                action="门口左右上顶出",
+                method=(
+                    "tap_single(摇杆, "
+                    f"x_bias={side_sign * self.DOOR_DIAGONAL_SWEEP_X_BIAS}, "
+                    f"y_bias={self.DOOR_DIAGONAL_SWEEP_Y_BIAS}, dura={dura})"
+                ),
+                result="下一帧确认 house_scene 是否变为室外/楼顶",
+            )
             w.tap_single(
                 "摇杆",
                 x_bias=side_sign * self.DOOR_DIAGONAL_SWEEP_X_BIAS,
@@ -368,6 +404,14 @@ class HouseExitManager:
 
             if w.get_info("跳跃"):
                 print(f"[HouseExit] 靠窗 step={step + 1}，点击跳跃并前推翻窗")
+                self._set_frame_decision(
+                    w,
+                    f"靠窗 step={step + 1} 检测到跳跃按钮，判断可以翻窗",
+                    "点击跳跃并前推翻窗出房",
+                    action="跳跃前推翻窗",
+                    method="w.click(跳跃); _move_forward()",
+                    result="下一帧确认是否已到室外",
+                )
                 w.click("跳跃")
                 time.sleep(0.12)
                 self._move_forward(w, dura=self.WINDOW_JUMP_FORWARD_DURA, wait=self.WINDOW_JUMP_FORWARD_WAIT)
@@ -387,6 +431,14 @@ class HouseExitManager:
                 continue
 
             print("[HouseExit] 小步靠近窗户")
+            self._set_frame_decision(
+                w,
+                f"靠窗 step={step + 1} 未看到跳跃按钮",
+                "先小步前推靠近窗户，继续寻找跳跃按钮",
+                action="靠近窗户",
+                method=f"_move_forward(dura={self.WINDOW_APPROACH_DURA})",
+                result="下一帧继续检测跳跃/室外/贴墙信号",
+            )
             self._move_forward(w, dura=self.WINDOW_APPROACH_DURA, wait=self.WINDOW_APPROACH_WAIT)
             w.refresh_frame()
             if self._handle_terminal_state(w, "靠窗前推后检测到死亡或结算界面，结束出房流程"):

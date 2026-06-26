@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Dict, NamedTuple, Optional
 
 from PyQt6.QtCore import QByteArray, QObject, QProcess, QProcessEnvironment, Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QDesktopServices, QPainter, QPen, QPixmap, QTextCursor
+from PyQt6.QtGui import QColor, QDesktopServices, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -1200,6 +1200,40 @@ def _format_history_log_entries(entries: list[dict]) -> list[str]:
     return lines
 
 
+def _format_semantic_values(values: dict, limit: int = 24) -> list[str]:
+    lines = []
+    if not isinstance(values, dict):
+        return lines
+    for key, value in list(values.items())[:limit]:
+        lines.append(f"- {key}: {value}")
+    return lines
+
+
+def _format_semantic_actions(actions: list[dict]) -> list[str]:
+    lines = []
+    if not isinstance(actions, list) or not actions:
+        return ["- 暂无控制动作"]
+    for action in actions[-12:]:
+        if not isinstance(action, dict):
+            continue
+        name = action.get("action") or action.get("name") or "-"
+        target = action.get("target") or "-"
+        control_point = action.get("control_point") or target
+        actual_pos = action.get("actual_pos") or "-"
+        start_pos = action.get("start_pos") or "-"
+        end_pos = action.get("end_pos") or "-"
+        params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        duration = action.get("duration") or params.get("dura") or params.get("duration") or "-"
+        reason = action.get("reason") or "-"
+        params_text = ", ".join(f"{key}={value}" for key, value in params.items()) or "-"
+        lines.append(
+            f"- action={name}; control_point={control_point}; target={target}; "
+            f"actual_pos={actual_pos}; start={start_pos}; end={end_pos}; "
+            f"duration={duration}; params={params_text}; reason={reason}"
+        )
+    return lines or ["- 暂无控制动作"]
+
+
 def format_history_frame_details(frame_record: dict) -> str:
     payload = frame_record.get("payload") if isinstance(frame_record, dict) else {}
     payload = payload if isinstance(payload, dict) else {}
@@ -1214,21 +1248,72 @@ def format_history_frame_details(frame_record: dict) -> str:
 
     seen = payload.get("seen") if isinstance(payload.get("seen"), dict) else {}
     info_payload = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+    semantic_log = payload.get("semantic_log") if isinstance(payload.get("semantic_log"), dict) else {}
     decision_payload = payload.get("decision") if isinstance(payload.get("decision"), dict) else {}
     code_branch = payload.get("code_branch") if isinstance(payload.get("code_branch"), dict) else {}
     next_action = str(payload.get("next_action") or "").strip() or "-"
+    summary = str(payload.get("frame_summary") or "").strip()
+    seen_summary = str(seen.get("summary") or "").strip()
+    if not seen_summary and info_payload:
+        seen_summary = "看到 " + ", ".join(str(key) for key in info_payload.keys())
 
     lines = [
         f"帧: {frame_info.get('image') or Path(str(frame_record.get('image_path') or '')).name}",
         f"序号: {frame_info.get('index', frame_record.get('index', '-'))}",
+    ]
+
+    if summary:
+        lines.extend(["", "帧摘要", f"- {summary}"])
+
+    semantic_stage = semantic_log.get("current_stage") if isinstance(semantic_log.get("current_stage"), dict) else {}
+    semantic_perception = semantic_log.get("perception") if isinstance(semantic_log.get("perception"), dict) else {}
+    semantic_judgment = semantic_log.get("judgment") if isinstance(semantic_log.get("judgment"), dict) else {}
+    semantic_branch = semantic_log.get("branch") if isinstance(semantic_log.get("branch"), dict) else {}
+    semantic_actions = semantic_log.get("actions") if isinstance(semantic_log.get("actions"), list) else []
+
+    lines.extend([
+        "",
+        "当前阶段",
+        f"- stage: {semantic_stage.get('stage') or stage_name}",
+        f"- scene/子状态: {semantic_stage.get('scene_state') or '-'}",
+        f"- group: {semantic_stage.get('group') or stage_group}",
+        f"- frame_index: {semantic_stage.get('frame_index', frame_info.get('index', frame_record.get('index', '-')))}",
+        "",
+        "当前感知结果",
+        f"- {semantic_perception.get('summary') or seen_summary or '-'}",
+    ])
+    semantic_values = _format_semantic_values(semantic_perception.get("critical_values"))
+    if semantic_values:
+        lines.extend(semantic_values)
+
+    lines.extend([
+        "",
+        "当前判断",
+        f"- reason: {semantic_judgment.get('reason') or decision_payload.get('observation') or code_branch.get('observation') or '-'}",
+        f"- decision: {semantic_judgment.get('decision') or decision_payload.get('decision') or code_branch.get('action') or next_action}",
+        f"- evidence: {semantic_judgment.get('evidence') or decision_payload.get('method') or code_branch.get('method') or '-'}",
+        f"- result: {semantic_judgment.get('result_expectation') or decision_payload.get('result') or code_branch.get('result') or '-'}",
+        "",
+        "当前分支",
+        f"- branch: {semantic_branch.get('name') or code_branch.get('target') or decision_payload.get('target') or '-'}",
+        f"- observation: {semantic_branch.get('observation') or code_branch.get('observation') or decision_payload.get('observation') or '-'}",
+        f"- action: {semantic_branch.get('action') or code_branch.get('action') or decision_payload.get('action') or '-'}",
+        f"- method: {semantic_branch.get('method') or code_branch.get('method') or decision_payload.get('method') or '-'}",
+        f"- result: {semantic_branch.get('result') or code_branch.get('result') or decision_payload.get('result') or '-'}",
+        "",
+        "当前动作",
+        *_format_semantic_actions(semantic_actions),
+    ])
+
+    lines.extend([
         "",
         "阶段信息",
         f"- 阶段: {stage_name}",
         f"- 分组: {stage_group}",
         "",
         "这一帧看到了",
-        f"- {seen.get('summary') or payload.get('frame_summary') or '-'}",
-    ]
+        f"- {seen_summary or '-'}",
+    ])
 
     if decision_payload:
         lines.extend([
@@ -1265,10 +1350,6 @@ def format_history_frame_details(frame_record: dict) -> str:
     logic_lines = _format_history_log_entries(payload.get("logic_logs", []))
     if logic_lines:
         lines.extend(["", "逻辑日志", *logic_lines])
-
-    summary = str(payload.get("frame_summary") or "").strip()
-    if summary:
-        lines.extend(["", "帧摘要", f"- {summary}"])
 
     return "\n".join(lines)
 
@@ -2530,6 +2611,12 @@ class LauncherWindow(QWidget):
         frame_nav_layout.setSpacing(8)
         self.history_prev_frame_button = QPushButton("上一帧")
         self.history_next_frame_button = QPushButton("下一帧")
+        self.history_prev_frame_shortcut = QShortcut(QKeySequence("A"), page)
+        self.history_prev_frame_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.history_prev_frame_shortcut.activated.connect(self._show_previous_history_frame)
+        self.history_next_frame_shortcut = QShortcut(QKeySequence("D"), page)
+        self.history_next_frame_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.history_next_frame_shortcut.activated.connect(self._show_next_history_frame)
         self.history_frame_counter_label = QLabel("未加载帧")
         self.history_frame_counter_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         frame_nav_layout.addWidget(self.history_prev_frame_button)

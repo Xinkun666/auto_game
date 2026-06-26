@@ -1620,15 +1620,36 @@ class Controller:
                    release1=True, release2=True, trajectory=None, max_step_px=None):
         pos1, label1 = self._resolve_pos(btn1)
         pos2, label2 = self._resolve_pos(btn2)
+        trace = {
+            "action": "tap_double",
+            "control_point": f"{btn1},{btn2}",
+            "resolved_label": f"{label1},{label2}",
+            "backend": str(self.backend),
+            "wait": str(wait),
+            "dura": str(dura),
+            "x1_bias": str(x1_bias),
+            "y1_bias": str(y1_bias),
+            "x2_bias": str(x2_bias),
+            "y2_bias": str(y2_bias),
+            "finger_id": str(finger_id),
+            "executed": "False",
+        }
         if pos1 and pos2:
             x1, y1 = pos1
             x2, y2 = pos2
+            trace["start_pos"] = f"({x1}, {y1});({x2}, {y2})"
+            trace["actual_pos"] = trace["start_pos"]
             print(f"执行双指操作: {label1} @({x1},{y1}), {label2} @({x2},{y2})")
             if self.backend == "sendevent":
                 end1, _ = self._resolve_pos(btn1, x_bias=x1_bias, y_bias=y1_bias)
                 end2, _ = self._resolve_pos(btn2, x_bias=x2_bias, y_bias=y2_bias)
                 if not end1 or not end2:
-                    return
+                    return trace
+                trace["end_pos"] = f"({end1[0]}, {end1[1]});({end2[0]}, {end2[1]})"
+                trace["actual_x1_bias"] = str(end1[0] - x1)
+                trace["actual_y1_bias"] = str(end1[1] - y1)
+                trace["actual_x2_bias"] = str(end2[0] - x2)
+                trace["actual_y2_bias"] = str(end2[1] - y2)
                 self.touch_backend.tap_double(
                     x1,
                     y1,
@@ -1646,22 +1667,44 @@ class Controller:
                     trajectory=trajectory,
                     max_step_px=max_step_px,
                 )
+                trace["executed"] = "True"
             else:
                 cmd = (
                     f"hdc shell uinput -T -m {x1} {y1} {x1 + x1_bias} {y1 + y1_bias} "
                     f"{x2} {y2} {x2 + x2_bias} {y2 + y2_bias} -k {wait} {dura}"
                 )
+                trace["end_pos"] = f"({x1 + x1_bias}, {y1 + y1_bias});({x2 + x2_bias}, {y2 + y2_bias})"
+                trace["command"] = cmd
                 self._run_hdc(cmd)
+                trace["executed"] = "True"
+        return trace
 
     def tap_single(self, btn, wait=100, dura=500, x_bias=0, y_bias=1, finger_id=0,
                    release=True, trajectory=None, max_step_px=None):
         pos, label = self._resolve_pos(btn)
+        trace = {
+            "action": "tap_single",
+            "control_point": str(btn),
+            "resolved_label": str(label or ""),
+            "backend": str(self.backend),
+            "wait": str(wait),
+            "dura": str(dura),
+            "x_bias": str(x_bias),
+            "y_bias": str(y_bias),
+            "finger_id": str(finger_id),
+            "executed": "False",
+        }
         if pos:
             x, y = pos
+            trace["start_pos"] = f"({x}, {y})"
+            trace["actual_pos"] = trace["start_pos"]
             if self.backend == "sendevent":
                 end_pos, _ = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias)
                 if not end_pos:
-                    return
+                    return trace
+                trace["end_pos"] = f"({end_pos[0]}, {end_pos[1]})"
+                trace["actual_x_bias"] = str(end_pos[0] - x)
+                trace["actual_y_bias"] = str(end_pos[1] - y)
                 self.touch_backend.tap_single(
                     x,
                     y,
@@ -1674,9 +1717,14 @@ class Controller:
                     trajectory=trajectory,
                     max_step_px=max_step_px,
                 )
+                trace["executed"] = "True"
             else:
                 cmd = f"hdc shell uinput -T -m {x} {y} {x + x_bias} {y + y_bias} -k {wait} {dura}"
+                trace["end_pos"] = f"({x + x_bias}, {y + y_bias})"
+                trace["command"] = cmd
                 self._run_hdc(cmd)
+                trace["executed"] = "True"
+        return trace
 
     def uinput_tap_single(self, btn, wait=100, dura=500, x_bias=0, y_bias=1):
         original_backend = self.backend
@@ -1687,19 +1735,50 @@ class Controller:
         finally:
             self.backend = original_backend
 
+        trace = {
+            "action": "uinput_tap_single",
+            "control_point": str(btn),
+            "resolved_label": str(label or ""),
+            "backend": "uinput",
+            "wait": str(wait),
+            "dura": str(dura),
+            "x_bias": str(x_bias),
+            "y_bias": str(y_bias),
+            "executed": "False",
+        }
         if not pos or not end_pos:
-            return
+            return trace
 
         x, y = pos
         end_x, end_y = end_pos
         cmd = f"hdc shell uinput -T -m {x} {y} {end_x} {end_y} -k {wait} {dura}"
+        trace["start_pos"] = f"({x}, {y})"
+        trace["end_pos"] = f"({end_x}, {end_y})"
+        trace["actual_pos"] = trace["start_pos"]
+        trace["command"] = cmd
         self._run_hdc(cmd)
+        trace["executed"] = "True"
+        return trace
 
     def click_down(self, btn, x_bias=0, y_bias=0, dura=0, finger_id=0,
                    trajectory=None, max_step_px=None):
         pos, label = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias)
+        trace = {
+            "action": "click_down",
+            "control_point": str(btn),
+            "resolved_label": str(label or ""),
+            "backend": str(self.backend),
+            "dura": str(dura),
+            "x_bias": str(x_bias),
+            "y_bias": str(y_bias),
+            "finger_id": str(finger_id),
+            "executed": "False",
+        }
         if pos:
             x, y = pos
+            trace["actual_pos"] = f"({x}, {y})"
+            trace["start_pos"] = trace["actual_pos"]
+            trace["end_pos"] = trace["actual_pos"]
             if self.backend == "sendevent":
                 self.touch_backend.click_down(
                     x,
@@ -1709,18 +1788,36 @@ class Controller:
                     trajectory=trajectory,
                     max_step_px=max_step_px,
                 )
+                trace["executed"] = "True"
             else:
                 if dura == 0:
                     cmd = f"hdc shell uinput -T -d {x} {y}"
                 else:
                     cmd = f"hdc shell uinput -T -d {x} {y} -i {dura} -u {x} {y}"
+                trace["command"] = cmd
                 self._run_hdc(cmd)
+                trace["executed"] = "True"
+        return trace
 
     def click(self, btn, x_bias=0, y_bias=0, finger_id=0, duration_ms=0,
               trajectory=None, max_step_px=None):
         pos, label = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias)
+        trace = {
+            "action": "click",
+            "control_point": str(btn),
+            "resolved_label": str(label or ""),
+            "backend": str(self.backend),
+            "duration_ms": str(duration_ms),
+            "x_bias": str(x_bias),
+            "y_bias": str(y_bias),
+            "finger_id": str(finger_id),
+            "executed": "False",
+        }
         if pos:
             x, y = pos
+            trace["actual_pos"] = f"({x}, {y})"
+            trace["start_pos"] = trace["actual_pos"]
+            trace["end_pos"] = trace["actual_pos"]
             if self.backend == "sendevent":
                 self.touch_backend.click(
                     x,
@@ -1730,8 +1827,13 @@ class Controller:
                     trajectory=trajectory,
                     max_step_px=max_step_px,
                 )
+                trace["executed"] = "True"
             else:
-                self._run_hdc(f"hdc shell uinput -T -c {x} {y}")
+                cmd = f"hdc shell uinput -T -c {x} {y}"
+                trace["command"] = cmd
+                self._run_hdc(cmd)
+                trace["executed"] = "True"
+        return trace
 
     def move_press(self, finger_id, pos, x_bias=0, y_bias=0):
         self._require_sendevent_backend()
@@ -1744,6 +1846,19 @@ class Controller:
         print(f"执行 move_press: finger_id={finger_id} @({x},{y})")
         print(f"move_press 目标: {desc}")
         self.touch_backend.move_press(finger_id, (x, y))
+        return {
+            "action": "move_press",
+            "control_point": str(pos),
+            "resolved_label": str(desc),
+            "backend": str(self.backend),
+            "finger_id": str(finger_id),
+            "x_bias": str(x_bias),
+            "y_bias": str(y_bias),
+            "actual_pos": f"({x}, {y})",
+            "start_pos": f"({x}, {y})",
+            "end_pos": f"({x}, {y})",
+            "executed": "True",
+        }
 
     def move_to(self, finger_id, pos, x_bias=0, y_bias=0, duration_ms=160,
                 trajectory=None, max_step_px=None):
@@ -1763,11 +1878,31 @@ class Controller:
             trajectory=trajectory,
             max_step_px=max_step_px,
         )
+        return {
+            "action": "move_to",
+            "control_point": str(pos),
+            "resolved_label": str(desc),
+            "backend": str(self.backend),
+            "finger_id": str(finger_id),
+            "duration_ms": str(duration_ms),
+            "x_bias": str(x_bias),
+            "y_bias": str(y_bias),
+            "actual_pos": f"({x}, {y})",
+            "end_pos": f"({x}, {y})",
+            "executed": "True",
+        }
 
     def move_up(self, finger_id, duration_ms=0):
         self._require_sendevent_backend()
         print(f"执行 move_up: finger_id={finger_id}")
         self.touch_backend.move_up(finger_id, duration_ms=duration_ms)
+        return {
+            "action": "move_up",
+            "backend": str(self.backend),
+            "finger_id": str(finger_id),
+            "duration_ms": str(duration_ms),
+            "executed": "True",
+        }
 
 class FrameWorker(threading.Thread):
     LAUNCHER_INACTIVITY_TIMEOUT_SECONDS = 5 * 60
@@ -1896,7 +2031,7 @@ class FrameWorker(threading.Thread):
         def _wrapped(*args, **kwargs):
             result = action(*args, **kwargs)
             self._record_control_action(action_name)
-            self._record_frame_action(action_name, args, kwargs)
+            self._record_frame_action(action_name, args, kwargs, result)
             return result
         return _wrapped
 
@@ -1938,10 +2073,65 @@ class FrameWorker(threading.Thread):
             return str(action_name)
         return str(action_name)
 
-    def _record_frame_action(self, action_name, args, kwargs):
+    def _semantic_frame_action_name(self, action_name, args, kwargs):
+        if action_name == "click":
+            return "click"
+        target = str(args[0] if args else kwargs.get("btn", kwargs.get("target", "")))
+        if action_name in {"tap_single", "tap_double", "uinput_tap_single"}:
+            if target == "摇杆":
+                try:
+                    y_bias = float(kwargs.get("y_bias", 0) or 0)
+                except (TypeError, ValueError):
+                    y_bias = 0
+                if y_bias < 0:
+                    return "move_forward"
+                if y_bias > 0:
+                    return "move_backward"
+                return "move_lateral"
+            if target == "视角":
+                return "turn_view"
+            return "tap"
+        if action_name in {"move_press", "move_to", "move_up"}:
+            return "move_control"
+        return str(action_name)
+
+    @staticmethod
+    def _normalize_control_trace(trace_result):
+        if not isinstance(trace_result, dict):
+            return {}
+        return {str(key): str(value) for key, value in trace_result.items()}
+
+    def _record_frame_action(self, action_name, args, kwargs, trace_result=None):
+        target = args[0] if args else kwargs.get("btn", kwargs.get("target", ""))
+        params = {str(key): str(value) for key, value in kwargs.items()}
+        for index, arg in enumerate(args[1:4], start=1):
+            params[f"arg{index}"] = str(arg)
+        control_trace = self._normalize_control_trace(trace_result)
+        for key in ("x_bias", "y_bias", "dura", "wait", "duration_ms", "finger_id", "backend"):
+            if key in control_trace and key not in params:
+                params[key] = control_trace[key]
+        duration = kwargs.get("dura", kwargs.get("duration", kwargs.get("wait", "")))
+        if not duration:
+            duration = control_trace.get("dura") or control_trace.get("duration_ms") or control_trace.get("wait")
+        reason = (
+            self.current_frame_decision.get("decision")
+            or self.current_frame_decision.get("observation")
+            or ""
+        )
         self.current_frame_actions.append({
             "name": str(action_name),
+            "action": self._semantic_frame_action_name(action_name, args, kwargs),
             "description": self._describe_frame_action(action_name, args, kwargs),
+            "target": str(control_trace.get("control_point") or target or ""),
+            "control_point": str(control_trace.get("control_point") or target or ""),
+            "resolved_label": str(control_trace.get("resolved_label") or ""),
+            "actual_pos": str(control_trace.get("actual_pos") or control_trace.get("start_pos") or ""),
+            "start_pos": str(control_trace.get("start_pos") or ""),
+            "end_pos": str(control_trace.get("end_pos") or ""),
+            "params": params,
+            "duration": str(duration or ""),
+            "reason": str(reason or ""),
+            "control_trace": control_trace,
             "args": [str(arg) for arg in args[:3]],
             "kwargs": {str(key): str(value) for key, value in kwargs.items()},
         })

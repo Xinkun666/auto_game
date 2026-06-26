@@ -263,6 +263,187 @@ def _normalize_frame_decision(runtime_logs):
     return {str(key): value for key, value in decision.items() if key in allowed_keys}
 
 
+def _semantic_text(value, default=""):
+    text = str(value or "").strip()
+    return text if text and text != "-" else default
+
+
+def _infer_house_scene_state(value):
+    text = str(value or "").strip().strip("[]()")
+    mapping = {
+        "0": "在屋内",
+        "1": "在屋外",
+        "2": "在楼顶/房顶",
+        "3": "靠近门",
+        "4": "靠近墙/贴墙/疑似撞墙",
+        "HOUSE_INDOOR": "在屋内",
+        "HOUSE_OUTDOOR": "在屋外",
+        "HOUSE_ROOFTOP": "在楼顶/房顶",
+        "HOUSE_NEAR_DOOR": "靠近门",
+        "HOUSE_NEAR_WALL": "靠近墙/贴墙/疑似撞墙",
+        "NEAR_DOOR": "靠近门",
+        "NEAR_WALL": "靠近墙/贴墙/疑似撞墙",
+    }
+    return mapping.get(text)
+
+
+def _infer_scene_state(safe_info, frame_decision, code_branch):
+    if isinstance(safe_info, dict):
+        house_scene_state = _infer_house_scene_state(safe_info.get("house_scene"))
+        if house_scene_state:
+            return house_scene_state
+        if safe_info.get("上浮"):
+            return "水中/水边"
+        if safe_info.get("驾驶") or safe_info.get("喇叭"):
+            return "车辆附近/车内"
+
+    text_pool = " ".join(
+        _semantic_text(value)
+        for value in (
+            frame_decision.get("target") if isinstance(frame_decision, dict) else "",
+            frame_decision.get("observation") if isinstance(frame_decision, dict) else "",
+            frame_decision.get("decision") if isinstance(frame_decision, dict) else "",
+            code_branch.get("target") if isinstance(code_branch, dict) else "",
+            code_branch.get("observation") if isinstance(code_branch, dict) else "",
+        )
+    )
+    if "不可通行" in text_pool or "黑区" in text_pool:
+        return "黑区中/不可通行区域"
+    if "卡住" in text_pool:
+        return "卡住/避障中"
+    if "跑图" in text_pool or "导航" in text_pool:
+        return "正常导航"
+    if "跳伞" in text_pool:
+        return "跳伞监控中"
+    return "未明确子状态"
+
+
+def _critical_frame_values(safe_info, info_keys):
+    if not isinstance(safe_info, dict):
+        return {}
+    preferred = [
+        "location",
+        "direction",
+        "forward_scene",
+        "house_scene",
+        "road_scene",
+        "vehicle_scene",
+        "上浮",
+        "跳跃",
+        "开门",
+        "关门",
+        "驾驶",
+        "喇叭",
+        "关闭活动",
+        "关闭",
+        "提示",
+    ]
+    critical = {}
+    for key in preferred:
+        if key in safe_info:
+            critical[key] = safe_info[key]
+    for key in info_keys:
+        if key not in critical and len(critical) < 24:
+            critical[key] = safe_info.get(key)
+    return critical
+
+
+def _normalize_semantic_actions(actions, default_reason=""):
+    if not isinstance(actions, list):
+        return []
+    normalized = []
+    for action in actions[-12:]:
+        if not isinstance(action, dict):
+            continue
+        params = action.get("params")
+        if not isinstance(params, dict):
+            params = action.get("kwargs") if isinstance(action.get("kwargs"), dict) else {}
+        control_trace = action.get("control_trace") if isinstance(action.get("control_trace"), dict) else {}
+        merged_params = {str(key): str(value) for key, value in params.items()}
+        for key in ("x_bias", "y_bias", "dura", "wait", "duration_ms", "finger_id", "backend"):
+            if key in control_trace and key not in merged_params:
+                merged_params[key] = str(control_trace[key])
+        target = _semantic_text(action.get("target"))
+        if not target and isinstance(action.get("args"), list) and action.get("args"):
+            target = _semantic_text(action.get("args")[0])
+        control_point = _semantic_text(action.get("control_point") or control_trace.get("control_point"), target)
+        start_pos = _semantic_text(action.get("start_pos") or control_trace.get("start_pos"))
+        end_pos = _semantic_text(action.get("end_pos") or control_trace.get("end_pos"))
+        actual_pos = _semantic_text(action.get("actual_pos") or control_trace.get("actual_pos") or start_pos)
+        normalized.append({
+            "action": _semantic_text(action.get("action"), _semantic_text(action.get("name"), "unknown_action")),
+            "name": _semantic_text(action.get("name"), "unknown_action"),
+            "target": target,
+            "control_point": control_point,
+            "resolved_label": _semantic_text(action.get("resolved_label") or control_trace.get("resolved_label")),
+            "actual_pos": actual_pos,
+            "start_pos": start_pos,
+            "end_pos": end_pos,
+            "description": _semantic_text(action.get("description")),
+            "params": merged_params,
+            "duration": _semantic_text(action.get("duration") or merged_params.get("dura") or merged_params.get("duration_ms") or merged_params.get("duration")),
+            "reason": _semantic_text(action.get("reason"), default_reason),
+            "control_trace": {str(key): str(value) for key, value in control_trace.items()},
+        })
+    return normalized
+
+
+def _build_semantic_frame_log(stage, group_name, safe_info, info_keys, frame_decision, code_branch, next_action, index):
+    frame_decision = frame_decision if isinstance(frame_decision, dict) else {}
+    code_branch = code_branch if isinstance(code_branch, dict) else {}
+    observed_infos = frame_decision.get("observed_infos") if isinstance(frame_decision.get("observed_infos"), list) else []
+    scene_state = _infer_scene_state(safe_info, frame_decision, code_branch)
+    perception_summary = "看到 " + ", ".join(info_keys) if info_keys else "未识别到有效 info"
+    judgment_reason = (
+        _semantic_text(frame_decision.get("observation"))
+        or _semantic_text(code_branch.get("observation"))
+        or perception_summary
+    )
+    judgment_decision = (
+        _semantic_text(frame_decision.get("decision"))
+        or _semantic_text(code_branch.get("action"))
+        or _semantic_text(next_action, "等待下一轮逻辑判断")
+    )
+    branch_name = (
+        _semantic_text(code_branch.get("target"))
+        or _semantic_text(frame_decision.get("target"))
+        or _semantic_text(stage, "未知分支")
+    )
+    actions = _normalize_semantic_actions(
+        frame_decision.get("control_actions"),
+        default_reason=judgment_decision or judgment_reason,
+    )
+
+    return {
+        "current_stage": {
+            "stage": stage or "",
+            "group": group_name or "",
+            "scene_state": scene_state,
+            "frame_index": index,
+        },
+        "perception": {
+            "summary": perception_summary,
+            "info_keys": info_keys,
+            "critical_values": _critical_frame_values(safe_info, info_keys),
+            "observed_infos": observed_infos,
+        },
+        "judgment": {
+            "reason": judgment_reason,
+            "decision": judgment_decision,
+            "evidence": _semantic_text(frame_decision.get("method") or code_branch.get("method")),
+            "result_expectation": _semantic_text(frame_decision.get("result") or code_branch.get("result")),
+        },
+        "branch": {
+            "name": branch_name,
+            "observation": _semantic_text(code_branch.get("observation") or frame_decision.get("observation")),
+            "action": _semantic_text(code_branch.get("action") or frame_decision.get("action")),
+            "method": _semantic_text(code_branch.get("method") or frame_decision.get("method")),
+            "result": _semantic_text(code_branch.get("result") or frame_decision.get("result")),
+        },
+        "actions": actions,
+    }
+
+
 def _select_frame_code_branch(runtime_logs):
     if not isinstance(runtime_logs, dict):
         return {}
@@ -330,6 +511,16 @@ def build_frame_log_payload(stage, info, index, runtime_logs=None, group_name=No
     frame_decision = _normalize_frame_decision(runtime_logs)
     code_branch = _select_frame_code_branch(runtime_logs)
     next_action = _select_next_action(runtime_logs, code_branch)
+    semantic_log = _build_semantic_frame_log(
+        stage,
+        group_name,
+        safe_info,
+        info_keys,
+        frame_decision,
+        code_branch,
+        next_action,
+        index,
+    )
     frame_name = frame_name or f"frame_{int(index):05d}.jpg"
 
     return {
@@ -359,6 +550,7 @@ def build_frame_log_payload(stage, info, index, runtime_logs=None, group_name=No
         "decision": frame_decision,
         "code_branch": code_branch,
         "next_action": next_action,
+        "semantic_log": semantic_log,
         "frame_summary": _build_frame_summary(stage, info_keys, code_branch, next_action),
     }
 

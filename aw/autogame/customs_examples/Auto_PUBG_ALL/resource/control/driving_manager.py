@@ -431,6 +431,7 @@ class DrivingManager:
         print(f"[Driving] 本次上车来源={reason}，跳过首次出库，直接进入巡航阶段")
 
     def process(self, w: "FrameWorker"):
+        self._frame_worker = w
         self._begin_frame()
 
         if self._handle_terminal_state(w, "开车模块入口"):
@@ -585,6 +586,25 @@ class DrivingManager:
             f"vision={context.decision}, classes={obstacle_classes}] "
             f"[决策:{decision}]"
         )
+        worker = getattr(self, "_frame_worker", None)
+        setter = getattr(worker, "set_frame_decision", None)
+        if callable(setter):
+            setter(
+                observation=(
+                    f"开车阶段：驾驶子状态={self.current_stage}，情况={situation}，"
+                    f"当前位置={context.location}，当前方位={context.direction:.1f}，"
+                    f"速度={speed_text}，圈角={circle_text}，目标角={target_text}，"
+                    f"障碍数量={obstacle_count}，视觉决策={context.decision}，障碍类别={obstacle_classes}"
+                ),
+                target=f"当前开车分支：{situation}",
+                decision=decision,
+                action=decision,
+                method=(
+                    "DrivingManager._log_drive_state "
+                    f"target_direction={target_text}, speed={speed_text}, obstacle_count={obstacle_count}"
+                ),
+                result="等待本帧驾驶动作执行后由下一帧重新识别路况/位置",
+            )
 
     def _begin_frame(self):
         self._frame_action_executed = False

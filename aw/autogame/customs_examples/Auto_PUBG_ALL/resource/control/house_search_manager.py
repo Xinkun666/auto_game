@@ -5349,9 +5349,10 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     R_CITY_FALLBACK_CENTER = (1036, 745)
     R_CITY_FALLBACK_LANDING_TARGET = (990, 757)
-    R_CITY_DEFAULT_NEAR_DISTANCE = 30.0
+    R_CITY_DEFAULT_NEAR_DISTANCE = 50.0
     R_CITY_PRE_SEARCH_DISTANCE = 3.0
     R_CITY_ENTRY_RUNNING_ROUTE_DISTANCE = 30.0
+    R_CITY_ENTRY_MAP_NAV_DISTANCE = 50.0
     R_CITY_DEFAULT_HOUSE_ARRIVAL_DISTANCE = 2.0
     R_CITY_DEFAULT_EARLY_ENTRY_SCENE_DISTANCE = 5.0
     R_CITY_ROUTE_WAYPOINT_DISTANCE = 3.0
@@ -5521,9 +5522,12 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_config = {}
         self.r_city_center = self._load_r_city_center()
         self.r_city_landing_target = self._load_r_city_landing_target()
-        self.r_city_near_distance = self._load_r_city_threshold(
-            "near_region_distance",
-            self.R_CITY_DEFAULT_NEAR_DISTANCE,
+        self.r_city_near_distance = max(
+            self.R_CITY_ENTRY_MAP_NAV_DISTANCE,
+            self._load_r_city_threshold(
+                "near_region_distance",
+                self.R_CITY_DEFAULT_NEAR_DISTANCE,
+            ),
         )
         self.r_city_house_arrival_distance = self._load_r_city_threshold(
             "house_arrival_distance",
@@ -5621,6 +5625,10 @@ class HouseSceneSearchManager(HouseSearchManager):
             current_loc = stable_loc
             self.initial_target_pending = False
 
+        if self.status == self.STATUS_ROUTE_TO_R_CITY:
+            self._handle_route_to_r_city(w, current_loc, current_direction)
+            return
+
         if self.current_house_id is None:
             print("[RCitySearch] 落地后直接从入门点列表选择最近目标，不再前往R城中转点")
             self._select_next_r_city_house(current_loc, current_direction)
@@ -5656,8 +5664,12 @@ class HouseSceneSearchManager(HouseSearchManager):
                 f"当前距离={target_dist:.2f}"
             )
             self.history_locations = []
-            if target_dist > self.R_CITY_ENTRY_RUNNING_ROUTE_DISTANCE:
-                if self._request_r_city_entry_route(w, self.active_entry["location"], target_dist):
+            r_city_dist, _ = self._distance_to_r_city(current_loc)
+            if (
+                r_city_dist is not None
+                and r_city_dist > self.R_CITY_ENTRY_MAP_NAV_DISTANCE
+            ):
+                if self._start_r_city_entry_map_navigation(w, current_loc, r_city_dist):
                     return
 
         target_loc = self.active_entry["location"]
@@ -6187,6 +6199,66 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_route_index = 0
         self.status = self.STATUS_ROUTE_TO_R_CITY
         callback(w, self.r_city_landing_target, reason)
+        return True
+
+    def _start_r_city_entry_map_navigation(self, w: "FrameWorker", current_loc, r_city_dist: float) -> bool:
+        if not self.active_entry:
+            return False
+
+        target_loc = self._location_tuple(self.active_entry.get("location"))
+        start_loc = self._location_tuple(current_loc)
+        if target_loc is None or start_loc is None:
+            return False
+
+        path = self._plan_path_safe(start_loc, target_loc)
+        if not path:
+            print(
+                f"[RCitySearch] 距离R城 {r_city_dist:.2f} > {self.R_CITY_ENTRY_MAP_NAV_DISTANCE:.1f}，"
+                "但 map_navigation 未能规划路径，继续 FAST_NAV 直冲"
+            )
+            self._set_frame_decision(
+                w,
+                (
+                    f"距离R城 {r_city_dist:.2f} > {self.R_CITY_ENTRY_MAP_NAV_DISTANCE:.1f}，"
+                    f"当前位置={start_loc}，最近入门点={target_loc}"
+                ),
+                "本应使用 map_navigation 绕开不可通行区域，但路径规划失败，保留FAST_NAV直冲兜底",
+                action="保留FAST_NAV直冲",
+                method="map_tool.plan_path() returned empty",
+                result="下一帧继续朝最近入门点推进",
+            )
+            return False
+
+        self.r_city_route_path = path
+        self.r_city_route_index = 0
+        self.r_city_route_target = {
+            "id": self.active_entry.get("r_city_target_id", "nearest_entry"),
+            "house_id": self.active_entry.get("house_id"),
+            "location": target_loc,
+            "approach_location": target_loc,
+            "side": self._side_from_location(target_loc),
+            "entry_direction": self.active_entry.get("direction", 0),
+        }
+        self.status = self.STATUS_ROUTE_TO_R_CITY
+        self.stop_auto_forward(w)
+        self.history_locations = []
+        self.r_city_route_stuck_cycles = 0
+        self._set_frame_decision(
+            w,
+            (
+                f"距离R城 {r_city_dist:.2f} > {self.R_CITY_ENTRY_MAP_NAV_DISTANCE:.1f}，"
+                f"当前位置={start_loc}，最近入门点={target_loc}，路径点数={len(path)}"
+            ),
+            "当前位置离R城较远，先用map_navigation规划到R城附近，规避地图不可通行区域",
+            action="启动R城入门点地图导航",
+            method="map_tool.plan_path(current_loc, nearest_entry); status=ROUTE_TO_R_CITY",
+            result="进入R城50距离内后停止路线导航，再直接FAST_NAV冲最近入门点",
+        )
+        print(
+            f"[RCitySearch] 距离R城 {r_city_dist:.2f} > {self.R_CITY_ENTRY_MAP_NAV_DISTANCE:.1f}，"
+            f"用map_navigation前往最近入门点附近: start={start_loc}, target={target_loc}, "
+            f"path_points={len(path)}"
+        )
         return True
 
     def _request_r_city_entry_route(self, w: "FrameWorker", target_loc, dist: float) -> bool:

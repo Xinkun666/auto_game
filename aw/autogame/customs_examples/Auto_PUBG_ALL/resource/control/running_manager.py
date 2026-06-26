@@ -333,7 +333,6 @@ class RunningManager:
     WAYPOINT_PRECISE_BIAS_Y = -120
     WAYPOINT_PRECISE_DURA = 180
     WAYPOINT_PRECISE_WAIT = 350
-    UNSTUCK_MOVE_THRESHOLD = 0.8
     UNSTUCK_STEP_DURA = 360
     UNSTUCK_STEP_WAIT = 900
     UNSTUCK_TURN_BIAS = 360
@@ -342,20 +341,6 @@ class RunningManager:
     UNSTUCK_REPEAT_RADIUS = 3.0
     UNSTUCK_SAME_POINT_RADIUS = 3.0
     UNSTUCK_BACK_Y_BIAS = 300
-    UNSTUCK_SIDE_X_BIAS = 300
-    UNSTUCK_FORWARD_Y_BIAS = -300
-    UNSTUCK_LARGE_TURN_BIAS = 720
-    UNSTUCK_LARGE_TURN_DURA = 850
-    UNSTUCK_LARGE_TURN_WAIT = 500
-    UNSTUCK_LARGE_WAIT_SECONDS = 3.0
-    UNSTUCK_LARGE_SIDE_WAIT = 3000
-    UNSTUCK_MAX_ESCALATION_LEVEL = 3
-    UNSTUCK_ESCALATE_BIAS_STEP = 120
-    UNSTUCK_ESCALATE_DURA_STEP = 180
-    UNSTUCK_ESCALATE_WAIT_STEP = 450
-    UNSTUCK_ESCALATE_TURN_BIAS_STEP = 180
-    UNSTUCK_ESCALATE_TURN_DURA_STEP = 160
-    UNSTUCK_ESCALATE_TURN_WAIT_STEP = 120
     WAYPOINT_PROJECTION_PASS_RATIO = 1.0
     WAYPOINT_PROJECTION_CORRIDOR = 12.0
     # 单帧位置跳变超过这个距离时，认为定位异常，需要重规划
@@ -2345,33 +2330,6 @@ class RunningManager:
             self.unstuck_area_attempts = 1
         return self.unstuck_area_attempts
 
-    def _unstuck_escalation_level(self, attempt: int) -> int:
-        return int(min(self.UNSTUCK_MAX_ESCALATION_LEVEL, max(0, attempt - 1)))
-
-    def _scaled_unstuck_bias(self, bias: int, level: int) -> int:
-        if bias == 0 or level <= 0:
-            return bias
-        sign = 1 if bias > 0 else -1
-        return bias + sign * self.UNSTUCK_ESCALATE_BIAS_STEP * level
-
-    def _unstuck_move_motion(self, x_bias: int, y_bias: int, level: int):
-        return (
-            self._scaled_unstuck_bias(x_bias, level),
-            self._scaled_unstuck_bias(y_bias, level),
-            self.UNSTUCK_STEP_DURA + self.UNSTUCK_ESCALATE_DURA_STEP * level,
-            self.UNSTUCK_STEP_WAIT + self.UNSTUCK_ESCALATE_WAIT_STEP * level,
-        )
-
-    def _unstuck_turn_motion(self, turn_bias: int, level: int):
-        if level <= 0:
-            return turn_bias, self.UNSTUCK_TURN_DURA, self.UNSTUCK_TURN_WAIT
-        sign = 1 if turn_bias > 0 else -1
-        return (
-            turn_bias + sign * self.UNSTUCK_ESCALATE_TURN_BIAS_STEP * level,
-            self.UNSTUCK_TURN_DURA + self.UNSTUCK_ESCALATE_TURN_DURA_STEP * level,
-            self.UNSTUCK_TURN_WAIT + self.UNSTUCK_ESCALATE_TURN_WAIT_STEP * level,
-        )
-
     def _perform_unstuck_action(self, w: "FrameWorker", current_loc: Tuple[int, int]):
         if self._try_house_exit_when_indoor(w, current_loc, None, "脱困前检测"):
             return
@@ -2383,21 +2341,19 @@ class RunningManager:
             f"same_point_radius={self.UNSTUCK_SAME_POINT_RADIUS}, reference={self.unstuck_reference_loc}"
         )
 
-        print("[Running] 执行U型避障：先左U，再右U，仍在同一卡点则大范围避障")
-        self._log_running_state("人物卡死", current_loc, None, "执行U型避障：后拉-左滑-前冲")
-        if self._try_unstuck_u_escape(w, current_loc, "left"):
-            return
+        print("[Running] 人物疑似撞墙/卡住，只执行后拉避让，取消跑图绕房避障")
+        self._log_running_state("人物卡死", current_loc, None, "后拉避让后重新规划")
+        self._tap_unstuck_joystick(w, "撞墙后拉避让", 0, self.UNSTUCK_BACK_Y_BIAS)
 
-        self._log_running_state("人物卡死", current_loc, None, "左U后仍在同一卡点，执行右U")
-        if self._try_unstuck_u_escape(w, current_loc, "right"):
-            return
+        new_loc = self._get_location(w)
+        if new_loc is not None:
+            self.locations = [new_loc]
+            self.history_locations = [new_loc]
+            self.last_valid_location = new_loc
 
-        self._log_running_state("人物卡死", current_loc, None, "左右U后仍在同一卡点，启动大范围避障")
-        if self._execute_large_area_unstuck(w, current_loc):
-            return
-
-        print("[Running] 本轮脱困未产生有效位移，清空路径等待下一帧重新判断")
+        print("[Running] 后拉避让完成，清空路径等待下一帧重新规划")
         self.stuck = False
+        self.trapped = False
         self.loading_road = False
         self.road_list = []
         self.current_segment_start = None
@@ -2428,7 +2384,7 @@ class RunningManager:
     ):
         move_wait = self.UNSTUCK_STEP_WAIT if wait is None else wait
         print(
-            f"[Running] U型避障动作: {label}, x_bias={x_bias}, y_bias={y_bias}, "
+            f"[Running] 后拉避让动作: {label}, x_bias={x_bias}, y_bias={y_bias}, "
             f"dura={self.UNSTUCK_STEP_DURA}, wait={move_wait}"
         )
         w.tap_single(
@@ -2439,172 +2395,6 @@ class RunningManager:
             wait=move_wait,
         )
         w.refresh_frame()
-
-    def _try_unstuck_u_escape(
-        self,
-        w: "FrameWorker",
-        current_loc: Tuple[int, int],
-        side: str,
-    ) -> bool:
-        side_label = "左" if side == "left" else "右"
-        side_bias = -self.UNSTUCK_SIDE_X_BIAS if side == "left" else self.UNSTUCK_SIDE_X_BIAS
-        print(f"[Running] U型避障{side_label}U：先后拉，再{side_label}滑，最后前冲")
-
-        self._tap_unstuck_joystick(w, f"{side_label}U后拉", 0, self.UNSTUCK_BACK_Y_BIAS)
-        self._tap_unstuck_joystick(w, f"{side_label}U{side_label}滑", side_bias, 0)
-        self._tap_unstuck_joystick(w, f"{side_label}U前冲", 0, self.UNSTUCK_FORWARD_Y_BIAS)
-
-        loc_after = self._get_location(w)
-        same_point = self._same_unstuck_point(current_loc, loc_after)
-        dist_text = "None" if loc_after is None else f"{get_distance(current_loc, loc_after):.2f}"
-        print(
-            f"[Running] {side_label}U后卡点复核: origin={current_loc}, current={loc_after}, "
-            f"dist={dist_text}, same_point={same_point}"
-        )
-        if same_point:
-            return False
-
-        self._finish_unstuck_success(loc_after, f"{side_label}U避障")
-        return True
-
-    def _execute_large_area_unstuck(self, w: "FrameWorker", current_loc: Tuple[int, int]) -> bool:
-        print("[Running] 启动大范围避障：视角往后调，自动前进3s，连续左滑，再朝目标前冲")
-        w.tap_single(
-            "视角",
-            x_bias=self.UNSTUCK_LARGE_TURN_BIAS,
-            dura=self.UNSTUCK_LARGE_TURN_DURA,
-            wait=self.UNSTUCK_LARGE_TURN_WAIT,
-        )
-        w.refresh_frame()
-
-        if not self.auto_forward:
-            w.click("自动前进")
-            self.auto_forward = True
-        time.sleep(self.UNSTUCK_LARGE_WAIT_SECONDS)
-        w.refresh_frame()
-
-        for step in range(2):
-            self._tap_unstuck_joystick(
-                w,
-                f"大范围避障左滑{step + 1}/2",
-                -self.UNSTUCK_SIDE_X_BIAS,
-                0,
-                wait=self.UNSTUCK_LARGE_SIDE_WAIT,
-            )
-
-        target = self.road_list[0] if self.road_list else None
-        loc_before_forward = self._get_location(w) or current_loc
-        direction = w.get_info("direction")
-        if target is not None and direction is not None:
-            self._align_to_point(w, loc_before_forward, direction, target, threshold=8, max_steps=2)
-            w.refresh_frame()
-
-        self._tap_unstuck_joystick(w, "大范围避障后朝目标前冲", 0, self.UNSTUCK_FORWARD_Y_BIAS)
-        loc_after = self._get_location(w)
-        if self._same_unstuck_point(current_loc, loc_after):
-            print(f"[Running] 大范围避障后仍在同一卡点: origin={current_loc}, current={loc_after}")
-            return False
-
-        self._finish_unstuck_success(loc_after, "大范围避障")
-        return True
-
-    def _try_unstuck_backoff_escape(
-        self,
-        w: "FrameWorker",
-        origin: Tuple[int, int],
-        label: str,
-        backoff_x_bias: int,
-        backoff_y_bias: int,
-        escalation_level: int = 0,
-    ) -> bool:
-        if not self._try_unstuck_move(
-            w,
-            origin,
-            label,
-            backoff_x_bias,
-            backoff_y_bias,
-            escalation_level,
-            finalize_success=False,
-        ):
-            return False
-
-        backoff_loc = self._get_location(w) or origin
-        side_x_bias = -300 if backoff_x_bias < 0 else 300
-        side_label = "左后撤后左侧移" if backoff_x_bias < 0 else "右后撤后右侧移"
-        print(
-            f"[Running] {label}已拉开距离，继续同侧侧移绕开原障碍: "
-            f"side_x_bias={side_x_bias}, loc={backoff_loc}"
-        )
-        if not self._try_unstuck_move(
-            w,
-            backoff_loc,
-            side_label,
-            side_x_bias,
-            0,
-            escalation_level,
-            finalize_success=False,
-        ):
-            return False
-
-        side_loc = self._get_location(w) or backoff_loc
-        print(f"[Running] {side_label}后执行前探确认，不再直接撞回原障碍: loc={side_loc}")
-        return self._try_unstuck_move(
-            w,
-            side_loc,
-            f"{side_label}后前探",
-            0,
-            -260,
-            escalation_level,
-        )
-
-    def _try_unstuck_move(
-        self,
-        w: "FrameWorker",
-        origin: Tuple[int, int],
-        label: str,
-        x_bias: int,
-        y_bias: int,
-        escalation_level: int = 0,
-        finalize_success: bool = True,
-    ) -> bool:
-        move_x_bias, move_y_bias, dura, wait = self._unstuck_move_motion(
-            x_bias,
-            y_bias,
-            escalation_level,
-        )
-        print(
-            f"[Running] 脱困动作: {label}, level={escalation_level}, "
-            f"x_bias={move_x_bias}, y_bias={move_y_bias}, dura={dura}, wait={wait}"
-        )
-        w.tap_single(
-            "摇杆",
-            x_bias=move_x_bias,
-            y_bias=move_y_bias,
-            dura=dura,
-            wait=wait,
-        )
-        w.refresh_frame()
-        new_loc = self._get_location(w)
-        if not new_loc:
-            return False
-
-        moved = get_distance(origin, new_loc)
-        if moved < self.UNSTUCK_MOVE_THRESHOLD:
-            return False
-        if not finalize_success:
-            print(f"[Running] 脱困阶段动作 {label} 产生位移 {moved:.2f}，继续组合动作验证")
-            return True
-
-        print(f"[Running] 脱困产生有效位移 {moved:.2f}，从新位置重新规划路径")
-        self.stuck = False
-        self.trapped = False
-        self.loading_road = False
-        self.road_list = []
-        self.current_segment_start = None
-        self.locations = [new_loc]
-        self.history_locations = [new_loc]
-        self.last_valid_location = new_loc
-        return True
 
     def _click_jump_if_available(
         self,

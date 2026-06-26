@@ -1448,7 +1448,7 @@ class HouseSearchManager:
     def _maybe_bypass_front_house_on_route(self, w: 'FrameWorker', current_loc, target_loc, dist, phase_label='NAV'):
         print(
             f"[NavBypass] {phase_label} 主动绕房已取消；"
-            f"移动中只在卡住且 house_scene=near_wall 时执行后拉、确认前方房体、按目标角度绕开"
+            f"移动中只在卡住且 house_scene=near_wall 时执行后拉避让"
         )
         return False
 
@@ -2715,7 +2715,7 @@ class HouseSearchManager:
                     dist=f"{dist:.2f}",
                     extra=f"current_direction={current_direction}, auto_forward={self.auto_forward}",
                 ),
-                "距离入门点较远，先对准入门点并保持自动前进，期间只处理贴墙/跳跃/卡住/绕房",
+                "距离入门点较远，先对准入门点并保持自动前进，期间只处理贴墙/跳跃/卡住",
                 action="对准入门点并自动前进",
                 method="align_direction(); click(自动前进); handle_jump_logic()",
                 result="进入近距离后切 PRECISE_NAV",
@@ -2731,12 +2731,7 @@ class HouseSearchManager:
                 return
 
             # 卡顿检测逻辑
-            if self._is_house_bypass_unstuck_paused():
-                self.history_locations = []
-                print("[Nav] 绕房视角调整/前推冷却中，跳过通用避障检测")
-            elif self.update_and_check_stuck(current_loc):
-                if self._maybe_bypass_front_house_on_route(w, current_loc, target_loc, dist, "FAST_NAV"):
-                    return
+            if self.update_and_check_stuck(current_loc):
                 print("[Nav] 检测到人物卡死，启动避障程序...")
                 self._set_search_frame_decision(
                     w,
@@ -2784,8 +2779,6 @@ class HouseSearchManager:
                 return
 
             self.align_direction(w, target_loc)
-            if self._maybe_bypass_front_house_on_route(w, current_loc, target_loc, dist, "FAST_NAV"):
-                return
 
             if not self.auto_forward:
                 self._set_search_frame_decision(
@@ -2837,12 +2830,7 @@ class HouseSearchManager:
 
             # --- [修改 1] 在精细导航阶段加入卡顿检测 ---
             # 原因：即使在慢速移动时，也可能卡在树根或小障碍物上
-            if self._is_house_bypass_unstuck_paused():
-                self.history_locations = []
-                print("[Nav] (Precise) 绕房视角调整/前推冷却中，跳过通用避障检测")
-            elif self.update_and_check_stuck(current_loc):
-                if self._maybe_bypass_front_house_on_route(w, current_loc, target_loc, dist, "PRECISE_NAV"):
-                    return
+            if self.update_and_check_stuck(current_loc):
                 print("[Nav] (Precise) 检测到人物卡死，启动避障程序...")
                 self._set_search_frame_decision(
                     w,
@@ -2927,8 +2915,6 @@ class HouseSearchManager:
                 return
 
             self.stop_auto_forward(w)
-            if self._maybe_bypass_front_house_on_route(w, current_loc, target_loc, dist, "PRECISE_NAV"):
-                return
 
             self.align_direction(w, target_loc)
             before_dist = dist
@@ -3499,7 +3485,7 @@ class HouseSearchManager:
         if scene_before != self.HOUSE_NEAR_WALL:
             print(
                 f"[Unstuck] 检测到卡住但 house_scene={scene_before}，"
-                f"新绕房策略只在 near_wall 触发，交给通用脱困"
+                f"入口导航后拉避让只在 near_wall 触发，交给通用脱困"
             )
             return False
 
@@ -3507,12 +3493,12 @@ class HouseSearchManager:
 
         backoff_y_bias, backoff_dura, backoff_wait = self._route_stuck_backoff_motion(attempt)
         print(
-            f"[Unstuck] 卡住且 house_scene=near_wall，先后拉再确认前方是否是房子: "
+            f"[Unstuck] 卡住且 house_scene=near_wall，只执行后拉避让，不再绕房: "
             f"attempt={attempt}, y_bias={backoff_y_bias}, dura={backoff_dura}, wait={backoff_wait}"
         )
         self._set_search_frame_decision(
             w,
-            "当前搜房分支：卡住且near_wall，先后拉",
+            "当前搜房分支：卡住且near_wall，只后拉避让",
             self._entry_observation(
                 w,
                 current_loc=current_loc,
@@ -3522,10 +3508,10 @@ class HouseSearchManager:
                     f"dura={backoff_dura}, wait={backoff_wait}"
                 ),
             ),
-            "卡住且贴墙，先后拉拉开空间，再判断前方是否仍是房体",
+            "卡住且贴墙，只后拉拉开空间，下一帧重新规划/继续朝入门点推进",
             action="卡住后拉",
             method=f"tap_single(摇杆, y_bias={backoff_y_bias}, dura={backoff_dura}, wait={backoff_wait})",
-            result="后拉后如果 indoor 则搜房，否则判断是否绕房",
+            result="后拉后如果 indoor 则搜房，否则清空卡住历史并重新规划",
         )
         w.tap_single('摇杆', y_bias=backoff_y_bias, dura=backoff_dura, wait=backoff_wait)
         self._refresh_frame_and_handle_jump(w)
@@ -3537,115 +3523,10 @@ class HouseSearchManager:
                 "卡住后后退复核确认误入房",
             )
 
-        front_block = self._front_house_blocking(w)
-        if not front_block:
-            print("[Unstuck] 后拉后前方未确认是房子，不执行新绕房，交给通用脱困")
-            return False
-
-        print(f"[Unstuck] 后拉后前方确认是房子/入门目标，准备结合目的地角度绕开: target={front_block}")
-        side, relative, target_angle, selected_from_dir = self._choose_route_stuck_bypass_side_by_target_angle(
-            w,
-            self._get_current_location(w) or current_loc,
-            target_loc,
-        )
-        current_dir = selected_from_dir if selected_from_dir is not None else w.get_info('direction')
-        turn_degrees = self.ROUTE_STUCK_HOUSE_BYPASS_TURN_DEGREES
-        if current_dir is not None:
-            try:
-                current_dir_float = float(current_dir)
-            except (TypeError, ValueError):
-                current_dir_float = None
-
-        if current_dir is not None and current_dir_float is not None:
-            turn_delta = turn_degrees if side == "right" else -turn_degrees
-            target_dir = (current_dir_float + turn_delta) % 360
-            print(
-                f"[Unstuck] 前方房体挡路，按目的地角度向{side}侧调整视角: "
-                f"attempt={attempt}, current_dir={current_dir_float:.1f}, "
-                f"target_angle={target_angle}, relative={relative}, "
-                f"turn={turn_delta}°, target_dir={target_dir:.1f}"
-            )
-            self.align_direction_blocking(
-                w,
-                current_dir,
-                target_dir,
-                threshold=10,
-                max_steps=4,
-            )
-            self._refresh_frame_and_handle_jump(w)
-        else:
-            x_bias = (
-                self.ROUTE_STUCK_HOUSE_BYPASS_VIEW_X_BIAS
-                if side == "right"
-                else -self.ROUTE_STUCK_HOUSE_BYPASS_VIEW_X_BIAS
-            )
-            print(
-                f"[Unstuck] 缺少方向角，直接向{side}侧拨动视角绕房: "
-                f"x_bias={x_bias}, dura={self.ROUTE_STUCK_HOUSE_BYPASS_VIEW_DURA}, "
-                f"wait={self.ROUTE_STUCK_HOUSE_BYPASS_VIEW_WAIT}"
-            )
-            w.tap_single(
-                '视角',
-                x_bias=x_bias,
-                dura=self.ROUTE_STUCK_HOUSE_BYPASS_VIEW_DURA,
-                wait=self.ROUTE_STUCK_HOUSE_BYPASS_VIEW_WAIT,
-            )
-            self._refresh_frame_and_handle_jump(w)
-
-        if self._get_house_scene(w) == 0:
-            loc_after_turn = self._get_current_location(w) or current_loc
-            return self._handle_indoor_during_entry_route(
-                w,
-                loc_after_turn,
-                "卡住后转向复核确认误入房",
-            )
-
-        print(
-            f"[Unstuck] 视角已向{side}侧避开前方房体，快速前推绕开: "
-            f"attempt={attempt}, y_bias={self.ROUTE_STUCK_HOUSE_BYPASS_FORWARD_Y_BIAS}, "
-            f"dura={self.ROUTE_STUCK_HOUSE_BYPASS_FORWARD_DURA}, "
-            f"wait={self.ROUTE_STUCK_HOUSE_BYPASS_FORWARD_WAIT}"
-        )
-        self._set_search_frame_decision(
-            w,
-            "当前搜房分支：卡住绕房后快速前推",
-            self._entry_observation(
-                w,
-                current_loc=self._get_current_location(w) or current_loc,
-                target_loc=target_loc,
-                extra=(
-                    f"side={side}, attempt={attempt}, "
-                    f"y_bias={self.ROUTE_STUCK_HOUSE_BYPASS_FORWARD_Y_BIAS}, "
-                    f"dura={self.ROUTE_STUCK_HOUSE_BYPASS_FORWARD_DURA}, "
-                    f"wait={self.ROUTE_STUCK_HOUSE_BYPASS_FORWARD_WAIT}"
-                ),
-            ),
-            "视角已绕开前方房体，快速前推通过障碍侧边",
-            action="绕房快速前推",
-            method=(
-                f"tap_single(摇杆, y_bias={self.ROUTE_STUCK_HOUSE_BYPASS_FORWARD_Y_BIAS}, "
-                f"dura={self.ROUTE_STUCK_HOUSE_BYPASS_FORWARD_DURA}, "
-                f"wait={self.ROUTE_STUCK_HOUSE_BYPASS_FORWARD_WAIT})"
-            ),
-            result="前推后如果进房则搜房，否则恢复原入门点方向",
-        )
-        w.tap_single(
-            '摇杆',
-            y_bias=self.ROUTE_STUCK_HOUSE_BYPASS_FORWARD_Y_BIAS,
-            dura=self.ROUTE_STUCK_HOUSE_BYPASS_FORWARD_DURA,
-            wait=self.ROUTE_STUCK_HOUSE_BYPASS_FORWARD_WAIT,
-        )
-        self._refresh_frame_and_handle_jump(w)
-
-        if self._get_house_scene(w) == 0:
-            loc_after_forward = self._get_current_location(w) or current_loc
-            return self._handle_indoor_during_entry_route(
-                w,
-                loc_after_forward,
-                "绕障前推后确认误入房",
-            )
-
-        self._resume_entry_direction_after_bypass(w, target_loc)
+        loc_after_back = self._get_current_location(w)
+        if loc_after_back is not None:
+            current_loc = loc_after_back
+        print(f"[Unstuck] near_wall 后拉避让完成，从 {current_loc} 重新规划/继续入门点导航")
         self.history_locations = []
         return True
 
@@ -5703,7 +5584,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                     f"FAST_NAV：当前位置={current_loc}，目标入门点={target_loc}，"
                     f"距离={dist:.2f}，方位={current_direction}"
                 ),
-                "继续快速导航到锁定入门点，期间只处理卡住、贴门墙和前方房屋绕行",
+                "继续快速导航到锁定入门点，期间只处理卡住、贴门墙和跳跃",
                 action="朝入门点自动前进",
                 method="align_direction(); click(自动前进); handle_jump_logic()",
                 result="到达分段导航范围后切PRECISE_NAV",
@@ -5759,17 +5640,6 @@ class HouseSceneSearchManager(HouseSearchManager):
                 )
                 self.stop_auto_forward(w)
                 self.status = "PRECISE_NAV"
-                return
-
-            if self._maybe_bypass_front_house_on_route(w, current_loc, target_loc, dist, "FAST_NAV"):
-                self._set_frame_decision(
-                    w,
-                    f"FAST_NAV前方检测到房子/石墙干扰，当前位置={current_loc}，目标={target_loc}",
-                    "调整视野并绕过前方障碍，避免被其他门或房子吸引",
-                    action="绕过前方房屋/石墙",
-                    method="_maybe_bypass_front_house_on_route()",
-                    result="保持原入门点目标不变",
-                )
                 return
 
             self.align_direction(w, target_loc)
@@ -5865,17 +5735,6 @@ class HouseSceneSearchManager(HouseSearchManager):
                 if near_result in {"failed", "aborted"}:
                     self.status = "IDLE"
                     return
-                return
-
-            if self._maybe_bypass_front_house_on_route(w, current_loc, target_loc, dist, "PRECISE_NAV"):
-                self._set_frame_decision(
-                    w,
-                    f"PRECISE_NAV前方检测到房子/石墙干扰，当前位置={current_loc}，目标={target_loc}",
-                    "小幅绕过前方障碍，避免在到达入门点前被其他房屋打断",
-                    action="绕过前方房屋/石墙",
-                    method="_maybe_bypass_front_house_on_route()",
-                    result="保持原入门点目标不变",
-                )
                 return
 
             self.stop_auto_forward(w)

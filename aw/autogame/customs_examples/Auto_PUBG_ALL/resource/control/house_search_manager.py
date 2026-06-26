@@ -5433,8 +5433,8 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     ROTATE_SEARCH_MOVE_DURA = 1000
     ROTATE_SEARCH_MOVE_WAIT_PAD = 260
-    ROTATE_SEARCH_X_BIAS = 300
-    ROTATE_SEARCH_Y_BIAS = -390
+    ROTATE_SEARCH_X_BIAS = 250
+    ROTATE_SEARCH_Y_BIAS = -340
     ROTATE_SEARCH_AUTO_TIMEOUT_SECONDS = 90
     ROTATE_SEARCH_AUTO_POLL_SECONDS = 0.35
     ROTATE_SEARCH_WALL_TURN_DEGREES = 60
@@ -7308,7 +7308,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _rotate_search_inside_house(self, w: "FrameWorker"):
         self.stop_auto_forward(w)
-        print("[SceneRotate] 室内搜房改为固定推进转向：顺时针 6 次，逆时针 6 次")
+        print("[SceneRotate] 室内搜房改为固定推进转向：左上+右转一圈，随后出房")
         self._set_search_frame_decision(
             w,
             "当前搜房分支：室内固定推进转向搜索",
@@ -7320,7 +7320,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                     f"turn_px={self.ROTATE_SEARCH_SWEEP_TURN_PX}"
                 ),
             ),
-            "室内按顺时针/逆时针固定推进转向，覆盖入口房间并寻找出房信号",
+            "室内只按左上推进并向右转视角一圈，覆盖入口房间后立即进入出房策略",
             action="执行室内旋转搜房计划",
             method="_move_rotate_search_sweep_step(); _turn_raw_pixels()",
             result="检测到屋外信号则复核出房，否则完成后进入出房策略",
@@ -7328,7 +7328,6 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         search_plan = (
             ("顺时针", "left_up", self.ROTATE_SEARCH_SWEEP_TURN_PX),
-            ("逆时针", "right_up", -self.ROTATE_SEARCH_SWEEP_TURN_PX),
         )
         step_index = 0
         for phase_label, move_mode, turn_px in search_plan:
@@ -7395,7 +7394,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                     continue
 
         self.stop_auto_forward(w)
-        print("[SceneRotate] 顺时针+逆时针各一圈后仍未出房，切出房策略")
+        print("[SceneRotate] 左上+右转一圈后仍未出房，切出房策略")
         return self.ROTATE_RESULT_FALLBACK_EXIT
 
     def _confirm_rotate_exit_or_continue(

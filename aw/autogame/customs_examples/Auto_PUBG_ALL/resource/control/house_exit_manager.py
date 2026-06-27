@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, List, Optional, Sequence
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import (
     execute_view_turn,
 )
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import log_step
 from aw.autogame.tools.Utils import get_resolution, get_wh
 
 def print(*values, sep=" ", end="\n", file=None, flush=False, **_kwargs):
@@ -89,6 +90,13 @@ class HouseExitManager:
         result: str = "",
         target: str = "出房兜底阶段",
     ):
+        log_step(
+            f"当前出房帧日志：{observation}",
+            target=target,
+            action=action or decision,
+            method=method,
+            result=result or decision,
+        )
         setter = getattr(w, "set_frame_decision", None)
         if not callable(setter):
             return

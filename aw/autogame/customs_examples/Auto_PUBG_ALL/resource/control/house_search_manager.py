@@ -10,6 +10,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_g
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_manager import HouseExitManager
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import TimeoutTracker
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import autogame_print as print
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import log_step
 from aw.autogame.tools.Utils import *
 
 if TYPE_CHECKING:
@@ -374,6 +375,13 @@ class HouseSearchManager:
         result: str = "",
         target: str = "搜房阶段",
     ):
+        log_step(
+            f"当前搜房帧日志：{observation}",
+            target=target,
+            action=action or decision,
+            method=method,
+            result=result or decision,
+        )
         setter = getattr(w, "set_frame_decision", None)
         if not callable(setter):
             return
@@ -2584,6 +2592,18 @@ class HouseSearchManager:
         self._refresh_frame_and_handle_jump(w)
         after_loc = self._get_current_location(w)
         after_dist = get_distance(after_loc, target_loc) if after_loc is not None else None
+        log_step(
+            f"近门微调计算完成：before_loc={refreshed_loc}, after_loc={after_loc}, "
+            f"target_loc={target_loc}, before_dist={before_dist}, after_dist={after_dist}, "
+            f"direction={direction}, relative={relative:.1f}",
+            target="当前进房分支：入门点微调反馈",
+            action="记录本次轻推摇杆后的距离变化",
+            method=(
+                f"update_adaptive_motion(direction={direction}, x_bias={used_x_bias}, "
+                f"y_bias={used_y_bias}, dura={used_dura}, wait={used_wait})"
+            ),
+            result="用前后距离反馈更新自适应移动模型，下一帧继续判断是否到达入门点",
+        )
         if direction in ("left", "right"):
             update_adaptive_side_motion(
                 direction,

@@ -81,6 +81,10 @@ def resolve_preview_frame_dir(app_dir: Optional[Path] = None) -> Path:
     return resolve_runtime_temp_dir(app_dir) / "logs" / "process_temp_logs"
 
 
+def resolve_history_temp_dir() -> Path:
+    return Path("aw") / "autogame" / "temp"
+
+
 APP_PATHS = resolve_app_paths()
 APP_DIR = APP_PATHS.app_dir
 INTERNAL_DIR = APP_PATHS.internal_dir
@@ -3103,14 +3107,15 @@ class LauncherWindow(QWidget):
 
     def _refresh_history_outputs(self):
         LOGGER.info("refresh_history_outputs")
-        self.history_records = discover_history_outputs(TEMP_DIR)
+        history_temp_dir = resolve_history_temp_dir()
+        self.history_records = discover_history_outputs(history_temp_dir)
         self.history_tree.clear()
         self._set_selected_history_record(None)
 
         if not self.history_records:
-            self.history_status_label.setText(f"未发现历史归档：{TEMP_DIR}")
+            self.history_status_label.setText(f"未发现历史归档：{history_temp_dir}")
             self.history_summary_edit.setPlainText(
-                f"未发现历史输出归档。\n\n运行完成后，launcher 会把每轮产物归档到：\n{TEMP_DIR}"
+                f"未发现历史输出归档。\n\n运行完成后，launcher 会把每轮产物归档到：\n{history_temp_dir}"
             )
             return
 
@@ -3137,7 +3142,7 @@ class LauncherWindow(QWidget):
         for column in range(3):
             self.history_tree.resizeColumnToContents(column)
 
-        self.history_status_label.setText(f"发现 {len(self.history_records)} 条历史输出：{TEMP_DIR}")
+        self.history_status_label.setText(f"发现 {len(self.history_records)} 条历史输出：{history_temp_dir}")
         first_group = self.history_tree.topLevelItem(0)
         if first_group and first_group.childCount() > 0:
             self.history_tree.setCurrentItem(first_group.child(0))
@@ -3166,14 +3171,15 @@ class LauncherWindow(QWidget):
             QMessageBox.warning(self, "目录不存在", f"历史输出目录不存在：\n{archive_dir}")
             self._refresh_history_outputs()
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(archive_dir)))
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(archive_dir.resolve())))
 
     def _delete_selected_history_output(self):
         if not self.selected_history_record:
             return
         archive_dir = Path(self.selected_history_record["archive_dir"]).resolve()
+        history_temp_dir = resolve_history_temp_dir().resolve()
         try:
-            archive_dir.relative_to(TEMP_DIR.resolve())
+            archive_dir.relative_to(history_temp_dir)
         except ValueError:
             QMessageBox.warning(self, "拒绝删除", f"只能删除 temp 目录下的历史输出：\n{archive_dir}")
             return

@@ -1025,27 +1025,84 @@ def _read_history_text(path: Path, max_chars: int = 200000) -> str:
     return text
 
 
+def _looks_like_history_archive_dir(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    if (path / "archive_info.json").is_file():
+        return True
+    if (path / "logs").is_dir():
+        return True
+    if (path / "process_temp_logs").is_dir():
+        return True
+    if (path / "process_save_frames").is_dir():
+        return True
+    if (path / "preview_10fps.mp4").is_file():
+        return True
+    return False
+
+
+def _iter_history_archive_dirs(temp_dir: Path) -> list[Path]:
+    archive_dirs: list[Path] = []
+    seen: set[Path] = set()
+
+    def add_archive_dir(path: Path):
+        try:
+            key = path.resolve()
+        except OSError:
+            key = path
+        if key in seen:
+            return
+        seen.add(key)
+        archive_dirs.append(path)
+
+    for batch_dir in sorted(temp_dir.iterdir()):
+        if not batch_dir.is_dir() or not batch_dir.name.startswith("game_cases_"):
+            continue
+        run_dirs = [
+            child
+            for child in sorted(batch_dir.iterdir())
+            if child.is_dir() and _looks_like_history_archive_dir(child)
+        ]
+        if run_dirs:
+            for run_dir in run_dirs:
+                add_archive_dir(run_dir)
+        elif _looks_like_history_archive_dir(batch_dir):
+            add_archive_dir(batch_dir)
+
+    for info_path in sorted(temp_dir.rglob("archive_info.json")):
+        add_archive_dir(info_path.parent)
+
+    return archive_dirs
+
+
+def _read_archive_metadata(info_path: Optional[Path]) -> dict:
+    if info_path is None or not info_path.exists() or not info_path.is_file():
+        return {}
+    try:
+        metadata = json.loads(info_path.read_text(encoding="utf-8"))
+        return metadata if isinstance(metadata, dict) else {}
+    except Exception:
+        return {}
+
+
 def discover_history_outputs(temp_dir: Path = TEMP_DIR) -> list[dict]:
     temp_dir = Path(temp_dir)
     if not temp_dir.exists():
         return []
 
     records = []
-    for info_path in sorted(temp_dir.rglob("archive_info.json")):
-        archive_dir = info_path.parent
-        try:
-            metadata = json.loads(info_path.read_text(encoding="utf-8"))
-            if not isinstance(metadata, dict):
-                metadata = {}
-        except Exception:
-            metadata = {}
-
+    for archive_dir in _iter_history_archive_dirs(temp_dir):
+        info_path = archive_dir / "archive_info.json"
+        if not info_path.exists():
+            info_path = None
+        metadata = _read_archive_metadata(info_path)
         logs_dir = archive_dir / "logs"
         launcher_output = _read_history_text(logs_dir / "launcher_output.txt")
         if not launcher_output:
             launcher_output = _read_history_text(logs_dir / "launcher_output_partial.txt")
 
         preview_video = archive_dir / "preview_10fps.mp4"
+        mtime_path = info_path or archive_dir
         record = {
             "archive_dir": archive_dir,
             "batch_dir": archive_dir.parent,
@@ -1068,7 +1125,7 @@ def discover_history_outputs(temp_dir: Path = TEMP_DIR) -> list[dict]:
             "frame_log_count": _count_frame_json_files(archive_dir / "process_temp_logs"),
             "preview_video_path": preview_video,
             "preview_video_exists": preview_video.exists() and preview_video.is_file(),
-            "mtime": info_path.stat().st_mtime,
+            "mtime": mtime_path.stat().st_mtime,
         }
         records.append(record)
 

@@ -578,6 +578,21 @@ class HouseExitManager:
 
         target_dir = (self.scan_anchor_direction + self.SCAN_OFFSETS[self.scan_index]) % 360
         print(f"[HouseExit] 扫视角度 {target_dir:.1f}")
+        self._set_frame_decision(
+            w,
+            (
+                f"出房兜底扫门：scan_index={self.scan_index + 1}/{len(self.SCAN_OFFSETS)}，"
+                f"anchor_dir={self.scan_anchor_direction}，current_dir={current_dir}，"
+                f"target_dir={target_dir:.1f}，house_scene={self._get_house_scene(w)}"
+            ),
+            "当前没有直接看到门/窗，按扫描锚点转到下一个角度找出口",
+            action="转向扫描门窗",
+            method=(
+                f"_align_direction_blocking(current_dir={current_dir}, "
+                f"target_dir={target_dir:.1f}, tolerance=8)"
+            ),
+            result="转向并刷新后重新识别 forward_scene 中的门/窗",
+        )
         self._align_direction_blocking(w, current_dir, target_dir, tolerance=8)
         w.refresh_frame()
         if self._handle_terminal_state(w, "扫描出口时检测到死亡或结算界面，结束出房流程"):
@@ -592,6 +607,14 @@ class HouseExitManager:
 
     def _handle_no_exit_after_scan(self, w: "FrameWorker") -> bool:
         scene = self._get_house_scene(w)
+        self._set_frame_decision(
+            w,
+            f"出房兜底一轮扫门结束仍未发现门窗，house_scene={scene}",
+            "根据当前是否贴墙/贴门决定撞墙恢复或死胡同随机逃逸",
+            action="选择扫门失败后的兜底动作",
+            method="_handle_no_exit_after_scan()",
+            result="贴墙则后拉掉头，否则启动随机逃逸",
+        )
         if scene in {self.HOUSE_NEAR_DOOR, self.HOUSE_NEAR_WALL}:
             if self._recover_from_wall_and_turn_back(w):
                 return True
@@ -599,6 +622,18 @@ class HouseExitManager:
 
     def _recover_from_wall_and_turn_back(self, w: "FrameWorker") -> bool:
         print("[HouseExit] 左右扫视仍是墙，先后拉再向后调转方向")
+        self._set_frame_decision(
+            w,
+            f"出房兜底撞墙恢复：house_scene={self._get_house_scene(w)}，"
+            f"back_dura={self.WALL_BACKOFF_DURA}，turn_back_degrees={self.WALL_TURN_BACK_DEGREES}",
+            "多角度扫门仍处于贴墙/贴门，先后拉脱离墙面，再掉头继续找出口",
+            action="后拉并掉头",
+            method=(
+                f"_move_backward(dura={self.WALL_BACKOFF_DURA}, wait={self.WALL_BACKOFF_WAIT}); "
+                f"_align_direction_blocking(+{self.WALL_TURN_BACK_DEGREES}deg)"
+            ),
+            result="刷新后重新判断是否看到门/窗或已经出房",
+        )
         self._move_backward(w, dura=self.WALL_BACKOFF_DURA, wait=self.WALL_BACKOFF_WAIT)
         w.refresh_frame()
         if self._handle_terminal_state(w, "撞墙后拉时检测到死亡或结算界面，结束出房流程"):
@@ -626,6 +661,15 @@ class HouseExitManager:
 
     def _escape_dead_end_randomly(self, w: "FrameWorker") -> bool:
         print("[HouseExit] 仍未发现门窗，启动自动前进随机跑动脱离死胡同")
+        self._set_frame_decision(
+            w,
+            f"出房兜底死胡同逃逸启动：steps={self.DEAD_END_ESCAPE_STEPS}，"
+            f"house_scene={self._get_house_scene(w)}",
+            "扫门和撞墙恢复都没有找到门窗，启动自动前进并随机转向/侧移寻找出口",
+            action="启动自动前进随机逃逸",
+            method="_start_auto_forward(); random turn + side move loop",
+            result="过程中一旦看到门/窗或室外信号就停止随机逃逸",
+        )
         self._start_auto_forward(w)
         for step in range(self.DEAD_END_ESCAPE_STEPS):
             w.refresh_frame()
@@ -648,6 +692,24 @@ class HouseExitManager:
             turn_sign = random.choice((-1, 1))
             side_sign = random.choice((-1, 1))
             print(f"[HouseExit] 死胡同随机跑动 {step + 1}/{self.DEAD_END_ESCAPE_STEPS}")
+            self._set_frame_decision(
+                w,
+                (
+                    f"出房兜底死胡同随机跑动：step={step + 1}/{self.DEAD_END_ESCAPE_STEPS}，"
+                    f"turn_sign={turn_sign}，side_sign={side_sign}，"
+                    f"turn_x_bias={turn_sign * self.DEAD_END_ESCAPE_TURN_X_BIAS}，"
+                    f"side_x_bias={side_sign * self.DEAD_END_ESCAPE_SIDE_X_BIAS}"
+                ),
+                "当前仍未看到门/窗，随机转视角并侧向推进，扩大出口搜索范围",
+                action="随机转向并侧移",
+                method=(
+                    f"tap_single(视角, x_bias={turn_sign * self.DEAD_END_ESCAPE_TURN_X_BIAS}, "
+                    f"dura={self.DEAD_END_ESCAPE_TURN_DURA}); "
+                    f"tap_single(摇杆, x_bias={side_sign * self.DEAD_END_ESCAPE_SIDE_X_BIAS}, "
+                    f"y_bias=-300, dura={self.DEAD_END_ESCAPE_SIDE_DURA})"
+                ),
+                result="下一帧继续检查门/窗和出房信号",
+            )
             w.tap_single(
                 "视角",
                 x_bias=turn_sign * self.DEAD_END_ESCAPE_TURN_X_BIAS,
@@ -673,12 +735,35 @@ class HouseExitManager:
         if current_dir is not None:
             target_dir = (current_dir + 180) % 360
             print(f"[HouseExit] 多角度未发现门窗，先调转 180 度到 {target_dir:.1f}")
+            self._set_frame_decision(
+                w,
+                f"旧兜底出房扫描失败：current_dir={current_dir}，target_dir={target_dir:.1f}",
+                "旧兜底流程未发现门窗，先调转180度尝试找原路/出口方向",
+                action="调转180度",
+                method=(
+                    f"_align_direction_blocking(current_dir={current_dir}, "
+                    f"target_dir={target_dir:.1f}, tolerance=12, max_steps=8)"
+                ),
+                result="转身刷新后再执行左右上推进兜底",
+            )
             self._align_direction_blocking(w, current_dir, target_dir, tolerance=12, max_steps=8)
             w.refresh_frame()
             if self._handle_terminal_state(w, "旧兜底转身后检测到死亡或结算界面，结束出房流程"):
                 return True
 
         print("[HouseExit] 未发现门窗，左上推动摇杆 5s 尝试出房")
+        self._set_frame_decision(
+            w,
+            f"旧兜底左上推进：x_bias={-self.NO_EXIT_ESCAPE_X_BIAS}，"
+            f"y_bias={self.NO_EXIT_ESCAPE_Y_BIAS}，dura={self.NO_EXIT_ESCAPE_DURA}",
+            "仍未发现门窗，先左上长推尝试穿出死角",
+            action="左上长推逃逸",
+            method=(
+                f"tap_single(摇杆, x_bias={-self.NO_EXIT_ESCAPE_X_BIAS}, "
+                f"y_bias={self.NO_EXIT_ESCAPE_Y_BIAS}, dura={self.NO_EXIT_ESCAPE_DURA})"
+            ),
+            result="刷新后检查是否出房",
+        )
         w.tap_single(
             "摇杆",
             x_bias=-self.NO_EXIT_ESCAPE_X_BIAS,
@@ -691,6 +776,18 @@ class HouseExitManager:
             return True
 
         print("[HouseExit] 未发现门窗，右上推动摇杆 5s 尝试出房")
+        self._set_frame_decision(
+            w,
+            f"旧兜底右上推进：x_bias={self.NO_EXIT_ESCAPE_X_BIAS}，"
+            f"y_bias={self.NO_EXIT_ESCAPE_Y_BIAS}，dura={self.NO_EXIT_ESCAPE_DURA}",
+            "左上长推仍未确认出房，换右上长推尝试离开死角",
+            action="右上长推逃逸",
+            method=(
+                f"tap_single(摇杆, x_bias={self.NO_EXIT_ESCAPE_X_BIAS}, "
+                f"y_bias={self.NO_EXIT_ESCAPE_Y_BIAS}, dura={self.NO_EXIT_ESCAPE_DURA})"
+            ),
+            result="刷新后检查是否出房",
+        )
         w.tap_single(
             "摇杆",
             x_bias=self.NO_EXIT_ESCAPE_X_BIAS,

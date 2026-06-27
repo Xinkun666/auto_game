@@ -619,6 +619,21 @@ class HouseSearchManager:
 
     def _refresh_frame_and_handle_jump(self, w: 'FrameWorker', reason: str = ""):
         refreshed = w.refresh_frame()
+        current_loc = self._get_current_location(w)
+        current_dir = w.get_info("direction")
+        house_scene = self._get_house_scene(w)
+        forward_scene = self._get_forward_scene(w)
+        log_step(
+            f"当前搜房帧日志：刷新帧后场景快照：reason={reason or '未标注'}，"
+            f"status={getattr(self, 'status', 'UNKNOWN')}，house={getattr(self, 'current_house_id', None)}，"
+            f"当前位置={current_loc}，current_dir={current_dir}，"
+            f"house_scene={house_scene}/{self._house_scene_label(house_scene)}，"
+            f"forward_scene_count={len(forward_scene)}，auto_forward={self.auto_forward}",
+            target="当前搜房分支：刷新帧后场景快照",
+            action="读取刷新后的场景信息",
+            method="w.refresh_frame(); get_info(location/direction/house_scene/forward_scene)",
+            result="后续门口微调、搜房、出房分支基于这次刷新后的识别结果继续判断",
+        )
         jump_reason = reason or f"{getattr(self, 'status', 'UNKNOWN')} 刷新后全局检查"
         self._handle_global_jump_forward_if_visible(w, jump_reason)
         return refreshed

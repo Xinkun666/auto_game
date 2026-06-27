@@ -444,6 +444,13 @@ class DrivingManager:
 
         if self._is_out_of_vehicle(w):
             print("[Driving] 检测到人物已下车，切回跑图阶段")
+            log_step(
+                "当前开车帧日志：开车阶段入口检测到人物已下车，车辆控制UI消失或步行UI成立",
+                target="当前开车分支：已下车",
+                action="停止驾驶并交给 RunningManager",
+                method="_handle_unexpected_vehicle_exit(w)",
+                result="下一帧重新按跑图阶段处理",
+            )
             if hasattr(w, "set_frame_decision"):
                 w.set_frame_decision(
                     observation="开车阶段当前帧检测到人物已下车",
@@ -460,6 +467,13 @@ class DrivingManager:
         context = self._build_context(w)
         if context is None:
             print("[Driving] 当前位置或朝向无效，等待下一帧")
+            log_step(
+                "当前开车帧日志：开车阶段当前位置或朝向无效，无法计算目标方向/障碍转向",
+                target="当前开车分支：位置或朝向无效",
+                action="暂不下发驾驶动作",
+                method="_build_context(w)",
+                result="等待下一帧重新识别车辆位置和方向",
+            )
             if hasattr(w, "set_frame_decision"):
                 w.set_frame_decision(
                     observation="开车阶段当前位置或朝向无效",
@@ -472,6 +486,16 @@ class DrivingManager:
             self._finalize_frame(w)
             return
 
+        log_step(
+            f"当前开车帧日志：开车阶段入口观察：当前位置={context.location}，"
+            f"当前方位={context.direction:.1f}，速度={context.speed}，"
+            f"驾驶子状态={self.current_stage}，视觉决策={context.decision}，"
+            f"障碍数量={int(context.obstacle_info.get('obstacles_count', 0) or 0)}",
+            target="开车阶段",
+            action="根据道路、目标点、障碍和车辆状态继续驾驶",
+            method="DrivingManager.process",
+            result="本帧继续推进驾驶路线",
+        )
         if hasattr(w, "set_frame_decision"):
             w.set_frame_decision(
                 observation=(
@@ -587,23 +611,32 @@ class DrivingManager:
             f"vision={context.decision}, classes={obstacle_classes}] "
             f"[决策:{decision}]"
         )
+        observation = (
+            f"开车阶段：驾驶子状态={self.current_stage}，情况={situation}，"
+            f"当前位置={context.location}，当前方位={context.direction:.1f}，"
+            f"速度={speed_text}，圈角={circle_text}，目标角={target_text}，"
+            f"障碍数量={obstacle_count}，视觉决策={context.decision}，障碍类别={obstacle_classes}"
+        )
+        method = (
+            "DrivingManager._log_drive_state "
+            f"target_direction={target_text}, speed={speed_text}, obstacle_count={obstacle_count}"
+        )
+        log_step(
+            f"当前开车帧日志：{observation}",
+            target=f"当前开车分支：{situation}",
+            action=decision,
+            method=method,
+            result="等待本帧驾驶动作执行后由下一帧重新识别路况/位置",
+        )
         worker = getattr(self, "_frame_worker", None)
         setter = getattr(worker, "set_frame_decision", None)
         if callable(setter):
             setter(
-                observation=(
-                    f"开车阶段：驾驶子状态={self.current_stage}，情况={situation}，"
-                    f"当前位置={context.location}，当前方位={context.direction:.1f}，"
-                    f"速度={speed_text}，圈角={circle_text}，目标角={target_text}，"
-                    f"障碍数量={obstacle_count}，视觉决策={context.decision}，障碍类别={obstacle_classes}"
-                ),
+                observation=observation,
                 target=f"当前开车分支：{situation}",
                 decision=decision,
                 action=decision,
-                method=(
-                    "DrivingManager._log_drive_state "
-                    f"target_direction={target_text}, speed={speed_text}, obstacle_count={obstacle_count}"
-                ),
+                method=method,
                 result="等待本帧驾驶动作执行后由下一帧重新识别路况/位置",
             )
 
@@ -1557,6 +1590,19 @@ class DrivingManager:
             f"stall_frames={self.no_fuel_stall_count}, loc={context.location}, "
             f"circle={self._current_circle_angle_text()}"
         )
+        log_step(
+            f"当前开车帧日志：疑似车辆没油：连续前进不动帧数={self.no_fuel_stall_count}，"
+            f"当前位置={context.location}，当前方位={context.direction:.1f}，"
+            f"速度={context.speed}，圈角={self._current_circle_angle_text()}，"
+            f"视觉决策={context.decision}",
+            target="当前开车分支：疑似车辆没油",
+            action="准备刹车下车并切回跑图",
+            method=(
+                "_check_probable_no_fuel: last_motion_mode=forward, open_forward_stall=True, "
+                f"motion_stalled_this_frame={self.motion_stalled_this_frame}"
+            ),
+            result="交给 _exit_vehicle_to_running 决定是否继续寻车",
+        )
         return True
 
     def _is_open_forward_stall(self, context: DriveContext) -> bool:
@@ -1881,6 +1927,14 @@ class DrivingManager:
         finding_car: bool = False,
     ):
         print(f"[Driving] {reason}")
+        log_step(
+            f"当前开车帧日志：准备从开车切回跑图，原因={reason}，finding_car={finding_car}，"
+            f"current_stage={self.current_stage}",
+            target="当前开车分支：下车切跑图",
+            action="刹车、下车、切换跑图阶段",
+            method="_exit_vehicle_to_running: brake -> off_car -> reset -> change_stage(跑图阶段)",
+            result="下一帧由 RunningManager 接管，必要时继续寻车",
+        )
         self.current_stage = self.STAGE_FINISH
         self._tap_single_control(w, "brake", wait=800, dura=80)
         self._click_control(w, "off_car")
@@ -2238,6 +2292,14 @@ class DrivingManager:
 
     def _handle_unexpected_vehicle_exit(self, w: "FrameWorker"):
         finding_car = self._should_continue_finding_car_after_running_fallback("意外下车")
+        log_step(
+            f"当前开车帧日志：检测到意外下车，finding_car={finding_car}，"
+            f"current_stage={self.current_stage}",
+            target="当前开车分支：意外下车",
+            action="重置开车状态并切回跑图",
+            method="_handle_unexpected_vehicle_exit: reset -> change_stage(跑图阶段)",
+            result="下一帧由 RunningManager 按步行状态继续处理",
+        )
         self.reset(max_driving_time=self.max_driving_time)
         self.next_running_finding_car = finding_car
         w.change_stage("跑图阶段")

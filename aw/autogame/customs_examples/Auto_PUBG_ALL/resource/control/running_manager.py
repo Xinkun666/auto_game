@@ -760,6 +760,13 @@ class RunningManager:
         location = self._get_location(w)
         if location is None:
             print("[Running] 位置无效，尝试小幅前探刷新坐标...")
+            log_step(
+                "当前跑图帧日志：跑图阶段当前帧位置无效，无法计算目标方向和路径距离",
+                target="当前跑图分支：位置无效",
+                action="轻推摇杆刷新坐标",
+                method="w.tap_single(摇杆, y_bias=-250)",
+                result="等待下一帧重新读取位置",
+            )
             if hasattr(w, "set_frame_decision"):
                 w.set_frame_decision(
                     observation="跑图阶段当前帧位置无效",
@@ -773,6 +780,15 @@ class RunningManager:
             return
 
         direction = self._get_scalar(w.get_info("direction"))
+        log_step(
+            f"当前跑图帧日志：跑图阶段入口观察：当前位置={location}，当前方位={direction}，"
+            f"finding_car={self.finding_car}，car_search_mode={self.car_search_mode}，"
+            f"auto_forward={self.auto_forward}，path_len={len(self.road_list)}",
+            target="跑图阶段",
+            action="继续跑图导航，保持自动前进/路线推进",
+            method="RunningManager.process 根据路径/障碍/载具状态决策",
+            result="本帧继续向目标推进",
+        )
         if hasattr(w, "set_frame_decision"):
             w.set_frame_decision(
                 observation=f"跑图阶段：当前位置={location}，当前方位={direction}",
@@ -961,23 +977,32 @@ class RunningManager:
             f"path_len={len(self.road_list)}, precise={self.precise_entering_car}] "
             f"[决策:{decision}]"
         )
+        observation = (
+            f"跑图阶段：子状态={stage}，情况={situation}，当前位置={location}，"
+            f"当前方位={direction_text}，目标={target_text}，距离={dist_text}，"
+            f"圈角={circle_text}，路径点数={len(self.road_list)}，"
+            f"auto_forward={self.auto_forward}"
+        )
+        method = (
+            "RunningManager._log_running_state "
+            f"target={target_text}, dist={dist_text}, precise={self.precise_entering_car}"
+        )
+        log_step(
+            f"当前跑图帧日志：{observation}",
+            target=f"当前跑图分支：{situation}",
+            action=decision,
+            method=method,
+            result="等待本帧动作执行后由下一帧重新识别位置/场景",
+        )
         worker = getattr(self, "_frame_worker", None)
         setter = getattr(worker, "set_frame_decision", None)
         if callable(setter):
             setter(
-                observation=(
-                    f"跑图阶段：子状态={stage}，情况={situation}，当前位置={location}，"
-                    f"当前方位={direction_text}，目标={target_text}，距离={dist_text}，"
-                    f"圈角={circle_text}，路径点数={len(self.road_list)}，"
-                    f"auto_forward={self.auto_forward}"
-                ),
+                observation=observation,
                 target=f"当前跑图分支：{situation}",
                 decision=decision,
                 action=decision,
-                method=(
-                    "RunningManager._log_running_state "
-                    f"target={target_text}, dist={dist_text}, precise={self.precise_entering_car}"
-                ),
+                method=method,
                 result="等待本帧动作执行后由下一帧重新识别位置/场景",
             )
 

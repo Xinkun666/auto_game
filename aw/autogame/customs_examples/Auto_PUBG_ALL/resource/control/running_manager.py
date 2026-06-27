@@ -24,6 +24,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import (
     TimeoutTracker,
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import autogame_print as print
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import log_step
 
 if TYPE_CHECKING:
     from aw.autogame.tools.GameFrameWorker import FrameWorker
@@ -3694,6 +3695,15 @@ class RunningManager:
         max_steps: int = 1,
     ) -> bool:
         target_dir = calculate_angle(location, target)
+        distance = get_distance(location, target)
+        log_step(
+            f"当前跑图要计算目标方向：current_loc={location}, target_loc={target}, "
+            f"current_dir={direction}, target_angle={target_dir}, distance={distance:.2f}",
+            target="跑图目标方向计算",
+            action=f"判断当前朝向是否需要先对齐目标点，threshold={threshold}",
+            method="calculate_angle(location, target) + execute_view_turn()",
+            result="如果角度差超过阈值，本帧先滑动视角；否则继续移动",
+        )
         return execute_view_turn(
             w,
             direction,
@@ -3844,8 +3854,29 @@ class RunningManager:
 
         target_dir = calculate_angle(location, target)
         turn_dir, pixel, diff = calculate_move_count(direction, target_dir)
+        distance = get_distance(location, target)
+        if diff is None:
+            log_step(
+                f"当前跑图要计算目标方向：current_loc={location}, target_loc={target}, "
+                f"current_dir={direction}, target_angle={target_dir}，角度差计算失败",
+                target="跑图路径点推进",
+                action="跳过本帧方向调整",
+                method="calculate_angle() + calculate_move_count()",
+                result="等待下一帧重新读取 direction/location 后再判断",
+            )
+            self._log_running_state("目标方向计算失败", location, direction, "等待下一帧", target, distance)
+            return
+        log_step(
+            f"当前跑图要计算目标方向：current_loc={location}, target_loc={target}, "
+            f"current_dir={direction}, target_angle={target_dir}, angle_diff={diff}, "
+            f"distance={distance:.2f}, turn_dir={turn_dir}, pixel={pixel}",
+            target="跑图路径点推进",
+            action="根据目标点方向决定保持自动前进还是先修正视角",
+            method="calculate_angle() + calculate_move_count()",
+            result="角度差 <= 5 则保持自动前进，否则调用统一视角调整模型",
+        )
         if abs(diff) <= 5:
-            self._log_running_state("前方路径正常", location, direction, "保持自动前进", target, get_distance(location, target))
+            self._log_running_state("前方路径正常", location, direction, "保持自动前进", target, distance)
             return
 
         motion_ok = execute_view_turn(

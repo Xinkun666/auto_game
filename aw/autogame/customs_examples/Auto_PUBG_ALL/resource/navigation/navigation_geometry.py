@@ -4,6 +4,7 @@ import math
 import json
 import numpy as np
 from sklearn.cluster import DBSCAN
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import log_step
 
 RESOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_ROUTE_IMAGE_PATH = os.path.join(RESOURCE_DIR, "map", "hpjy.png")
@@ -643,10 +644,35 @@ def execute_view_turn(
         if motion is None:
             return False
         if motion["diff"] <= threshold:
+            log_step(
+                f"当前要调整视角：current_dir={current_angle}, target_dir={target_angle}, "
+                f"angle_diff={motion['diff']:.1f}，已经小于阈值 threshold={threshold}",
+                target="视角角度调节",
+                action="不再滑动视角，保持当前方向",
+                method="execute_view_turn()",
+                result="当前方向已经满足本帧目标",
+            )
             return True
         if not motion["px"]:
+            log_step(
+                f"当前要调整视角：current_dir={current_angle}, target_dir={target_angle}, "
+                f"angle_diff={motion['diff']:.1f}，计算得到滑动像素为 0",
+                target="视角角度调节",
+                action="跳过本次视角滑动",
+                method="calculate_move_count() -> px=0",
+                result="等待下一帧重新确认方向",
+            )
             return True
 
+        log_step(
+            f"当前要调整视角：current_dir={current_angle}, target_dir={target_angle}, "
+            f"angle_diff={motion['diff']:.1f}，turn_dir={motion['turn_dir']}，"
+            f"准备把视角滑动 x_bias={motion['x_bias']}",
+            target="视角角度调节",
+            action=f"向{('右' if motion['turn_dir'] == 'right' else '左')}调整视角",
+            method=f"tap_single(视角, x_bias={motion['x_bias']}, dura={motion['dura']}, wait={wait})",
+            result="下一帧重新读取 direction，确认是否已经对齐目标角度",
+        )
         print(
             f"{log_prefix} current={current_angle}, target={target_angle}, "
             f"diff={motion['diff']:.1f}, bin={motion['angle_key']}, "

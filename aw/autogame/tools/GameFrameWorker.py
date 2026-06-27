@@ -1936,7 +1936,8 @@ class FrameWorker(threading.Thread):
         except Exception as exc:
             print(f"加载业务逻辑失败: {exc}")
             raise
-        self.frame_log_snapshotter = self._load_frame_log_snapshotter(project_case)
+        self.frame_log_snapshotter = self._load_frame_log_hook(project_case, "get_recent_frame_log_snapshot")
+        self.frame_log_context_beginner = self._load_frame_log_hook(project_case, "begin_frame_log_context")
 
         self.buffer = buffer
         self.driver = driver
@@ -1971,6 +1972,7 @@ class FrameWorker(threading.Thread):
         self.current_frame_observations = []
         self.current_frame_actions = []
         self.current_frame_decision = {}
+        self.current_frame_flushed = False
         self.last_gc_time = time.time()
 
         self.click = self._wrap_control_action("click", self.controller.click)
@@ -1982,14 +1984,28 @@ class FrameWorker(threading.Thread):
         self.move_to = self._wrap_control_action("move_to", self.controller.move_to)
         self.move_up = self._wrap_control_action("move_up", self.controller.move_up)
 
-    def _load_frame_log_snapshotter(self, project_case):
+    def _load_frame_log_hook(self, project_case, hook_name):
         module_path = f"aw.autogame.customs_examples.{project_case}.resource.support.structured_log"
         try:
             module = importlib.import_module(module_path)
         except Exception:
             return None
-        snapshotter = getattr(module, "get_recent_frame_log_snapshot", None)
-        return snapshotter if callable(snapshotter) else None
+        hook = getattr(module, hook_name, None)
+        return hook if callable(hook) else None
+
+    def _begin_frame_log_context(self):
+        self._reset_frame_decision()
+        self.current_frame_flushed = False
+        if not callable(self.frame_log_context_beginner):
+            return
+        try:
+            self.frame_log_context_beginner(
+                frame_index=self.frame_index,
+                stage=self.current_stage,
+                group_name=self.current_group,
+            )
+        except Exception as exc:
+            print(f"[FrameWorker] 开启帧日志上下文失败: {exc}")
 
     def _get_frame_runtime_logs(self):
         if not callable(self.frame_log_snapshotter):
@@ -2003,7 +2019,7 @@ class FrameWorker(threading.Thread):
 
     def _queue_visual_frame(self):
         if self.frame is None or not self.viz_proc or self.viz_queue.full():
-            return
+            return False
         frame_meta = {
             "group_name": self.current_group,
             "runtime_logs": self._get_frame_runtime_logs(),
@@ -2011,6 +2027,14 @@ class FrameWorker(threading.Thread):
         }
         self.viz_queue.put((self.frame.copy(), self.current_stage, self.stage_info, self.frame_index, frame_meta))
         self.frame_index += 1
+        return True
+
+    def _flush_current_frame_log(self):
+        if self.current_frame_flushed:
+            return False
+        queued = self._queue_visual_frame()
+        self.current_frame_flushed = True
+        return queued
 
     def _is_launcher_mode(self):
         source = os.environ.get("AUTOGAME_RUN_SOURCE", "").strip().lower()
@@ -2336,9 +2360,9 @@ class FrameWorker(threading.Thread):
                     self.current_group,
                 )
 
-                self._reset_frame_decision()
+                self._begin_frame_log_context()
                 self.on_stage_logic(self)
-                self._queue_visual_frame()
+                self._flush_current_frame_log()
                 time.sleep(0.05)
             except Exception as exc:
                 print(f"[Loop Error] 运行时异常: {exc}")
@@ -2457,6 +2481,7 @@ class FrameWorker(threading.Thread):
         return True
 
     def refresh_frame(self):
+        self._flush_current_frame_log()
         frame = self.buffer.get_latest(must_new=True)
         if frame is None:
             print("[FrameWorker] 刷新失败：缓冲区暂无数据")
@@ -2470,6 +2495,6 @@ class FrameWorker(threading.Thread):
             self.current_group,
         )
 
-        self._queue_visual_frame()
+        self._begin_frame_log_context()
 
         return True

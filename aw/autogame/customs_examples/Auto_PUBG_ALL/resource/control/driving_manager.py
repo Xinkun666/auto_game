@@ -19,6 +19,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_g
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import Cooldown, Stopwatch
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import autogame_print as print
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import log_step
 
 if TYPE_CHECKING:
     from aw.autogame.tools.GameFrameWorker import FrameWorker
@@ -672,17 +673,40 @@ class DrivingManager:
     def _load_path(self, location: Tuple[int, int]):
         target_dist = self._get_circle_distance()
         target_point = self.map_tool.get_target_point(location, self.stable_circle_angle, target_dist)
+        log_step(
+            f"当前开车要规划进圈路径：current_loc={location}, circle_angle={self.stable_circle_angle}, "
+            f"target_distance={target_dist:.2f}, target_loc={target_point}",
+            target="开车路径规划",
+            action="先按圈角和目标距离计算地图目标点，再调用 A* 规划路线",
+            method="get_target_point() + MapNavigator.plan_path()",
+            result="规划成功后使用第一个路径点作为驾驶目标方向",
+        )
         planned_path = self.map_tool.plan_path(location, target_point) if target_point is not None else []
         self.road_list = [tuple(map(int, point)) for point in planned_path if point is not None]
         self.last_planned_circle_angle = self.stable_circle_angle
 
         if self.road_list:
+            log_step(
+                f"开车路径规划成功：current_loc={location}, target_loc={target_point}, "
+                f"path_points={len(self.road_list)}, first_waypoint={self.road_list[0]}",
+                target="开车路径规划",
+                action="进入路径巡航",
+                method="self.road_list = planned_path",
+                result="下一帧会用 first_waypoint 计算 target_direction",
+            )
             print(f"[Driving] 路径已加载: {self.road_list}")
             try:
                 draw_points_with_arrows(self.road_list)
             except Exception as exc:
                 print(f"[Driving] 绘制路径调试图失败: {exc}")
         else:
+            log_step(
+                f"开车路径规划失败：current_loc={location}, target_loc={target_point}",
+                target="开车路径规划",
+                action="回退自由巡航",
+                method="MapNavigator.plan_path()",
+                result="本帧直接使用 stable_circle_angle 作为目标方向",
+            )
             print("[Driving] 路径规划失败，回退自由巡航")
 
     def _repair_route_after_deviation(self, location: Tuple[int, int]):
@@ -1208,6 +1232,15 @@ class DrivingManager:
             return
 
         turn_dir, _, diff = calculate_move_count(context.direction, target_direction)
+        log_step(
+            f"当前开车要计算目标方向：current_loc={context.location}, "
+            f"current_dir={context.direction}, target_direction={target_direction}, "
+            f"angle_diff={diff}, turn_dir={turn_dir}, speed={context.speed}",
+            target="开车目标方向计算",
+            action="判断直行还是带方向转向",
+            method="calculate_move_count(context.direction, target_direction)",
+            result="角度差小于阈值则直行，否则按校准表计算转向时长",
+        )
         print(
             f"[Driving] 目标对齐: current={context.direction}, "
             f"target={target_direction}, diff={diff:.2f}"

@@ -112,6 +112,14 @@ BRACKET_FIELD_RE = re.compile(r"\[(?P<key>[^:\]]+):(?P<value>[^\]]*)\]")
 FRAME_LOG_HISTORY_LIMIT = 160
 FRAME_LOG_SNAPSHOT_LIMIT = 20
 _FRAME_LOG_HISTORY = deque(maxlen=FRAME_LOG_HISTORY_LIMIT)
+_CURRENT_FRAME_LOG_HISTORY = deque(maxlen=FRAME_LOG_HISTORY_LIMIT)
+_CURRENT_FRAME_CONTEXT = {
+    "active": False,
+    "frame_index": None,
+    "stage": "",
+    "group_name": "",
+    "started_at": "",
+}
 _FRAME_LOG_LOCK = threading.Lock()
 _FRAME_LOG_SEQUENCE = 0
 
@@ -264,7 +272,10 @@ def format_log_line(
 
 def _record_frame_log(entry):
     with _FRAME_LOG_LOCK:
-        _FRAME_LOG_HISTORY.append(dict(entry))
+        item = dict(entry)
+        _FRAME_LOG_HISTORY.append(item)
+        if _CURRENT_FRAME_CONTEXT.get("active"):
+            _CURRENT_FRAME_LOG_HISTORY.append(dict(item))
 
 
 def _entry_from_fields(
@@ -318,7 +329,31 @@ def clear_frame_log_history():
     global _FRAME_LOG_SEQUENCE
     with _FRAME_LOG_LOCK:
         _FRAME_LOG_HISTORY.clear()
+        _CURRENT_FRAME_LOG_HISTORY.clear()
+        _CURRENT_FRAME_CONTEXT.update(
+            {
+                "active": False,
+                "frame_index": None,
+                "stage": "",
+                "group_name": "",
+                "started_at": "",
+            }
+        )
         _FRAME_LOG_SEQUENCE = 0
+
+
+def begin_frame_log_context(frame_index=None, stage="", group_name=""):
+    with _FRAME_LOG_LOCK:
+        _CURRENT_FRAME_LOG_HISTORY.clear()
+        _CURRENT_FRAME_CONTEXT.update(
+            {
+                "active": True,
+                "frame_index": frame_index,
+                "stage": _clean_field(stage),
+                "group_name": _clean_field(group_name),
+                "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
 
 
 def get_recent_frame_log_snapshot(limit=FRAME_LOG_SNAPSHOT_LIMIT):
@@ -328,7 +363,18 @@ def get_recent_frame_log_snapshot(limit=FRAME_LOG_SNAPSHOT_LIMIT):
         item_limit = FRAME_LOG_SNAPSHOT_LIMIT
 
     with _FRAME_LOG_LOCK:
-        entries = [dict(entry) for entry in _FRAME_LOG_HISTORY]
+        if _CURRENT_FRAME_CONTEXT.get("active"):
+            entries = [dict(entry) for entry in _CURRENT_FRAME_LOG_HISTORY]
+            frame_context = dict(_CURRENT_FRAME_CONTEXT)
+        else:
+            entries = [dict(entry) for entry in _FRAME_LOG_HISTORY]
+            frame_context = {
+                "active": False,
+                "frame_index": None,
+                "stage": "",
+                "group_name": "",
+                "started_at": "",
+            }
 
     recent_logs = entries[-item_limit:]
     time_logs = [entry for entry in entries if entry.get("category") == LOG_CATEGORY_TIME][-item_limit:]
@@ -349,6 +395,7 @@ def get_recent_frame_log_snapshot(limit=FRAME_LOG_SNAPSHOT_LIMIT):
         "logic_logs": logic_logs,
         "current_branch": dict(current_branch) if current_branch else {},
         "next_action": next_action,
+        "frame_context": frame_context,
     }
 
 

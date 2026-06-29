@@ -422,6 +422,17 @@ class HouseSearchManager:
         dist=None,
         extra: str = "",
     ) -> str:
+        if dist is None and current_loc is not None and target_loc is not None:
+            current_point = self._normalize_location_value(current_loc)
+            target_point = self._normalize_location_value(target_loc)
+            if current_point is not None and target_point is not None:
+                computed_dist = get_distance(current_point, target_point)
+                try:
+                    if computed_dist is not None and float(computed_dist) >= 0:
+                        dist = f"{float(computed_dist):.2f}"
+                except (TypeError, ValueError):
+                    pass
+
         current_dir = w.get_info("direction") if w is not None else None
         house_scene = self._get_house_scene(w) if w is not None else None
         active_entry = getattr(self, "active_entry", None)

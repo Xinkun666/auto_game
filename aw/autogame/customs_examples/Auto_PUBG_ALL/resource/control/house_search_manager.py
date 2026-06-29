@@ -424,6 +424,9 @@ class HouseSearchManager:
         dist=None,
         extra: str = "",
     ) -> str:
+        if current_loc is None and w is not None:
+            current_loc = self._get_current_location(w)
+
         if dist is None and current_loc is not None and target_loc is not None:
             current_point = self._normalize_location_value(current_loc)
             target_point = self._normalize_location_value(target_loc)
@@ -3331,7 +3334,10 @@ class HouseSearchManager:
 
     def _get_current_location(self, w: 'FrameWorker'):
         raw = w.get_info('location')
-        return self._normalize_location_value(raw)
+        current_loc = self._remember_valid_location(raw)
+        if current_loc is not None:
+            return current_loc
+        return self._last_valid_location()
 
     def _push_until_entered_house(self, w: 'FrameWorker') -> bool:
         if self._get_house_scene(w) == 0:
@@ -7195,11 +7201,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         return step_y, step_dura, step_wait
 
     def _get_current_entry_distance(self, w: "FrameWorker", target_loc) -> Optional[float]:
-        raw = w.get_info("location")
-        if not raw:
-            return None
-
-        current_loc = self._normalize_location_value(raw)
+        current_loc = self._get_current_location(w)
         if current_loc is None:
             return None
 

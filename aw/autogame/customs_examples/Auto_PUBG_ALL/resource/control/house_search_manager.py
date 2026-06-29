@@ -508,7 +508,7 @@ class HouseSearchManager:
                 print('位置连续缺失，轻微移动以刷新位置...')
                 w.tap_single('摇杆', y_bias=-120, wait=300)
             return
-        location = check_location(location_raw[0])
+        location = self._normalize_location_value(location_raw)
         direction = w.get_info('direction')
 
         if location is None:
@@ -630,14 +630,15 @@ class HouseSearchManager:
 
     def _refresh_frame_and_handle_jump(self, w: 'FrameWorker', reason: str = ""):
         refreshed = w.refresh_frame()
-        current_loc = self._get_current_location(w)
+        raw_location = w.get_info("location")
+        current_loc = self._normalize_location_value(raw_location)
         current_dir = w.get_info("direction")
         house_scene = self._get_house_scene(w)
         forward_scene = self._get_forward_scene(w)
         log_step(
             f"当前搜房帧日志：刷新帧后场景快照：reason={reason or '未标注'}，"
             f"status={getattr(self, 'status', 'UNKNOWN')}，house={getattr(self, 'current_house_id', None)}，"
-            f"当前位置={current_loc}，current_dir={current_dir}，"
+            f"raw_location={raw_location}，当前位置={current_loc}，current_dir={current_dir}，"
             f"house_scene={house_scene}/{self._house_scene_label(house_scene)}，"
             f"forward_scene_count={len(forward_scene)}，auto_forward={self.auto_forward}",
             target="当前搜房分支：刷新帧后场景快照",
@@ -1162,9 +1163,7 @@ class HouseSearchManager:
         raw = w.get_info('location')
         if raw is None:
             return None
-        if isinstance(raw, (list, tuple)) and raw and isinstance(raw[0], (list, tuple)):
-            return check_location(raw[0])
-        return check_location(raw)
+        return self._normalize_location_value(raw)
 
     def _is_route_close_to_current_entry(self, target_loc, dist_val):
         if not self.current_house_id or not self.active_entry:
@@ -2874,35 +2873,6 @@ class HouseSearchManager:
             if self._jump_forward_if_visible_near_house(w, "PRECISE_NAV 靠近房子"):
                 return
 
-            # --- [修改 1] 在精细导航阶段加入卡顿检测 ---
-            # 原因：即使在慢速移动时，也可能卡在树根或小障碍物上
-            if self.update_and_check_stuck(current_loc):
-                print("[Nav] (Precise) 检测到人物卡死，启动避障程序...")
-                self._set_search_frame_decision(
-                    w,
-                    "当前搜房分支：PRECISE_NAV检测到卡住，执行避障",
-                    self._entry_observation(
-                        w,
-                        current_loc=current_loc,
-                        target_loc=target_loc,
-                        dist=f"{dist:.2f}",
-                        extra=(
-                            f"连续 {len(self.history_locations)} 帧位置变化小于 "
-                            f"{self.stuck_threshold}"
-                        ),
-                    ),
-                    "精准推进时位置几乎不变，判断卡住，先脱困再继续入门点目标",
-                    action="执行PRECISE_NAV脱困",
-                    method="execute_unstuck_logic()",
-                    result="脱困后继续入门点推进或重选目标",
-                )
-                if not self.execute_unstuck_logic(w, current_loc):
-                    self.handle_failed_entry_logic(self.active_entry['direction'])
-                    self.status = "IDLE"
-                self.history_locations = []  # 清空历史，防止重复触发
-                return
-            # ----------------------------------------
-
             if dist <= self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
                 near_result = self._handle_near_entry_point(w, current_loc, target_loc, dist, "Nav")
                 if near_result == "adjusting":
@@ -2962,7 +2932,52 @@ class HouseSearchManager:
 
             self.stop_auto_forward(w)
 
-            self.align_direction(w, target_loc)
+            aligned = self.align_direction(w, target_loc)
+            if not aligned:
+                self.history_locations = []
+                self._set_search_frame_decision(
+                    w,
+                    "当前搜房分支：PRECISE_NAV角度调整中",
+                    self._entry_observation(
+                        w,
+                        current_loc=current_loc,
+                        target_loc=target_loc,
+                        dist=f"{dist:.2f}",
+                        extra="角度未对齐，本帧只调整视角，不进行卡住检测",
+                    ),
+                    "PRECISE_NAV 正在停下来调整角度，本帧不判断卡住、不触发避障",
+                    action="等待角度对齐",
+                    method="align_direction()",
+                    result="下一帧继续按入门点方向校准",
+                )
+                return
+
+            if self.update_and_check_stuck(current_loc):
+                print("[Nav] (Precise) 检测到人物卡死，启动避障程序...")
+                self._set_search_frame_decision(
+                    w,
+                    "当前搜房分支：PRECISE_NAV检测到卡住，执行避障",
+                    self._entry_observation(
+                        w,
+                        current_loc=current_loc,
+                        target_loc=target_loc,
+                        dist=f"{dist:.2f}",
+                        extra=(
+                            f"连续 {len(self.history_locations)} 帧位置变化小于 "
+                            f"{self.stuck_threshold}"
+                        ),
+                    ),
+                    "角度已对齐但位置几乎不变，判断卡住，先脱困再继续入门点目标",
+                    action="执行PRECISE_NAV脱困",
+                    method="execute_unstuck_logic()",
+                    result="脱困后继续入门点推进或重选目标",
+                )
+                if not self.execute_unstuck_logic(w, current_loc):
+                    self.handle_failed_entry_logic(self.active_entry['direction'])
+                    self.status = "IDLE"
+                self.history_locations = []
+                return
+
             before_dist = dist
             mode = self._entry_forward_mode(dist)
             y_bias, dura, wait = self._get_entry_move_params(dist)
@@ -4020,12 +4035,20 @@ class HouseSearchManager:
         location_raw = w.get_info('location')
         if location_raw is None:
             return False
-        cur_loc = check_location(location_raw[0])
+        cur_loc = self._normalize_location_value(location_raw)
         cur_dir = w.get_info('direction')
         if cur_loc is None or cur_dir is None:
+            print(
+                f"[NavAlign] 无法计算目标角：raw_location={location_raw}，"
+                f"current_loc={cur_loc}，current_dir={cur_dir}"
+            )
             return False
         target_angle = calculate_angle(cur_loc, tar_loc)
         if target_angle is None:
+            print(
+                f"[NavAlign] 目标角计算失败：raw_location={location_raw}，"
+                f"current_loc={cur_loc}，target_loc={tar_loc}"
+            )
             return False
         self._set_search_frame_decision(
             w,
@@ -5751,22 +5774,6 @@ class HouseSceneSearchManager(HouseSearchManager):
                 )
                 return
 
-            if self.update_and_check_stuck(current_loc):
-                print("[SceneSearch] 精细导航检测到卡住，启动避障")
-                self._set_frame_decision(
-                    w,
-                    f"PRECISE_NAV检测到位置卡住，当前位置={current_loc}",
-                    "执行精细导航避障，避免继续向前撞障碍物",
-                    action="执行精细导航卡住恢复",
-                    method="_recover_r_city_navigation_stuck()",
-                    result="恢复后继续入门点推进或重选目标",
-                )
-                if not self._recover_r_city_navigation_stuck(w, current_loc):
-                    self._mark_current_r_city_target_failed("精细导航卡住避障失败")
-                    self.status = "IDLE"
-                self.history_locations = []
-                return
-
             if dist <= self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
                 self._set_frame_decision(
                     w,
@@ -5788,21 +5795,40 @@ class HouseSceneSearchManager(HouseSearchManager):
                 return
 
             self.stop_auto_forward(w)
-            if not self._move_precisely_to_entry_point(w, current_loc, target_loc, dist):
-                self.align_direction(
+            if self._move_precisely_to_entry_point(w, current_loc, target_loc, dist):
+                self.handle_jump_logic(w)
+                return
+
+            if self.update_and_check_stuck(current_loc):
+                print("[SceneSearch] 精细导航检测到卡住，启动避障")
+                self._set_frame_decision(
                     w,
-                    target_loc,
-                    threshold=self.R_CITY_PRECISE_NAV_ALIGN_TOLERANCE,
-                    max_steps=self.R_CITY_PRECISE_NAV_ALIGN_MAX_STEPS,
+                    f"PRECISE_NAV检测到位置卡住，当前位置={current_loc}",
+                    "角度/位置读取无法完成精准推进后，再判断是否真正卡住并执行避障",
+                    action="执行精细导航卡住恢复",
+                    method="_recover_r_city_navigation_stuck()",
+                    result="恢复后继续入门点推进或重选目标",
                 )
-                y_bias, dura, wait = self._get_entry_move_params(dist)
-                mode = self._entry_forward_mode(dist)
-                print(
-                    f"[SceneSearch] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
-                    f"未完成精准推进，补一次{self._entry_forward_mode_label(mode)}："
-                    f"y_bias={y_bias}, dura={dura}, wait={wait}"
-                )
-                self._tap_entry_forward_with_learning(w, target_loc, dist, mode, y_bias, dura, wait)
+                if not self._recover_r_city_navigation_stuck(w, current_loc):
+                    self._mark_current_r_city_target_failed("精细导航卡住避障失败")
+                    self.status = "IDLE"
+                self.history_locations = []
+                return
+
+            self.align_direction(
+                w,
+                target_loc,
+                threshold=self.R_CITY_PRECISE_NAV_ALIGN_TOLERANCE,
+                max_steps=self.R_CITY_PRECISE_NAV_ALIGN_MAX_STEPS,
+            )
+            y_bias, dura, wait = self._get_entry_move_params(dist)
+            mode = self._entry_forward_mode(dist)
+            print(
+                f"[SceneSearch] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
+                f"未完成精准推进，补一次{self._entry_forward_mode_label(mode)}："
+                f"y_bias={y_bias}, dura={dura}, wait={wait}"
+            )
+            self._tap_entry_forward_with_learning(w, target_loc, dist, mode, y_bias, dura, wait)
             self.handle_jump_logic(w)
             return
 
@@ -7157,10 +7183,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         if not raw:
             return None
 
-        if isinstance(raw, (list, tuple)) and raw and isinstance(raw[0], (list, tuple)):
-            current_loc = check_location(raw[0])
-        else:
-            current_loc = check_location(raw)
+        current_loc = self._normalize_location_value(raw)
         if current_loc is None:
             return None
 

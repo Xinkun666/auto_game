@@ -277,6 +277,7 @@ class HouseSearchManager:
         self.house_bypass_unstuck_pause_until = 0.0
         self.entry_near_micro_adjust_attempts = 0
         self.entry_door_last_area_ratio = None
+        self._entry_door_force_strict_align_once = False
         self._jump_forward_guard = False
         self._jump_forward_wait_until_hidden = False
 
@@ -1641,6 +1642,22 @@ class HouseSearchManager:
             return max(threshold, self.ENTRY_DOOR_ALIGN_CLOSE_CENTER_THRESHOLD)
         return threshold
 
+    def _get_strict_door_align_center_threshold(self, tolerance_px=80):
+        try:
+            threshold = int(tolerance_px)
+        except (TypeError, ValueError):
+            threshold = self.ENTRY_DOOR_FINAL_VIEW_TOLERANCE_PX
+        return max(1, threshold)
+
+    def _mark_entry_door_strict_align_after_backoff(self):
+        self._entry_door_force_strict_align_once = True
+
+    def _consume_entry_door_strict_align_after_backoff(self) -> bool:
+        if getattr(self, "_entry_door_force_strict_align_once", False):
+            self._entry_door_force_strict_align_once = False
+            return True
+        return False
+
     def _door_center_ratio(self, door, frame_w=None):
         if frame_w is None:
             frame_w = self._entry_door_frame_width()
@@ -1781,6 +1798,7 @@ class HouseSearchManager:
             wait=self.ENTRY_DOOR_DIRECT_BACKOFF_WAIT,
         )
         self._refresh_frame_and_handle_jump(w)
+        self._mark_entry_door_strict_align_after_backoff()
 
     def _handle_entry_near_wall_if_needed(self, w: 'FrameWorker', phase_label: str, reason: str):
         if self._get_house_scene(w) != self.HOUSE_NEAR_WALL:
@@ -1838,6 +1856,7 @@ class HouseSearchManager:
             print(f"[{phase_label}] near_wall 后拉后仍在 indoor，直接启动搜房策略")
             return "indoor"
 
+        self._mark_entry_door_strict_align_after_backoff()
         scene_after_backoff = self._get_house_scene(w)
         if scene_after_backoff in {self.HOUSE_OUTDOOR, self.HOUSE_ROOFTOP, self.HOUSE_NEAR_DOOR}:
             self._set_search_frame_decision(
@@ -1924,6 +1943,7 @@ class HouseSearchManager:
             print(f"[{phase_label}] {scene_label} 后拉后已在 indoor，直接启动当前房搜房")
             return "indoor"
 
+        self._mark_entry_door_strict_align_after_backoff()
         if w.get_info('跳跃'):
             print(f"[{phase_label}] {scene_label} 后拉后仍有跳跃按钮，尝试跳过房体/石墙障碍")
             self.handle_jump_logic(w, f"{phase_label} {scene_label} 后拉后跳障")
@@ -2126,6 +2146,7 @@ class HouseSearchManager:
         door = self.find_largest_door(w)
         if door is not None:
             print(f"[{phase_label}] 后拉扩视野后看到门，进入对准门流程: door={door}")
+            self._mark_entry_door_strict_align_after_backoff()
             return door
 
         sweeps = (
@@ -2172,6 +2193,7 @@ class HouseSearchManager:
             door = self.find_largest_door(w)
             if door is not None:
                 print(f"[{phase_label}] {label}后看到门，进入对准门流程: door={door}")
+                self._mark_entry_door_strict_align_after_backoff()
                 return door
 
         print(f"[{phase_label}] 后拉/左右滑动后仍没看到门，舍弃当前入门点")
@@ -3671,6 +3693,7 @@ class HouseSearchManager:
         if loc_after_back is not None:
             current_loc = loc_after_back
         print(f"[Unstuck] near_wall 后拉避让完成，从 {current_loc} 重新规划/继续入门点导航")
+        self._mark_entry_door_strict_align_after_backoff()
         self.history_locations = []
         return True
 
@@ -4197,16 +4220,21 @@ class HouseSearchManager:
         return self.find_largest_door(w)
 
     def _align_to_door_detection(self, w, door, tolerance_px=80, phase_label="DoorAlign"):
+        strict_after_backoff = self._consume_entry_door_strict_align_after_backoff()
         for step in range(self.ENTRY_DOOR_FINAL_ALIGN_MAX_STEPS):
             offset_real, door_area_ratio, frame_w = self._get_visible_door_center_offset(w, door)
             if offset_real is None:
                 return False
 
-            center_threshold = self._get_door_align_center_threshold(tolerance_px)
+            if strict_after_backoff:
+                center_threshold = self._get_strict_door_align_center_threshold(tolerance_px)
+            else:
+                center_threshold = self._get_door_align_center_threshold(tolerance_px)
             if abs(offset_real) <= center_threshold:
                 print(
                     f"[{phase_label}] 门已大致对准，offset={offset_real:.2f}px, "
-                    f"threshold={center_threshold}, door_area_ratio={door_area_ratio}"
+                    f"threshold={center_threshold}, door_area_ratio={door_area_ratio}, "
+                    f"strict_after_backoff={strict_after_backoff}"
                 )
                 return True
 
@@ -4220,7 +4248,7 @@ class HouseSearchManager:
                 f"第 {step + 1}/{self.ENTRY_DOOR_FINAL_ALIGN_MAX_STEPS} 次调整视角后等待最新帧: "
                 f"x_bias={adjust_val}, dura={self.ENTRY_DOOR_ALIGN_DURA}, "
                 f"wait={self.ENTRY_DOOR_ALIGN_WAIT}, threshold={center_threshold}, "
-                f"door_area_ratio={door_area_ratio}"
+                f"door_area_ratio={door_area_ratio}, strict_after_backoff={strict_after_backoff}"
             )
             self._set_search_frame_decision(
                 w,
@@ -4232,7 +4260,7 @@ class HouseSearchManager:
                         f"phase={phase_label}, door={door}, offset_real={offset_real:.1f}px, "
                         f"x_bias={adjust_val}, step={step + 1}/{self.ENTRY_DOOR_FINAL_ALIGN_MAX_STEPS}, "
                         f"tolerance_px={tolerance_px}, threshold={center_threshold}, "
-                        f"door_area_ratio={door_area_ratio}"
+                        f"door_area_ratio={door_area_ratio}, strict_after_backoff={strict_after_backoff}"
                     ),
                 ),
                 "门中心没有进入动态容差，按车辆对准逻辑用像素偏移滑动视角",

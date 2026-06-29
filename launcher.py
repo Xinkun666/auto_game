@@ -150,6 +150,15 @@ LOG_FILTERS = (
     LOG_CATEGORY_OTHER,
 )
 LOG_CATEGORIES = set(LOG_FILTERS) - {LOG_FILTER_ALL}
+
+
+def build_launcher_process_args(*helper_args: str) -> list[str]:
+    args = [str(arg) for arg in helper_args]
+    if getattr(sys, "frozen", False):
+        return args
+    return [str(ROOT_DIR / "launcher.py"), *args]
+
+
 STRUCTURED_LOG_RE = re.compile(r"^\[AutoLog\](?:\[(?P<category>[^\]]+)\])?")
 TIME_LOG_MARKERS = (
     "[Timer]",
@@ -4006,13 +4015,13 @@ class LauncherWindow(QWidget):
 
         if self.current_plan["mode"] == "testcase":
             testcase_label = self.current_plan["testcase_label"]
-            args = [str(ROOT_DIR / "launcher.py"), "--run-testcase", testcase_label]
+            args = build_launcher_process_args("--run-testcase", testcase_label)
             self._set_status(
                 f"第 {run_no}/{self.current_plan['run_count']} 次启动：{testcase_label}"
             )
             self._log_message(f"\n[Launcher] 第 {run_no}/{self.current_plan['run_count']} 次：通过 testcase 启动 {testcase_label}\n")
         else:
-            args = [str(ROOT_DIR / "launcher.py"), "--run-direct", project_case, target_case]
+            args = build_launcher_process_args("--run-direct", project_case, target_case)
             self._set_status(
                 f"第 {run_no}/{self.current_plan['run_count']} 次启动：project_case={project_case}, target_case={target_case}"
             )

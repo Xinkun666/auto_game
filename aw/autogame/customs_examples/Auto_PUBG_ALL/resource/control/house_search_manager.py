@@ -146,6 +146,8 @@ class HouseSearchManager:
     ENTRY_DOOR_ALIGN_VERY_NEAR_AREA_RATIO = 0.090
     ENTRY_DOOR_DIRECT_CENTER_MIN_RATIO = 0.40
     ENTRY_DOOR_DIRECT_CENTER_MAX_RATIO = 0.60
+    ENTRY_DOOR_EDGE_LATERAL_LEFT_RATIO = 0.25
+    ENTRY_DOOR_EDGE_LATERAL_RIGHT_RATIO = 0.75
     ENTRY_DOOR_DIRECT_FORWARD_Y_BIAS = -200
     ENTRY_DOOR_DIRECT_FORWARD_DURA = 200
     ENTRY_DOOR_DIRECT_FORWARD_WAIT = 3000
@@ -1656,6 +1658,62 @@ class HouseSearchManager:
             return False
         return self.ENTRY_DOOR_DIRECT_CENTER_MIN_RATIO <= ratio <= self.ENTRY_DOOR_DIRECT_CENTER_MAX_RATIO
 
+    def _shift_edge_visible_entry_door_by_lateral_move(self, w: 'FrameWorker', door, phase_label='Nav') -> bool:
+        frame_size = self._get_visual_frame_size(w)
+        if frame_size is None:
+            return False
+
+        frame_w, _ = frame_size
+        ratio = self._door_center_ratio(door, frame_w)
+        if ratio is None:
+            return False
+
+        if ratio <= self.ENTRY_DOOR_EDGE_LATERAL_LEFT_RATIO:
+            side = "left"
+            x_bias = -self.VISIBLE_DOOR_CENTER_SIDE_BIAS
+        elif ratio >= self.ENTRY_DOOR_EDGE_LATERAL_RIGHT_RATIO:
+            side = "right"
+            x_bias = self.VISIBLE_DOOR_CENTER_SIDE_BIAS
+        else:
+            return False
+
+        print(
+            f"[{phase_label}] 入门点附近最大门中心在画面{self._side_label(side)}侧边缘 "
+            f"(ratio={ratio:.2f})，不转视角，改用摇杆横移对齐门"
+        )
+        self._set_search_frame_decision(
+            w,
+            "当前进房分支：门在画面边缘，横移对齐",
+            self._entry_observation(
+                w,
+                extra=(
+                    f"door={door}, door_center_ratio={ratio:.2f}, "
+                    f"edge_range=[0,{self.ENTRY_DOOR_EDGE_LATERAL_LEFT_RATIO:g}]/"
+                    f"[{self.ENTRY_DOOR_EDGE_LATERAL_RIGHT_RATIO:g},1], "
+                    f"x_bias={x_bias}, dura={self.VISIBLE_DOOR_CENTER_SIDE_DURA}, "
+                    f"wait={self.VISIBLE_DOOR_CENTER_SIDE_WAIT}"
+                ),
+            ),
+            "入门点附近已按入门方向对齐，门在画面边缘时优先横移人物站位，不用视角把门转到中间",
+            action=f"向{self._side_label(side)}横移对门",
+            method=(
+                f"tap_single(摇杆, x_bias={x_bias}, y_bias=0, "
+                f"dura={self.VISIBLE_DOOR_CENTER_SIDE_DURA}, "
+                f"wait={self.VISIBLE_DOOR_CENTER_SIDE_WAIT})"
+            ),
+            result="横移后刷新帧，下一帧重新判断门中心位置",
+        )
+        w.tap_single(
+            '摇杆',
+            x_bias=x_bias,
+            y_bias=0,
+            dura=self.VISIBLE_DOOR_CENTER_SIDE_DURA,
+            wait=self.VISIBLE_DOOR_CENTER_SIDE_WAIT,
+        )
+        self._refresh_frame_and_handle_jump(w)
+        self.history_locations = []
+        return True
+
     def _align_visible_entry_door_for_direct_push(self, w: 'FrameWorker', door, phase_label='Nav'):
         """Use the same visual-center loop as car alignment before pushing through a door."""
         wall_result = self._handle_entry_near_wall_if_needed(w, phase_label, "门框视觉对齐前")
@@ -2137,6 +2195,9 @@ class HouseSearchManager:
                 f"[{phase_label}] 第 {attempt + 1}/{self.ENTRY_DOOR_ALIGNED_PUSH_MAX_ATTEMPTS} 次对准门: "
                 f"door={door}"
             )
+            if self._shift_edge_visible_entry_door_by_lateral_move(w, door, phase_label):
+                return "adjusting"
+
             if not self._align_to_door_detection(
                 w,
                 door,

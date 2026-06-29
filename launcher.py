@@ -1645,10 +1645,13 @@ def force_stop_apps(apps: list[str]) -> list[str]:
 
 
 class LauncherWindow(QWidget):
+    restart_phone_script_finished = pyqtSignal(bool, str)
+
     def __init__(self):
         super().__init__()
         LOGGER.info("LauncherWindow init start")
         self.process: Optional[QProcess] = None
+        self.restart_phone_script_running = False
         self.selected_testcase_file: Optional[Path] = None
         self._updating_targets = False
         self.latest_preview_file: Optional[Path] = None
@@ -1663,6 +1666,7 @@ class LauncherWindow(QWidget):
         self.run_timeout_timer.setSingleShot(True)
         self.stream_disconnect_signal_timer = QTimer(self)
         self.stream_disconnect_signal_timer.setInterval(500)
+        self.restart_phone_script_finished.connect(self._finish_restart_phone_script)
 
         self.batch_active = False
         self.stop_requested = False
@@ -1808,6 +1812,8 @@ class LauncherWindow(QWidget):
 
         self.start_button = QPushButton("启动")
         self.start_button.setProperty("primaryButton", True)
+        self.restart_phone_button = QPushButton("重启手机")
+        self.restart_phone_button.setToolTip("执行 launcher 同目录下的 restart.bat 重启手机")
         self.stop_button = QPushButton("停止")
         self.stop_button.setProperty("dangerButton", True)
         self.stop_button.setEnabled(False)
@@ -2497,6 +2503,7 @@ class LauncherWindow(QWidget):
         action_layout.setContentsMargins(12, 9, 12, 9)
         action_layout.setSpacing(8)
         action_layout.addWidget(self.start_button)
+        action_layout.addWidget(self.restart_phone_button)
         action_layout.addWidget(self.stop_button)
         action_layout.addWidget(self.open_history_button)
         action_layout.addWidget(self.keep_process_on_manual_stop_button)
@@ -2728,6 +2735,7 @@ class LauncherWindow(QWidget):
         self.refresh_button.clicked.connect(self._refresh_config_choices)
         self.project_combo.currentTextChanged.connect(self._on_project_changed)
         self.start_button.clicked.connect(self._start_run)
+        self.restart_phone_button.clicked.connect(self._restart_phone_from_button)
         self.stop_button.clicked.connect(self._stop_run)
         self.open_history_button.clicked.connect(self._show_history_page)
         self.history_refresh_button.clicked.connect(self._refresh_history_outputs)
@@ -3356,6 +3364,7 @@ class LauncherWindow(QWidget):
         self.mode_direct.setEnabled(enabled)
         self.refresh_button.setEnabled(enabled)
         self.open_history_button.setEnabled(enabled)
+        self.restart_phone_button.setEnabled(enabled and not self.restart_phone_script_running)
         self.project_combo.setEnabled(enabled)
         self.target_combo.setEnabled(enabled)
         self.run_count_spin.setEnabled(enabled)
@@ -3793,6 +3802,7 @@ class LauncherWindow(QWidget):
         self.output_edit.clear()
         self._clear_preview_files()
         self.start_button.setEnabled(False)
+        self.restart_phone_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self._set_inputs_enabled(False)
         self._set_status("已开始批量执行，准备进行安全检查。")
@@ -3843,6 +3853,7 @@ class LauncherWindow(QWidget):
         self.current_run_start_timestamp = None
         self.current_run_archive_dir = None
         self.start_button.setEnabled(True)
+        self.restart_phone_button.setEnabled(not self.restart_phone_script_running)
         self.stop_button.setEnabled(False)
         self._set_inputs_enabled(True)
         self.preview_timer.stop()
@@ -4626,6 +4637,72 @@ class LauncherWindow(QWidget):
             QMessageBox.warning(self, "截图流预检失败", check_result.message)
             return False
         return True
+
+    def _restart_phone_from_button(self):
+        if self.restart_phone_script_running:
+            return
+        if self.batch_active or self.process is not None:
+            QMessageBox.information(self, "运行中", "当前已有任务在运行，请先停止。")
+            return
+
+        script_path = APP_DIR / "restart.bat"
+        if not script_path.is_file():
+            message = f"未找到重启脚本：{script_path}"
+            LOGGER.warning("restart phone script missing: %s", script_path)
+            self._log_message(f"[Launcher] {message}\n", level=logging.WARNING)
+            QMessageBox.warning(self, "重启手机", message)
+            return
+
+        self.restart_phone_script_running = True
+        self.start_button.setEnabled(False)
+        self.restart_phone_button.setEnabled(False)
+        self._log_message(f"[Launcher] 正在执行重启手机脚本：{script_path}\n")
+        thread = threading.Thread(
+            target=self._run_restart_phone_script,
+            args=(script_path,),
+            daemon=True,
+            name="launcher-restart-phone",
+        )
+        thread.start()
+
+    def _run_restart_phone_script(self, script_path: Path):
+        try:
+            command = ["cmd", "/c", str(script_path)] if os.name == "nt" else [str(script_path)]
+            LOGGER.info("restart phone script start: command=%s cwd=%s", command, script_path.parent)
+            proc = subprocess.Popen(
+                command,
+                cwd=str(script_path.parent),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                **hidden_subprocess_kwargs(),
+            )
+            output, _ = proc.communicate()
+            output_text = (output or "").rstrip()
+            if proc.returncode == 0:
+                message = "重启手机脚本执行完成。"
+                if output_text:
+                    message = f"{message}\n{output_text}"
+                self.restart_phone_script_finished.emit(True, message)
+            else:
+                message = f"重启手机脚本执行失败，exit_code={proc.returncode}。"
+                if output_text:
+                    message = f"{message}\n{output_text}"
+                self.restart_phone_script_finished.emit(False, message)
+        except Exception as exc:
+            log_exception(f"restart phone script failed: script_path={script_path}")
+            self.restart_phone_script_finished.emit(False, f"执行 restart.bat 失败：{exc}")
+
+    def _finish_restart_phone_script(self, success: bool, message: str):
+        self.restart_phone_script_running = False
+        if not self.batch_active and self.process is None:
+            self.start_button.setEnabled(True)
+            self.restart_phone_button.setEnabled(True)
+        level = logging.INFO if success else logging.ERROR
+        self._log_message(f"[Launcher] {message}\n", level=level)
+        if not success:
+            QMessageBox.warning(self, "重启手机", message)
 
     def _start_run(self):
         LOGGER.info(

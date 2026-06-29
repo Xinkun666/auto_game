@@ -6027,13 +6027,29 @@ class HouseSceneSearchManager(HouseSearchManager):
         house_id = target.get("house_id") or target.get("existing_house_id") or target.get("id")
         return str(house_id) if house_id is not None else None
 
+    def _r_city_target_entry_key(self, target):
+        if not target:
+            return None
+        entry_loc = self._location_tuple(target.get("location"))
+        if entry_loc is None:
+            return None
+        direction = target.get("entry_direction", target.get("direction"))
+        try:
+            entry_direction = int(float(direction)) % 360
+        except (TypeError, ValueError):
+            entry_direction = None
+        return entry_loc, entry_direction
+
     def _is_r_city_target_completed(self, target) -> bool:
         target_id = target.get("id")
         house_id = self._r_city_target_house_id(target)
+        entry_key = self._r_city_target_entry_key(target)
+        completed_entry_keys = getattr(self, "r_city_completed_entry_keys", set())
         return (
             target_id in self.r_city_completed_targets
             or house_id in self.completed_houses
             or house_id in self.r_city_completed_targets
+            or entry_key in completed_entry_keys
         )
 
     def _is_r_city_target_available(self, target) -> bool:
@@ -6051,10 +6067,15 @@ class HouseSceneSearchManager(HouseSearchManager):
         if house_id is None:
             return
         house_id = str(house_id)
+        if not hasattr(self, "r_city_completed_entry_keys"):
+            self.r_city_completed_entry_keys = set()
         self.completed_houses.add(house_id)
         for target in self.r_city_targets:
             if self._r_city_target_house_id(target) == house_id:
                 self.r_city_completed_targets.add(target["id"])
+                entry_key = self._r_city_target_entry_key(target)
+                if entry_key is not None:
+                    self.r_city_completed_entry_keys.add(entry_key)
 
     def _resolve_r_city_approach_location(self, loc):
         if self._is_walkable(loc):
@@ -6076,6 +6097,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _reset_r_city_runtime(self):
         self.r_city_completed_targets = set()
+        self.r_city_completed_entry_keys = set()
         self.r_city_failed_counts = {}
         self.current_r_city_target = None
         self.r_city_route_target = None

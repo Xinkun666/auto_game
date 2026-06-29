@@ -5301,6 +5301,10 @@ class HouseSceneSearchManager(HouseSearchManager):
     ENTRY_INDOOR_CONFIRM_FORWARD_DURA = 650
     ENTRY_INDOOR_CONFIRM_FORWARD_WAIT = 850
     R_CITY_PRECISE_NAV_Y_BIAS = -200
+    R_CITY_PRECISE_NAV_ALIGN_TOLERANCE = 10
+    R_CITY_PRECISE_NAV_ALIGN_MAX_STEPS = 1
+    R_CITY_PRECISE_NAV_MIN_WAIT = 300
+    R_CITY_PRECISE_NAV_MAX_WAIT = 7000
     R_CITY_ENTRY_FAST_MIN_DURA = 520
     R_CITY_ENTRY_FAST_MIN_WAIT = 1100
     R_CITY_ENTRY_SLOW_MIN_DURA = 460
@@ -5785,7 +5789,12 @@ class HouseSceneSearchManager(HouseSearchManager):
 
             self.stop_auto_forward(w)
             if not self._move_precisely_to_entry_point(w, current_loc, target_loc, dist):
-                self.align_direction(w, target_loc)
+                self.align_direction(
+                    w,
+                    target_loc,
+                    threshold=self.R_CITY_PRECISE_NAV_ALIGN_TOLERANCE,
+                    max_steps=self.R_CITY_PRECISE_NAV_ALIGN_MAX_STEPS,
+                )
                 y_bias, dura, wait = self._get_entry_move_params(dist)
                 mode = self._entry_forward_mode(dist)
                 print(
@@ -6847,8 +6856,8 @@ class HouseSceneSearchManager(HouseSearchManager):
         if diff is None or turn_dir is None:
             return False
 
-        align_threshold = 2 if dist < 5 else 5
-        align_max_steps = 3 if dist < 5 else 1
+        align_threshold = self.R_CITY_PRECISE_NAV_ALIGN_TOLERANCE
+        align_max_steps = self.R_CITY_PRECISE_NAV_ALIGN_MAX_STEPS
         aligned = self.align_direction(
             w,
             target_loc,
@@ -6922,6 +6931,16 @@ class HouseSceneSearchManager(HouseSearchManager):
             max(int(wait), self.R_CITY_ENTRY_SLOW_MIN_WAIT),
         )
 
+    def _precise_nav_wait_ms(self, dist, fallback_wait: int) -> int:
+        try:
+            wait = int(round(max(0.0, float(dist)) / 2.0 * 1000))
+        except (TypeError, ValueError):
+            wait = int(fallback_wait)
+        return max(
+            self.R_CITY_PRECISE_NAV_MIN_WAIT,
+            min(self.R_CITY_PRECISE_NAV_MAX_WAIT, wait),
+        )
+
     @staticmethod
     def _entry_forward_mode_label(mode: str) -> str:
         return "快推" if mode == "fast" else "慢推"
@@ -6955,6 +6974,37 @@ class HouseSceneSearchManager(HouseSearchManager):
                 )
                 return True
 
+            current_loc = self._get_current_location(w)
+            current_dir = w.get_info("direction")
+            target_angle = calculate_angle(current_loc, target_loc) if current_loc is not None else None
+            aligned = self.align_direction(
+                w,
+                target_loc,
+                threshold=self.R_CITY_PRECISE_NAV_ALIGN_TOLERANCE,
+                max_steps=self.R_CITY_PRECISE_NAV_ALIGN_MAX_STEPS,
+            )
+            if not aligned:
+                self._set_search_frame_decision(
+                    w,
+                    "当前搜房分支：R城PRECISE_NAV小步前角度未对齐",
+                    self._entry_observation(
+                        w,
+                        current_loc=current_loc,
+                        target_loc=target_loc,
+                        dist=f"{current_dist:.2f}",
+                        extra=(
+                            f"step={step + 1}/{self.ENTRY_FORWARD_MAX_STEPS}, "
+                            f"current_dir={current_dir}, target_angle={target_angle}, "
+                            f"threshold={self.R_CITY_PRECISE_NAV_ALIGN_TOLERANCE}"
+                        ),
+                    ),
+                    "每次前推前都先按最新位置重新计算目标角；角度未进入10度容差，本步不前推",
+                    action="等待下一帧继续角度校准",
+                    method="align_direction(threshold=10, max_steps=1)",
+                    result="避免斜着前推撞到门框/墙",
+                )
+                return True
+
             desired_step_dist = max(0.2, float(current_dist))
             y_bias, dura, wait, distance_key = get_adaptive_forward_motion(
                 mode,
@@ -6964,29 +7014,34 @@ class HouseSceneSearchManager(HouseSearchManager):
                 fallback_wait,
             )
             adaptive_y_bias = y_bias
+            model_wait = wait
+            wait = self._precise_nav_wait_ms(current_dist, wait)
             y_bias = self.R_CITY_PRECISE_NAV_Y_BIAS
 
             print(
                 f"[SceneSearch] 当前距离入门点 {target_loc} 为 {current_dist:.2f}，"
                 f"执行{self._entry_forward_mode_label(mode)}小步 {step + 1}/{self.ENTRY_FORWARD_MAX_STEPS}："
                 f"模型距离={distance_key}, model_y_bias={adaptive_y_bias}, "
-                f"fixed_y_bias={y_bias}, dura={dura}, wait={wait}"
+                f"fixed_y_bias={y_bias}, dura={dura}, model_wait={model_wait}, "
+                f"dynamic_wait={wait}, target_angle={target_angle}"
             )
             self._set_search_frame_decision(
                 w,
                 "当前搜房分支：R城入门点自适应前推",
                 self._entry_observation(
                     w,
-                    current_loc=self._get_current_location(w),
+                    current_loc=current_loc,
                     target_loc=target_loc,
                     dist=f"{current_dist:.2f}",
                     extra=(
                         f"mode={mode}, step={step + 1}/{self.ENTRY_FORWARD_MAX_STEPS}, "
                         f"bin={distance_key}, model_y_bias={adaptive_y_bias}, "
-                        f"fixed_y_bias={y_bias}, dura={dura}, wait={wait}"
+                        f"fixed_y_bias={y_bias}, dura={dura}, model_wait={model_wait}, "
+                        f"dynamic_wait={wait}, current_dir={current_dir}, target_angle={target_angle}, "
+                        f"align_threshold={self.R_CITY_PRECISE_NAV_ALIGN_TOLERANCE}"
                     ),
                 ),
-                "使用自适应模型决定推进节奏，但R城PRECISE_NAV固定 y_bias=-200，避免前推过猛越过入门点",
+                "使用当前距离动态决定等待时间；每次前推前按最新位置重新校准目标角",
                 action=f"{self._entry_forward_mode_label(mode)}小步推进",
                 method=f"tap_single(摇杆, y_bias={y_bias}, dura={dura}, wait={wait})",
                 result="推进后读取距离反馈并更新模型",

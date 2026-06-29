@@ -491,9 +491,24 @@ def build_launcher_plan_env_values(plan: Optional[dict]) -> dict[str, str]:
     }
 
 
+def _decode_process_output(output) -> str:
+    if output is None:
+        return ""
+    if isinstance(output, str):
+        return output
+    if isinstance(output, (bytes, bytearray)):
+        for encoding in ("utf-8", "gbk", "cp936"):
+            try:
+                return bytes(output).decode(encoding)
+            except (LookupError, UnicodeDecodeError):
+                continue
+        return bytes(output).decode("utf-8", errors="replace")
+    return str(output)
+
+
 def _completed_process_text(result: subprocess.CompletedProcess) -> str:
-    stdout = result.stdout.decode("utf-8", errors="replace") if isinstance(result.stdout, bytes) else (result.stdout or "")
-    stderr = result.stderr.decode("utf-8", errors="replace") if isinstance(result.stderr, bytes) else (result.stderr or "")
+    stdout = _decode_process_output(result.stdout)
+    stderr = _decode_process_output(result.stderr)
     text = (stdout + stderr).strip()
     return text[:500]
 
@@ -4675,11 +4690,10 @@ class LauncherWindow(QWidget):
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
                 **hidden_subprocess_kwargs(),
             )
             output, _ = proc.communicate()
-            output_text = (output or "").rstrip()
+            output_text = _decode_process_output(output).rstrip()
             if proc.returncode == 0:
                 message = "重启手机脚本执行完成。"
                 if output_text:

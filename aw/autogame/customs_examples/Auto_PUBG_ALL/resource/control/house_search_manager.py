@@ -7896,6 +7896,8 @@ class HouseSceneSearchManager(HouseSearchManager):
                 if self._is_out_of_house(w):
                     print("[SceneExit] 转向找门过程中已通过双帧确认在屋外")
                     return True
+                if self._try_exit_visible_door_from_current_frame(w, f"第{turn_index + 1}次转向后"):
+                    return True
                 if self._try_exit_current_visible_door(w, f"第{turn_index + 1}次转向后"):
                     return True
                 if self._recover_exit_wall_collision(w, f"第{turn_index + 1}次转向后"):
@@ -7934,6 +7936,9 @@ class HouseSceneSearchManager(HouseSearchManager):
             print(f"[SceneExit] {phase_label}查门前已双帧确认在屋外")
             return True
 
+        return self._try_exit_visible_door_from_current_frame(w, phase_label)
+
+    def _try_exit_visible_door_from_current_frame(self, w: "FrameWorker", phase_label: str) -> bool:
         door = self.find_largest_door(w)
         if not door:
             print(f"[SceneExit] {phase_label}没有看到门，继续按出房扫描流程执行")

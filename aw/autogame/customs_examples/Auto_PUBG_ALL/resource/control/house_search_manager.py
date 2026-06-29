@@ -6011,8 +6011,11 @@ class HouseSceneSearchManager(HouseSearchManager):
     def _is_r_city_target_available(self, target) -> bool:
         if self._is_r_city_target_completed(target):
             return False
-        entry_loc = self._location_tuple(target.get("approach_location") or target.get("location"))
+        entry_loc = self._location_tuple(target.get("location"))
+        approach_loc = self._location_tuple(target.get("approach_location"))
         if entry_loc is not None and entry_loc in self.temp_skip_entries:
+            return False
+        if approach_loc is not None and approach_loc in self.temp_skip_entries:
             return False
         return self.r_city_failed_counts.get(target.get("id"), 0) < self.R_CITY_FAILED_TARGET_LIMIT
 
@@ -6195,11 +6198,12 @@ class HouseSceneSearchManager(HouseSearchManager):
             return False
 
         target_loc = self._location_tuple(self.active_entry.get("location"))
+        route_target_loc = self._location_tuple(self.active_entry.get("approach_location")) or target_loc
         start_loc = self._location_tuple(current_loc)
-        if target_loc is None or start_loc is None:
+        if target_loc is None or route_target_loc is None or start_loc is None:
             return False
 
-        path = self._plan_path_safe(start_loc, target_loc)
+        path = self._plan_path_safe(start_loc, route_target_loc)
         if not path:
             print(
                 f"[RCitySearch] 距离R城 {r_city_dist:.2f} > {self.R_CITY_ENTRY_MAP_NAV_DISTANCE:.1f}，"
@@ -6209,7 +6213,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 w,
                 (
                     f"距离R城 {r_city_dist:.2f} > {self.R_CITY_ENTRY_MAP_NAV_DISTANCE:.1f}，"
-                    f"当前位置={start_loc}，最近入门点={target_loc}"
+                    f"当前位置={start_loc}，最近入门点={target_loc}，接入点={route_target_loc}"
                 ),
                 "本应使用 map_navigation 绕开不可通行区域，但路径规划失败，保留FAST_NAV直冲兜底",
                 action="保留FAST_NAV直冲",
@@ -6224,8 +6228,8 @@ class HouseSceneSearchManager(HouseSearchManager):
             "id": self.active_entry.get("r_city_target_id", "nearest_entry"),
             "house_id": self.active_entry.get("house_id"),
             "location": target_loc,
-            "approach_location": target_loc,
-            "side": self._side_from_location(target_loc),
+            "approach_location": route_target_loc,
+            "side": self._side_from_location(route_target_loc),
             "entry_direction": self.active_entry.get("direction", 0),
         }
         self.status = self.STATUS_ROUTE_TO_R_CITY
@@ -6236,16 +6240,17 @@ class HouseSceneSearchManager(HouseSearchManager):
             w,
             (
                 f"距离R城 {r_city_dist:.2f} > {self.R_CITY_ENTRY_MAP_NAV_DISTANCE:.1f}，"
-                f"当前位置={start_loc}，最近入门点={target_loc}，路径点数={len(path)}"
+                f"当前位置={start_loc}，最近入门点={target_loc}，接入点={route_target_loc}，路径点数={len(path)}"
             ),
-            "当前位置离R城较远，先用map_navigation规划到R城附近，规避地图不可通行区域",
+            "当前位置离R城较远，先用map_navigation规划到入门点附近的可通行接入点；进门仍使用真实入门点",
             action="启动R城入门点地图导航",
-            method="map_tool.plan_path(current_loc, nearest_entry); status=ROUTE_TO_R_CITY",
+            method="map_tool.plan_path(current_loc, entry_approach); status=ROUTE_TO_R_CITY",
             result="进入R城50距离内后停止路线导航，再直接FAST_NAV冲最近入门点",
         )
         print(
             f"[RCitySearch] 距离R城 {r_city_dist:.2f} > {self.R_CITY_ENTRY_MAP_NAV_DISTANCE:.1f}，"
-            f"用map_navigation前往最近入门点附近: start={start_loc}, target={target_loc}, "
+            f"用map_navigation前往最近入门点附近: start={start_loc}, entry={target_loc}, "
+            f"approach={route_target_loc}, "
             f"path_points={len(path)}"
         )
         return True
@@ -6807,7 +6812,8 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.current_r_city_target = target
         self.current_house_id = self._r_city_target_house_id(target)
         self.active_entry = {
-            "location": target["approach_location"],
+            "location": target["location"],
+            "approach_location": target["approach_location"],
             "direction": target["entry_direction"],
             "r_city_target_id": target["id"],
             "house_id": self.current_house_id,
@@ -6823,12 +6829,16 @@ class HouseSceneSearchManager(HouseSearchManager):
         if self.current_r_city_target:
             target_id = self.current_r_city_target["id"]
             self.r_city_failed_counts[target_id] = self.r_city_failed_counts.get(target_id, 0) + 1
-            entry_loc = self.current_r_city_target.get("approach_location")
+            entry_loc = self.current_r_city_target.get("location")
+            approach_loc = self.current_r_city_target.get("approach_location")
             if entry_loc is not None:
                 self.temp_skip_entries.add(tuple(entry_loc))
+            if approach_loc is not None:
+                self.temp_skip_entries.add(tuple(approach_loc))
             print(
                 f"[RCitySearch] {reason}: 跳过当前入门点 {target_id} "
-                f"entry={entry_loc} fail={self.r_city_failed_counts[target_id]}/{self.R_CITY_FAILED_TARGET_LIMIT}；"
+                f"entry={entry_loc}, approach={approach_loc} "
+                f"fail={self.r_city_failed_counts[target_id]}/{self.R_CITY_FAILED_TARGET_LIMIT}；"
                 "同房其他入门点继续保留"
             )
         elif self.current_house_id:

@@ -28,6 +28,7 @@ class ParachuteManager:
     JUMP_CONFIRM_TOLERANCE: int = 35  # 跳伞前后帧允许的小幅测距波动
     JUMP_LOCATION_CONTINUITY_MAX_STEP: int = 120  # 跳伞确认帧之间允许的最大位置跳变
     ROUTE_MISS_CONFIRM_TOLERANCE: int = 35  # 航线错过R城时，后一帧需要明显远离才确认重开
+    SUSTAINED_ROUTE_MISS_INCREASE_FRAMES: int = 3  # 错过最近点后，连续递增多少帧才确认重开
 
     def __init__(self):
         self.is_active = False  # 是否处于监控跳伞距离的激活状态
@@ -282,8 +283,47 @@ class ParachuteManager:
                 method="_confirm_bad_route_window()",
                 result="确认航线最近点仍超过阈值才结束当前局",
             )
+            if self._confirm_sustained_bad_route_increase():
+                return True
             return self._confirm_bad_route_window()
         return False
+
+    def _confirm_sustained_bad_route_increase(self) -> bool:
+        if self.increase_streak < self.SUSTAINED_ROUTE_MISS_INCREASE_FRAMES:
+            return False
+
+        recent_distances = self.route_confirm_distances[-self.SUSTAINED_ROUTE_MISS_INCREASE_FRAMES:]
+        recent_locations = self.route_confirm_locations[-self.SUSTAINED_ROUTE_MISS_INCREASE_FRAMES:]
+        if len(recent_distances) < self.SUSTAINED_ROUTE_MISS_INCREASE_FRAMES:
+            return False
+
+        if any(distance <= self.TRIGGER_DIST for distance in recent_distances):
+            return False
+
+        if not all(
+            next_distance > current_distance
+            for current_distance, next_distance in zip(recent_distances, recent_distances[1:])
+        ):
+            return False
+
+        if not self._confirm_location_continuity(recent_locations):
+            return False
+
+        print(
+            f"[Parachute] 航线持续远离确认最近点仍超过跳伞阈值: "
+            f"closest={self.prior_dist:.2f}, recent={recent_distances}, "
+            f"threshold={self.TRIGGER_DIST}"
+        )
+        log_step(
+            f"路线确认距离连续递增通过重开判断：closest={self.prior_dist:.2f}，"
+            f"recent={recent_distances}，increase_streak={self.increase_streak}，"
+            f"trigger_dist={self.TRIGGER_DIST}",
+            target="当前跳伞分支：航线错过持续确认",
+            action="放弃本局落点",
+            method="_confirm_sustained_bad_route_increase 连续递增窗口",
+            result="下一步切结束阶段重开",
+        )
+        return True
 
     def _confirm_bad_route_window(self) -> bool:
         if len(self.route_confirm_distances) < 3:

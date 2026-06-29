@@ -268,6 +268,7 @@ class HouseSearchManager:
         self.avoid_mode = None
         self.initial_target_pending = True
         self.location_missing_frames = 0
+        self.last_valid_location = None
         self.initial_location_samples = []
         self.route_stuck_reference_loc = None
         self.route_stuck_bypass_attempts = 0
@@ -357,6 +358,7 @@ class HouseSearchManager:
         self.avoid_mode = None
         self.initial_target_pending = True
         self.location_missing_frames = 0
+        self.last_valid_location = None
         self.initial_location_samples = []
         self.route_stuck_reference_loc = None
         self.route_stuck_bypass_attempts = 0
@@ -508,7 +510,7 @@ class HouseSearchManager:
                 print('位置连续缺失，轻微移动以刷新位置...')
                 w.tap_single('摇杆', y_bias=-120, wait=300)
             return
-        location = self._normalize_location_value(location_raw)
+        location = self._remember_valid_location(location_raw)
         direction = w.get_info('direction')
 
         if location is None:
@@ -631,14 +633,19 @@ class HouseSearchManager:
     def _refresh_frame_and_handle_jump(self, w: 'FrameWorker', reason: str = ""):
         refreshed = w.refresh_frame()
         raw_location = w.get_info("location")
-        current_loc = self._normalize_location_value(raw_location)
+        current_loc = self._remember_valid_location(raw_location)
+        location_source = "current"
+        if current_loc is None:
+            current_loc = self._last_valid_location()
+            location_source = "last_valid" if current_loc is not None else "missing"
         current_dir = w.get_info("direction")
         house_scene = self._get_house_scene(w)
         forward_scene = self._get_forward_scene(w)
         log_step(
             f"当前搜房帧日志：刷新帧后场景快照：reason={reason or '未标注'}，"
             f"status={getattr(self, 'status', 'UNKNOWN')}，house={getattr(self, 'current_house_id', None)}，"
-            f"raw_location={raw_location}，当前位置={current_loc}，current_dir={current_dir}，"
+            f"raw_location={raw_location}，当前位置={current_loc}，location_source={location_source}，"
+            f"current_dir={current_dir}，"
             f"house_scene={house_scene}/{self._house_scene_label(house_scene)}，"
             f"forward_scene_count={len(forward_scene)}，auto_forward={self.auto_forward}",
             target="当前搜房分支：刷新帧后场景快照",
@@ -672,6 +679,15 @@ class HouseSearchManager:
         if isinstance(value, (list, tuple)) and value and isinstance(value[0], (list, tuple)):
             value = value[0]
         return check_location(value)
+
+    def _remember_valid_location(self, value):
+        loc = self._normalize_location_value(value)
+        if loc is not None:
+            self.last_valid_location = loc
+        return loc
+
+    def _last_valid_location(self):
+        return self._normalize_location_value(getattr(self, "last_valid_location", None))
 
     def _reset_route_stuck_bypass(self):
         self.route_stuck_reference_loc = None
@@ -2615,7 +2631,7 @@ class HouseSearchManager:
             wait=used_wait,
         )
         self._refresh_frame_and_handle_jump(w)
-        after_loc = self._get_current_location(w)
+        after_loc = self._get_current_location(w) or refreshed_loc
         after_dist = get_distance(after_loc, target_loc) if after_loc is not None else None
         log_step(
             f"近门微调计算完成：before_loc={refreshed_loc}, after_loc={after_loc}, "

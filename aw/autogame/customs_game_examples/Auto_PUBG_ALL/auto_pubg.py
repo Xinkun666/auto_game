@@ -47,9 +47,6 @@ PHASE_STAGE_MAP = {
     "开车阶段": PHASE_DRIVING,
 }
 
-# 单位：分钟。默认 10 分钟，可在 aw/autogame/config/config.json 的 stage_time_minutes 中修改。
-PHASE_DURATIONS = load_phase_durations_from_config(_read_autogame_config())
-
 DROP_TARGET_R_CITY = (990, 757)
 DROP_TARGET_R_CITY_SEARCH_START = (986, 759)
 DROP_TARGET_GARAGE = DROP_TARGET_R_CITY
@@ -61,9 +58,7 @@ STAGE_PRIORITY_JUMP_FORWARD_WAIT = 300
 STAGE_PRIORITY_JUMP_SETTLE_SECONDS = 0.2
 RANK_FINISH_SPECTATE_WAIT_SECONDS = 2.0
 SP_SAVE_LONG_PRESS_MS = 3000
-SP_RECORDING_ENABLED = should_use_sp_recording_for_profile(
-    os.environ.get("AUTOGAME_TEST_PROFILE")
-)
+SP_RECORDING_ENABLED = False
 START_GAME_VERIFY_DELAY = 5.0
 CLOSE_POPUP_SETTLE_DELAY = 1.0
 LOBBY_CONFIRM_INTERVAL = 0.7
@@ -91,30 +86,72 @@ searching_to_running_notified = False
 searching_exit_retry_count = 0
 last_popup_close_time = 0.0
 lobby_house_confirm_count = 0
-parachute_manager = ParachuteManager()
-running_manager = RunningManager()
-driving_manager = DrivingManager()
-searching_house_manager = HouseSceneSearchManager()
-searching_house_manager.configure_r_city_landing_target(DROP_TARGET_R_CITY)
-searching_house_manager.configure_r_city_pre_search_target(
-    DROP_TARGET_R_CITY_SEARCH_START,
-    arrival_distance=3.0,
-)
-house_exit_manager = HouseExitManager()
-phase_timer = PhaseTimeManager(PHASE_DURATIONS, PHASE_STAGE_MAP)
-print(
-    "[Timer] 阶段时间配置: "
-    f"搜房={phase_timer.get_duration_minutes_label(PHASE_SEARCHING)}分钟, "
-    f"跑图={phase_timer.get_duration_minutes_label(PHASE_RUNNING)}分钟, "
-    f"开车={phase_timer.get_duration_minutes_label(PHASE_DRIVING)}分钟"
-)
-phase_timer.configure_case_loop_count(
-    parse_case_loop_count(os.environ.get("AUTOGAME_SINGLE_CASE_LOOPS"))
-)
-phase_reporter = PhaseTimeReporter()
+PHASE_DURATIONS = None
+parachute_manager = None
+running_manager = None
+driving_manager = None
+searching_house_manager = None
+house_exit_manager = None
+phase_timer = None
+phase_reporter = None
+_runtime_initialized = False
+
+
+def initialize_runtime():
+    global SP_RECORDING_ENABLED, PHASE_DURATIONS, _runtime_initialized
+    global parachute_manager, running_manager, driving_manager
+    global searching_house_manager, house_exit_manager, phase_timer, phase_reporter
+
+    if _runtime_initialized:
+        return
+
+    SP_RECORDING_ENABLED = should_use_sp_recording_for_profile(
+        os.environ.get("AUTOGAME_TEST_PROFILE")
+    )
+    PHASE_DURATIONS = load_phase_durations_from_config(_read_autogame_config())
+
+    parachute_manager = ParachuteManager()
+    running_manager = RunningManager()
+    driving_manager = DrivingManager()
+    searching_house_manager = HouseSceneSearchManager()
+    searching_house_manager.configure_r_city_landing_target(DROP_TARGET_R_CITY)
+    searching_house_manager.configure_r_city_pre_search_target(
+        DROP_TARGET_R_CITY_SEARCH_START,
+        arrival_distance=3.0,
+    )
+    house_exit_manager = HouseExitManager()
+    phase_timer = PhaseTimeManager(PHASE_DURATIONS, PHASE_STAGE_MAP)
+    print(
+        "[Timer] 阶段时间配置: "
+        f"搜房={phase_timer.get_duration_minutes_label(PHASE_SEARCHING)}分钟, "
+        f"跑图={phase_timer.get_duration_minutes_label(PHASE_RUNNING)}分钟, "
+        f"开车={phase_timer.get_duration_minutes_label(PHASE_DRIVING)}分钟"
+    )
+    phase_timer.configure_case_loop_count(
+        parse_case_loop_count(os.environ.get("AUTOGAME_SINGLE_CASE_LOOPS"))
+    )
+    phase_reporter = PhaseTimeReporter()
+
+    running_manager.pause_sp_callback = pause_sp_after_death
+    driving_manager.pause_sp_callback = pause_sp_after_death
+    searching_house_manager.abort_callback = should_abort_searching
+    searching_house_manager.can_finish_callback = lambda w: phase_timer.is_completed(PHASE_SEARCHING)
+    running_manager.terminal_state_callback = handle_terminal_state
+    driving_manager.terminal_state_callback = handle_terminal_state
+    searching_house_manager.r_city_recovery_route_callback = recover_bad_landing_to_r_city
+    searching_house_manager.r_city_pre_search_route_callback = route_to_r_city_search_start
+    searching_house_manager.r_city_entry_route_callback = route_to_r_city_entry_point
+    searching_house_manager.finish_callback = finish_searching_and_enter_running
+
+    _runtime_initialized = True
+
+
+def _require_runtime():
+    initialize_runtime()
 
 
 def pause_sp_after_death(w: "FrameWorker"):
+    _require_runtime()
     if not SP_RECORDING_ENABLED:
         return
     w.click("sp")
@@ -122,14 +159,11 @@ def pause_sp_after_death(w: "FrameWorker"):
     phase_timer.mark_sp_stopped()
 
 
-running_manager.pause_sp_callback = pause_sp_after_death
-driving_manager.pause_sp_callback = pause_sp_after_death
-
-
 def prepare_round():
     global searching_view_synced, rank_finish_pending
     global searching_phase_finishing, searching_to_running_notified, searching_exit_retry_count
 
+    _require_runtime()
     phase_timer.start_new_round()
     phase_reporter.reset()
     searching_view_synced = False
@@ -167,6 +201,7 @@ def prepare_round():
 
 
 def handle_sp_start(w: "FrameWorker"):
+    _require_runtime()
     if not SP_RECORDING_ENABLED:
         return
     if not phase_timer.should_start_sp():
@@ -188,6 +223,7 @@ def handle_sp_start(w: "FrameWorker"):
 
 
 def handle_sp_stop(w: "FrameWorker"):
+    _require_runtime()
     if not SP_RECORDING_ENABLED:
         return
     if not phase_timer.sp_recording:
@@ -214,6 +250,7 @@ def _has_death_finish_info(w: "FrameWorker") -> bool:
 
 
 def _stop_active_motion(w: "FrameWorker"):
+    _require_runtime()
     for manager in (searching_house_manager, running_manager):
         stop_func = getattr(manager, "stop_auto_forward", None)
         if callable(stop_func):
@@ -227,6 +264,7 @@ def _stop_active_motion(w: "FrameWorker"):
 def handle_terminal_state(w: "FrameWorker", context: str = "阶段入口") -> bool:
     global rank_finish_pending, searching_phase_finishing
 
+    _require_runtime()
     if _has_rank_finish_info(w):
         print(f"[Terminal] {context} 检测到个人排名或队伍排名，进入结束阶段")
         set_stage_decision(
@@ -264,6 +302,7 @@ def handle_terminal_state(w: "FrameWorker", context: str = "阶段入口") -> bo
 
 
 def should_abort_searching(w: "FrameWorker"):
+    _require_runtime()
     if w.current_stage != "搜房阶段":
         return True
 
@@ -284,15 +323,10 @@ def should_abort_searching(w: "FrameWorker"):
     return False
 
 
-searching_house_manager.abort_callback = should_abort_searching
-searching_house_manager.can_finish_callback = lambda w: phase_timer.is_completed(PHASE_SEARCHING)
-running_manager.terminal_state_callback = handle_terminal_state
-driving_manager.terminal_state_callback = handle_terminal_state
-
-
 def recover_bad_landing_to_r_city(w: "FrameWorker", target, reason: str):
     global searching_view_synced, searching_to_running_notified
 
+    _require_runtime()
     route_target = tuple(target or DROP_TARGET_R_CITY)
     print(
         f"[Flow] 搜房落点异常，切到跑图阶段恢复到R城: "
@@ -320,9 +354,6 @@ def recover_bad_landing_to_r_city(w: "FrameWorker", target, reason: str):
     return True
 
 
-searching_house_manager.r_city_recovery_route_callback = recover_bad_landing_to_r_city
-
-
 def route_to_r_city_search_start(
     w: "FrameWorker",
     target,
@@ -331,6 +362,7 @@ def route_to_r_city_search_start(
 ):
     global searching_view_synced, searching_to_running_notified
 
+    _require_runtime()
     route_target = tuple(target or DROP_TARGET_R_CITY_SEARCH_START)
     print(
         f"[Flow] 搜房前置跑图，先到R城搜房起点: "
@@ -358,9 +390,6 @@ def route_to_r_city_search_start(
     return True
 
 
-searching_house_manager.r_city_pre_search_route_callback = route_to_r_city_search_start
-
-
 def route_to_r_city_entry_point(
     w: "FrameWorker",
     target,
@@ -369,6 +398,7 @@ def route_to_r_city_entry_point(
 ):
     global searching_view_synced, searching_to_running_notified
 
+    _require_runtime()
     route_target = tuple(target or DROP_TARGET_R_CITY_SEARCH_START)
     print(
         f"[Flow] 落地后最近入门点仍较远，先按跑图阶段冲到入门点附近: "
@@ -396,10 +426,8 @@ def route_to_r_city_entry_point(
     return True
 
 
-searching_house_manager.r_city_entry_route_callback = route_to_r_city_entry_point
-
-
 def _should_find_car_after_searching() -> bool:
+    _require_runtime()
     return (
         not phase_timer.is_completed(PHASE_DRIVING)
         and phase_timer.get_remaining(PHASE_DRIVING) > 0
@@ -410,6 +438,7 @@ def finish_searching_and_enter_running(w: "FrameWorker", reason: str):
     global searching_view_synced, searching_phase_finishing, searching_to_running_notified
     global searching_exit_retry_count
 
+    _require_runtime()
     if searching_phase_finishing:
         return True
 
@@ -472,12 +501,10 @@ def finish_searching_and_enter_running(w: "FrameWorker", reason: str):
     return True
 
 
-searching_house_manager.finish_callback = finish_searching_and_enter_running
-
-
 def finalize_automation(w: "FrameWorker"):
     global final_shutdown_pending
 
+    _require_runtime()
     set_stage_decision(
         w,
         "当前用例/所有循环已完成",
@@ -500,6 +527,7 @@ def finalize_automation(w: "FrameWorker"):
 
 
 def finish_case_loop_or_finalize(w: "FrameWorker"):
+    _require_runtime()
     if not phase_timer.has_next_case_loop():
         finalize_automation(w)
         return
@@ -629,6 +657,7 @@ def prepare_rank_finish_for_lobby(w: "FrameWorker"):
 
 
 def maybe_report_phase_remaining():
+    _require_runtime()
     phase_reporter.maybe_report(phase_timer)
 
 
@@ -655,6 +684,7 @@ def record_manager_decision(w: "FrameWorker", target: str, decision: str, method
 
 
 def handle_priority_stage_jump_forward(w: "FrameWorker", stage_label: str) -> bool:
+    _require_runtime()
     if not w.get_info("跳跃"):
         return False
 
@@ -687,6 +717,7 @@ def on_stage(w: "FrameWorker"):
     global start_game, start_game_click_time, final_shutdown_pending
     global searching_view_synced, searching_to_running_notified
 
+    _require_runtime()
     previous_stage = phase_timer.last_stage
     stage_events = phase_timer.sync_stage(w.current_stage)
     stage_events |= phase_timer.refresh()

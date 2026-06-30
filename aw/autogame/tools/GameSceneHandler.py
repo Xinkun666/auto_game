@@ -8,24 +8,24 @@ import numpy as np
 DEFAULT_GROUP_NAME = "默认"
 GROUPABLE_ITEM_TYPES = ("area", "special_area")
 
-project_case = os.environ.get("TARGET_PROJECT_CASE")
-if not project_case:
-    raise ValueError("TARGET_PROJECT_CASE 未设置，无法定位资源路径")
+def load_special_handler(project_case):
+    if not project_case:
+        raise ValueError("TARGET_PROJECT_CASE 未设置，无法定位资源路径")
 
-handler_path = f"aw.autogame.customs_examples.{project_case}.resource.SpecialSceneHandler"
-try:
-    special_handler_module = importlib.import_module(handler_path)
-    SpecialHandler = special_handler_module
-    print(f"成功从项目 [{project_case}] 加载 SpecialSceneHandler")
-except ImportError as e:
-    print(f"路径错误: 无法在 {handler_path} 找到 SpecialSceneHandler 模块")
-    raise e
+    handler_path = f"aw.autogame.customs_examples.{project_case}.resource.SpecialSceneHandler"
+    try:
+        special_handler_module = importlib.import_module(handler_path)
+        print(f"成功从项目 [{project_case}] 加载 SpecialSceneHandler")
+        return special_handler_module
+    except ImportError as e:
+        print(f"路径错误: 无法在 {handler_path} 找到 SpecialSceneHandler 模块")
+        raise e
 
 class GameImageProcessor:
-    def __init__(self, project_name):
+    def __init__(self, project_name, special_handler=None):
         self.project_root = os.path.join(r"aw/autogame/customs_examples", project_name)
         self.template_cache = self._load_templates()
-        self.special_handler = SpecialHandler
+        self.special_handler = special_handler or load_special_handler(project_name)
         self.task_config = None
         self.screen_w, self.screen_h = self._resolve_screen_resolution()
 

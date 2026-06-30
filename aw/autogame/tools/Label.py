@@ -22,6 +22,7 @@ from PyQt6.QtCore import Qt, QRectF, QPointF, QEvent
 from PyQt6.QtGui import QAction, QPixmap, QColor, QPen, QBrush, QImage, QPainter, QGuiApplication, QFontMetricsF
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
+from aw.autogame.tools.Utils import TEMPLATE_MATCH_MODES
 # ==========================================
 # 1. 数据模型 (Data Structure)
 # ==========================================
@@ -1965,7 +1966,7 @@ class AutoStudioWindow(QMainWindow):
     def set_area_match_mode(self, item_data: ItemData):
         if item_data.item_type != "area":
             return
-        options = ["gray", "rgb", "hsv"]
+        options = list(TEMPLATE_MATCH_MODES)
         current_mode = item_data.match_mode if item_data.match_mode in options else "gray"
         current_index = options.index(current_mode)
         mode, ok = QInputDialog.getItem(

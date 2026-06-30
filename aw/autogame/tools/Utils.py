@@ -723,10 +723,27 @@ def archive_run_artifacts(
     )
     return archive_dir
 
+TEMPLATE_MATCH_MODES = ("gray", "rgb", "hsv", "edge", "clahe_gray")
+
+
 def find_template_center_multiscale(target_img, template_input, threshold=0.7, match_mode="gray"):
     def _normalize_match_mode(mode):
         mode = str(mode or "gray").strip().lower()
-        return mode if mode in ("gray", "rgb", "hsv") else "gray"
+        return mode if mode in TEMPLATE_MATCH_MODES else "gray"
+
+    def _to_gray(img):
+        if len(img.shape) == 2:
+            return img
+        return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    def _apply_clahe(gray):
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        return clahe.apply(gray)
+
+    def _edge_image(img):
+        gray = _apply_clahe(_to_gray(img))
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        return cv2.Canny(blurred, 5, 15)
 
     def _prepare_match_image(img_data, mode):
         if isinstance(img_data, str):
@@ -745,9 +762,11 @@ def find_template_center_multiscale(target_img, template_input, threshold=0.7, m
             return None
 
         if mode == "gray":
-            if len(img.shape) == 3:
-                return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            return img
+            return _to_gray(img)
+        if mode == "clahe_gray":
+            return _apply_clahe(_to_gray(img))
+        if mode == "edge":
+            return _edge_image(img)
 
         if len(img.shape) == 2:
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -758,9 +777,10 @@ def find_template_center_multiscale(target_img, template_input, threshold=0.7, m
             return cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    def _match_template(search_img, tpl_img):
+    def _match_template(search_img, tpl_img, mode):
+        method = cv2.TM_CCORR_NORMED if mode == "edge" else cv2.TM_CCOEFF_NORMED
         if len(search_img.shape) == 2:
-            return cv2.matchTemplate(search_img, tpl_img, cv2.TM_CCOEFF_NORMED)
+            return cv2.matchTemplate(search_img, tpl_img, method)
 
         channel_scores = []
         for channel_idx in range(search_img.shape[2]):
@@ -768,7 +788,7 @@ def find_template_center_multiscale(target_img, template_input, threshold=0.7, m
                 cv2.matchTemplate(
                     search_img[:, :, channel_idx],
                     tpl_img[:, :, channel_idx],
-                    cv2.TM_CCOEFF_NORMED,
+                    method,
                 )
             )
         return np.mean(channel_scores, axis=0)
@@ -793,7 +813,7 @@ def find_template_center_multiscale(target_img, template_input, threshold=0.7, m
             continue
 
         resized_tpl = cv2.resize(prepared_template, (new_w, new_h))
-        res = _match_template(prepared_target, resized_tpl)
+        res = _match_template(prepared_target, resized_tpl, match_mode)
         _, max_val, _, max_loc = cv2.minMaxLoc(res)
 
         if best_match is None or max_val > best_match[0]:

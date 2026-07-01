@@ -1405,6 +1405,43 @@ class AutoStudioWindow(QMainWindow):
         return os.path.join(project_dir, *relative_path.split("/"))
 
     @staticmethod
+    def _resolve_import_asset_path(import_dir: str, relative_path: str) -> str:
+        if not relative_path:
+            return ""
+        raw_path = os.fspath(relative_path)
+        if os.path.isabs(raw_path):
+            return raw_path
+        normalized = raw_path.replace("\\", "/")
+        parts = [part for part in normalized.split("/") if part]
+        candidates = []
+        if parts:
+            candidates.append(os.path.join(import_dir, *parts))
+            candidates.append(os.path.join(import_dir, "resource", *parts))
+            if len(parts) >= 3 and parts[-1] == "scene.png":
+                resolution = parts[-2]
+                alternate_resolution = ""
+                if "x" in resolution:
+                    alternate_resolution = resolution.replace("x", "_")
+                elif "_" in resolution:
+                    alternate_resolution = resolution.replace("_", "x")
+                if alternate_resolution and alternate_resolution != resolution:
+                    alternate_parts = list(parts)
+                    alternate_parts[-2] = alternate_resolution
+                    candidates.append(os.path.join(import_dir, *alternate_parts))
+                    candidates.append(os.path.join(import_dir, "resource", *alternate_parts))
+        else:
+            candidates.append(os.path.join(import_dir, raw_path))
+
+        seen = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if os.path.exists(candidate):
+                return candidate
+        return candidates[0] if candidates else os.path.join(import_dir, raw_path)
+
+    @staticmethod
     def _export_scene_dir_from_image_rel(image_rel: str) -> str:
         normalized = str(image_rel or "").replace("\\", "/")
         parts = [part for part in normalized.split("/") if part]
@@ -3747,20 +3784,34 @@ class AutoStudioWindow(QMainWindow):
             return
         self.status_label.setText("图片已导入。请开始添加区域或控点。")
     def show_scene_image(self, scene_data):
+        if not scene_data:
+            self.clear_scene_display()
+            return
         self.canvas.active_scene_data = scene_data
-        if not scene_data.pixmap and scene_data.image_path and os.path.exists(scene_data.image_path):
+        scene_pixmap = scene_data.pixmap
+        if scene_pixmap and scene_pixmap.isNull():
+            scene_data.pixmap = None
+            scene_pixmap = None
+        if scene_pixmap is None and scene_data.image_path and os.path.exists(scene_data.image_path):
             loaded_pixmap = QPixmap(scene_data.image_path)
             if not loaded_pixmap.isNull():
                 scene_data.pixmap = loaded_pixmap
-        if scene_data.pixmap:
+                scene_pixmap = loaded_pixmap
+        if scene_pixmap is not None:
             if scene_data.image_width <= 0 or scene_data.image_height <= 0:
-                scene_data.image_width = scene_data.pixmap.width()
-                scene_data.image_height = scene_data.pixmap.height()
-            self.canvas.set_image(scene_data.pixmap)
+                scene_data.image_width = scene_pixmap.width()
+                scene_data.image_height = scene_pixmap.height()
+            self.canvas.set_image(scene_pixmap)
         else:
-            self.clear_scene_display()
+            self.canvas.scene.clear()
+            self.canvas.current_pixmap = None
+            self.canvas.crosshair_h = None
+            self.canvas.crosshair_v = None
+            self.canvas.hide_crosshair()
+            if scene_data.image_width > 0 and scene_data.image_height > 0:
+                self.canvas.setSceneRect(QRectF(0, 0, scene_data.image_width, scene_data.image_height))
             self.canvas.active_scene_data = scene_data
-            return
+            self.update_coord_display(None, None)
         self.canvas.redraw_overlays(scene_data)
     def prepare_draw(self, mode, target_data=None):
         if not self.canvas.current_pixmap:
@@ -4934,7 +4985,7 @@ class AutoStudioWindow(QMainWindow):
     def _import_scene_version(import_dir, stage_name, scene_name, scene_data, stage_control_names):
         scene = SceneData(id=str(random.randint(1000, 9999)), name=scene_name)
         image_rel = scene_data.get("image", "")
-        image_path = os.path.join(import_dir, image_rel) if image_rel else ""
+        image_path = AutoStudioWindow._resolve_import_asset_path(import_dir, image_rel)
         scene.image_path = image_path
         if image_path and os.path.exists(image_path):
             pix = QPixmap(image_path)

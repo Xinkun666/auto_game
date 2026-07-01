@@ -691,7 +691,7 @@ class AutoStudioWindow(QMainWindow):
             group_data[group.name] = {
                 "items": [
                     {
-                        "scene": ref.scene_name,
+                        "scene": self._stage_scene_display_name(stage, ref.scene_name),
                         "type": ref.item_type,
                         "name": ref.item_name,
                     }
@@ -1355,6 +1355,92 @@ class AutoStudioWindow(QMainWindow):
             int(scene.image_height or 0),
             tuple(sorted(items)),
         )
+
+    @staticmethod
+    def _safe_export_filename(name: str) -> str:
+        safe = str(name or "").strip()
+        if not safe:
+            return "unnamed"
+        for ch in [os.sep, "/", "\\", ":", "*", "?", "\"", "<", ">", "|"]:
+            safe = safe.replace(ch, "_")
+        return safe
+
+    @staticmethod
+    def _export_resolution_dir(width: int, height: int) -> str:
+        return f"{int(width or 0)}x{int(height or 0)}"
+
+    @staticmethod
+    def _export_scene_image_rel_path(scene_dir_name: str, width: int, height: int) -> str:
+        resolution_dir = AutoStudioWindow._export_resolution_dir(width, height)
+        return f"scenes/{scene_dir_name}/{resolution_dir}/scene.png"
+
+    @staticmethod
+    def _export_template_rel_path(scene_dir_name: str, width: int, height: int, item_name: str) -> str:
+        resolution_dir = AutoStudioWindow._export_resolution_dir(width, height)
+        template_name = f"{AutoStudioWindow._safe_export_filename(item_name)}.png"
+        return f"templates/{scene_dir_name}/{resolution_dir}/{template_name}"
+
+    @staticmethod
+    def _export_template_rel_path_with_name(scene_dir_name: str, width: int, height: int, template_name: str) -> str:
+        resolution_dir = AutoStudioWindow._export_resolution_dir(width, height)
+        return f"templates/{scene_dir_name}/{resolution_dir}/{template_name}"
+
+    @staticmethod
+    def _resource_abs_path(project_dir: str, relative_path: str) -> str:
+        return os.path.join(project_dir, *relative_path.split("/"))
+
+    @staticmethod
+    def _build_export_scene_dir_names(project: Optional[ProjectData]) -> Dict[str, str]:
+        if not project:
+            return {}
+
+        logical_records = {}
+        duplicate_names = {}
+        for stage in project.stages:
+            grouped = {}
+            for scene in stage.scenes:
+                grouped.setdefault(scene.name, []).append(scene)
+            for scene_name, scenes in grouped.items():
+                scene_ids = tuple(scene.id for scene in scenes)
+                base_name = AutoStudioWindow._stage_scene_base_name(stage, scene_name)
+                logical_key = (base_name, frozenset(scene_ids))
+                record = logical_records.setdefault(
+                    logical_key,
+                    {
+                        "base_name": base_name,
+                        "stage_names": [],
+                        "scene_ids": [],
+                    },
+                )
+                if stage.name not in record["stage_names"]:
+                    record["stage_names"].append(stage.name)
+                for scene_id in scene_ids:
+                    if scene_id not in record["scene_ids"]:
+                        record["scene_ids"].append(scene_id)
+                duplicate_names.setdefault(base_name, set()).add(logical_key)
+
+        result = {}
+        used_names = set()
+        for logical_key, record in logical_records.items():
+            base_name = record["base_name"]
+            stage_names = record["stage_names"]
+            needs_prefix = len(duplicate_names.get(base_name, set())) > 1
+            if needs_prefix and len(stage_names) == 1:
+                candidate = f"{stage_names[0]}_{base_name}"
+            else:
+                candidate = base_name
+            safe_candidate = AutoStudioWindow._safe_export_filename(candidate)
+            if safe_candidate in used_names:
+                short_id = AutoStudioWindow._safe_export_filename(str(record["scene_ids"][0]))[:8] or "scene"
+                safe_candidate = f"{safe_candidate}_{short_id}"
+                suffix = 2
+                while safe_candidate in used_names:
+                    safe_candidate = f"{AutoStudioWindow._safe_export_filename(candidate)}_{short_id}_{suffix}"
+                    suffix += 1
+            for scene_id in record["scene_ids"]:
+                result[scene_id] = safe_candidate
+            used_names.add(safe_candidate)
+        return result
 
     @staticmethod
     def _add_scene_to_project_pool(project: ProjectData, scene: SceneData, group_name: str = DEFAULT_SCENE_GROUP_NAME) -> SceneData:
@@ -2580,15 +2666,7 @@ class AutoStudioWindow(QMainWindow):
         return self._warn_scene_global_item_conflicts(scene)
 
     def _autosave_imported_project_state(self) -> bool:
-        imported_project_dir = getattr(self, "imported_project_dir", None)
-        if not self.project or not imported_project_dir:
-            return False
-        try:
-            self._save_editor_state_to_dir(self.project, imported_project_dir)
-            return True
-        except Exception as exc:
-            QMessageBox.warning(self, "保存编辑状态失败", f"本次修改暂未保存到导入目录：\n{exc}")
-            return False
+        return False
 
     def preview_stage_scene_pool_item(self, item: Optional[QTreeWidgetItem]):
         if item is None:
@@ -4273,7 +4351,7 @@ class AutoStudioWindow(QMainWindow):
                         return
             progress_total = self._estimate_export_generation_steps()
             progress_total += self._estimate_tree_copy_steps(export_resource_source) if export_resource_source else 1
-            progress_total += 5
+            progress_total += 4
             progress_dialog = self._create_export_progress_dialog(progress_total)
             progress_state = {"current": 0, "total": progress_total}
             self._advance_export_progress(progress_dialog, progress_state, "正在创建导出暂存目录...", 0)
@@ -4303,15 +4381,10 @@ class AutoStudioWindow(QMainWindow):
             stage_dict = {}
             stage_info = {}
             special_area_names = set()
-            exported_scene_image_paths = {}
+            scene_export_dir_names = self._build_export_scene_dir_names(self.project)
 
             def safe_filename(name):
-                safe = name.strip()
-                if not safe:
-                    return "unnamed"
-                for ch in [os.sep, "/", "\\", ":", "*", "?", "\"", "<", ">", "|"]:
-                    safe = safe.replace(ch, "_")
-                return safe
+                return self._safe_export_filename(name)
 
             def get_scene_pixmap(scene):
                 if scene.pixmap and not scene.pixmap.isNull():
@@ -4338,13 +4411,8 @@ class AutoStudioWindow(QMainWindow):
                     "groups": self._serialize_stage_groups(stage),
                     "scenes": {},
                 }
-                stage_safe_name = safe_filename(stage.name)
-                scenes_stage_dir = os.path.join(scenes_dir, stage_safe_name)
-                os.makedirs(scenes_stage_dir, exist_ok=True)
-                template_stage_dir = os.path.join(templates_dir, stage_safe_name)
-                os.makedirs(template_stage_dir, exist_ok=True)
                 for scene_name, scene_versions in self._group_scenes_by_name(stage).items():
-                    scene_safe_name = safe_filename(scene_name)
+                    runtime_scene_name = self._stage_scene_display_name(stage, scene_name)
                     exported_versions = {}
                     has_multiple_versions = len(scene_versions) > 1
                     for scene in scene_versions:
@@ -4368,22 +4436,45 @@ class AutoStudioWindow(QMainWindow):
                         scene.image_width = scene_width
                         scene.image_height = scene_height
                         resolution_key = f"{scene_width}_{scene_height}"
-                        name_suffix = f"__{resolution_key}" if has_multiple_versions else ""
-                        scene_image_name = f"{scene_safe_name}{name_suffix}.png"
-                        scene_image_path = os.path.join(scenes_stage_dir, scene_image_name)
+                        scene_dir_name = scene_export_dir_names.get(scene.id, safe_filename(runtime_scene_name))
+                        scene_image_rel = self._export_scene_image_rel_path(
+                            scene_dir_name,
+                            scene_width,
+                            scene_height,
+                        )
+                        scene_image_path = self._resource_abs_path(staging_project_dir, scene_image_rel)
+                        os.makedirs(os.path.dirname(scene_image_path), exist_ok=True)
                         if scene_pixmap:
                             scene_pixmap.save(scene_image_path)
                         elif scene.image_path and os.path.exists(scene.image_path):
                             shutil.copy(scene.image_path, scene_image_path)
-                        exported_scene_image_paths[scene.id] = scene_image_path
                         scene_entry = {
-                            "image": os.path.join("scenes", stage_safe_name, scene_image_name),
+                            "image": scene_image_rel,
                             "width": scene_width,
                             "height": scene_height,
                             "areas": {},
                             "points": {},
                             "special_areas": {},
                         }
+                        used_template_names = set()
+
+                        def next_template_name(item):
+                            base_name = f"{safe_filename(item.name)}.png"
+                            if base_name not in used_template_names:
+                                used_template_names.add(base_name)
+                                return base_name
+                            typed_name = f"{safe_filename(item.name)}__{safe_filename(item.item_type)}.png"
+                            if typed_name not in used_template_names:
+                                used_template_names.add(typed_name)
+                                return typed_name
+                            index = 2
+                            while True:
+                                indexed_name = f"{safe_filename(item.name)}__{safe_filename(item.item_type)}_{index}.png"
+                                if indexed_name not in used_template_names:
+                                    used_template_names.add(indexed_name)
+                                    return indexed_name
+                                index += 1
+
                         for item in scene.items:
                             self._advance_export_progress(
                                 progress_dialog,
@@ -4392,11 +4483,17 @@ class AutoStudioWindow(QMainWindow):
                                 1,
                             )
                             rect_norm = normalize_rect(item.rect, scene_width, scene_height)
-                            item_template_stem = f"{scene_safe_name}{name_suffix}__{safe_filename(item.name)}"
                             if item.item_type == "area":
                                 scope_norm = normalize_rect(item.search_scope, scene_width, scene_height) if item.search_scope else [0, 0, 0, 0]
-                                template_name = f"{item_template_stem}.png"
-                                template_path = os.path.join(template_stage_dir, template_name)
+                                template_name = next_template_name(item)
+                                template_rel = self._export_template_rel_path_with_name(
+                                    scene_dir_name,
+                                    scene_width,
+                                    scene_height,
+                                    template_name,
+                                )
+                                template_path = self._resource_abs_path(staging_project_dir, template_rel)
+                                os.makedirs(os.path.dirname(template_path), exist_ok=True)
                                 if scene_pixmap:
                                     crop_rect = QRectF(item.rect.x, item.rect.y, item.rect.w, item.rect.h).toRect()
                                     cropped = scene_pixmap.copy(crop_rect)
@@ -4405,27 +4502,34 @@ class AutoStudioWindow(QMainWindow):
                                     "rect": rect_norm,
                                     "search_scope": scope_norm,
                                     "match_mode": item.match_mode or "gray",
-                                    "template": os.path.join("templates", stage_safe_name, template_name),
+                                    "template": template_rel,
                                 }
                             elif item.item_type == "control":
                                 scene_entry["points"][item.name] = {"rect": rect_norm}
                             elif item.item_type == "special_area":
                                 special_area_names.add(item.name)
-                                template_name = f"{item_template_stem}.png"
-                                template_path = os.path.join(template_stage_dir, template_name)
+                                template_name = next_template_name(item)
+                                template_rel = self._export_template_rel_path_with_name(
+                                    scene_dir_name,
+                                    scene_width,
+                                    scene_height,
+                                    template_name,
+                                )
+                                template_path = self._resource_abs_path(staging_project_dir, template_rel)
+                                os.makedirs(os.path.dirname(template_path), exist_ok=True)
                                 if scene_pixmap:
                                     crop_rect = QRectF(item.rect.x, item.rect.y, item.rect.w, item.rect.h).toRect()
                                     cropped = scene_pixmap.copy(crop_rect)
                                     cropped.save(template_path)
                                 scene_entry["special_areas"][item.name] = {
                                     "rect": rect_norm,
-                                    "template": os.path.join("templates", stage_safe_name, template_name),
+                                    "template": template_rel,
                                 }
                         exported_versions[resolution_key] = scene_entry
                     if has_multiple_versions:
-                        stage_entry["scenes"][scene_name] = {"resolutions": exported_versions}
+                        stage_entry["scenes"][runtime_scene_name] = {"resolutions": exported_versions}
                     else:
-                        stage_entry["scenes"][scene_name] = next(iter(exported_versions.values()))
+                        stage_entry["scenes"][runtime_scene_name] = next(iter(exported_versions.values()))
                 stage_info[stage.name] = stage_entry
 
             code_lines = []
@@ -4440,20 +4544,10 @@ class AutoStudioWindow(QMainWindow):
             for stage_name, data in stage_info.items():
                 code_lines.append(f"    {repr(stage_name)}: {repr(data)},")
             code_lines.append("}")
-            code_lines.append("")
-            code_lines.append(
-                self._editor_state_code_line(
-                    self.project,
-                    staging_project_dir,
-                    exported_scene_image_paths,
-                )
-            )
 
             with open(file_path, "w", encoding='utf-8') as f:
                 f.write("\n".join(code_lines))
             self._advance_export_progress(progress_dialog, progress_state, "正在生成 info.py", 1)
-            self._save_export_editor_state_to_dir(self.project, staging_project_dir)
-            self._advance_export_progress(progress_dialog, progress_state, "正在保存标注编辑状态", 1)
             if imported_resource_source:
                 self.ensure_special_scene_handler(staging_project_dir, special_area_names)
             else:
@@ -4555,18 +4649,12 @@ class AutoStudioWindow(QMainWindow):
     @staticmethod
     def _load_project_model_from_dir(import_dir):
         import_dir = os.path.abspath(os.fspath(import_dir))
-        editor_state_project = AutoStudioWindow._load_editor_state_from_dir(import_dir)
-        if editor_state_project is not None:
-            return editor_state_project
         py_path = os.path.join(import_dir, "info.py")
         if not os.path.exists(py_path):
             raise FileNotFoundError("未找到 info.py。")
         data_env = {}
         with open(py_path, "r", encoding="utf-8") as f:
             exec(f.read(), data_env)
-        editor_state = data_env.get(INFO_EDITOR_STATE_NAME)
-        if isinstance(editor_state, dict):
-            return AutoStudioWindow._project_from_editor_state(editor_state, import_dir)
         project_name = data_env.get("PROJECT_NAME") or os.path.basename(import_dir.rstrip(os.sep))
         stage_info = data_env.get("STAGE_INFO", {})
         if not isinstance(stage_info, dict):

@@ -3748,12 +3748,16 @@ class AutoStudioWindow(QMainWindow):
         self.status_label.setText("图片已导入。请开始添加区域或控点。")
     def show_scene_image(self, scene_data):
         self.canvas.active_scene_data = scene_data
+        if not scene_data.pixmap and scene_data.image_path and os.path.exists(scene_data.image_path):
+            loaded_pixmap = QPixmap(scene_data.image_path)
+            if not loaded_pixmap.isNull():
+                scene_data.pixmap = loaded_pixmap
         if scene_data.pixmap:
             if scene_data.image_width <= 0 or scene_data.image_height <= 0:
                 scene_data.image_width = scene_data.pixmap.width()
                 scene_data.image_height = scene_data.pixmap.height()
             self.canvas.set_image(scene_data.pixmap)
-        elif not scene_data.image_path:
+        else:
             self.clear_scene_display()
             self.canvas.active_scene_data = scene_data
             return

@@ -2057,6 +2057,29 @@ class AutoStudioWindow(QMainWindow):
         return scene_names
 
     @staticmethod
+    def _scene_pool_group_batch_entries(project: Optional[ProjectData], scene_group: Optional[SceneGroupData]) -> List[Dict]:
+        if not project or not scene_group:
+            return []
+        AutoStudioWindow._ensure_project_scene_pool(project)
+        entries = []
+        for source_group in AutoStudioWindow._ordered_scene_pool_groups_for_tree(project):
+            grouped_scenes = {}
+            for scene in source_group.scenes:
+                grouped_scenes.setdefault(scene.name, []).append(scene)
+            for scene_name, scenes in grouped_scenes.items():
+                entries.append({
+                    "group_id": source_group.id,
+                    "group_name": source_group.name,
+                    "scene_name": scene_name,
+                    "source_group": source_group,
+                    "scenes": scenes,
+                    "scene": scenes[0] if scenes else None,
+                    "resolution_count": len(scenes),
+                    "checked": source_group is scene_group,
+                })
+        return entries
+
+    @staticmethod
     def _add_scene_group_scenes_to_stage(
         project: Optional[ProjectData],
         scene_group: Optional[SceneGroupData],
@@ -2466,10 +2489,8 @@ class AutoStudioWindow(QMainWindow):
         if not self.project or not scene_group:
             return
         default_group = self._pending_scene_group(self.project)
-        source_groups = [scene_group]
-        if default_group and default_group is not scene_group:
-            source_groups.append(default_group)
-        if not any(group.scenes for group in source_groups):
+        entries = self._scene_pool_group_batch_entries(self.project, scene_group)
+        if not entries:
             QMessageBox.information(self, "提示", "当前没有可管理的场景。")
             return
 
@@ -2480,22 +2501,15 @@ class AutoStudioWindow(QMainWindow):
         tree.setHeaderLabels(["场景", "所在分组", "分辨率数量"])
         tree.setSelectionMode(QTreeWidget.SelectionMode.NoSelection)
         scene_items = []
-        for source_group in source_groups:
-            for scene_name in self._scene_group_scene_names(source_group):
-                scene = self._first_pool_scene_resolution(source_group, scene_name)
-                resolution_count = sum(1 for item in source_group.scenes if item.name == scene_name)
-                scene_item = QTreeWidgetItem(tree)
-                scene_item.setText(0, scene_name)
-                scene_item.setText(1, source_group.name)
-                scene_item.setText(2, str(resolution_count))
-                scene_item.setFlags(scene_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                scene_item.setCheckState(0, Qt.CheckState.Unchecked)
-                scene_item.setData(0, Qt.ItemDataRole.UserRole, {
-                    "scene_name": scene_name,
-                    "source_group": source_group,
-                    "scene": scene,
-                })
-                scene_items.append(scene_item)
+        for entry in entries:
+            scene_item = QTreeWidgetItem(tree)
+            scene_item.setText(0, entry["scene_name"])
+            scene_item.setText(1, entry["group_name"])
+            scene_item.setText(2, str(entry["resolution_count"]))
+            scene_item.setFlags(scene_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            scene_item.setCheckState(0, Qt.CheckState.Checked if entry["checked"] else Qt.CheckState.Unchecked)
+            scene_item.setData(0, Qt.ItemDataRole.UserRole, entry)
+            scene_items.append(scene_item)
 
         def preview_batch_scene(item: Optional[QTreeWidgetItem], _column=0):
             if item is None:
@@ -2539,9 +2553,14 @@ class AutoStudioWindow(QMainWindow):
         button_row.addStretch()
         button_row.addWidget(close_btn)
         layout.addLayout(button_row)
-        can_move_with_default = bool(default_group and default_group is not scene_group)
-        add_to_group_btn.setEnabled(can_move_with_default)
-        return_to_default_btn.setEnabled(can_move_with_default)
+        can_add_to_current = any(entry["source_group"] is not scene_group for entry in entries)
+        can_return_to_default = bool(
+            default_group
+            and default_group is not scene_group
+            and any(entry["source_group"] is scene_group for entry in entries)
+        )
+        add_to_group_btn.setEnabled(can_add_to_current)
+        return_to_default_btn.setEnabled(can_return_to_default)
 
         def selected_payloads():
             return [
@@ -2613,14 +2632,35 @@ class AutoStudioWindow(QMainWindow):
             dialog.accept()
 
         def add_selected_to_current_group():
-            if not default_group or default_group is scene_group:
+            payloads = selected_payloads()
+            grouped_payloads = {}
+            for payload in payloads:
+                source_group = payload.get("source_group")
+                if not source_group or source_group is scene_group:
+                    continue
+                grouped_payloads.setdefault(id(source_group), {"group": source_group, "names": []})
+                if payload["scene_name"] not in grouped_payloads[id(source_group)]["names"]:
+                    grouped_payloads[id(source_group)]["names"].append(payload["scene_name"])
+            if not grouped_payloads:
+                QMessageBox.information(dialog, "提示", "请先选择其他分组中的场景。")
                 return
-            move_selected(
-                default_group,
-                scene_group,
-                f"请先选择来自{DEFAULT_SCENE_GROUP_NAME}的场景。",
-                "已将 {count} 个场景分辨率加入分组 {group}。",
-            )
+            moved_scenes = []
+            for grouped in grouped_payloads.values():
+                moved_scenes.extend(
+                    self._move_scene_group_scene_names(
+                        self.project,
+                        grouped["group"],
+                        scene_group,
+                        grouped["names"],
+                    )
+                )
+            if not moved_scenes:
+                QMessageBox.information(dialog, "提示", "没有可移动的场景。")
+                return
+            self._autosave_imported_project_state()
+            self.update_tree_view()
+            self.status_label.setText(f"已将 {len(moved_scenes)} 个场景分辨率加入分组 {scene_group.name}。")
+            dialog.accept()
 
         def return_selected_to_default_group():
             if not default_group or default_group is scene_group:
@@ -3052,17 +3092,9 @@ class AutoStudioWindow(QMainWindow):
             )
             btn_batch_manage = QPushButton("批量管理")
             btn_batch_manage.clicked.connect(lambda: self.manage_scene_pool_group_batch(scene_group))
-            default_group = self._pending_scene_group(self.project) if self.project else None
             can_batch_manage = bool(
                 scene_group
-                and (
-                    scene_group.scenes
-                    or (
-                        default_group
-                        and default_group is not scene_group
-                        and default_group.scenes
-                    )
-                )
+                and self._scene_pool_group_batch_entries(self.project, scene_group)
             )
             btn_batch_manage.setEnabled(can_batch_manage)
             self.action_layout.addWidget(btn_batch_manage)
@@ -3272,18 +3304,10 @@ class AutoStudioWindow(QMainWindow):
             menu.addSeparator()
         elif isinstance(data, dict) and data.get("kind") == "scene_pool_group":
             scene_group = data.get("scene_group")
-            default_group = self._pending_scene_group(self.project) if self.project else None
             batch_action = QAction("批量管理", self)
             batch_action.setEnabled(bool(
                 scene_group
-                and (
-                    scene_group.scenes
-                    or (
-                        default_group
-                        and default_group is not scene_group
-                        and default_group.scenes
-                    )
-                )
+                and self._scene_pool_group_batch_entries(self.project, scene_group)
             ))
             batch_action.triggered.connect(lambda: self.manage_scene_pool_group_batch(scene_group))
             menu.addAction(batch_action)

@@ -1612,9 +1612,11 @@ def build_restart_device_commands(hdc_executable: Optional[str] = None):
     ]
 
 
-def build_restart_bat_cmd_command(script_path: Path) -> list[str]:
+def build_restart_bat_cmd_command(script_path: Path, keep_open: bool = False) -> list[str]:
     if os.name == "nt":
-        return ["cmd", "/c", f'title {RESTART_BAT_CMD_TITLE} && call "{script_path}"']
+        if keep_open:
+            return ["cmd", "/c", f'start "{RESTART_BAT_CMD_TITLE}" cmd /k call "{script_path.name}"']
+        return ["cmd", "/c", f'title {RESTART_BAT_CMD_TITLE} && call "{script_path.name}"']
     return [str(script_path)]
 
 
@@ -1625,9 +1627,14 @@ def restart_bat_cmd_window_kwargs() -> Dict[str, int]:
     return {"creationflags": create_new_console} if create_new_console else {}
 
 
-def launch_restart_bat_cmd_window(script_path: Path) -> subprocess.Popen:
-    command = build_restart_bat_cmd_command(script_path)
-    LOGGER.info("restart.bat visible cmd start: command=%s cwd=%s", command, script_path.parent)
+def launch_restart_bat_cmd_window(script_path: Path, keep_open: bool = False) -> subprocess.Popen:
+    command = build_restart_bat_cmd_command(script_path, keep_open=keep_open)
+    LOGGER.info(
+        "restart.bat visible cmd start: command=%s cwd=%s keep_open=%s",
+        command,
+        script_path.parent,
+        keep_open,
+    )
     return subprocess.Popen(
         command,
         cwd=str(script_path.parent),
@@ -4715,13 +4722,13 @@ class LauncherWindow(QWidget):
 
     def _run_restart_phone_script(self, script_path: Path):
         try:
-            proc = launch_restart_bat_cmd_window(script_path)
+            proc = launch_restart_bat_cmd_window(script_path, keep_open=True)
             return_code = proc.wait()
             if proc.returncode == 0:
-                message = "重启手机脚本执行完成。"
+                message = "已弹出 cmd 窗口执行重启手机脚本。"
                 self.restart_phone_script_finished.emit(True, message)
             else:
-                message = f"重启手机脚本执行失败，exit_code={return_code}。请查看弹出的 cmd 窗口输出。"
+                message = f"启动重启手机 cmd 窗口失败，exit_code={return_code}。"
                 self.restart_phone_script_finished.emit(False, message)
         except Exception as exc:
             log_exception(f"restart phone script failed: script_path={script_path}")

@@ -2080,6 +2080,54 @@ class AutoStudioWindow(QMainWindow):
         return entries
 
     @staticmethod
+    def _scene_pool_group_duplicate_item_entries(scene_group: Optional[SceneGroupData]) -> List[Dict]:
+        if not scene_group:
+            return []
+        scene_records = {}
+        scene_order = []
+        for scene in scene_group.scenes:
+            scene_name = str(scene.name or "").strip()
+            if not scene_name:
+                continue
+            record = scene_records.get(scene_name)
+            if record is None:
+                record = {"scene_name": scene_name, "resolution_count": 0, "item_keys": set()}
+                scene_records[scene_name] = record
+                scene_order.append(scene_name)
+            record["resolution_count"] += 1
+            for item in scene.items:
+                item_type = str(item.item_type or "").strip()
+                item_name = str(item.name or "").strip()
+                if item_type not in ITEM_TYPE_LABELS or not item_name:
+                    continue
+                record["item_keys"].add((item_type, item_name))
+
+        scenes_by_key = {}
+        for scene_name in scene_order:
+            record = scene_records[scene_name]
+            for item_key in record["item_keys"]:
+                scenes_by_key.setdefault(item_key, []).append({
+                    "scene_name": scene_name,
+                    "resolution_count": record["resolution_count"],
+                })
+
+        item_type_order = {item_type: index for index, item_type in enumerate(ITEM_TYPE_LABELS)}
+        entries = []
+        for (item_type, item_name), scenes in scenes_by_key.items():
+            if len(scenes) < 2:
+                continue
+            entries.append({
+                "item_type": item_type,
+                "item_type_label": ITEM_TYPE_LABELS.get(item_type, item_type),
+                "item_name": item_name,
+                "scenes": scenes,
+                "scene_count": len(scenes),
+                "resolution_count": sum(scene["resolution_count"] for scene in scenes),
+            })
+        entries.sort(key=lambda entry: (item_type_order.get(entry["item_type"], 99), entry["item_name"]))
+        return entries
+
+    @staticmethod
     def _add_scene_group_scenes_to_stage(
         project: Optional[ProjectData],
         scene_group: Optional[SceneGroupData],
@@ -2821,6 +2869,44 @@ class AutoStudioWindow(QMainWindow):
         close_btn.clicked.connect(dialog.reject)
         dialog.exec()
 
+    def show_scene_pool_group_duplicate_items(self, scene_group: Optional[SceneGroupData]):
+        if not scene_group:
+            return
+        entries = self._scene_pool_group_duplicate_item_entries(scene_group)
+        if not entries:
+            QMessageBox.information(self, "重复标注检查", f"分组 {scene_group.name} 中没有发现不同场景之间的重复标注。")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"重复标注检查 - {scene_group.name}")
+        layout = QVBoxLayout(dialog)
+        tree = QTreeWidget(dialog)
+        tree.setHeaderLabels(["重复标注", "涉及场景", "分辨率"])
+        for entry in entries:
+            item_text = f"{entry['item_type_label']}「{entry['item_name']}」"
+            item_node = QTreeWidgetItem(tree)
+            item_node.setText(0, item_text)
+            item_node.setText(1, f"{entry['scene_count']} 个场景")
+            item_node.setText(2, f"{entry['resolution_count']} 个分辨率")
+            item_node.setExpanded(True)
+            for scene_info in entry["scenes"]:
+                scene_node = QTreeWidgetItem(item_node)
+                scene_node.setText(0, scene_info["scene_name"])
+                scene_node.setText(1, "")
+                scene_node.setText(2, f"{scene_info['resolution_count']} 个分辨率")
+        tree.expandAll()
+        tree.resizeColumnToContents(0)
+        tree.resizeColumnToContents(1)
+        tree.resizeColumnToContents(2)
+        layout.addWidget(tree)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dialog)
+        buttons.rejected.connect(dialog.reject)
+        close_button = buttons.button(QDialogButtonBox.StandardButton.Close)
+        if close_button:
+            close_button.clicked.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec()
+
     def rename_scene_pool_group(self, scene_group: Optional[SceneGroupData]):
         if not self.project or not scene_group:
             return
@@ -3279,6 +3365,10 @@ class AutoStudioWindow(QMainWindow):
                 scene_group
                 and scene_group.name in (DEFAULT_SCENE_GROUP_NAME, DEFAULT_GLOBAL_SCENE_GROUP_NAME)
             )
+            btn_duplicate_items = QPushButton("重复标注检查")
+            btn_duplicate_items.clicked.connect(lambda: self.show_scene_pool_group_duplicate_items(scene_group))
+            btn_duplicate_items.setEnabled(bool(scene_group and scene_group.scenes))
+            self.action_layout.addWidget(btn_duplicate_items)
             btn_batch_manage = QPushButton("批量管理")
             btn_batch_manage.clicked.connect(lambda: self.manage_scene_pool_group_batch(scene_group))
             can_batch_manage = bool(
@@ -3505,6 +3595,10 @@ class AutoStudioWindow(QMainWindow):
             menu.addSeparator()
         elif isinstance(data, dict) and data.get("kind") == "scene_pool_group":
             scene_group = data.get("scene_group")
+            duplicate_items_action = QAction("重复标注检查", self)
+            duplicate_items_action.setEnabled(bool(scene_group and scene_group.scenes))
+            duplicate_items_action.triggered.connect(lambda: self.show_scene_pool_group_duplicate_items(scene_group))
+            menu.addAction(duplicate_items_action)
             batch_action = QAction("批量管理", self)
             batch_action.setEnabled(bool(
                 scene_group

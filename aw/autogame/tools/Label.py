@@ -932,13 +932,12 @@ class AutoStudioWindow(QMainWindow):
                 image_width=int(raw_scene.get("image_width") or 0),
                 image_height=int(raw_scene.get("image_height") or 0),
             )
-            if scene.image_path and os.path.exists(scene.image_path):
-                pixmap = QPixmap(scene.image_path)
-                if not pixmap.isNull():
-                    scene.pixmap = pixmap
-                    if scene.image_width <= 0 or scene.image_height <= 0:
-                        scene.image_width = pixmap.width()
-                        scene.image_height = pixmap.height()
+            pixmap = AutoStudioWindow._load_pixmap_from_path(scene.image_path)
+            if pixmap:
+                scene.pixmap = pixmap
+                if scene.image_width <= 0 or scene.image_height <= 0:
+                    scene.image_width = pixmap.width()
+                    scene.image_height = pixmap.height()
             for raw_item in raw_scene.get("items", []):
                 if not isinstance(raw_item, dict):
                     continue
@@ -1440,6 +1439,27 @@ class AutoStudioWindow(QMainWindow):
             if os.path.exists(candidate):
                 return candidate
         return candidates[0] if candidates else os.path.join(import_dir, raw_path)
+
+    @staticmethod
+    def _load_pixmap_from_path(image_path: str) -> Optional[QPixmap]:
+        if not image_path or not os.path.exists(image_path):
+            return None
+        pixmap = QPixmap(image_path)
+        if not pixmap.isNull():
+            return pixmap
+        try:
+            with open(image_path, "rb") as image_file:
+                image_data = image_file.read()
+        except OSError:
+            return None
+        if not image_data:
+            return None
+        pixmap = QPixmap()
+        if not hasattr(pixmap, "loadFromData"):
+            return None
+        if not pixmap.loadFromData(image_data) or pixmap.isNull():
+            return None
+        return pixmap
 
     @staticmethod
     def _export_scene_dir_from_image_rel(image_rel: str) -> str:
@@ -3378,10 +3398,9 @@ class AutoStudioWindow(QMainWindow):
             return scene.image_width, scene.image_height
         if scene.pixmap and not scene.pixmap.isNull():
             return scene.pixmap.width(), scene.pixmap.height()
-        if scene.image_path and os.path.exists(scene.image_path):
-            pixmap = QPixmap(scene.image_path)
-            if not pixmap.isNull():
-                return pixmap.width(), pixmap.height()
+        pixmap = self._load_pixmap_from_path(scene.image_path)
+        if pixmap:
+            return pixmap.width(), pixmap.height()
         return 0, 0
 
     def _scale_rect_between_images(self, rect: Optional[RectData], old_w, old_h, new_w, new_h) -> Optional[RectData]:
@@ -3584,9 +3603,9 @@ class AutoStudioWindow(QMainWindow):
         pixmap = None
         if scene.pixmap and not scene.pixmap.isNull():
             pixmap = scene.pixmap.copy()
-        elif scene.image_path and os.path.exists(scene.image_path):
-            loaded_pixmap = QPixmap(scene.image_path)
-            if not loaded_pixmap.isNull():
+        elif scene.image_path:
+            loaded_pixmap = self._load_pixmap_from_path(scene.image_path)
+            if loaded_pixmap:
                 pixmap = loaded_pixmap.copy()
         image_width, image_height = self._get_scene_image_size(scene)
         return SceneData(
@@ -3648,8 +3667,8 @@ class AutoStudioWindow(QMainWindow):
             except subprocess.CalledProcessError as exc:
                 QMessageBox.critical(self, "抓图失败", f"HDc 命令执行失败：\n{exc.stderr or exc.stdout}")
                 return None, None
-            pixmap = QPixmap(local_path)
-            if pixmap.isNull():
+            pixmap = self._load_pixmap_from_path(local_path)
+            if not pixmap:
                 QMessageBox.critical(self, "抓图失败", "读取截图文件失败，请检查路径或权限。")
                 return None, None
             return local_path, pixmap
@@ -3661,8 +3680,8 @@ class AutoStudioWindow(QMainWindow):
         )
         if not file_path:
             return None, None
-        pixmap = QPixmap(file_path)
-        if pixmap.isNull():
+        pixmap = self._load_pixmap_from_path(file_path)
+        if not pixmap:
             QMessageBox.critical(self, "导入失败", "读取图片失败，请检查文件格式或路径。")
             return None, None
         return file_path, pixmap
@@ -3736,8 +3755,8 @@ class AutoStudioWindow(QMainWindow):
         except subprocess.CalledProcessError as exc:
             QMessageBox.critical(self, "抓图失败", f"HDc 命令执行失败：\n{exc.stderr or exc.stdout}")
             return
-        img = QPixmap(local_path)
-        if img.isNull():
+        img = self._load_pixmap_from_path(local_path)
+        if not img:
             QMessageBox.critical(self, "抓图失败", "读取截图文件失败，请检查路径或权限。")
             return
         apply_result = self._apply_capture_pixmap_to_scene_resolution(scene_data, local_path, img)
@@ -3772,8 +3791,8 @@ class AutoStudioWindow(QMainWindow):
         )
         if not file_path:
             return
-        img = QPixmap(file_path)
-        if img.isNull():
+        img = self._load_pixmap_from_path(file_path)
+        if not img:
             QMessageBox.critical(self, "导入失败", "读取图片失败，请检查文件格式或路径。")
             return
         resized_items = self._replace_scene_image(scene_data, file_path, img)
@@ -3792,9 +3811,9 @@ class AutoStudioWindow(QMainWindow):
         if scene_pixmap and scene_pixmap.isNull():
             scene_data.pixmap = None
             scene_pixmap = None
-        if scene_pixmap is None and scene_data.image_path and os.path.exists(scene_data.image_path):
-            loaded_pixmap = QPixmap(scene_data.image_path)
-            if not loaded_pixmap.isNull():
+        if scene_pixmap is None and scene_data.image_path:
+            loaded_pixmap = self._load_pixmap_from_path(scene_data.image_path)
+            if loaded_pixmap:
                 scene_data.pixmap = loaded_pixmap
                 scene_pixmap = loaded_pixmap
         if scene_pixmap is not None:
@@ -4089,8 +4108,8 @@ class AutoStudioWindow(QMainWindow):
             pixmap = self.canvas.current_pixmap.pixmap()
         elif self.current_scene and self.current_scene.pixmap:
             pixmap = self.current_scene.pixmap
-        elif self.current_scene and self.current_scene.image_path and os.path.exists(self.current_scene.image_path):
-            pixmap = QPixmap(self.current_scene.image_path)
+        elif self.current_scene and self.current_scene.image_path:
+            pixmap = self._load_pixmap_from_path(self.current_scene.image_path)
         if not pixmap or pixmap.isNull():
             QMessageBox.warning(self, "复制失败", "当前图片无效，无法计算归一化坐标。")
             return
@@ -4606,11 +4625,7 @@ class AutoStudioWindow(QMainWindow):
             def get_scene_pixmap(scene):
                 if scene.pixmap and not scene.pixmap.isNull():
                     return scene.pixmap
-                if scene.image_path and os.path.exists(scene.image_path):
-                    pix = QPixmap(scene.image_path)
-                    if not pix.isNull():
-                        return pix
-                return None
+                return self._load_pixmap_from_path(scene.image_path)
 
             def normalize_rect(rect, width, height):
                 if width <= 0 or height <= 0:
@@ -4638,11 +4653,6 @@ class AutoStudioWindow(QMainWindow):
                 if scene_pixmap:
                     scene_width = scene_pixmap.width()
                     scene_height = scene_pixmap.height()
-                elif scene.image_path and os.path.exists(scene.image_path):
-                    temp_pix = QPixmap(scene.image_path)
-                    if not temp_pix.isNull():
-                        scene_width = temp_pix.width()
-                        scene_height = temp_pix.height()
                 scene.image_width = scene_width
                 scene.image_height = scene_height
                 resolution_key = f"{scene_width}_{scene_height}"
@@ -4987,10 +4997,9 @@ class AutoStudioWindow(QMainWindow):
         image_rel = scene_data.get("image", "")
         image_path = AutoStudioWindow._resolve_import_asset_path(import_dir, image_rel)
         scene.image_path = image_path
-        if image_path and os.path.exists(image_path):
-            pix = QPixmap(image_path)
-            if not pix.isNull():
-                scene.pixmap = pix
+        pix = AutoStudioWindow._load_pixmap_from_path(image_path)
+        if pix:
+            scene.pixmap = pix
         width = scene_data.get("width", 0) or (scene.pixmap.width() if scene.pixmap else 0)
         height = scene_data.get("height", 0) or (scene.pixmap.height() if scene.pixmap else 0)
         scene.image_width = int(width)

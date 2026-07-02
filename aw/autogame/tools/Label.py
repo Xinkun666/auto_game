@@ -1404,7 +1404,13 @@ class AutoStudioWindow(QMainWindow):
         return os.path.join(project_dir, *relative_path.split("/"))
 
     @staticmethod
-    def _resolve_import_asset_path(import_dir: str, relative_path: str) -> str:
+    def _resolve_import_asset_path(
+        import_dir: str,
+        relative_path: str,
+        scene_name: str = "",
+        width: int = 0,
+        height: int = 0,
+    ) -> str:
         if not relative_path:
             return ""
         raw_path = os.fspath(relative_path)
@@ -1413,9 +1419,32 @@ class AutoStudioWindow(QMainWindow):
         normalized = raw_path.replace("\\", "/")
         parts = [part for part in normalized.split("/") if part]
         candidates = []
+
+        def add_candidate(candidate_parts):
+            if not candidate_parts:
+                return
+            candidates.append(os.path.join(import_dir, *candidate_parts))
+            candidates.append(os.path.join(import_dir, "resource", *candidate_parts))
+
+        def add_scene_layout_candidates(scene_dir_name):
+            safe_scene_dir = str(scene_dir_name or "").strip()
+            if not safe_scene_dir:
+                return
+            resolution_dirs = []
+            try:
+                scene_width = int(width or 0)
+                scene_height = int(height or 0)
+            except (TypeError, ValueError):
+                scene_width = 0
+                scene_height = 0
+            if scene_width > 0 and scene_height > 0:
+                resolution_dirs.append(f"{scene_width}x{scene_height}")
+                resolution_dirs.append(f"{scene_width}_{scene_height}")
+            for resolution_dir in resolution_dirs:
+                add_candidate(["scenes", safe_scene_dir, resolution_dir, "scene.png"])
+
         if parts:
-            candidates.append(os.path.join(import_dir, *parts))
-            candidates.append(os.path.join(import_dir, "resource", *parts))
+            add_candidate(parts)
             if len(parts) >= 3 and parts[-1] == "scene.png":
                 resolution = parts[-2]
                 alternate_resolution = ""
@@ -1426,8 +1455,16 @@ class AutoStudioWindow(QMainWindow):
                 if alternate_resolution and alternate_resolution != resolution:
                     alternate_parts = list(parts)
                     alternate_parts[-2] = alternate_resolution
-                    candidates.append(os.path.join(import_dir, *alternate_parts))
-                    candidates.append(os.path.join(import_dir, "resource", *alternate_parts))
+                    add_candidate(alternate_parts)
+            if len(parts) >= 3 and parts[0] == "scenes":
+                legacy_scene_name = os.path.splitext(parts[-1])[0]
+                legacy_stage_name = parts[1] if len(parts) > 1 else ""
+                for candidate_scene_name in (
+                    scene_name,
+                    legacy_scene_name,
+                    f"{legacy_stage_name}_{legacy_scene_name}" if legacy_stage_name and legacy_scene_name else "",
+                ):
+                    add_scene_layout_candidates(candidate_scene_name)
         else:
             candidates.append(os.path.join(import_dir, raw_path))
 
@@ -4995,7 +5032,13 @@ class AutoStudioWindow(QMainWindow):
     def _import_scene_version(import_dir, stage_name, scene_name, scene_data, stage_control_names):
         scene = SceneData(id=str(random.randint(1000, 9999)), name=scene_name)
         image_rel = scene_data.get("image", "")
-        image_path = AutoStudioWindow._resolve_import_asset_path(import_dir, image_rel)
+        image_path = AutoStudioWindow._resolve_import_asset_path(
+            import_dir,
+            image_rel,
+            scene_name=scene_name,
+            width=scene_data.get("width", 0),
+            height=scene_data.get("height", 0),
+        )
         scene.image_path = image_path
         pix = AutoStudioWindow._load_pixmap_from_path(image_path)
         if pix:

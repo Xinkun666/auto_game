@@ -107,7 +107,7 @@ STREAM_CONNECTED_MARKERS = (
     "[Stream] Start receiving...",
     "[HDC] First frame received.",
 )
-REBOOT_RELAUNCH_DELAY_SECONDS = 10
+REBOOT_RELAUNCH_DELAY_SECONDS = 120
 STREAM_DISCONNECT_SP_LONG_PRESS_MS = 3000
 STREAM_DISCONNECT_SP_NORM_POS = (0.048, 0.295)
 STREAM_DISCONNECT_GRACEFUL_STOP_TIMEOUT_MS = 60000
@@ -4922,18 +4922,7 @@ class LauncherWindow(QWidget):
 
         self._log_message(f"[Launcher] 弹出 cmd 窗口执行断流恢复脚本：{script_path}\n")
         try:
-            proc = launch_restart_bat_cmd_window(script_path)
-            return_code = proc.wait(timeout=360)
-        except subprocess.TimeoutExpired as exc:
-            self._log_message(
-                f"[Launcher] 执行断流恢复脚本超时：{script_path}，detail={exc}\n",
-                level=logging.ERROR,
-            )
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            return False
+            launch_restart_bat_with_system_shell(script_path)
         except Exception:
             log_exception("restart device after stream disconnect failed")
             self._log_message(
@@ -4942,23 +4931,17 @@ class LauncherWindow(QWidget):
             )
             return False
 
-        if return_code != 0:
-            self._log_message(
-                f"[Launcher] 断流恢复脚本执行失败：{script_path}，returncode={return_code}，请查看弹出的 cmd 窗口输出。\n",
-                level=logging.ERROR,
-            )
-            return False
-
-        if not self._reinitialize_stream_service():
-            return False
-
-        self._log_message("[Launcher] 手机重启与端口恢复完成。\n")
         self._log_message(
             f"[Launcher] 重启后固定等待 {REBOOT_RELAUNCH_DELAY_SECONDS}s，再重新启动用例。\n"
         )
         for _ in range(REBOOT_RELAUNCH_DELAY_SECONDS):
             QApplication.processEvents()
             time.sleep(1)
+
+        if not self._reinitialize_stream_service():
+            return False
+
+        self._log_message("[Launcher] 手机重启与端口恢复完成。\n")
         self.dismiss_reboot_prompt_on_next_case_start = True
         return True
 

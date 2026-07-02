@@ -102,6 +102,7 @@ class WindowsSubprocessWindowSuppressor:
         ),
         direct_hide_processes: Sequence[str] = ("icpm_xdc.exe", "hdc.exe"),
         excluded_processes: Sequence[str] = (),
+        excluded_window_title_markers: Sequence[str] = ("autogame restart.bat",),
         xdc_temp_path_markers: Sequence[str] = ("\\temp\\xdc\\",),
         hide_descendant_windows: bool = True,
         interval_seconds: float = 0.01,
@@ -112,6 +113,7 @@ class WindowsSubprocessWindowSuppressor:
         self.target_processes = {str(name).lower() for name in target_processes}
         self.direct_hide_processes = {str(name).lower() for name in direct_hide_processes}
         self.excluded_processes = {str(name).lower() for name in excluded_processes}
+        self.excluded_window_title_markers = tuple(str(marker).lower() for marker in excluded_window_title_markers)
         self.xdc_temp_path_markers = tuple(str(marker).lower() for marker in xdc_temp_path_markers)
         self.hide_descendant_windows = bool(hide_descendant_windows)
         self.interval_seconds = float(interval_seconds)
@@ -142,13 +144,14 @@ class WindowsSubprocessWindowSuppressor:
         )
         self._thread.start()
         LOGGER.info(
-            "subprocess window suppression started: root_pid=%s targets=%s direct=%s xdc_temp_markers=%s hide_descendants=%s excluded=%s interval=%.3f",
+            "subprocess window suppression started: root_pid=%s targets=%s direct=%s xdc_temp_markers=%s hide_descendants=%s excluded=%s excluded_title_markers=%s interval=%.3f",
             self.root_pid,
             sorted(self.target_processes),
             sorted(self.direct_hide_processes),
             list(self.xdc_temp_path_markers),
             self.hide_descendant_windows,
             sorted(self.excluded_processes),
+            list(self.excluded_window_title_markers),
             self.interval_seconds,
         )
         return True
@@ -316,6 +319,10 @@ class WindowsSubprocessWindowSuppressor:
         normalized = str(text or "").replace("/", "\\").lower()
         return any(marker in normalized for marker in self.xdc_temp_path_markers)
 
+    def _contains_excluded_window_title_marker(self, text: str) -> bool:
+        normalized = str(text or "").lower()
+        return any(marker in normalized for marker in self.excluded_window_title_markers)
+
     def _should_hide_process(
         self,
         pid: int,
@@ -328,6 +335,8 @@ class WindowsSubprocessWindowSuppressor:
             return False, "root"
         if process_name in self.excluded_processes:
             return False, "excluded"
+        if self._contains_excluded_window_title_marker(window_title):
+            return False, "excluded-title"
         if process_name in self.direct_hide_processes:
             return True, "direct"
         if self._contains_xdc_temp_marker(process_path):

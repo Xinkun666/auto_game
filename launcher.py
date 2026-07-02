@@ -211,6 +211,7 @@ LOGIC_LOG_MARKERS = (
     "[Flow]",
     "[TurnCalibration]",
 )
+RESTART_BAT_CMD_TITLE = "AutoGame restart.bat"
 SYSTEM_LOG_MARKERS = (
     "[Launcher]",
     "[Stream]",
@@ -1609,6 +1610,29 @@ def build_restart_device_commands(hdc_executable: Optional[str] = None):
         [hdc, "shell", "reboot", "-D"],
         [hdc, "wait"],
     ]
+
+
+def build_restart_bat_cmd_command(script_path: Path) -> list[str]:
+    if os.name == "nt":
+        return ["cmd", "/c", f'title {RESTART_BAT_CMD_TITLE} && call "{script_path}"']
+    return [str(script_path)]
+
+
+def restart_bat_cmd_window_kwargs() -> Dict[str, int]:
+    if os.name != "nt":
+        return {}
+    create_new_console = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+    return {"creationflags": create_new_console} if create_new_console else {}
+
+
+def launch_restart_bat_cmd_window(script_path: Path) -> subprocess.Popen:
+    command = build_restart_bat_cmd_command(script_path)
+    LOGGER.info("restart.bat visible cmd start: command=%s cwd=%s", command, script_path.parent)
+    return subprocess.Popen(
+        command,
+        cwd=str(script_path.parent),
+        **restart_bat_cmd_window_kwargs(),
+    )
 
 
 def install_helper_signal_handlers():
@@ -4691,27 +4715,13 @@ class LauncherWindow(QWidget):
 
     def _run_restart_phone_script(self, script_path: Path):
         try:
-            command = ["cmd", "/c", str(script_path)] if os.name == "nt" else [str(script_path)]
-            LOGGER.info("restart phone script start: command=%s cwd=%s", command, script_path.parent)
-            proc = subprocess.Popen(
-                command,
-                cwd=str(script_path.parent),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                **hidden_subprocess_kwargs(),
-            )
-            output, _ = proc.communicate()
-            output_text = _decode_process_output(output).rstrip()
+            proc = launch_restart_bat_cmd_window(script_path)
+            return_code = proc.wait()
             if proc.returncode == 0:
                 message = "重启手机脚本执行完成。"
-                if output_text:
-                    message = f"{message}\n{output_text}"
                 self.restart_phone_script_finished.emit(True, message)
             else:
-                message = f"重启手机脚本执行失败，exit_code={proc.returncode}。"
-                if output_text:
-                    message = f"{message}\n{output_text}"
+                message = f"重启手机脚本执行失败，exit_code={return_code}。请查看弹出的 cmd 窗口输出。"
                 self.restart_phone_script_finished.emit(False, message)
         except Exception as exc:
             log_exception(f"restart phone script failed: script_path={script_path}")
@@ -4900,43 +4910,39 @@ class LauncherWindow(QWidget):
         self._set_runtime("运行信息：检测到断流，正在重启手机并等待开机。")
         QApplication.processEvents()
 
-        for command in build_restart_device_commands():
-            LOGGER.info("restart recovery command start: %s", command)
+        script_path = APP_DIR / "restart.bat"
+        if not script_path.is_file():
+            self._log_message(f"[Launcher] 未找到重启脚本：{script_path}\n", level=logging.ERROR)
+            return False
+
+        self._log_message(f"[Launcher] 弹出 cmd 窗口执行断流恢复脚本：{script_path}\n")
+        try:
+            proc = launch_restart_bat_cmd_window(script_path)
+            return_code = proc.wait(timeout=360)
+        except subprocess.TimeoutExpired as exc:
+            self._log_message(
+                f"[Launcher] 执行断流恢复脚本超时：{script_path}，detail={exc}\n",
+                level=logging.ERROR,
+            )
             try:
-                result = subprocess.run(
-                    command,
-                    cwd=str(APP_DIR),
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="ignore",
-                    timeout=360,
-                    **hidden_subprocess_kwargs(),
-                )
-            except subprocess.TimeoutExpired as exc:
-                self._log_message(
-                    f"[Launcher] 执行断流恢复命令超时：{command}，detail={exc}\n",
-                    level=logging.ERROR,
-                )
-                return False
+                proc.kill()
             except Exception:
-                log_exception("restart device after stream disconnect failed")
-                self._log_message(
-                    f"[Launcher] 执行断流恢复命令失败：{command}，请查看 launcher_debug.log。\n",
-                    level=logging.ERROR,
-                )
-                return False
+                pass
+            return False
+        except Exception:
+            log_exception("restart device after stream disconnect failed")
+            self._log_message(
+                f"[Launcher] 执行断流恢复脚本失败：{script_path}，请查看 launcher_debug.log 或弹出的 cmd 窗口。\n",
+                level=logging.ERROR,
+            )
+            return False
 
-            output = (result.stdout or "") + (result.stderr or "")
-            if output.strip():
-                self._log_message(f"[Launcher][restart]\n{output.rstrip()}\n")
-
-            if result.returncode != 0:
-                self._log_message(
-                    f"[Launcher] 断流恢复命令失败：{command}，returncode={result.returncode}\n",
-                    level=logging.ERROR,
-                )
-                return False
+        if return_code != 0:
+            self._log_message(
+                f"[Launcher] 断流恢复脚本执行失败：{script_path}，returncode={return_code}，请查看弹出的 cmd 窗口输出。\n",
+                level=logging.ERROR,
+            )
+            return False
 
         if not self._reinitialize_stream_service():
             return False

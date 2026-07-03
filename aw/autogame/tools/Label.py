@@ -3245,7 +3245,7 @@ class AutoStudioWindow(QMainWindow):
                 self.last_expand_stage_id = self.current_stage.id
         self.update_tree_view()
         if self.current_scene:
-            self.select_data_in_tree(self.current_scene)
+            self._select_pool_scene_after_action(self.current_scene)
         self.status_label.setText(
             f"阶段管理已更新：添加 {len(result['added'])} 个分辨率，移除 {len(result['removed'])} 个分辨率。"
         )
@@ -3330,6 +3330,11 @@ class AutoStudioWindow(QMainWindow):
         self.current_scene = scene
         self.show_scene_image(scene)
         self.status_label.setText(f"正在预览场景 {scene.name}。")
+
+    def _select_pool_scene_after_action(self, scene: Optional[SceneData]):
+        if not scene:
+            return
+        self.select_data_in_tree(scene, preferred_tree=getattr(self, "scene_pool_tree", None))
 
     def rename_pool_scene_group(self, scene_group: Optional[SceneGroupData], scene_name: str):
         if not self.project or not scene_group:

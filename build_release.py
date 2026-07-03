@@ -35,12 +35,12 @@ OPTIONAL_HIDDEN_IMPORTS = (
 )
 REQUIRED_HIDDEN_IMPORTS = (
     "aw.autogame.tools.ProcessUtils",
-    "hoscrcpy_sdk",
-    "hoscrcpy_sdk.HosRemoteConfig",
-    "hoscrcpy_sdk.HosRemoteDevice",
-    "hoscrcpy_sdk.ScreenCapCallback",
-    "hoscrcpy_sdk.communication.proto.scrcpy_pb2",
-    "hoscrcpy_sdk.communication.proto.scrcpy_pb2_grpc",
+    "aw.autogame.stream_client.hos_sdk",
+    "aw.autogame.stream_client.hos_sdk.HosRemoteConfig",
+    "aw.autogame.stream_client.hos_sdk.HosRemoteDevice",
+    "aw.autogame.stream_client.hos_sdk.ScreenCapCallback",
+    "aw.autogame.stream_client.hos_sdk.communication.proto.scrcpy_pb2",
+    "aw.autogame.stream_client.hos_sdk.communication.proto.scrcpy_pb2_grpc",
 )
 MODEL_WEIGHT_FILES = (
     "aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/direction_ctc.pt",
@@ -79,7 +79,7 @@ def required_runtime_assets() -> list[ReleaseAsset]:
         _asset("testcases/pubg/pubg_full_flow"),
         _asset("aw/autogame/tools"),
         _asset("aw/autogame/config"),
-        _asset("hoscrcpy_sdk"),
+        _asset("aw/autogame/stream_client/hos_sdk"),
         _asset("aw/autogame/customs_examples/Auto_PUBG_ALL"),
         _asset("aw/autogame/customs_game_examples/Auto_PUBG_ALL"),
     ]
@@ -161,7 +161,7 @@ def build_pyinstaller_command() -> list[str]:
             command.extend(["--copy-metadata", package])
 
     command.extend(["--collect-submodules", "aw"])
-    command.extend(["--collect-submodules", "hoscrcpy_sdk"])
+    command.extend(["--collect-submodules", "aw.autogame.stream_client.hos_sdk"])
 
     for module_name in REQUIRED_HIDDEN_IMPORTS:
         command.extend(["--hidden-import", module_name])

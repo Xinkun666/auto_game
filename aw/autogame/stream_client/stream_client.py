@@ -947,8 +947,8 @@ class HOSScrcpyStreamClient:
             self.sn = self._resolve_default_device_sn()
         if self.device_factory is not None:
             return self.device_factory(self)
-        from hoscrcpy_sdk.HosRemoteConfig import HosRemoteConfig
-        from hoscrcpy_sdk.HosRemoteDevice import HosRemoteDevice
+        from aw.autogame.stream_client.hos_sdk.HosRemoteConfig import HosRemoteConfig
+        from aw.autogame.stream_client.hos_sdk.HosRemoteDevice import HosRemoteDevice
 
         config = HosRemoteConfig(
             sn=self.sn,
@@ -987,7 +987,7 @@ class HOSScrcpyStreamClient:
         return devices[0]
 
     def _create_callback(self):
-        from hoscrcpy_sdk.ScreenCapCallback import ScreenCapCallback
+        from aw.autogame.stream_client.hos_sdk.ScreenCapCallback import ScreenCapCallback
 
         client = self
 

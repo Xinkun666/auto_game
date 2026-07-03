@@ -1,6 +1,6 @@
 import threading
-from hoscrcpy_sdk.communication.rpc_manager import RpcManager
-from hoscrcpy_sdk.ScreenCapCallback import ScreenCapCallback
+from aw.autogame.stream_client.hos_sdk.communication.rpc_manager import RpcManager
+from aw.autogame.stream_client.hos_sdk.ScreenCapCallback import ScreenCapCallback
 
 
 def start_scrcpy(rpc_manager: RpcManager, screen_cap_callback: ScreenCapCallback) -> None:

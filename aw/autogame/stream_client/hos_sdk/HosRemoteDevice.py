@@ -1,9 +1,9 @@
 import socket
-from hoscrcpy_sdk.environment.device import Device
-from hoscrcpy_sdk.ScreenCapCallback import ScreenCapCallback
-from hoscrcpy_sdk.Size import Size
+from aw.autogame.stream_client.hos_sdk.environment.device import Device
+from aw.autogame.stream_client.hos_sdk.ScreenCapCallback import ScreenCapCallback
+from aw.autogame.stream_client.hos_sdk.Size import Size
 from typing import Union
-from hoscrcpy_sdk.HosRemoteConfig import HosRemoteConfig
+from aw.autogame.stream_client.hos_sdk.HosRemoteConfig import HosRemoteConfig
 
 
 class HosRemoteDevice:

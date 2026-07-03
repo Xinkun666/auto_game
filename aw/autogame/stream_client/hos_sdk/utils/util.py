@@ -6,7 +6,7 @@ import socket
 import secrets
 import time
 import random
-from hoscrcpy_sdk.utils.logger import get_logger
+from aw.autogame.stream_client.hos_sdk.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

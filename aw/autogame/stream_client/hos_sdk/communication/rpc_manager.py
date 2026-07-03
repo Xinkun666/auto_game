@@ -1,8 +1,8 @@
 import grpc
 import threading
-from hoscrcpy_sdk.communication.proto import scrcpy_pb2, scrcpy_pb2_grpc
-from hoscrcpy_sdk.ScreenCapCallback import ScreenCapCallback
-from hoscrcpy_sdk.utils.logger import get_logger
+from aw.autogame.stream_client.hos_sdk.communication.proto import scrcpy_pb2, scrcpy_pb2_grpc
+from aw.autogame.stream_client.hos_sdk.ScreenCapCallback import ScreenCapCallback
+from aw.autogame.stream_client.hos_sdk.utils.logger import get_logger
 
 
 logger = get_logger(__name__)

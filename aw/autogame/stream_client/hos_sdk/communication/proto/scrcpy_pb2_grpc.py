@@ -2,7 +2,7 @@
 """Client and server classes corresponding to protobuf-defined services."""
 import grpc
 
-from hoscrcpy_sdk.communication.proto import scrcpy_pb2 as scrcpy__pb2
+from aw.autogame.stream_client.hos_sdk.communication.proto import scrcpy_pb2 as scrcpy__pb2
 
 
 class ScrcpyServiceStub(object):

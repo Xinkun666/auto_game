@@ -3,16 +3,16 @@ import hashlib
 import time
 import re
 from typing import Union
-from hoscrcpy_sdk.ScreenCapCallback import ScreenCapCallback
-from hoscrcpy_sdk.environment.device_video_proxy import DeviceVideoProxy
-from hoscrcpy_sdk.utils.variables import Connector
-from hoscrcpy_sdk.utils.variables import ActionMode
-from hoscrcpy_sdk.utils.util import exec_cmd
-from hoscrcpy_sdk.utils.util import get_forward_port
-from hoscrcpy_sdk.utils.util import parse_version
-from hoscrcpy_sdk.environment.device_proxy import DeviceProxy
-from hoscrcpy_sdk.HosRemoteConfig import HosRemoteConfig
-from hoscrcpy_sdk.utils.logger import get_logger
+from aw.autogame.stream_client.hos_sdk.ScreenCapCallback import ScreenCapCallback
+from aw.autogame.stream_client.hos_sdk.environment.device_video_proxy import DeviceVideoProxy
+from aw.autogame.stream_client.hos_sdk.utils.variables import Connector
+from aw.autogame.stream_client.hos_sdk.utils.variables import ActionMode
+from aw.autogame.stream_client.hos_sdk.utils.util import exec_cmd
+from aw.autogame.stream_client.hos_sdk.utils.util import get_forward_port
+from aw.autogame.stream_client.hos_sdk.utils.util import parse_version
+from aw.autogame.stream_client.hos_sdk.environment.device_proxy import DeviceProxy
+from aw.autogame.stream_client.hos_sdk.HosRemoteConfig import HosRemoteConfig
+from aw.autogame.stream_client.hos_sdk.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

@@ -19,6 +19,8 @@ logger = get_logger(__name__)
 MODIFY_TIME_STR = "Modify: "
 BASE_TIME = "2023-10-01 00:00:00"
 AGENT_CLEAR_PATH = ["app", "commons-", "agent", "libagent_antry"]
+FPORT_RETRY_ATTEMPTS = int(os.environ.get("AUTOGAME_HOSCRCPY_FPORT_RETRIES", "10"))
+FPORT_RETRY_DELAY_SECONDS = float(os.environ.get("AUTOGAME_HOSCRCPY_FPORT_RETRY_DELAY", "1"))
 
 PATH = os.path.dirname(os.path.abspath(__file__))
 RESOURCE_PATH = os.path.join(os.path.dirname(PATH), "res")
@@ -142,9 +144,11 @@ class Device(object):
         return None
 
     def _retry_fport(self, is_agent_so: bool, device_port: int):
-        for _ in range(3):
+        last_result = ""
+        retry_attempts = max(1, FPORT_RETRY_ATTEMPTS)
+        for attempt in range(1, retry_attempts + 1):
             port = get_forward_port(self)
-            logger.info("Trying to forward port: %s", port)
+            logger.info("Trying to forward port: %s (attempt %s/%s)", port, attempt, retry_attempts)
             if is_agent_so:
                 if self.is_use_unix_socket_agent_so:
                     ret = self.connector_command("fport tcp:{} localabstract:uitest_socket".format(port))
@@ -155,11 +159,19 @@ class Device(object):
                     ret = self.connector_command("fport tcp:{} localabstract:scrcpy_grpc_socket".format(port))
                 else:
                     ret = self.connector_command("fport tcp:{} tcp:{}".format(port, device_port))
-            logger.info("Forward port result: %s", ret)
-            if "OK" in ret:
+            last_result = str(ret or "").strip()
+            logger.info("Forward port result: %s", last_result)
+            if "OK" in last_result.upper():
                 return port
-        else:
-            raise RuntimeError("cannot fport")
+            if attempt < retry_attempts and FPORT_RETRY_DELAY_SECONDS > 0:
+                time.sleep(FPORT_RETRY_DELAY_SECONDS)
+        raise RuntimeError(
+            "cannot fport after {} attempts, device_port={}, last_result={}".format(
+                retry_attempts,
+                device_port,
+                last_result or "<empty>",
+            )
+        )
 
     def _start_uitest(self) -> bool:
         # 再检测agent是否需要更新
@@ -246,6 +258,8 @@ class Device(object):
         return self._exec_cmd(command, timeout)
 
     def push_file(self, local: str, remote: str) -> None:
+        if not os.path.exists(local):
+            raise FileNotFoundError("HOScrcpy resource not found: {}".format(local))
         local = "\"{}\"".format(local)
         remote = "\"{}\"".format(remote)
         res = self.connector_command("file send {} {}".format(local, remote))
@@ -361,14 +375,24 @@ class DeviceHelper(object):
     def init_agent_resource(self) -> None:
         self._init_so_resource()
 
+    @staticmethod
+    def _resolve_resource_path(*paths: str) -> str:
+        for path in paths:
+            if os.path.exists(path):
+                return path
+        raise FileNotFoundError("HOScrcpy resource not found: {}".format(" or ".join(paths)))
+
     def _init_so_resource(self) -> None:
         folder_path = os.path.join(RESOURCE_PATH)
         file_postfix = ".so"
         device_agent_path = "/data/local/tmp/agent.so"
         logger.info("Start init resource...")
         agent_filename = ""
-        normal_agent_path = os.path.join(folder_path, "uitest_agent_1.1.4.so")
-        unix_agent_path = os.path.join(folder_path, "uitest_agent_1.2.2.so")
+        normal_agent_path = self._resolve_resource_path(
+            os.path.join(folder_path, "uitest_agent_1.1.4.so"),
+            os.path.join(folder_path, "uitest_agent_v1.1.4.so"),
+        )
+        unix_agent_path = self._resolve_resource_path(os.path.join(folder_path, "uitest_agent_1.2.2.so"))
         local_link = "1.1.4"
         agent_path = normal_agent_path
         if self.need_unix_socket_agent_so():

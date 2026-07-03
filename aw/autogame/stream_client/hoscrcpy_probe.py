@@ -150,6 +150,8 @@ def apply_hoscrcpy_env_overrides(args) -> None:
     _set_env_if_present("AUTOGAME_HOSCRCPY_BIT_RATE", args.bit_rate)
     _set_env_if_present("AUTOGAME_HOSCRCPY_DEVICE_PORT", args.device_port)
     _set_env_if_present("AUTOGAME_HOSCRCPY_ENCODER_TYPE", args.encoder_type)
+    _set_env_if_present("AUTOGAME_HOSCRCPY_FPORT_RETRIES", args.fport_retries)
+    _set_env_if_present("AUTOGAME_HOSCRCPY_FPORT_RETRY_DELAY", args.fport_delay)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -163,6 +165,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bit-rate", type=int, default=None, help="HOScrcpy 码率")
     parser.add_argument("--device-port", type=int, default=None, help="设备端投屏服务端口")
     parser.add_argument("--encoder-type", default=None, help="编码器类型")
+    parser.add_argument("--fport-retries", type=int, default=None, help="HDC fport 失败时的重试次数")
+    parser.add_argument("--fport-delay", type=float, default=None, help="HDC fport 每次重试前等待的秒数")
     parser.add_argument("--rotation-mode", type=int, default=0, choices=(0, 1, 2, 3), help="0/1/2/3 对应不旋转/90/180/270")
     parser.add_argument("--save-frame", type=Path, default=None, help="保存首帧到指定 JPEG 路径")
     parser.add_argument("--no-save", action="store_true", help="不保存首帧诊断图")

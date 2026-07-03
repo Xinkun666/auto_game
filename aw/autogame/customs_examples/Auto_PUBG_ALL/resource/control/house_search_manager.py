@@ -4931,8 +4931,8 @@ class HouseSearchManager:
 
     def approach_and_pickup(self, w, initial_bbox, target_class, rel_ang):
         """
-        小步靠近物资，并拾取
-        返回是否成功拾取。
+        小步靠近物资，让游戏内自动拾取接管。
+        返回是否已经进入自动拾取可处理的范围。
         """
         if self._should_stop_house_search(w):
             return False
@@ -4966,111 +4966,42 @@ class HouseSearchManager:
                 print("检查到附近有物资")
                 self._set_search_frame_decision(
                     w,
-                    "当前搜房分支：附近出现物资提示，点击拾取",
+                    "当前搜房分支：附近出现物资提示",
                     self._entry_observation(
                         w,
                         current_loc=self._get_current_location(w),
                         extra=f"pick_menu={pick_menu}, step={i + 1}/30",
                     ),
-                    "已出现拾取提示，连续点击拾取首个物资",
-                    action="点击拾取首个物资",
-                    method="click(拾取首个物资) x2",
-                    result="刷新后关闭附近弹窗并继续搜物资",
+                    "已进入游戏自动拾取范围，等待自动拾取接管",
+                    action="等待自动拾取",
+                    method="auto pickup",
+                    result="记录当前物资后继续搜物资",
                 )
-                w.click("拾取首个物资")
                 time.sleep(1)
                 self._refresh_frame_and_handle_jump(w)
-                w.click("拾取首个物资")
-                time.sleep(1)
-                self._refresh_frame_and_handle_jump(w)
-                time.sleep(1)
-                # 关闭附近弹窗，不影响继续旋转角度查找物资点
-                if w.get_info("关闭附近"):
-                    print("检测到关闭附近按钮。。。")
-                    self._set_search_frame_decision(
-                        w,
-                        "当前搜房分支：拾取后关闭附近弹窗",
-                        self._entry_observation(
-                            w,
-                            current_loc=self._get_current_location(w),
-                            extra="拾取物资后检测到关闭附近按钮",
-                        ),
-                        "拾取后附近面板仍打开，点击关闭附近，避免遮挡后续搜物资视角",
-                        action="点击关闭附近",
-                        method="click(关闭附近)",
-                        result="关闭后继续旋转查找物资",
-                    )
-                    w.click(w.get_info("关闭附近"))
-                    time.sleep(0.5)
-                    self._refresh_frame_and_handle_jump(w)
-                i = 30
-                return True
-            # 走到物资点后，检测到
-            if w.get_info("关闭附近"):
-                print("检查到附近有物资")
-                self._set_search_frame_decision(
-                    w,
-                    "当前搜房分支：附近面板出现，点击拾取",
-                    self._entry_observation(
-                        w,
-                        current_loc=self._get_current_location(w),
-                        extra=f"step={i + 1}/30，检测到关闭附近，说明附近面板已打开",
-                    ),
-                    "虽然未识别 pick_menu，但附近面板已出现，点击拾取首个物资",
-                    action="点击拾取首个物资",
-                    method="click(拾取首个物资) x2",
-                    result="拾取后关闭附近弹窗",
-                )
-                w.click("拾取首个物资")
-                time.sleep(1)
-                self._refresh_frame_and_handle_jump(w)
-                w.click("拾取首个物资")
-                time.sleep(1)
-                self._refresh_frame_and_handle_jump(w)
-                time.sleep(1)
-                if w.get_info("关闭附近"):
-                    print("检测到关闭附近按钮。。。")
-                    self._set_search_frame_decision(
-                        w,
-                        "当前搜房分支：拾取后关闭附近弹窗",
-                        self._entry_observation(
-                            w,
-                            current_loc=self._get_current_location(w),
-                            extra="拾取物资后检测到关闭附近按钮",
-                        ),
-                        "拾取后附近面板仍打开，点击关闭附近，避免遮挡后续搜物资视角",
-                        action="点击关闭附近",
-                        method="click(关闭附近)",
-                        result="关闭后继续旋转查找物资",
-                    )
-                    w.click(w.get_info("关闭附近"))
-                    time.sleep(0.5)
-                    self._refresh_frame_and_handle_jump(w)
-                i = 30
                 return True
 
-            else:
-                print("======识别到物资后，视角对准，往前靠近{}步，最大移动距离30步======".format(i + 1))
-                self._set_search_frame_decision(
+            print("======识别到物资后，视角对准，往前靠近{}步，最大移动距离30步======".format(i + 1))
+            self._set_search_frame_decision(
+                w,
+                "当前搜房分支：靠近物资",
+                self._entry_observation(
                     w,
-                    "当前搜房分支：靠近物资",
-                    self._entry_observation(
-                        w,
-                        current_loc=self._get_current_location(w),
-                        extra=f"initial_bbox={initial_bbox}, step={i + 1}/30",
-                    ),
-                    "已识别物资但还没有拾取提示，向前小步靠近",
-                    action="小步靠近物资",
-                    method="tap_single(摇杆, y_bias=-20, dura=300)",
-                    result="靠近后重新判断是否出现拾取提示",
-                )
-                w.tap_single('摇杆', y_bias=-20, dura=300)
-                time.sleep(0.5)
-                self._refresh_frame_and_handle_jump(w)
-                i += 1
+                    current_loc=self._get_current_location(w),
+                    extra=f"initial_bbox={initial_bbox}, step={i + 1}/30",
+                ),
+                "已识别物资但还没有拾取提示，向前小步靠近",
+                action="小步靠近物资",
+                method="tap_single(摇杆, y_bias=-20, dura=300)",
+                result="靠近后重新判断是否进入自动拾取范围",
+            )
+            w.tap_single('摇杆', y_bias=-20, dura=300)
+            time.sleep(0.5)
+            self._refresh_frame_and_handle_jump(w)
+            i += 1
 
             time.sleep(1)
-        print("当前已移动完成30步或者已经拾取完物资")
+        print("当前已移动完成30步或者已经进入自动拾取范围")
         return False
 
     def pixel_to_angle(self, cx):

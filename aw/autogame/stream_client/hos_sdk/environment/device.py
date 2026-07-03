@@ -162,6 +162,7 @@ class Device(object):
             last_result = str(ret or "").strip()
             logger.info("Forward port result: %s", last_result)
             if "OK" in last_result.upper():
+                logger.info("Forward port success: local tcp:%s -> device port %s", port, device_port)
                 return port
             if attempt < retry_attempts and FPORT_RETRY_DELAY_SECONDS > 0:
                 time.sleep(FPORT_RETRY_DELAY_SECONDS)
@@ -180,6 +181,13 @@ class Device(object):
         self.agent_port = self._retry_fport(True, self.agent_server_port)
         self.guest_port = self._retry_fport(True, self.agent_server_port)
         self.layout_port = self._retry_fport(True, self.agent_server_port)
+        logger.info(
+            "Agent fports ready: agent=%s guest=%s layout=%s device_port=%s",
+            self.agent_port,
+            self.guest_port,
+            self.layout_port,
+            self.agent_server_port,
+        )
         # 若abc已经启动，则不需要重复启动
         pid = self._get_uitest_process(extension=False)
         if pid is None:
@@ -217,6 +225,7 @@ class Device(object):
             self.start_video_so_server(video_params)
             pid_list = self.device_helper.get_video_pid_list()
             if pid_list:
+                logger.info("Video server started with existing so=%s pid_list=%s", current_so_name, pid_list)
                 # 判断当前推送的so是不是要使用unix_socket连接方式
                 self.is_use_unix_socket_video_so = "unix" in current_so_name
                 return
@@ -229,6 +238,7 @@ class Device(object):
             self.start_video_so_server(video_params)
             pid_list = self.device_helper.get_video_pid_list()
             if pid_list:
+                logger.info("Video server started with pushed so=%s pid_list=%s", so_name, pid_list)
                 # 判断当前推送的so是不是要使用unix_socket连接方式
                 self.is_use_unix_socket_video_so = "unix" in so_name
                 return
@@ -308,6 +318,12 @@ class Device(object):
         self._screen_cap_callback = screen_cap_callback
         # 设置端口转发
         self.video_port = self._retry_fport(False, self.video_server_port)
+        logger.info(
+            "Video fport ready: local tcp:%s -> device port %s, unix_socket=%s",
+            self.video_port,
+            self.video_server_port,
+            self.is_use_unix_socket_video_so,
+        )
         self.video_proxy = DeviceVideoProxy(self.host, self.video_port, self._on_first_frame_timeout)
         self.video_proxy.create_video_screen_copy_request(screen_cap_callback)
 

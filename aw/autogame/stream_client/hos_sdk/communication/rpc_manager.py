@@ -41,6 +41,7 @@ class RpcManager(object):
         try:
             self.screenCapCallback = screen_cap_callback
             self._rpc_call = self.stub.onStart(scrcpy_pb2.Empty())
+            logger.info("scrcpy grpc onStart called")
             # 仅首次投屏启动首帧超时计时器，重试时不启动
             if self.on_first_frame_timeout:
                 self._timeout_timer = threading.Timer(FIRST_FRAME_TIMEOUT, self._on_first_frame_timeout)
@@ -48,12 +49,13 @@ class RpcManager(object):
                 self._timeout_timer.start()
             first_frame_received = False
             for response in self._rpc_call:
+                frame_data = response.payload['data'].val_bytes
                 if not first_frame_received:
                     first_frame_received = True
+                    logger.info("first scrcpy grpc payload received: bytes=%s", len(frame_data))
                     if self._timeout_timer:
                         self._timeout_timer.cancel()
                         self._timeout_timer = None
-                frame_data = response.payload['data'].val_bytes
                 screen_cap_callback.on_data(frame_data)
             return True
         except grpc.RpcError as e:

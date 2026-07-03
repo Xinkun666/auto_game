@@ -57,21 +57,84 @@ class ProbeFrameBuffer:
         while True:
             client_error = getattr(client, "_last_error", None)
             if client_error is not None:
-                raise HOScrcpyProbeError("HOScrcpy 流启动失败: %s" % client_error) from client_error
+                raise HOScrcpyProbeError(
+                    "HOScrcpy 流启动失败: %s\n%s" % (
+                        client_error,
+                        format_client_diagnostics(client),
+                    )
+                ) from client_error
 
             main_thread = getattr(client, "main_thread", None)
             client_running = bool(getattr(client, "running", False))
             if main_thread is not None and not main_thread.is_alive() and not client_running:
-                raise HOScrcpyProbeError("HOScrcpy 流线程已退出，但没有收到首帧")
+                raise HOScrcpyProbeError(
+                    "HOScrcpy 流线程已退出，但没有收到首帧\n%s" % format_client_diagnostics(client)
+                )
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise HOScrcpyStreamTimeout("等待 HOScrcpy 首帧超时: %.1fs" % float(timeout))
+                raise HOScrcpyStreamTimeout(
+                    "等待 HOScrcpy 首帧超时: %.1fs\n%s" % (
+                        float(timeout),
+                        format_client_diagnostics(client),
+                    )
+                )
 
             try:
                 return self._frames.get(timeout=min(0.25, remaining))
             except queue.Empty:
                 continue
+
+
+def format_client_diagnostics(client) -> str:
+    snapshot = {}
+    if hasattr(client, "diagnostic_snapshot"):
+        try:
+            snapshot = client.diagnostic_snapshot() or {}
+        except Exception as exc:
+            snapshot = {"diagnostic_error": str(exc)}
+    else:
+        main_thread = getattr(client, "main_thread", None)
+        snapshot = {
+            "running": bool(getattr(client, "running", False)),
+            "thread_alive": bool(main_thread and main_thread.is_alive()),
+            "last_error": str(getattr(client, "_last_error", "") or ""),
+        }
+    ordered_keys = [
+        "stage",
+        "running",
+        "thread_alive",
+        "stop_requested",
+        "sn",
+        "ip",
+        "port",
+        "agent_port",
+        "guest_port",
+        "layout_port",
+        "video_port",
+        "video_server_port",
+        "is_setup",
+        "is_use_unix_socket_agent_so",
+        "is_use_unix_socket_video_so",
+        "ready_received",
+        "first_frame_received",
+        "callback_data_count",
+        "last_data_bytes",
+        "decoded_frame_count",
+        "last_error",
+        "elapsed_seconds",
+        "diagnostic_error",
+    ]
+    parts = []
+    for key in ordered_keys:
+        if key in snapshot:
+            parts.append("%s=%s" % (key, snapshot.get(key)))
+    for key in sorted(snapshot):
+        if key not in ordered_keys:
+            parts.append("%s=%s" % (key, snapshot.get(key)))
+    if not parts:
+        parts.append("diagnostic_unavailable=True")
+    return "[HOSProbeDiag] " + ", ".join(parts)
 
 
 def _default_save_frame_path() -> Path:

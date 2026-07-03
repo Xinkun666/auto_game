@@ -832,6 +832,14 @@ class HOSScrcpyStreamClient:
         self.device = None
         self._last_error = None
         self._first_frame_received = False
+        self._diagnostic_stage = "initialized"
+        self._ready_received = False
+        self._callback_data_count = 0
+        self._decoded_frame_count = 0
+        self._last_data_bytes = 0
+        self._last_data_at = None
+        self._last_decoded_at = None
+        self._start_monotonic = None
 
         config = _read_autogame_config()
         self.sn = _resolve_str_option("AUTOGAME_HOSCRCPY_SN", config, "hoscrcpy_sn", "")
@@ -872,6 +880,7 @@ class HOSScrcpyStreamClient:
         if self.main_thread is not None and self.main_thread.is_alive():
             print("[HOS] Backend already running.")
             return
+        self._diagnostic_stage = "backend_starting"
         self._stop_event.clear()
         self.main_thread = threading.Thread(target=self.run, name="HOSMainThread", daemon=True)
         self.main_thread.start()
@@ -881,18 +890,23 @@ class HOSScrcpyStreamClient:
         self.running = True
         self._stop_event.clear()
         self._last_error = None
+        self._diagnostic_stage = "creating_device"
+        self._start_monotonic = time.monotonic()
         if self.save_frame:
             self._start_save_worker()
 
         try:
             self.device = self._create_device()
+            self._diagnostic_stage = "creating_callback"
             callback = self._create_callback()
             print(
                 "[HOS] Starting HOScrcpy stream: sn=%s ip=%s port=%s scale=%s fps=%s bitrate=%s"
                 % (self.sn, self.ip, self.port, self.scale, self.frame_rate, self.bit_rate),
                 flush=True,
             )
+            self._diagnostic_stage = "starting_capture"
             self.device.start_capture_screen(callback)
+            self._diagnostic_stage = "capture_started_waiting_frames"
             while self.running and not self._stop_event.is_set():
                 if self._last_error is not None:
                     break
@@ -901,6 +915,7 @@ class HOSScrcpyStreamClient:
                 raise RuntimeError("HOScrcpy stream failed: %s" % self._last_error)
         except Exception as exc:
             self._last_error = exc
+            self._diagnostic_stage = "runtime_error"
             message = "[HOS] Runtime Error: %s" % exc
             print(message, flush=True)
             self._write_disconnect_signal("hoscrcpy_runtime_error", message, 1)
@@ -999,6 +1014,8 @@ class HOSScrcpyStreamClient:
                 client._handle_stream_exception(err)
 
             def on_ready(self):
+                client._ready_received = True
+                client._diagnostic_stage = "stream_ready"
                 print("[HOS] HOScrcpy stream ready.", flush=True)
 
         return _Callback()
@@ -1006,11 +1023,24 @@ class HOSScrcpyStreamClient:
     def _handle_stream_bytes(self, data):
         if not data:
             return
+        self._callback_data_count += 1
+        self._last_data_bytes = len(data)
+        self._last_data_at = time.monotonic()
+        if self._callback_data_count == 1:
+            print("[HOS] First H264 buffer received: bytes=%s" % self._last_data_bytes, flush=True)
         if self.decoder is None:
             self.decoder = PyAVH264Decoder()
         frames = self.decoder.decode(data) or []
+        if not frames and self._callback_data_count <= 3:
+            print(
+                "[HOS] H264 buffer decoded no frame yet: callback_data_count=%s bytes=%s"
+                % (self._callback_data_count, self._last_data_bytes),
+                flush=True,
+            )
         for frame in frames:
             frame = apply_rotation(frame, self.rotation_mode)
+            self._decoded_frame_count += 1
+            self._last_decoded_at = time.monotonic()
             self.on_frame(frame)
             if self.save_frame:
                 self._enqueue_save(frame)
@@ -1022,10 +1052,54 @@ class HOSScrcpyStreamClient:
         if not self.running:
             return
         self._last_error = err
+        self._diagnostic_stage = "stream_error"
         message = "[HOS] Stream Error: %s" % err
         print(message, flush=True)
         self._write_disconnect_signal("hoscrcpy_stream_error", message, 1)
         self._stop_event.set()
+
+    def diagnostic_snapshot(self):
+        main_thread = self.main_thread
+        device = self.device
+        device_inner = getattr(device, "device", None)
+        elapsed = None
+        if self._start_monotonic is not None:
+            elapsed = round(time.monotonic() - self._start_monotonic, 3)
+        snapshot = {
+            "stage": self._diagnostic_stage,
+            "running": self.running,
+            "thread_alive": bool(main_thread and main_thread.is_alive()),
+            "stop_requested": self._stop_event.is_set(),
+            "sn": self.sn,
+            "ip": self.ip,
+            "port": self.port,
+            "scale": self.scale,
+            "frame_rate": self.frame_rate,
+            "bit_rate": self.bit_rate,
+            "device_port": self.device_port,
+            "encoder_type": self.encoder_type,
+            "ready_received": self._ready_received,
+            "first_frame_received": self._first_frame_received,
+            "callback_data_count": self._callback_data_count,
+            "last_data_bytes": self._last_data_bytes,
+            "decoded_frame_count": self._decoded_frame_count,
+            "last_error": str(self._last_error) if self._last_error is not None else "",
+            "elapsed_seconds": elapsed,
+        }
+        if device_inner is not None:
+            snapshot.update(
+                {
+                    "agent_port": getattr(device_inner, "agent_port", None),
+                    "guest_port": getattr(device_inner, "guest_port", None),
+                    "layout_port": getattr(device_inner, "layout_port", None),
+                    "video_port": getattr(device_inner, "video_port", None),
+                    "video_server_port": getattr(device_inner, "video_server_port", None),
+                    "is_setup": getattr(device_inner, "is_setup", None),
+                    "is_use_unix_socket_video_so": getattr(device_inner, "is_use_unix_socket_video_so", None),
+                    "is_use_unix_socket_agent_so": getattr(device_inner, "is_use_unix_socket_agent_so", None),
+                }
+            )
+        return snapshot
 
     def on_frame(self, frame):
         try:

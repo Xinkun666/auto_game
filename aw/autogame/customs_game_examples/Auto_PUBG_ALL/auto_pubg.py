@@ -65,7 +65,7 @@ LOBBY_CONFIRM_INTERVAL = 0.7
 LOBBY_CONFIRM_REQUIRED = 2
 CLOSE_POPUP_INFOS = (
     "关闭公告",
-    "提示",
+    "重新进入比赛",
     "对局结束",
     "关闭预约",
     "关闭",
@@ -73,7 +73,6 @@ CLOSE_POPUP_INFOS = (
     "关闭活动",
     "关闭新玩法",
     "关闭活动2",
-    "关闭活动3",
 )
 
 start_game = False
@@ -749,10 +748,10 @@ def on_stage(w: "FrameWorker"):
         if click_popup_info_if_visible(w, "关闭公告"):
             return
 
-        if click_popup_info_if_visible(w, "提示", "取消"):
+        if click_popup_info_if_visible(w, "重新进入比赛", "取消"):
             return
 
-        if click_popup_info_if_visible(w, "对局结束", "确定"):
+        if click_popup_info_if_visible(w, "对局结束", "确定已结束"):
             return
 
         if click_popup_info_if_visible(w, "关闭预约"):
@@ -771,9 +770,6 @@ def on_stage(w: "FrameWorker"):
             return
 
         if click_popup_info_if_visible(w, "关闭活动2"):
-            return
-
-        if click_popup_info_if_visible(w, "关闭活动3"):
             return
 
         if confirm_lobby_after_popups(w):
@@ -1016,7 +1012,7 @@ def on_stage(w: "FrameWorker"):
                 "结束阶段且本用例准备最终停止",
                 "停止录制/回到大厅/确认后进入关闭弹窗阶段",
                 action="返回大厅并准备结束",
-                method="handle_sp_stop(); 设置->返回大厅->确定",
+                method="handle_sp_stop(); 设置->返回大厅->确定退出比赛",
                 result="关闭弹窗阶段确认大厅后停止任务",
             )
             handle_sp_stop(w)
@@ -1025,7 +1021,7 @@ def on_stage(w: "FrameWorker"):
             time.sleep(1)
             w.click("返回大厅")
             time.sleep(1)
-            w.click("确定")
+            w.click("确定退出比赛")
             time.sleep(3)
             w.change_stage("关闭弹窗阶段")
             return
@@ -1035,7 +1031,7 @@ def on_stage(w: "FrameWorker"):
             "当前处于结束阶段",
             "停止录制并返回大厅，然后进入关闭弹窗阶段处理结算/活动弹窗",
             action="返回大厅",
-            method="handle_sp_stop(); 设置->返回大厅->确定",
+            method="handle_sp_stop(); 设置->返回大厅->确定退出比赛",
             result="下一帧处理大厅弹窗",
         )
         handle_sp_stop(w)
@@ -1045,6 +1041,6 @@ def on_stage(w: "FrameWorker"):
         time.sleep(1)
         w.click("返回大厅")
         time.sleep(1)
-        w.click("确定")
+        w.click("确定退出比赛")
         time.sleep(3)
         w.change_stage("开始游戏阶段")

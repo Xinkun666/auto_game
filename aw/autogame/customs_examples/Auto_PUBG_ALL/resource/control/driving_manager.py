@@ -285,9 +285,9 @@ class DrivingManager:
         "left": ("向左", "左转", "left"),
         "right": ("向右", "右转", "right"),
         "brake": ("急刹", "刹车", "制动", "brake"),
-        "auto_forward": ("自动前进", "auto_forward"),
+        "auto_forward": ("开车自动前进", "自动前进", "auto_forward"),
         "off_car": ("下车", "离开载具", "off_car"),
-        "spectate": ("观战", "guanzhan"),
+        "spectate": ("观战对手", "观战", "guanzhan"),
     }
 
     def __init__(
@@ -1943,10 +1943,7 @@ class DrivingManager:
         w.change_stage("跑图阶段")
 
     def _handle_death(self, w: "FrameWorker"):
-        spectate = w.get_info("观战对手") or w.get_info("观战")
-        if spectate:
-            self._frame_action_executed = True
-            w.click(spectate)
+        if self._click_control_if_configured(w, "spectate"):
             time.sleep(2)
         self.reset(max_driving_time=self.max_driving_time)
         w.change_stage("结束阶段")
@@ -2240,17 +2237,17 @@ class DrivingManager:
         return False
 
     def _is_out_of_vehicle(self, w: "FrameWorker") -> bool:
-        if w.get_info("驾驶"):
+        if self._get_configured_info(w, "驾驶"):
             print("[Driving] 检测到驾驶按钮，判定已意外下车")
             return True
 
-        strong_vehicle_ui_visible = any(
-            bool(w.get_info(name))
-            for name in ("漂移", "自动前进", "急刹", "加速")
+        strong_vehicle_ui_visible = self._has_visible_info(
+            w,
+            ("喇叭", "speed", "漂移", "加速"),
         )
 
         if self._is_configured_info(w, "喇叭"):
-            if w.get_info("喇叭"):
+            if self._get_configured_info(w, "喇叭"):
                 self.horn_missing_frames = 0
             else:
                 self.horn_missing_frames += 1
@@ -2266,16 +2263,16 @@ class DrivingManager:
         else:
             self.horn_missing_frames = 0
 
-        on_foot_ui_visible = any(
-            bool(w.get_info(name))
-            for name in ("左拳头", "子弹", "跳跃")
+        on_foot_ui_visible = self._has_visible_info(
+            w,
+            ("驾驶", "左拳头", "子弹", "跳跃"),
         )
         if not on_foot_ui_visible:
             return False
 
-        vehicle_ui_visible = any(
-            bool(w.get_info(name))
-            for name in ("喇叭", "漂移", "自动前进", "急刹", "加速")
+        vehicle_ui_visible = self._has_visible_info(
+            w,
+            ("喇叭", "speed", "漂移", "加速"),
         ) or strong_vehicle_ui_visible
         if vehicle_ui_visible:
             return False
@@ -2284,11 +2281,49 @@ class DrivingManager:
         return True
 
     def _is_configured_info(self, w: "FrameWorker", area_name: str) -> bool:
+        stage = getattr(w, "current_stage", None)
+        resolver = getattr(w, "stage_resolver", None)
+        raw_stage_info = getattr(resolver, "stage_info", {})
+        stage_data = raw_stage_info.get(stage, {}) if isinstance(raw_stage_info, dict) else {}
+        for scene_info in stage_data.get("scenes", {}).values():
+            for variant in self._iter_scene_variants(scene_info):
+                if area_name in (variant.get("areas") or {}):
+                    return True
+                if area_name in (variant.get("special_areas") or {}):
+                    return True
+
         suffix = f"__{area_name}"
         return any(
             str(key).endswith(suffix)
             for key in getattr(w, "stage_info", {}).keys()
         )
+
+    def _iter_scene_variants(self, scene_info: Dict[str, Any]):
+        resolutions = scene_info.get("resolutions")
+        if isinstance(resolutions, dict):
+            yield from (item for item in resolutions.values() if isinstance(item, dict))
+        elif isinstance(scene_info, dict):
+            yield scene_info
+
+    def _get_configured_info(self, w: "FrameWorker", area_name: str):
+        if not self._is_configured_info(w, area_name):
+            return None
+        return w.get_info(area_name)
+
+    def _has_visible_info(self, w: "FrameWorker", names: Tuple[str, ...]) -> bool:
+        return any(self._get_configured_info(w, name) is not None for name in names)
+
+    def _has_configured_control(self, w: "FrameWorker", key: str) -> bool:
+        aliases = self.CONTROL_ALIASES.get(key, (key,))
+        stage = getattr(w, "current_stage", None)
+        buttons = getattr(getattr(w, "controller", None), "buttons", {})
+        return bool(stage and buttons and any(f"{stage}_{alias}" in buttons for alias in aliases))
+
+    def _click_control_if_configured(self, w: "FrameWorker", key: str, **kwargs) -> bool:
+        if not self._has_configured_control(w, key):
+            return False
+        self._click_control(w, key, **kwargs)
+        return True
 
     def _handle_unexpected_vehicle_exit(self, w: "FrameWorker"):
         finding_car = self._should_continue_finding_car_after_running_fallback("意外下车")

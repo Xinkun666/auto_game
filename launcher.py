@@ -134,6 +134,9 @@ TEST_PROFILE_SCREEN_MODES = {
     "power": "2",
     "function": "2",
 }
+STREAM_DISCONNECT_POLICY_PRESERVE = "preserve"
+STREAM_DISCONNECT_POLICY_DISABLED = "disabled"
+STREAM_DISCONNECT_POLICY_STOP_ONLY = "stop_only"
 PUBG_CASE_KEYWORDS = ("和平精英", "pubg")
 PUBG_CASE_DEFAULT_LOOP_COUNT = 2
 PUBG_CASE_RUNTIME_DESCRIPTION = "和平精英用例默认10分钟搜房、10分钟开车、10分钟跑图，总测试时长60分钟，要循环2次。"
@@ -611,6 +614,15 @@ def check_capture_stream_for_screen_mode(
                 local_path.unlink()
         except Exception:
             pass
+
+
+def stream_disconnect_policy_for_screen_mode(screen_mode: str) -> str:
+    mode = str(screen_mode).strip()
+    if mode == "1":
+        return STREAM_DISCONNECT_POLICY_DISABLED
+    if mode == "2":
+        return STREAM_DISCONNECT_POLICY_STOP_ONLY
+    return STREAM_DISCONNECT_POLICY_PRESERVE
 
 
 def _powershell_single_quote(value: str) -> str:
@@ -4316,10 +4328,19 @@ class LauncherWindow(QWidget):
         if self.current_plan is None:
             return False
         screen_mode = str(self.current_plan.get("screen_mode") or "").strip()
-        return screen_mode == "1"
+        return stream_disconnect_policy_for_screen_mode(screen_mode) == STREAM_DISCONNECT_POLICY_DISABLED
 
     def _stream_disconnect_recovery_enabled(self) -> bool:
-        return not self._current_plan_uses_hdc_capture()
+        if self.current_plan is None:
+            return True
+        screen_mode = str(self.current_plan.get("screen_mode") or "").strip()
+        return stream_disconnect_policy_for_screen_mode(screen_mode) != STREAM_DISCONNECT_POLICY_DISABLED
+
+    def _current_plan_stops_on_stream_disconnect(self) -> bool:
+        if self.current_plan is None:
+            return False
+        screen_mode = str(self.current_plan.get("screen_mode") or "").strip()
+        return stream_disconnect_policy_for_screen_mode(screen_mode) == STREAM_DISCONNECT_POLICY_STOP_ONLY
 
     def _capture_stream_disconnect_screenshot(self, archive_dir: Path) -> Optional[Path]:
         screenshot_dir = archive_dir / "stream_disconnect_screenshots"
@@ -4440,12 +4461,17 @@ class LauncherWindow(QWidget):
         self._refresh_current_run_sp_state()
         self.current_run_stream_disconnected = True
         uses_sp_recording = self._current_plan_uses_sp_recording()
-        if uses_sp_recording:
+        stop_only_disconnect = self._current_plan_stops_on_stream_disconnect()
+        if stop_only_disconnect:
+            self.current_run_stream_disconnect_startup = True
+        elif uses_sp_recording:
             self.current_run_stream_disconnect_startup = not self.current_run_sp_started
         else:
             self.current_run_stream_disconnect_startup = not self.current_run_stream_started
         self.current_run_stream_disconnect_message = str(message or source or "stream disconnected")
-        if self.current_run_stream_disconnect_startup:
+        if stop_only_disconnect:
+            phase_text = "HOScrcpy停止"
+        elif self.current_run_stream_disconnect_startup:
             phase_text = "启动阶段" if uses_sp_recording else "启动阶段(首帧未到达)"
         else:
             phase_text = "SP记录后" if uses_sp_recording else "功能测试首帧后"
@@ -4454,7 +4480,12 @@ class LauncherWindow(QWidget):
             f"{self.current_run_stream_disconnect_message}\n"
         )
         if self.current_run_stream_disconnect_startup:
-            if uses_sp_recording:
+            if stop_only_disconnect:
+                self._log_message(
+                    "[Launcher] HOScrcpy 抓图流断开，当前任务已停止。"
+                    "不截图、不保存 SP、不归档本轮日志，直接停止当前子进程。\n"
+                )
+            elif uses_sp_recording:
                 self._log_message(
                     "[Launcher] SP 记录尚未开始，本次按启动阶段断流处理："
                     "不截图、不保存 SP、不归档本轮日志，直接停止当前子进程并准备重启。\n"
@@ -4464,7 +4495,12 @@ class LauncherWindow(QWidget):
                     "[Launcher] 功能测试首帧尚未到达，本次按启动阶段断流处理："
                     "不截图、不归档本轮日志，直接停止当前子进程并准备重启。\n"
                 )
-            self._set_status("启动阶段 gRPC 流断连，正在停止当前子进程并准备重启手机。")
+            status_text = (
+                "HOScrcpy 流断连，正在停止当前子进程。"
+                if stop_only_disconnect
+                else "启动阶段 gRPC 流断连，正在停止当前子进程并准备重启手机。"
+            )
+            self._set_status(status_text)
             self._request_stream_disconnect_process_exit(immediate=True)
             return
 
@@ -4997,6 +5033,14 @@ class LauncherWindow(QWidget):
 
         if self.current_run_stream_disconnected:
             if self.current_run_stream_disconnect_startup:
+                if self._current_plan_stops_on_stream_disconnect():
+                    self._log_message(
+                        "[Launcher] 本次 HOScrcpy 断流按直接停止处理，不计入已执行次数，"
+                        "本轮不保存产物，不执行重启恢复。\n"
+                    )
+                    self._finish_batch("HOScrcpy 抓图流断开，当前任务已停止。")
+                    return
+
                 self._log_message(
                     "[Launcher] 本次断流发生在 SP 记录开始前，不计入已执行次数，"
                     "本轮不保存产物；重启手机后将重新运行当前用例。\n"

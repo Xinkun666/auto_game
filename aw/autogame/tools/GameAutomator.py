@@ -31,8 +31,7 @@ def create_stream_client_for_mode(
     if mode == "1":
         return HDCSnapshotClient(buffer)
     if mode == "2":
-        rotation_mode = _resolve_stream_rotation(screen_w, screen_h, display_rotation)
-        return HOSScrcpyStreamClient(buffer, rotation_mode=rotation_mode)
+        return HOSScrcpyStreamClient(buffer)
     raise ValueError(f"unsupported screen_mode: {screen_mode}")
 
 class GameAutomator:

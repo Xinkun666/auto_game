@@ -117,6 +117,8 @@ STREAM_DISCONNECT_PATTERNS = (
     "[Stream] Receive loop ended unexpectedly.",
     "[Stream] gRPC Error:",
     "[Stream] Runtime Error:",
+    "[HOS] Runtime Error:",
+    "[HOS] Stream Error:",
 )
 SP_RECORD_EVER_STARTED_MARKERS = (
     "[Timer] sp 记录已开始",
@@ -129,8 +131,8 @@ DEVICE_LOG_SETTLE_INTERVAL_SECONDS = 0.2
 DEVICE_LOG_STOP_WAIT_TIMEOUT_SECONDS = 15.0
 HDC_SHELL_TIMEOUT_SECONDS = float(os.environ.get("AUTOGAME_HDC_SHELL_TIMEOUT_SECONDS", "5"))
 TEST_PROFILE_SCREEN_MODES = {
-    "power": "0",
-    "function": "1",
+    "power": "2",
+    "function": "2",
 }
 PUBG_CASE_KEYWORDS = ("和平精英", "pubg")
 PUBG_CASE_DEFAULT_LOOP_COUNT = 2
@@ -465,7 +467,7 @@ def resolve_test_profile_from_radio_selection(power_checked: bool, function_chec
 def write_screen_mode_config(screen_mode: str, config_path: Path = AUTOGAME_CONFIG_FILE) -> None:
     config_path = Path(config_path)
     screen_mode = str(screen_mode).strip()
-    if screen_mode not in {"0", "1"}:
+    if screen_mode not in {"0", "1", "2"}:
         raise ValueError(f"unsupported screen_mode: {screen_mode}")
 
     config = {}
@@ -533,6 +535,11 @@ def check_capture_stream_for_screen_mode(
         return CaptureStreamCheckResult(
             True,
             "低功耗拉流模式会在用例启动后由 launcher 监听首帧和断流信号。",
+        )
+    if screen_mode == "2":
+        return CaptureStreamCheckResult(
+            True,
+            "HOScrcpy 拉流模式会在用例启动后自动推送并启动手机端投屏服务。",
         )
     if screen_mode != "1":
         return CaptureStreamCheckResult(False, f"未知 screen_mode: {screen_mode}")
@@ -4309,7 +4316,7 @@ class LauncherWindow(QWidget):
         if self.current_plan is None:
             return False
         screen_mode = str(self.current_plan.get("screen_mode") or "").strip()
-        return screen_mode == TEST_PROFILE_SCREEN_MODES["function"]
+        return screen_mode == "1"
 
     def _stream_disconnect_recovery_enabled(self) -> bool:
         return not self._current_plan_uses_hdc_capture()

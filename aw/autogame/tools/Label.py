@@ -29,9 +29,16 @@ from aw.autogame.tools.Utils import TEMPLATE_MATCH_MODES
 DEFAULT_GROUP_NAME = "默认"
 DEFAULT_SCENE_GROUP_NAME = "未分组场景"
 DEFAULT_GLOBAL_SCENE_GROUP_NAME = "全局分组"
+DEFAULT_ALL_SCENE_GROUP_NAME = "所有场景"
+ALL_SCENE_GROUP_ID = "__all_scene_group__"
 LEGACY_DEFAULT_SCENE_GROUP_NAME = "待分组场景"
 LEGACY_BLANK_SCENE_GROUP_NAME = "未分组"
 LEGACY_GLOBAL_SCENE_GROUP_NAME = "默认分组"
+SYSTEM_SCENE_GROUP_NAMES = (
+    DEFAULT_SCENE_GROUP_NAME,
+    DEFAULT_GLOBAL_SCENE_GROUP_NAME,
+    DEFAULT_ALL_SCENE_GROUP_NAME,
+)
 GROUPABLE_ITEM_TYPES = ("area", "special_area")
 EDITOR_STATE_FILENAME = ".label_project_state.json"
 EDITOR_STATE_VERSION = 1
@@ -1241,6 +1248,29 @@ class AutoStudioWindow(QMainWindow):
         return SceneGroupData(id=str(random.randint(1000, 9999)), name=DEFAULT_GLOBAL_SCENE_GROUP_NAME)
 
     @staticmethod
+    def _is_virtual_all_scene_group(scene_group: Optional[SceneGroupData]) -> bool:
+        return bool(scene_group and scene_group.id == ALL_SCENE_GROUP_ID)
+
+    @staticmethod
+    def _all_scene_group(project: Optional[ProjectData]) -> Optional[SceneGroupData]:
+        if not project:
+            return None
+        scenes = []
+        seen_ids = set()
+        for group in AutoStudioWindow._ordered_real_scene_pool_groups(project):
+            for scene in group.scenes:
+                scene_key = id(scene)
+                if scene_key in seen_ids:
+                    continue
+                scenes.append(scene)
+                seen_ids.add(scene_key)
+        return SceneGroupData(
+            id=ALL_SCENE_GROUP_ID,
+            name=DEFAULT_ALL_SCENE_GROUP_NAME,
+            scenes=scenes,
+        )
+
+    @staticmethod
     def _ensure_project_scene_pool(project: Optional[ProjectData]) -> Optional[SceneGroupData]:
         if not project:
             return None
@@ -2062,7 +2092,7 @@ class AutoStudioWindow(QMainWindow):
             return []
         AutoStudioWindow._ensure_project_scene_pool(project)
         entries = []
-        for source_group in AutoStudioWindow._ordered_scene_pool_groups_for_tree(project):
+        for source_group in AutoStudioWindow._ordered_real_scene_pool_groups(project):
             grouped_scenes = {}
             for scene in source_group.scenes:
                 grouped_scenes.setdefault(scene.name, []).append(scene)
@@ -2499,6 +2529,7 @@ class AutoStudioWindow(QMainWindow):
         pool_root.setExpanded(True)
 
         def add_scene_pool_group_node(parent_node, scene_group):
+            is_virtual_group = self._is_virtual_all_scene_group(scene_group)
             group_node = QTreeWidgetItem(parent_node)
             group_text = f"场景分组: {scene_group.name}"
             group_node.setText(0, group_text)
@@ -2506,6 +2537,7 @@ class AutoStudioWindow(QMainWindow):
             group_node.setData(0, Qt.ItemDataRole.UserRole, {
                 "kind": "scene_pool_group",
                 "scene_group": scene_group,
+                "virtual": is_virtual_group,
             })
             grouped_pool_scenes = {}
             for scene in scene_group.scenes:
@@ -2519,6 +2551,7 @@ class AutoStudioWindow(QMainWindow):
                     "kind": "scene_pool_scene_group",
                     "scene_group": scene_group,
                     "scene_name": scene_name,
+                    "virtual": is_virtual_group,
                 })
                 add_scene_version_nodes(pool_scene_node, scenes)
             return group_node
@@ -2580,7 +2613,7 @@ class AutoStudioWindow(QMainWindow):
         name = self.prompt_unique_name(
             "新建场景分组",
             "分组名称:",
-            existing_names=[group.name for group in self.project.scene_groups],
+            existing_names=[group.name for group in self.project.scene_groups] + [DEFAULT_ALL_SCENE_GROUP_NAME],
         )
         if not name:
             return
@@ -2914,7 +2947,9 @@ class AutoStudioWindow(QMainWindow):
             "修改场景分组名称",
             "新名称:",
             text=scene_group.name,
-            existing_names=[group.name for group in self.project.scene_groups if group is not scene_group],
+            existing_names=[
+                group.name for group in self.project.scene_groups if group is not scene_group
+            ] + [DEFAULT_ALL_SCENE_GROUP_NAME],
         )
         if not name:
             return
@@ -2966,6 +3001,10 @@ class AutoStudioWindow(QMainWindow):
 
     @staticmethod
     def _ordered_scene_pool_groups_for_stage_add(project: Optional[ProjectData]) -> List[SceneGroupData]:
+        return AutoStudioWindow._ordered_real_scene_pool_groups(project)
+
+    @staticmethod
+    def _ordered_real_scene_pool_groups(project: Optional[ProjectData]) -> List[SceneGroupData]:
         if not project:
             return []
         ordered = []
@@ -2976,7 +3015,7 @@ class AutoStudioWindow(QMainWindow):
         ordered.extend(
             group
             for group in project.scene_groups
-            if group.name not in (DEFAULT_GLOBAL_SCENE_GROUP_NAME, DEFAULT_SCENE_GROUP_NAME)
+            if group.name not in SYSTEM_SCENE_GROUP_NAMES
         )
         return ordered
 
@@ -2985,14 +3024,19 @@ class AutoStudioWindow(QMainWindow):
         if not project:
             return []
         ordered = []
-        for group_name in (DEFAULT_SCENE_GROUP_NAME, DEFAULT_GLOBAL_SCENE_GROUP_NAME):
-            group = next((item for item in project.scene_groups if item.name == group_name), None)
-            if group:
-                ordered.append(group)
+        global_group = next((item for item in project.scene_groups if item.name == DEFAULT_GLOBAL_SCENE_GROUP_NAME), None)
+        if global_group:
+            ordered.append(global_group)
+        all_group = AutoStudioWindow._all_scene_group(project)
+        if all_group:
+            ordered.append(all_group)
+        pending_group = next((item for item in project.scene_groups if item.name == DEFAULT_SCENE_GROUP_NAME), None)
+        if pending_group:
+            ordered.append(pending_group)
         ordered.extend(
             group
             for group in project.scene_groups
-            if group.name not in (DEFAULT_SCENE_GROUP_NAME, DEFAULT_GLOBAL_SCENE_GROUP_NAME)
+            if group.name not in SYSTEM_SCENE_GROUP_NAMES
         )
         return ordered
 
@@ -3356,14 +3400,16 @@ class AutoStudioWindow(QMainWindow):
             self.current_scene = None
             self.clear_scene_display()
             scene_group = data.get("scene_group")
+            is_virtual_group = bool(data.get("virtual")) or self._is_virtual_all_scene_group(scene_group)
             lbl = QLabel(f"当前分组: {scene_group.name if scene_group else ''}")
             self.action_layout.addWidget(lbl)
             btn_add_scene = QPushButton("新建池内场景")
             btn_add_scene.clicked.connect(lambda: self.add_pool_scene(scene_group))
+            btn_add_scene.setEnabled(not is_virtual_group)
             self.action_layout.addWidget(btn_add_scene)
             is_system_group = bool(
                 scene_group
-                and scene_group.name in (DEFAULT_SCENE_GROUP_NAME, DEFAULT_GLOBAL_SCENE_GROUP_NAME)
+                and scene_group.name in SYSTEM_SCENE_GROUP_NAMES
             )
             btn_duplicate_items = QPushButton("重复标注检查")
             btn_duplicate_items.clicked.connect(lambda: self.show_scene_pool_group_duplicate_items(scene_group))
@@ -3373,6 +3419,7 @@ class AutoStudioWindow(QMainWindow):
             btn_batch_manage.clicked.connect(lambda: self.manage_scene_pool_group_batch(scene_group))
             can_batch_manage = bool(
                 scene_group
+                and not is_virtual_group
                 and self._scene_pool_group_batch_entries(self.project, scene_group)
             )
             btn_batch_manage.setEnabled(can_batch_manage)
@@ -3388,6 +3435,7 @@ class AutoStudioWindow(QMainWindow):
         elif isinstance(data, dict) and data.get("kind") == "scene_pool_scene_group":
             scene_group = data.get("scene_group")
             scene_name = data.get("scene_name", "")
+            is_virtual_group = bool(data.get("virtual")) or self._is_virtual_all_scene_group(scene_group)
             first_scene = self._first_pool_scene_resolution(scene_group, scene_name)
             self.current_stage = self._find_stage_for_scene(first_scene) if first_scene else None
             self.set_current_work_stage(self.current_stage)
@@ -3404,12 +3452,15 @@ class AutoStudioWindow(QMainWindow):
             self.action_layout.addWidget(btn_manage_stages)
             btn_rename = QPushButton("✏️ 修改场景名称")
             btn_rename.clicked.connect(lambda: self.rename_pool_scene_group(scene_group, scene_name))
+            btn_rename.setEnabled(not is_virtual_group)
             self.action_layout.addWidget(btn_rename)
             btn_move = QPushButton("移动到其他分组")
             btn_move.clicked.connect(lambda: self.move_pool_scene_group(scene_group, scene_name))
+            btn_move.setEnabled(not is_virtual_group)
             self.action_layout.addWidget(btn_move)
             btn_delete = QPushButton("🗑 删除池内场景")
             btn_delete.clicked.connect(lambda: self.delete_pool_scene_group(scene_group, scene_name))
+            btn_delete.setEnabled(not is_virtual_group)
             self.action_layout.addWidget(btn_delete)
         elif isinstance(data, dict) and data.get("kind") == "scene_group":
             self.current_stage = data.get("stage")
@@ -3575,6 +3626,7 @@ class AutoStudioWindow(QMainWindow):
         elif isinstance(data, dict) and data.get("kind") == "scene_pool_scene_group":
             scene_group = data.get("scene_group")
             scene_name = data.get("scene_name", "")
+            is_virtual_group = bool(data.get("virtual")) or self._is_virtual_all_scene_group(scene_group)
             manage_stage_action = QAction("管理阶段", self)
             manage_stage_action.setEnabled(bool(
                 self.project
@@ -3584,17 +3636,21 @@ class AutoStudioWindow(QMainWindow):
             manage_stage_action.triggered.connect(lambda: self.manage_pool_scene_stages(scene_group, scene_name))
             menu.addAction(manage_stage_action)
             rename_pool_action = QAction("修改池内场景名称", self)
+            rename_pool_action.setEnabled(not is_virtual_group)
             rename_pool_action.triggered.connect(lambda: self.rename_pool_scene_group(scene_group, scene_name))
             menu.addAction(rename_pool_action)
             move_pool_action = QAction("移动到其他分组", self)
+            move_pool_action.setEnabled(not is_virtual_group)
             move_pool_action.triggered.connect(lambda: self.move_pool_scene_group(scene_group, scene_name))
             menu.addAction(move_pool_action)
             delete_pool_action = QAction("删除池内场景", self)
+            delete_pool_action.setEnabled(not is_virtual_group)
             delete_pool_action.triggered.connect(lambda: self.delete_pool_scene_group(scene_group, scene_name))
             menu.addAction(delete_pool_action)
             menu.addSeparator()
         elif isinstance(data, dict) and data.get("kind") == "scene_pool_group":
             scene_group = data.get("scene_group")
+            is_virtual_group = bool(data.get("virtual")) or self._is_virtual_all_scene_group(scene_group)
             duplicate_items_action = QAction("重复标注检查", self)
             duplicate_items_action.setEnabled(bool(scene_group and scene_group.scenes))
             duplicate_items_action.triggered.connect(lambda: self.show_scene_pool_group_duplicate_items(scene_group))
@@ -3602,6 +3658,7 @@ class AutoStudioWindow(QMainWindow):
             batch_action = QAction("批量管理", self)
             batch_action.setEnabled(bool(
                 scene_group
+                and not is_virtual_group
                 and self._scene_pool_group_batch_entries(self.project, scene_group)
             ))
             batch_action.triggered.connect(lambda: self.manage_scene_pool_group_batch(scene_group))

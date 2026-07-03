@@ -1,9 +1,14 @@
 {
-    "screen_mode": "0",
+    "screen_mode": "2",
     "touch_backend": "uinput",
     "stream_disable_save_frames": true,
     "stream_diagnostics": true,
     "stream_diagnostics_interval": 1.0,
+    "hoscrcpy_scale": 1,
+    "hoscrcpy_frame_rate": 60,
+    "hoscrcpy_bit_rate": 30,
+    "hoscrcpy_device_port": 5000,
+    "hoscrcpy_encoder_type": "0",
     "stage_time_minutes": {
         "搜房": 10,
         "跑图": 10,

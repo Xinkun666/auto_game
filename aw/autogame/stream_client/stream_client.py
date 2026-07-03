@@ -65,12 +65,40 @@ def _config_float(config, name, default):
         return default
 
 
+def _config_int(config, name, default):
+    if not isinstance(config, dict) or name not in config:
+        return default
+    try:
+        return int(config.get(name))
+    except (TypeError, ValueError):
+        return default
+
+
 def _resolve_bool_option(env_name, config, config_name, default=False):
     return _env_truthy(env_name, _config_truthy(config, config_name, default))
 
 
 def _resolve_float_option(env_name, config, config_name, default):
     return _env_float(env_name, _config_float(config, config_name, default))
+
+
+def _resolve_int_option(env_name, config, config_name, default):
+    value = os.environ.get(env_name)
+    if value is not None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+    return _config_int(config, config_name, default)
+
+
+def _resolve_str_option(env_name, config, config_name, default=""):
+    value = os.environ.get(env_name)
+    if value is not None:
+        return str(value).strip()
+    if isinstance(config, dict) and config_name in config:
+        return str(config.get(config_name) or "").strip()
+    return str(default or "").strip()
 
 
 class FrameBuffer:
@@ -765,6 +793,317 @@ class StreamClient:
         attempt = max(1, int(attempt))
         delay = self.reconnect_base_delay * (2 ** (attempt - 1))
         return min(self.reconnect_max_delay, delay)
+
+
+class PyAVH264Decoder:
+    def __init__(self):
+        try:
+            import av
+        except ImportError as exc:
+            raise RuntimeError(
+                "HOScrcpy 流输出 H.264 ByteBuffer，需要安装 PyAV：python -m pip install av"
+            ) from exc
+        self.codec = av.CodecContext.create("h264", "r")
+
+    def decode(self, data):
+        frames = []
+        for packet in self.codec.parse(bytes(data)):
+            for frame in self.codec.decode(packet):
+                frames.append(frame.to_image().convert("RGB").copy())
+        return frames
+
+
+class HOSScrcpyStreamClient:
+    def __init__(
+        self,
+        buffer,
+        save_frame=False,
+        rotation_mode=0,
+        decoder=None,
+        device_factory=None,
+    ):
+        self.buffer = buffer
+        self.running = False
+        self.main_thread = None
+        self._stop_event = threading.Event()
+        self.rotation_mode = rotation_mode
+        self.decoder = decoder
+        self.device_factory = device_factory
+        self.device = None
+        self._last_error = None
+        self._first_frame_received = False
+
+        config = _read_autogame_config()
+        self.sn = _resolve_str_option("AUTOGAME_HOSCRCPY_SN", config, "hoscrcpy_sn", "")
+        self.ip = _resolve_str_option("AUTOGAME_HOSCRCPY_IP", config, "hoscrcpy_ip", "127.0.0.1") or "127.0.0.1"
+        self.port = _resolve_int_option("AUTOGAME_HOSCRCPY_PORT", config, "hoscrcpy_port", 8710)
+        self.scale = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_SCALE", config, "hoscrcpy_scale", 1))
+        self.frame_rate = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_FRAME_RATE", config, "hoscrcpy_frame_rate", 60))
+        self.bit_rate = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_BIT_RATE", config, "hoscrcpy_bit_rate", 30))
+        self.device_port = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_DEVICE_PORT", config, "hoscrcpy_device_port", 5000))
+        self.encoder_type = _resolve_str_option("AUTOGAME_HOSCRCPY_ENCODER_TYPE", config, "hoscrcpy_encoder_type", "0") or "0"
+
+        self.save_frame_disabled = _resolve_bool_option(
+            "AUTOGAME_DISABLE_SAVE_FRAMES",
+            config,
+            "stream_disable_save_frames",
+            False,
+        )
+        self.save_frame = bool(save_frame and not self.save_frame_disabled)
+        self.save_queue = queue.Queue(maxsize=100)
+        self.save_worker = None
+        self.save_dir = str(resolve_process_save_frames_dir())
+        if self.save_frame:
+            os.makedirs(self.save_dir, exist_ok=True)
+        atexit.register(self._atexit_cleanup)
+
+    def set_save_frame(self, enable):
+        if enable and self.save_frame_disabled:
+            self.save_frame = False
+            print("[HOS] Save frame mode disabled by AUTOGAME_DISABLE_SAVE_FRAMES=1")
+            return
+        self.save_frame = bool(enable)
+        if self.save_frame:
+            os.makedirs(self.save_dir, exist_ok=True)
+            self._start_save_worker()
+        print("[HOS] Save frame mode set to: %s" % self.save_frame)
+
+    def start_backend(self):
+        if self.main_thread is not None and self.main_thread.is_alive():
+            print("[HOS] Backend already running.")
+            return
+        self._stop_event.clear()
+        self.main_thread = threading.Thread(target=self.run, name="HOSMainThread", daemon=True)
+        self.main_thread.start()
+        print("[HOS] Backend started.")
+
+    def run(self):
+        self.running = True
+        self._stop_event.clear()
+        self._last_error = None
+        if self.save_frame:
+            self._start_save_worker()
+
+        try:
+            self.device = self._create_device()
+            callback = self._create_callback()
+            print(
+                "[HOS] Starting HOScrcpy stream: sn=%s ip=%s port=%s scale=%s fps=%s bitrate=%s"
+                % (self.sn, self.ip, self.port, self.scale, self.frame_rate, self.bit_rate),
+                flush=True,
+            )
+            self.device.start_capture_screen(callback)
+            while self.running and not self._stop_event.is_set():
+                if self._last_error is not None:
+                    break
+                self._stop_event.wait(0.2)
+            if self._last_error is not None:
+                raise RuntimeError("HOScrcpy stream failed: %s" % self._last_error)
+        except Exception as exc:
+            self._last_error = exc
+            message = "[HOS] Runtime Error: %s" % exc
+            print(message, flush=True)
+            self._write_disconnect_signal("hoscrcpy_runtime_error", message, 1)
+            raise
+        finally:
+            self.running = False
+            self._stop_event.set()
+            self._stop_device()
+            try:
+                self.save_queue.put_nowait(None)
+            except Exception:
+                pass
+            print("[HOS] Main loop exited.", flush=True)
+
+    def stop(self):
+        if not self.running and self.device is None:
+            return
+        print("[HOS] Stopping client...")
+        self.running = False
+        self._stop_event.set()
+        self._stop_device()
+        try:
+            self.save_queue.put(None, timeout=1)
+        except Exception:
+            pass
+        if self.save_worker and self.save_worker.is_alive():
+            self.save_worker.join(timeout=1)
+        if (
+            self.main_thread
+            and self.main_thread.is_alive()
+            and threading.current_thread() is not self.main_thread
+        ):
+            self.main_thread.join(timeout=1)
+        print("[HOS] Client stopped.")
+
+    def _atexit_cleanup(self):
+        try:
+            self.stop()
+        except Exception:
+            pass
+
+    def _create_device(self):
+        if not self.sn:
+            self.sn = self._resolve_default_device_sn()
+        if self.device_factory is not None:
+            return self.device_factory(self)
+        from hoscrcpy_sdk.HosRemoteConfig import HosRemoteConfig
+        from hoscrcpy_sdk.HosRemoteDevice import HosRemoteDevice
+
+        config = HosRemoteConfig(
+            sn=self.sn,
+            ip=self.ip,
+            port=self.port,
+            scale=self.scale,
+            frame_rate=self.frame_rate,
+            bit_rate=self.bit_rate,
+            device_port=self.device_port,
+            encoder_type=self.encoder_type,
+        )
+        return HosRemoteDevice(config)
+
+    def _resolve_default_device_sn(self):
+        args = hdc_command_args("hdc list targets")
+        if not args:
+            raise RuntimeError("无法构造 hdc list targets 命令，请在 config.json 写入 hoscrcpy_sn")
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            timeout=5,
+            text=True,
+            **hidden_subprocess_kwargs(),
+        )
+        if result.returncode != 0:
+            raise RuntimeError("自动获取 HOScrcpy 设备 SN 失败: %s" % ((result.stderr or result.stdout or "").strip()))
+        devices = [
+            line.strip()
+            for line in (result.stdout or "").splitlines()
+            if line.strip() and "Empty" not in line and not line.startswith("ErrorMessage:")
+        ]
+        if not devices:
+            raise RuntimeError("未发现可用于 HOScrcpy 的 hdc 设备，请在 config.json 写入 hoscrcpy_sn")
+        if len(devices) > 1:
+            print("[HOS] Multiple hdc devices found, using first: %s" % devices[0], flush=True)
+        return devices[0]
+
+    def _create_callback(self):
+        from hoscrcpy_sdk.ScreenCapCallback import ScreenCapCallback
+
+        client = self
+
+        class _Callback(ScreenCapCallback):
+            def on_data(self, byte_buffer: bytes):
+                client._handle_stream_bytes(byte_buffer)
+
+            def on_exception(self, err: Exception):
+                client._handle_stream_exception(err)
+
+            def on_ready(self):
+                print("[HOS] HOScrcpy stream ready.", flush=True)
+
+        return _Callback()
+
+    def _handle_stream_bytes(self, data):
+        if not data:
+            return
+        if self.decoder is None:
+            self.decoder = PyAVH264Decoder()
+        frames = self.decoder.decode(data) or []
+        for frame in frames:
+            frame = apply_rotation(frame, self.rotation_mode)
+            self.on_frame(frame)
+            if self.save_frame:
+                self._enqueue_save(frame)
+            if not self._first_frame_received:
+                self._first_frame_received = True
+                print("[HOS] First frame received.", flush=True)
+
+    def _handle_stream_exception(self, err):
+        if not self.running:
+            return
+        self._last_error = err
+        message = "[HOS] Stream Error: %s" % err
+        print(message, flush=True)
+        self._write_disconnect_signal("hoscrcpy_stream_error", message, 1)
+        self._stop_event.set()
+
+    def on_frame(self, frame):
+        try:
+            if frame is not None:
+                self.buffer.push(frame)
+        except Exception as exc:
+            print("[HOS] Buffer push error: %s" % exc)
+
+    def _enqueue_save(self, frame):
+        ts_str = datetime.now().strftime("%m-%d %H-%M-%S.%f")[:-3]
+        try:
+            self.save_queue.put_nowait((frame.copy(), ts_str))
+        except queue.Full:
+            pass
+        except Exception as exc:
+            print("[HOS] Save queue error: %s" % exc)
+
+    def _start_save_worker(self):
+        if self.save_worker is None or not self.save_worker.is_alive():
+            self.save_worker = threading.Thread(
+                target=self._save_worker_logic,
+                name="HOSSaveWorker",
+                daemon=True,
+            )
+            self.save_worker.start()
+
+    def _save_worker_logic(self):
+        while True:
+            item = self.save_queue.get()
+            if item is None:
+                try:
+                    self.save_queue.task_done()
+                except Exception:
+                    pass
+                break
+            frame, time_str = item
+            try:
+                save_path = os.path.join(self.save_dir, "%s.jpg" % time_str)
+                frame.save(save_path, "JPEG")
+            except Exception as exc:
+                print("[HOS] Save disk error: %s" % exc)
+            finally:
+                try:
+                    self.save_queue.task_done()
+                except Exception:
+                    pass
+        print("[HOS] Save worker exited.")
+
+    def _stop_device(self):
+        device = self.device
+        self.device = None
+        if device is not None:
+            try:
+                device.stop_capture_screen()
+            except Exception as exc:
+                print("[HOS] Stop capture warning: %s" % exc)
+
+    def _write_disconnect_signal(self, reason, message, attempt):
+        archive_dir = os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()
+        if not archive_dir:
+            return
+        try:
+            os.makedirs(archive_dir, exist_ok=True)
+            payload = {
+                "event": "stream_disconnected",
+                "reason": str(reason),
+                "message": str(message),
+                "attempt": int(attempt),
+                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                "pid": os.getpid(),
+            }
+            signal_path = os.path.join(archive_dir, "stream_disconnect_signal.json")
+            tmp_path = signal_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, signal_path)
+        except Exception as exc:
+            print("[HOS] Write disconnect signal failed: %s" % exc, flush=True)
 
 
 class HDCSnapshotClient:

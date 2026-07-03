@@ -4,7 +4,36 @@ import atexit
 import threading
 from aw.autogame.tools.GameFrameWorker import FrameWorker
 from aw.autogame.tools.Utils import *
-from aw.autogame.stream_client.stream_client import global_buffer, StreamClient, HDCSnapshotClient
+from aw.autogame.stream_client.stream_client import global_buffer, StreamClient, HDCSnapshotClient, HOSScrcpyStreamClient
+
+
+def _resolve_stream_rotation(screen_w, screen_h, display_rotation):
+    rotation_mode = normalize_rotation(display_rotation)
+    if rotation_mode is None:
+        rotation_mode = infer_landscape_rotation(screen_w, screen_h)
+        print(f"[Rotation] 未获取到屏幕旋转，拉流使用兜底 rotation={rotation_mode}")
+    return rotation_mode
+
+
+def create_stream_client_for_mode(
+    screen_mode,
+    buffer,
+    screen_w,
+    screen_h,
+    width,
+    height,
+    display_rotation=None,
+):
+    mode = str(screen_mode)
+    if mode == "0":
+        rotation_mode = _resolve_stream_rotation(screen_w, screen_h, display_rotation)
+        return StreamClient(buffer, rotation_mode=rotation_mode)
+    if mode == "1":
+        return HDCSnapshotClient(buffer)
+    if mode == "2":
+        rotation_mode = _resolve_stream_rotation(screen_w, screen_h, display_rotation)
+        return HOSScrcpyStreamClient(buffer, rotation_mode=rotation_mode)
+    raise ValueError(f"unsupported screen_mode: {screen_mode}")
 
 class GameAutomator:
     def __init__(self, driver, logger):
@@ -13,15 +42,18 @@ class GameAutomator:
 
         self.screen_w, self.screen_h = wait_for_landscape_resolution_stable()
         self.W, self.H = get_wh()
-        if get_screen_mode() == "0":
-            rotation_mode = normalize_rotation(get_display_rotation())
-            if rotation_mode is None:
-                rotation_mode = infer_landscape_rotation(self.screen_w, self.screen_h)
-                print(f"[Rotation] 未获取到屏幕旋转，拉流使用兜底 rotation={rotation_mode}")
-            self.client = StreamClient(global_buffer, rotation_mode=rotation_mode)
+        self.screen_mode = get_screen_mode()
+        self.client = create_stream_client_for_mode(
+            self.screen_mode,
+            global_buffer,
+            self.screen_w,
+            self.screen_h,
+            self.W,
+            self.H,
+            get_display_rotation(),
+        )
+        if self.screen_mode == "0":
             self.client.start_backend(lowh=0, highh=10000, skip=20, width=self.W, height=self.H)
-        elif get_screen_mode() == "1":
-            self.client = HDCSnapshotClient(global_buffer)
         self.client.set_save_frame(True)
         self.processor = FrameWorker(global_buffer, driver=self.driver, logger=self.logger)
         self.is_cleaned_up = False
@@ -131,9 +163,9 @@ class GameAutomator:
             monitor_thread.start()
 
             print(">>> 正在启动视频流服务（阻塞中）...")
-            if get_screen_mode() == "0":
+            if self.screen_mode == "0":
                 self.client.run(lowh=0, highh=10000, skip=20, width=self.W, height=self.H)
-            elif get_screen_mode() == "1":
+            elif self.screen_mode in {"1", "2"}:
                 self.client.run()
 
         except Exception as e:

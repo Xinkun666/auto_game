@@ -845,7 +845,7 @@ class HOSScrcpyStreamClient:
         self.sn = _resolve_str_option("AUTOGAME_HOSCRCPY_SN", config, "hoscrcpy_sn", "")
         self.ip = _resolve_str_option("AUTOGAME_HOSCRCPY_IP", config, "hoscrcpy_ip", "127.0.0.1") or "127.0.0.1"
         self.port = _resolve_int_option("AUTOGAME_HOSCRCPY_PORT", config, "hoscrcpy_port", 8710)
-        self.scale = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_SCALE", config, "hoscrcpy_scale", 1))
+        self.scale = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_SCALE", config, "hoscrcpy_scale", 2))
         self.frame_rate = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_FRAME_RATE", config, "hoscrcpy_frame_rate", 60))
         self.bit_rate = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_BIT_RATE", config, "hoscrcpy_bit_rate", 30))
         self.device_port = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_DEVICE_PORT", config, "hoscrcpy_device_port", 5000))

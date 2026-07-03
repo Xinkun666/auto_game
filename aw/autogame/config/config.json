@@ -4,7 +4,7 @@
     "stream_disable_save_frames": true,
     "stream_diagnostics": true,
     "stream_diagnostics_interval": 1.0,
-    "hoscrcpy_scale": 1,
+    "hoscrcpy_scale": 2,
     "hoscrcpy_frame_rate": 60,
     "hoscrcpy_bit_rate": 30,
     "hoscrcpy_device_port": 5000,

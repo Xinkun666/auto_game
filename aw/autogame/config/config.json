@@ -5,8 +5,8 @@
     "stream_diagnostics": true,
     "stream_diagnostics_interval": 1.0,
     "hoscrcpy_scale": 2,
-    "hoscrcpy_frame_rate": 60,
-    "hoscrcpy_bit_rate": 30,
+    "hoscrcpy_frame_rate": 10,
+    "hoscrcpy_bit_rate": 2,
     "hoscrcpy_device_port": 5000,
     "hoscrcpy_encoder_type": "0",
     "stage_time_minutes": {

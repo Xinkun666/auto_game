@@ -1271,6 +1271,41 @@ class AutoStudioWindow(QMainWindow):
         )
 
     @staticmethod
+    def _scene_pool_group_for_new_scene(
+        project: Optional[ProjectData],
+        scene_group: Optional[SceneGroupData],
+    ) -> Optional[SceneGroupData]:
+        if not project:
+            return None
+        AutoStudioWindow._ensure_project_scene_pool(project)
+        if scene_group and not AutoStudioWindow._is_virtual_all_scene_group(scene_group):
+            return scene_group
+        target_group = next(
+            (group for group in project.scene_groups if group.name == DEFAULT_SCENE_GROUP_NAME),
+            None,
+        )
+        if target_group is None:
+            target_group = AutoStudioWindow._default_scene_group()
+            project.scene_groups.append(target_group)
+        return target_group
+
+    @staticmethod
+    def _scene_pool_groups_for_scene_action(
+        project: Optional[ProjectData],
+        scene_group: Optional[SceneGroupData],
+        scene_name: str,
+    ) -> List[SceneGroupData]:
+        if not project or not scene_group or not scene_name:
+            return []
+        if not AutoStudioWindow._is_virtual_all_scene_group(scene_group):
+            return [scene_group]
+        return [
+            group
+            for group in AutoStudioWindow._ordered_real_scene_pool_groups(project)
+            if any(scene.name == scene_name for scene in group.scenes)
+        ]
+
+    @staticmethod
     def _ensure_project_scene_pool(project: Optional[ProjectData]) -> Optional[SceneGroupData]:
         if not project:
             return None
@@ -2033,10 +2068,11 @@ class AutoStudioWindow(QMainWindow):
         if old_scene_name == new_scene_name:
             return False
         renamed = False
-        for scene in scene_group.scenes:
-            if scene.name == old_scene_name:
-                scene.name = new_scene_name
-                renamed = True
+        for source_group in AutoStudioWindow._scene_pool_groups_for_scene_action(project, scene_group, old_scene_name):
+            for scene in source_group.scenes:
+                if scene.name == old_scene_name:
+                    scene.name = new_scene_name
+                    renamed = True
         if not renamed:
             return False
         for stage in project.stages:
@@ -2065,11 +2101,17 @@ class AutoStudioWindow(QMainWindow):
     ) -> List[SceneData]:
         if not project or not scene_group or not scene_name:
             return []
-        deleted_scenes = [scene for scene in scene_group.scenes if scene.name == scene_name]
+        source_groups = AutoStudioWindow._scene_pool_groups_for_scene_action(project, scene_group, scene_name)
+        deleted_scenes = []
+        for source_group in source_groups:
+            for scene in source_group.scenes:
+                if scene.name == scene_name and scene not in deleted_scenes:
+                    deleted_scenes.append(scene)
         if not deleted_scenes:
             return []
         deleted_ids = {id(scene) for scene in deleted_scenes}
-        scene_group.scenes = [scene for scene in scene_group.scenes if id(scene) not in deleted_ids]
+        for source_group in source_groups:
+            source_group.scenes = [scene for scene in source_group.scenes if id(scene) not in deleted_ids]
         for stage in project.stages:
             stage.scenes = [scene for scene in stage.scenes if id(scene) not in deleted_ids]
             if not any(scene.name == scene_name for scene in stage.scenes):
@@ -2970,20 +3012,27 @@ class AutoStudioWindow(QMainWindow):
     def add_pool_scene(self, scene_group: Optional[SceneGroupData]):
         if not self.project or not scene_group:
             return
+        target_group = self._scene_pool_group_for_new_scene(self.project, scene_group)
+        if not target_group:
+            return
+        existing_scene_group = scene_group if self._is_virtual_all_scene_group(scene_group) else target_group
         name = self.prompt_unique_name(
             "新建池内场景",
             "场景名称:",
-            existing_names=sorted({scene.name for scene in scene_group.scenes}),
+            existing_names=sorted({scene.name for scene in existing_scene_group.scenes}),
         )
         if not name:
             return
         new_scene = SceneData(id=str(random.randint(1000, 9999)), name=name)
-        self._add_scene_to_project_pool(self.project, new_scene, scene_group.name)
+        self._add_scene_to_project_pool(self.project, new_scene, target_group.name)
         self.current_scene = new_scene
         self.last_expand_scene_id = new_scene.id
         self.update_tree_view()
         self.select_data_in_tree(new_scene)
-        self.status_label.setText(f"已在场景池分组 {scene_group.name} 新建场景 {name}。")
+        if self._is_virtual_all_scene_group(scene_group):
+            self.status_label.setText(f"已在场景池分组 {target_group.name} 新建场景 {name}。")
+        else:
+            self.status_label.setText(f"已在场景池分组 {scene_group.name} 新建场景 {name}。")
 
     def _pool_scene_choices(self):
         if not self.project:
@@ -3355,6 +3404,7 @@ class AutoStudioWindow(QMainWindow):
         self.scene_pool_tree.collapseAll()
     # --- 树交互与动态按钮 ---
     def on_tree_click(self, item, column):
+        self._active_tree_widget = item.treeWidget()
         data = item.data(0, Qt.ItemDataRole.UserRole)
         self.clear_action_panel()
         if isinstance(data, StageData):
@@ -3405,7 +3455,7 @@ class AutoStudioWindow(QMainWindow):
             self.action_layout.addWidget(lbl)
             btn_add_scene = QPushButton("新建池内场景")
             btn_add_scene.clicked.connect(lambda: self.add_pool_scene(scene_group))
-            btn_add_scene.setEnabled(not is_virtual_group)
+            btn_add_scene.setEnabled(bool(scene_group))
             self.action_layout.addWidget(btn_add_scene)
             is_system_group = bool(
                 scene_group
@@ -3452,7 +3502,7 @@ class AutoStudioWindow(QMainWindow):
             self.action_layout.addWidget(btn_manage_stages)
             btn_rename = QPushButton("✏️ 修改场景名称")
             btn_rename.clicked.connect(lambda: self.rename_pool_scene_group(scene_group, scene_name))
-            btn_rename.setEnabled(not is_virtual_group)
+            btn_rename.setEnabled(bool(first_scene))
             self.action_layout.addWidget(btn_rename)
             btn_move = QPushButton("移动到其他分组")
             btn_move.clicked.connect(lambda: self.move_pool_scene_group(scene_group, scene_name))
@@ -3460,7 +3510,7 @@ class AutoStudioWindow(QMainWindow):
             self.action_layout.addWidget(btn_move)
             btn_delete = QPushButton("🗑 删除池内场景")
             btn_delete.clicked.connect(lambda: self.delete_pool_scene_group(scene_group, scene_name))
-            btn_delete.setEnabled(not is_virtual_group)
+            btn_delete.setEnabled(bool(first_scene))
             self.action_layout.addWidget(btn_delete)
         elif isinstance(data, dict) and data.get("kind") == "scene_group":
             self.current_stage = data.get("stage")
@@ -3580,7 +3630,7 @@ class AutoStudioWindow(QMainWindow):
         self.coord_label.setText(f"坐标: ({int(x)}, {int(y)})")
     def select_item_in_tree(self, target_data):
         self.select_data_in_tree(target_data)
-    def select_data_in_tree(self, target_data):
+    def select_data_in_tree(self, target_data, preferred_tree=None):
         if not target_data:
             return
         def walk(node):
@@ -3595,7 +3645,11 @@ class AutoStudioWindow(QMainWindow):
             return None
         target_tree = None
         target_item = None
-        for tree in (self.tree, self.scene_pool_tree):
+        trees = []
+        for tree in (preferred_tree, getattr(self, "tree", None), getattr(self, "scene_pool_tree", None)):
+            if tree is not None and tree not in trees:
+                trees.append(tree)
+        for tree in trees:
             target_item = walk(tree.invisibleRootItem())
             if target_item:
                 target_tree = tree
@@ -3627,16 +3681,17 @@ class AutoStudioWindow(QMainWindow):
             scene_group = data.get("scene_group")
             scene_name = data.get("scene_name", "")
             is_virtual_group = bool(data.get("virtual")) or self._is_virtual_all_scene_group(scene_group)
+            first_scene = self._first_pool_scene_resolution(scene_group, scene_name)
             manage_stage_action = QAction("管理阶段", self)
             manage_stage_action.setEnabled(bool(
                 self.project
                 and self.project.stages
-                and self._first_pool_scene_resolution(scene_group, scene_name)
+                and first_scene
             ))
             manage_stage_action.triggered.connect(lambda: self.manage_pool_scene_stages(scene_group, scene_name))
             menu.addAction(manage_stage_action)
             rename_pool_action = QAction("修改池内场景名称", self)
-            rename_pool_action.setEnabled(not is_virtual_group)
+            rename_pool_action.setEnabled(bool(first_scene))
             rename_pool_action.triggered.connect(lambda: self.rename_pool_scene_group(scene_group, scene_name))
             menu.addAction(rename_pool_action)
             move_pool_action = QAction("移动到其他分组", self)
@@ -3644,7 +3699,7 @@ class AutoStudioWindow(QMainWindow):
             move_pool_action.triggered.connect(lambda: self.move_pool_scene_group(scene_group, scene_name))
             menu.addAction(move_pool_action)
             delete_pool_action = QAction("删除池内场景", self)
-            delete_pool_action.setEnabled(not is_virtual_group)
+            delete_pool_action.setEnabled(bool(first_scene))
             delete_pool_action.triggered.connect(lambda: self.delete_pool_scene_group(scene_group, scene_name))
             menu.addAction(delete_pool_action)
             menu.addSeparator()
@@ -3755,6 +3810,8 @@ class AutoStudioWindow(QMainWindow):
         parent = tree_item.parent()
         if not parent: return  # Can't delete root
         parent_data = parent.data(0, Qt.ItemDataRole.UserRole)
+        restore_scene = None
+        preferred_tree = tree_item.treeWidget()
         if isinstance(data, StageData):
             self.project.stages.remove(data)
             if self.current_stage == data:
@@ -3777,7 +3834,10 @@ class AutoStudioWindow(QMainWindow):
             parent_data.items.remove(data)
             self.sync_deleted_item_to_scene_peers(parent_data, data)
             self.show_scene_image(parent_data)  # refresh view
+            restore_scene = parent_data
         self.update_tree_view()
+        if restore_scene:
+            self.select_data_in_tree(restore_scene, preferred_tree=preferred_tree)
     # --- 场景与绘图逻辑 ---
     def add_scene(self, stage):
         self.current_stage = stage
@@ -4346,11 +4406,14 @@ class AutoStudioWindow(QMainWindow):
     def delete_selected_item(self, item_data: ItemData):
         if not self.current_scene:
             return
+        scene_to_restore = self.current_scene
+        preferred_tree = getattr(self, "_active_tree_widget", None)
         self.current_scene.items.remove(item_data)
         self.sync_deleted_item_to_scene_peers(self.current_scene, item_data)
         self.status_label.setText(f"已删除 {item_data.name}")
         self.update_tree_view()
-        self.canvas.redraw_overlays(self.current_scene)
+        self.select_data_in_tree(scene_to_restore, preferred_tree=preferred_tree)
+        self.canvas.redraw_overlays(scene_to_restore)
     def rename_stage(self, stage_data: StageData):
         if not self.project:
             return

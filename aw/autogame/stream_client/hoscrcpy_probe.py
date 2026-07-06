@@ -60,8 +60,10 @@ class ProbeFrameBuffer:
             except queue.Empty:
                 return frame
 
-    def wait_for_frame(self, timeout: float, client=None):
+    def wait_for_frame(self, timeout: float, client=None, diagnostic_interval: float = 5.0):
         deadline = time.monotonic() + max(0.0, float(timeout))
+        interval = max(0.0, float(diagnostic_interval or 0.0))
+        next_diagnostic_at = time.monotonic() + interval if interval > 0 else None
         while True:
             client_error = getattr(client, "_last_error", None)
             if client_error is not None:
@@ -88,8 +90,20 @@ class ProbeFrameBuffer:
                     )
                 )
 
+            now = time.monotonic()
+            if next_diagnostic_at is not None and now >= next_diagnostic_at:
+                print(
+                    "[HOSProbeWait] waiting for first frame: %s" % format_client_diagnostics(client),
+                    flush=True,
+                )
+                next_diagnostic_at = now + interval
+
+            wait_timeout = min(0.25, remaining)
+            if next_diagnostic_at is not None:
+                wait_timeout = min(wait_timeout, max(0.0, next_diagnostic_at - time.monotonic()))
+
             try:
-                return self._frames.get(timeout=min(0.25, remaining))
+                return self._frames.get(timeout=wait_timeout)
             except queue.Empty:
                 continue
 
@@ -309,12 +323,13 @@ def display_realtime_frames(
 
 
 def probe_hoscrcpy_stream(
-    timeout: float = 15.0,
+    timeout: float = 60.0,
     save_frame_path: Optional[Path] = None,
     rotation_mode: int = 0,
     client_factory: Callable = HOSScrcpyStreamClient,
     display: bool = False,
     display_poll_ms: int = 15,
+    diagnostic_interval: float = 5.0,
     success_callback: Optional[Callable[[HOScrcpyProbeResult], None]] = None,
 ) -> HOScrcpyProbeResult:
     buffer = ProbeFrameBuffer()
@@ -327,7 +342,11 @@ def probe_hoscrcpy_stream(
         except Exception as exc:
             raise HOScrcpyProbeError("HOScrcpy 流启动异常: %s" % exc) from exc
 
-        frame = buffer.wait_for_frame(timeout=timeout, client=client)
+        frame = buffer.wait_for_frame(
+            timeout=timeout,
+            client=client,
+            diagnostic_interval=diagnostic_interval,
+        )
         elapsed = time.monotonic() - start_time
         width, height = _frame_size(frame)
         saved_path = _save_frame(frame, save_frame_path)
@@ -389,6 +408,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--display", dest="display", action="store_true", help="首帧成功后打开实时预览窗口，默认开启")
     parser.add_argument("--no-display", dest="display", action="store_false", help="仅验证首帧后退出，不打开实时预览")
     parser.add_argument("--display-poll-ms", type=int, default=15, help="实时预览刷新间隔，单位毫秒")
+    parser.add_argument("--diagnostic-interval", type=float, default=5.0, help="等待首帧时打印诊断快照的间隔，0 表示关闭")
     return parser
 
 
@@ -407,6 +427,7 @@ def main(argv=None) -> int:
         rotation_mode=args.rotation_mode,
         display=args.display,
         display_poll_ms=args.display_poll_ms,
+        diagnostic_interval=args.diagnostic_interval,
         success_callback=_print_probe_result if args.display else None,
     )
     if not args.display:

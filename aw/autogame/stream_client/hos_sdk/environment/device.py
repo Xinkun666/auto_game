@@ -26,6 +26,33 @@ PATH = os.path.dirname(os.path.abspath(__file__))
 RESOURCE_PATH = os.path.join(os.path.dirname(PATH), "res")
 
 
+def _compact_log_value(value, limit=500):
+    text = "" if value is None else str(value)
+    text = text.strip().replace("\r", "\\r").replace("\n", " | ")
+    if len(text) > limit:
+        return text[:limit] + "..."
+    return text
+
+
+def _format_video_attempt(attempt):
+    keys = (
+        "source",
+        "so",
+        "local_md5",
+        "device_md5",
+        "push_result",
+        "start_output",
+        "pid_list",
+        "unix_socket",
+        "error",
+    )
+    return ", ".join(
+        "{}={}".format(key, _compact_log_value(attempt.get(key)))
+        for key in keys
+        if key in attempt
+    )
+
+
 class Device(object):
 
     def __init__(self, device_sn, host: str = "127.0.0.1", port: int = "8710") -> None:
@@ -212,44 +239,85 @@ class Device(object):
         """推送并开启投屏so服务"""
         # 拉起进程
         video_params = config.get_params()
+        attempts = []
         # 先获取当前设备中有没推送过资源,如果已经推送过了则优先使用设备中的资源进行启动
-        folder_path = os.path.join(RESOURCE_PATH)
         device_agent_path = "/data/local/tmp/libscreen_casting.z.so"
         # 获取设备端的资源md5值
-        device_so_md5_info = self.connector_shell_command(
-            "md5sum {}".format(device_agent_path)).split(" ")[0].strip()
+        device_so_md5_output = self.connector_shell_command("md5sum {}".format(device_agent_path))
+        device_so_md5_info = device_so_md5_output.split(" ")[0].strip()
+        matched_so_name = self.so_md5_map.get(device_so_md5_info)
+        logger.info(
+            "Device scrcpy so md5: parsed=%s matched_so=%s raw=%s",
+            device_so_md5_info,
+            matched_so_name,
+            _compact_log_value(device_so_md5_output),
+        )
         if device_so_md5_info in self.so_md5_map:
-            current_so_name = self.so_md5_map.get(device_so_md5_info)
-            logger.info("try to use exist so : %s", device_so_md5_info)
+            current_so_name = matched_so_name
+            logger.info("try to use exist so: md5=%s so=%s", device_so_md5_info, current_so_name)
             # 直接进行启动
-            self.start_video_so_server(video_params)
+            start_output = self.start_video_so_server(video_params)
             pid_list = self.device_helper.get_video_pid_list()
+            attempt = {
+                "source": "existing",
+                "so": current_so_name,
+                "device_md5": device_so_md5_info,
+                "start_output": start_output,
+                "pid_list": pid_list,
+                "unix_socket": "unix" in current_so_name,
+            }
+            attempts.append(attempt)
             if pid_list:
                 logger.info("Video server started with existing so=%s pid_list=%s", current_so_name, pid_list)
                 # 判断当前推送的so是不是要使用unix_socket连接方式
                 self.is_use_unix_socket_video_so = "unix" in current_so_name
                 return
+            logger.warning("Existing scrcpy so did not expose process: %s", _format_video_attempt(attempt))
+        else:
+            logger.warning(
+                "Device scrcpy so is missing or unknown: parsed=%s raw=%s",
+                device_so_md5_info,
+                _compact_log_value(device_so_md5_output),
+            )
         # 启动不成功再逐个遍历尝试
         for so_name in reversed(self.so_name_list):
-            logger.info("try to use %s", so_name)
-            folder_path = os.path.join(RESOURCE_PATH)
-            path = os.path.join(folder_path, "video" + os.path.sep + so_name)
-            self.device_helper.init_video_so_resource(path)
-            self.start_video_so_server(video_params)
-            pid_list = self.device_helper.get_video_pid_list()
+            path = os.path.join(RESOURCE_PATH, "video" + os.path.sep + so_name)
+            attempt = {"source": "pushed", "so": so_name}
+            try:
+                attempt["local_md5"] = self.device_helper._calculate_md5(path)
+                logger.info("try to use %s local_md5=%s path=%s", so_name, attempt["local_md5"], path)
+                attempt["push_result"] = self.device_helper.init_video_so_resource(path)
+                attempt["start_output"] = self.start_video_so_server(video_params)
+                pid_list = self.device_helper.get_video_pid_list()
+                attempt["pid_list"] = pid_list
+                attempt["unix_socket"] = "unix" in so_name
+            except Exception as exc:
+                attempt["error"] = repr(exc)
+                attempts.append(attempt)
+                logger.exception("Video server attempt failed before process detection: %s", _format_video_attempt(attempt))
+                continue
+            attempts.append(attempt)
             if pid_list:
                 logger.info("Video server started with pushed so=%s pid_list=%s", so_name, pid_list)
                 # 判断当前推送的so是不是要使用unix_socket连接方式
                 self.is_use_unix_socket_video_so = "unix" in so_name
                 return
+            logger.warning("Pushed scrcpy so did not expose process: %s", _format_video_attempt(attempt))
         # 全部试完都不行就报错
-        raise Exception("Init scrcpy service failed!")
+        raise Exception(
+            "Init scrcpy service failed! attempts=%s"
+            % " || ".join(_format_video_attempt(attempt) for attempt in attempts)
+        )
 
-    def start_video_so_server(self, video_params: str) -> None:
+    def start_video_so_server(self, video_params: str):
         """拉起投屏so服务"""
-        self.connector_shell_command(
+        command = (
             r"/system/bin/uitest start-daemon singleness --extension-name \
-            libscreen_casting.z.so {} &".format(video_params))
+            libscreen_casting.z.so {} &".format(video_params)
+        )
+        result = self.connector_shell_command(command)
+        logger.info("Start video so command result: %s", _compact_log_value(result))
+        return result
 
     def _exec_cmd(self, command: Union[str, list], timeout: int = 5 * 60):
         if isinstance(command, list):
@@ -267,13 +335,14 @@ class Device(object):
         self.cmd = [Connector.name, "-s", "{}:{}".format(self.host, self.port), "-t", self.device_sn, "shell"]
         return self._exec_cmd(command, timeout)
 
-    def push_file(self, local: str, remote: str) -> None:
+    def push_file(self, local: str, remote: str) -> str:
         if not os.path.exists(local):
             raise FileNotFoundError("HOScrcpy resource not found: {}".format(local))
         local = "\"{}\"".format(local)
         remote = "\"{}\"".format(remote)
         res = self.connector_command("file send {} {}".format(local, remote))
         logger.info("Push file result: %s", res)
+        return res
 
     def perform_action(self, x: int, y: int, action: ActionMode) -> None:
         self.proxy.create_action_request(x, y, action)
@@ -446,14 +515,14 @@ class DeviceHelper(object):
         else:
             logger.info("device control service is up to date!")
 
-    def init_video_so_resource(self, file_path: str) -> None:
+    def init_video_so_resource(self, file_path: str) -> str:
         """推送投屏so服务"""
         device_agent_path = "/data/local/tmp/libscreen_casting.z.so"
         logger.info("Init scrcpy service...")
         # 获取设备端的资源md5值
         self.device.connector_shell_command("rm -rf {}".format(device_agent_path))
         # 推送资源
-        self.device.push_file(file_path, device_agent_path)
+        return self.device.push_file(file_path, device_agent_path)
 
     def need_unix_socket_agent_so(self) -> bool:
         # 检查uitest的版本是否大于6.0.2.2

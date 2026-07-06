@@ -131,8 +131,8 @@ DEVICE_LOG_SETTLE_INTERVAL_SECONDS = 0.2
 DEVICE_LOG_STOP_WAIT_TIMEOUT_SECONDS = 15.0
 HDC_SHELL_TIMEOUT_SECONDS = float(os.environ.get("AUTOGAME_HDC_SHELL_TIMEOUT_SECONDS", "5"))
 TEST_PROFILE_SCREEN_MODES = {
-    "power": "0",
-    "function": "1",
+    "power": "2",
+    "function": "2",
 }
 PUBG_CASE_SCREEN_MODES = {
     "power": "2",
@@ -1337,8 +1337,6 @@ def _format_history_logic(
             text = _clean_history_text(item, "")
             if not text:
                 continue
-            if lines:
-                lines.append("")
             lines.append(f"- {text}")
         if lines:
             return lines

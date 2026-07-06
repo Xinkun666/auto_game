@@ -468,8 +468,8 @@ class RunningManager:
     POST_HOUSE_EXIT_CLEAR_Y_BIAS = -220
     POST_HOUSE_EXIT_CLEAR_DURA = 450
     POST_HOUSE_EXIT_CLEAR_WAIT = 550
-    # 落水后，上浮和向前划水脱离水面的操作参数
-    WATER_FLOAT_DURA = 2000
+    # 落水后，上浮、自动前进和岸边侧滑脱困参数
+    WATER_FLOAT_DURA = 1000
     WATER_FORWARD_BIAS_Y = -280
     WATER_FORWARD_DURA = 1200
     WATER_FORWARD_WAIT = 5200
@@ -478,6 +478,7 @@ class RunningManager:
     WATER_EXIT_STUCK_WINDOW = 18.0
     WATER_EXIT_BACK_DURA = 650
     WATER_EXIT_BACK_WAIT = 900
+    WATER_EXIT_SIDE_SWIPES = 2
     WATER_EXIT_SIDE_DURA = 900
     WATER_EXIT_SIDE_WAIT = 1500
     HOUSE_SCENE_REAR_CONFIRM_TURNS = 3
@@ -2043,48 +2044,64 @@ class RunningManager:
         self.water_escape_target = target
         self._log_running_state("检测到落水", location, direction, "执行上浮脱困", target)
 
-        print("[Running] 检测到上浮图标，只点击一次上浮，随后按目标方向尽快离开水域")
-        w.click("上浮")
-        time.sleep(0.2)
+        if not self._is_in_water(w):
+            self._mark_water_escape_finished(w, location, direction, target)
+            return
+
+        print("[Running] 检测到上浮图标，长按1秒上浮，随后对准目标并点击自动前进")
+        w.click("上浮", duration_ms=self.WATER_FLOAT_DURA)
         w.refresh_frame()
 
         updated_location = self._get_location(w) or location
         updated_direction = self._get_scalar(w.get_info("direction"))
+
+        if not self._is_in_water(w) or w.get_info("左拳头") or w.get_info("子弹"):
+            self._mark_water_escape_finished(w, updated_location, updated_direction, target)
+            return
 
         if target is not None and updated_direction is not None:
             aligned = self._align_to_point(w, updated_location, updated_direction, target, threshold=5)
             if not aligned:
                 return
 
-        print("[Running] 开始按目标方向长推摇杆脱离水面")
-        before_forward_location = updated_location
-        w.tap_single(
-            "摇杆",
-            y_bias=self.WATER_FORWARD_BIAS_Y,
-            dura=self.WATER_FORWARD_DURA,
-            wait=self.WATER_FORWARD_WAIT,
-        )
+        print("[Running] 已对准目标，点击自动前进游出水面")
+        if not self.auto_forward:
+            w.click("自动前进")
+            self.auto_forward = True
         w.refresh_frame()
 
         if not self._is_in_water(w) or w.get_info("左拳头") or w.get_info("子弹"):
-            print("[Running] 上浮图标已消失，已脱离水面，恢复正常跑图")
-            new_location = self._get_location(w) or updated_location
-            new_direction = self._get_scalar(w.get_info("direction"))
-            self._log_running_state("已脱离水面", new_location, new_direction, "恢复正常跑图", target)
-            self.water_exit_last_location = new_location
-            self.water_exit_stuck_frames = 0
-            self.water_exit_clock.start()
-            self.water_swim_last_location = None
-            self.water_swim_stuck_frames = 0
-            self.loading_road = False
-            self.current_segment_start = None
+            self._mark_water_escape_finished(
+                w,
+                self._get_location(w) or updated_location,
+                self._get_scalar(w.get_info("direction")),
+                target,
+            )
             return
 
-        after_forward_location = self._get_location(w) or before_forward_location
+        after_forward_location = self._get_location(w) or updated_location
         if self._handle_in_water_forward_stuck(w, after_forward_location, direction, target):
             return
 
         print("[Running] 仍在水中，下一帧继续执行脱水流程")
+
+    def _mark_water_escape_finished(
+        self,
+        w: "FrameWorker",
+        location: Optional[Tuple[int, int]],
+        direction: Optional[float],
+        target: Optional[Tuple[int, int]],
+    ):
+        print("[Running] 上浮图标已消失，已脱离水面，恢复正常跑图")
+        self._log_running_state("已脱离水面", location, direction, "恢复正常跑图", target)
+        self.water_exit_last_location = None
+        self.water_exit_stuck_frames = 0
+        if hasattr(self, "water_exit_clock"):
+            self.water_exit_clock.reset()
+        self.water_swim_last_location = None
+        self.water_swim_stuck_frames = 0
+        self.loading_road = False
+        self.current_segment_start = None
 
     def _handle_in_water_forward_stuck(
         self,
@@ -2108,29 +2125,36 @@ class RunningManager:
         if self.water_swim_stuck_frames < self.WATER_EXIT_STUCK_FRAMES:
             return False
 
-        print("[Running] 水中朝目标前推仍无有效位移，侧移换上岸点后继续前推")
-        self._log_running_state("水中前推卡住", location, direction, "侧移换上岸点", target)
+        print("[Running] 水中自动前进连续3帧无有效位移，侧移换上岸点后重新自动前进")
+        self._log_running_state("水中自动前进卡住", location, direction, "侧移换上岸点", target)
+        self.stop_auto_forward(w)
         side_bias = 360 * self.water_exit_side_sign
         self.water_exit_side_sign *= -1
-        w.tap_single(
-            "摇杆",
-            x_bias=side_bias,
-            dura=self.WATER_EXIT_SIDE_DURA,
-            wait=self.WATER_EXIT_SIDE_WAIT,
-        )
-        w.refresh_frame()
+        for _ in range(self.WATER_EXIT_SIDE_SWIPES):
+            w.tap_single(
+                "摇杆",
+                x_bias=side_bias,
+                dura=self.WATER_EXIT_SIDE_DURA,
+                wait=self.WATER_EXIT_SIDE_WAIT,
+            )
+            w.refresh_frame()
+            if not self._is_in_water(w) or w.get_info("左拳头") or w.get_info("子弹"):
+                self._mark_water_escape_finished(
+                    w,
+                    self._get_location(w) or location,
+                    self._get_scalar(w.get_info("direction")),
+                    target,
+                )
+                return True
 
         updated_location = self._get_location(w) or location
         updated_direction = self._get_scalar(w.get_info("direction"))
         if target is not None and updated_direction is not None:
             self._align_to_point(w, updated_location, updated_direction, target, threshold=8)
 
-        w.tap_single(
-            "摇杆",
-            y_bias=self.WATER_FORWARD_BIAS_Y,
-            dura=self.WATER_FORWARD_DURA,
-            wait=self.WATER_FORWARD_WAIT,
-        )
+        if not self.auto_forward:
+            w.click("自动前进")
+            self.auto_forward = True
         w.refresh_frame()
         self.water_swim_last_location = self._get_location(w) or updated_location
         self.water_swim_stuck_frames = 0

@@ -5460,7 +5460,7 @@ class HouseSceneSearchManager(HouseSearchManager):
     SCENE_EXIT_WALL_TURN_AROUND_DURA = 220
     SCENE_EXIT_WALL_TURN_AROUND_WAIT = 700
 
-    WATER_FLOAT_DURA = 2000
+    WATER_FLOAT_DURA = 1000
     WATER_BACK_DURA = 650
     WATER_BACK_WAIT = 900
     WATER_SIDE_X_BIAS = 320
@@ -5469,6 +5469,8 @@ class HouseSceneSearchManager(HouseSearchManager):
     WATER_FORWARD_Y_BIAS = -300
     WATER_FORWARD_DURA = 850
     WATER_FORWARD_WAIT = 1500
+    WATER_SHORE_SIDE_SWIPES = 2
+    WATER_ESCAPE_STUCK_FRAMES = 3
     WATER_ESCAPE_STUCK_DISTANCE = 0.6
     WATER_ESCAPE_SIDE_SWITCH_ATTEMPTS = 3
     WATER_ESCAPE_MAX_ATTEMPTS = 5
@@ -6043,6 +6045,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.water_escape_side_attempts = 0
         self.water_escape_total_attempts = 0
         self.water_escape_last_loc = None
+        self.water_escape_stuck_frames = 0
         self.r_city_pre_search_completed = True
 
     def _handle_r_city_pre_search_route(self, w: "FrameWorker", current_loc) -> bool:
@@ -6619,116 +6622,123 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _handle_water_escape(self, w: "FrameWorker", current_loc, current_direction):
         target_loc = self._current_navigation_target_location(current_loc)
-        side = self._choose_water_escape_side(current_loc, target_loc, current_direction)
-        side_label = self._side_label(side)
-        x_bias = -self.WATER_SIDE_X_BIAS if side == "left" else self.WATER_SIDE_X_BIAS
 
         self.stop_auto_forward(w)
         before_loc = self._location_tuple(current_loc)
         self._set_frame_decision(
             w,
-            f"检测到落水/水边受阻，当前位置={current_loc}，目标={target_loc}，脱困方向={side_label}",
-            "先上浮、后拉、沿岸侧移，再对准导航目标前推脱水",
-            action="执行水边脱困组合动作",
+            f"检测到落水/水边受阻，当前位置={current_loc}，目标={target_loc}",
+            "优先长按上浮，再对准导航目标点击自动前进；连续3帧无位移才执行岸边侧滑避障",
+            action="执行水中自动前进脱困",
             method="_handle_water_escape()",
             result="脱水后继续R城入门点导航",
         )
         print(
-            f"[RCityWater] 落水/水边受阻，沿{side_label}侧岸线脱困 "
+            f"[RCityWater] 落水/水边受阻，先上浮并自动前进脱困 "
             f"attempt={self.water_escape_total_attempts + 1}, target={target_loc}"
         )
 
         if w.get_info("上浮"):
             self._set_search_frame_decision(
                 w,
-                "当前搜房分支：水区脱困点击上浮",
+                "当前搜房分支：水区脱困长按上浮",
                 self._entry_observation(
                     w,
                     current_loc=current_loc,
                     target_loc=target_loc,
                     extra=f"float_dura={self.WATER_FLOAT_DURA}",
                 ),
-                "识别到上浮按钮，先上浮再执行岸边脱困组合动作",
-                action="点击上浮",
-                method="click(上浮)",
-                result="上浮后后拉、侧移、前推脱水",
+                "识别到上浮按钮，先长按上浮1秒；如果上浮消失，则下一帧回到陆地逻辑",
+                action="长按上浮",
+                method="click(上浮, duration_ms=1000)",
+                result="若仍在水中则对准目标并启动自动前进",
             )
-            w.click("上浮")
-            time.sleep(self.WATER_FLOAT_DURA / 1000.0)
-            self._refresh_frame_and_handle_jump(w)
+            w.click("上浮", duration_ms=self.WATER_FLOAT_DURA)
+            self._refresh_frame_and_handle_jump(w, "水区长按上浮后")
 
+        if not self._is_in_water(w):
+            print("[RCityWater] 上浮按钮已消失，认为已离开水域，回到陆地搜房逻辑")
+            self._reset_water_escape_progress()
+            return
+
+        self.align_direction(w, target_loc, threshold=5, max_steps=1)
         self._set_search_frame_decision(
             w,
-            "当前搜房分支：水区脱困后拉",
+            "当前搜房分支：水区脱困启动自动前进",
+            self._entry_observation(
+                w,
+                current_loc=self._get_current_location(w) or current_loc,
+                target_loc=target_loc,
+                extra="auto_forward=True",
+            ),
+            "仍在水中时对准导航目标，点击自动前进持续游向目标点",
+            action="点击自动前进",
+            method="click(自动前进)",
+            result="后续帧持续判断位置变化，卡住才执行岸边侧滑",
+        )
+        if not self.auto_forward:
+            w.click("自动前进")
+            self.auto_forward = True
+
+        self._refresh_frame_and_handle_jump(w, "水区自动前进后")
+        if not self._is_in_water(w):
+            print("[RCityWater] 自动前进后上浮按钮消失，回到陆地搜房逻辑")
+            self._reset_water_escape_progress()
+            return
+
+        after_loc = self._get_current_location(w) or before_loc
+        if self._record_water_escape_attempt(before_loc, after_loc):
+            self._handle_water_shore_obstacle(w, after_loc, target_loc, current_direction)
+
+    def _reset_water_escape_progress(self):
+        self.water_escape_side = None
+        self.water_escape_side_attempts = 0
+        self.water_escape_stuck_frames = 0
+        self.water_escape_last_loc = None
+
+    def _handle_water_shore_obstacle(self, w: "FrameWorker", current_loc, target_loc, current_direction):
+        side = self._choose_water_escape_side(current_loc, target_loc, current_direction)
+        side_label = self._side_label(side)
+        x_bias = -self.WATER_SIDE_X_BIAS if side == "left" else self.WATER_SIDE_X_BIAS
+
+        print(f"[RCityWater] 连续多帧无位移，沿{side_label}侧执行岸边避障")
+        self.stop_auto_forward(w)
+        self._set_search_frame_decision(
+            w,
+            "当前搜房分支：水区岸边侧滑避障",
             self._entry_observation(
                 w,
                 current_loc=current_loc,
                 target_loc=target_loc,
-                extra=f"y_bias=320, dura={self.WATER_BACK_DURA}, wait={self.WATER_BACK_WAIT}",
-            ),
-            "水边受阻先后拉，拉开与岸边/障碍的距离",
-            action="水区后拉",
-            method=f"tap_single(摇杆, y_bias=320, dura={self.WATER_BACK_DURA}, wait={self.WATER_BACK_WAIT})",
-            result="后拉后沿选定岸线侧移",
-        )
-        w.tap_single("摇杆", y_bias=320, dura=self.WATER_BACK_DURA, wait=self.WATER_BACK_WAIT)
-        self._refresh_frame_and_handle_jump(w)
-        self._set_search_frame_decision(
-            w,
-            "当前搜房分支：水区脱困侧移",
-            self._entry_observation(
-                w,
-                current_loc=self._get_current_location(w) or current_loc,
-                target_loc=target_loc,
-                extra=f"side={side_label}, x_bias={x_bias}, dura={self.WATER_SIDE_DURA}, wait={self.WATER_SIDE_WAIT}",
-            ),
-            "后拉后沿岸线侧移，寻找可上岸方向",
-            action="水区侧移",
-            method=f"tap_single(摇杆, x_bias={x_bias}, y_bias=0, dura={self.WATER_SIDE_DURA}, wait={self.WATER_SIDE_WAIT})",
-            result="侧移后对准目标前推脱水",
-        )
-        w.tap_single(
-            "摇杆",
-            x_bias=x_bias,
-            y_bias=0,
-            dura=self.WATER_SIDE_DURA,
-            wait=self.WATER_SIDE_WAIT,
-        )
-        self._refresh_frame_and_handle_jump(w)
-        self.align_direction(w, target_loc)
-        self._set_search_frame_decision(
-            w,
-            "当前搜房分支：水区脱困前推",
-            self._entry_observation(
-                w,
-                current_loc=self._get_current_location(w) or current_loc,
-                target_loc=target_loc,
                 extra=(
-                    f"y_bias={self.WATER_FORWARD_Y_BIAS}, dura={self.WATER_FORWARD_DURA}, "
-                    f"wait={self.WATER_FORWARD_WAIT}"
+                    f"side={side_label}, x_bias={x_bias}, "
+                    f"swipes={self.WATER_SHORE_SIDE_SWIPES}"
                 ),
             ),
-            "已对准导航目标，前推脱离水区/岸边",
-            action="水区前推脱困",
-            method=(
-                f"tap_single(摇杆, y_bias={self.WATER_FORWARD_Y_BIAS}, "
-                f"dura={self.WATER_FORWARD_DURA}, wait={self.WATER_FORWARD_WAIT})"
-            ),
-            result="记录位移反馈，失败多次则交给跑图阶段",
+            "自动前进连续多帧无位移，判断被岸边卡住，连续侧滑换上岸点",
+            action="岸边侧滑避障",
+            method="tap_single(摇杆, x_bias=±WATER_SIDE_X_BIAS) * 2",
+            result="侧滑后重新对准目标并启动自动前进",
         )
-        w.tap_single(
-            "摇杆",
-            y_bias=self.WATER_FORWARD_Y_BIAS,
-            dura=self.WATER_FORWARD_DURA,
-            wait=self.WATER_FORWARD_WAIT,
-        )
-        self._refresh_frame_and_handle_jump(w)
+        for _ in range(self.WATER_SHORE_SIDE_SWIPES):
+            w.tap_single(
+                "摇杆",
+                x_bias=x_bias,
+                dura=self.WATER_SIDE_DURA,
+                wait=self.WATER_SIDE_WAIT,
+            )
+            self._refresh_frame_and_handle_jump(w, "水区岸边侧滑后")
+            if not self._is_in_water(w):
+                print("[RCityWater] 岸边侧滑后上浮按钮消失，回到陆地搜房逻辑")
+                self._reset_water_escape_progress()
+                return
 
-        after_loc = self._get_current_location(w) or before_loc
-        self._record_water_escape_attempt(before_loc, after_loc)
-        if self.water_escape_total_attempts >= self.WATER_ESCAPE_MAX_ATTEMPTS and self._finish_callback_configured():
-            print("[RCityWater] 水边脱困多次失败，交给跑图阶段继续处理")
-            self._finish_searching_phase(w, "R城搜房水边脱困失败")
+        self.align_direction(w, target_loc, threshold=5, max_steps=1)
+        if not self.auto_forward:
+            w.click("自动前进")
+            self.auto_forward = True
+        self.water_escape_stuck_frames = 0
+        self.water_escape_last_loc = self._get_current_location(w) or current_loc
 
     def _choose_water_escape_side(self, current_loc, target_loc, current_direction):
         if (
@@ -6751,18 +6761,29 @@ class HouseSceneSearchManager(HouseSearchManager):
     def _record_water_escape_attempt(self, before_loc, after_loc):
         before = self._location_tuple(before_loc)
         after = self._location_tuple(after_loc)
-        moved = 0.0 if before is None or after is None else get_distance(before, after)
+        reference = self.water_escape_last_loc or before
+        moved = 0.0 if reference is None or after is None else get_distance(reference, after)
         self.water_escape_total_attempts += 1
-        self.water_escape_side_attempts += 1
         self.water_escape_last_loc = after
-        print(
-            f"[RCityWater] 水边脱困反馈: side={self.water_escape_side}, "
-            f"moved={moved:.2f}, same_side_attempts={self.water_escape_side_attempts}"
-        )
         if moved >= self.WATER_ESCAPE_STUCK_DISTANCE:
-            return
-        if self.water_escape_side_attempts >= self.WATER_ESCAPE_SIDE_SWITCH_ATTEMPTS:
-            print("[RCityWater] 同方向多次几乎无位移，下轮换另一侧沿岸尝试")
+            self.water_escape_stuck_frames = 0
+            self.water_escape_side_attempts = 0
+            print(
+                f"[RCityWater] 水中自动前进反馈: moved={moved:.2f}, "
+                f"stuck_frames=0"
+            )
+            return False
+
+        self.water_escape_stuck_frames += 1
+        self.water_escape_side_attempts += 1
+        print(
+            f"[RCityWater] 水中自动前进反馈: moved={moved:.2f}, "
+            f"stuck_frames={self.water_escape_stuck_frames}, side={self.water_escape_side}"
+        )
+        if self.water_escape_stuck_frames >= self.WATER_ESCAPE_STUCK_FRAMES:
+            print("[RCityWater] 连续3帧几乎无位移，触发岸边侧滑避障")
+            return True
+        return False
 
     def _select_next_r_city_house(self, current_loc, current_direction):
         loc = self._location_tuple(current_loc)

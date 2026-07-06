@@ -24,6 +24,9 @@ FPORT_RETRY_DELAY_SECONDS = float(os.environ.get("AUTOGAME_HOSCRCPY_FPORT_RETRY_
 
 PATH = os.path.dirname(os.path.abspath(__file__))
 RESOURCE_PATH = os.path.join(os.path.dirname(PATH), "res")
+VIDEO_SO_NAME_PATTERN = re.compile(r"^libscrcpy_server.*[.]z[.]so$")
+VIDEO_SO_DATE_PATTERN = re.compile(r"-(\d{8})[.]z[.]so$")
+VIDEO_SO_VERSION_PATTERN = re.compile(r"libscrcpy_server(?:_unix)?_?([0-9]+(?:[.][0-9]+)*)")
 
 
 def _compact_log_value(value, limit=500):
@@ -53,6 +56,32 @@ def _format_video_attempt(attempt):
     )
 
 
+def _video_so_sort_key(name):
+    date_match = VIDEO_SO_DATE_PATTERN.search(name)
+    date_value = int(date_match.group(1)) if date_match else 0
+    version_match = VIDEO_SO_VERSION_PATTERN.search(name)
+    if version_match:
+        version_value = tuple(int(part) for part in version_match.group(1).split("."))
+    else:
+        version_value = ()
+    return (date_value, version_value, name)
+
+
+def discover_video_so_names(resource_path=RESOURCE_PATH):
+    video_path = os.path.join(resource_path, "video")
+    try:
+        names = [
+            name
+            for name in os.listdir(video_path)
+            if VIDEO_SO_NAME_PATTERN.match(name)
+        ]
+    except OSError:
+        logger.warning("Video so directory is unavailable: %s", video_path)
+        return []
+    names.sort(key=_video_so_sort_key)
+    return names
+
+
 class Device(object):
 
     def __init__(self, device_sn, host: str = "127.0.0.1", port: int = "8710") -> None:
@@ -76,10 +105,12 @@ class Device(object):
         self.device_helper = DeviceHelper(self)
         self.last_action_time = 0
         # 先计算出当前本地所有投屏so的md5
-        self.so_name_list = ["libscrcpy_server0.z.so", "libscrcpy_server1.z.so", "libscrcpy_server2.z.so",
-                             "libscrcpy_server3.z.so", "libscrcpy_server_5.10-20260114.z.so",
-                             "libscrcpy_server_unix_6.3.1-20260113.z.so", "libscrcpy_server_unix_6.4-20260113.z.so",
-                             "libscrcpy_server_unix_6.5-20260313.z.so", "libscrcpy_server_unix_6.6-20260418.z.so"]
+        self.so_name_list = discover_video_so_names()
+        logger.info(
+            "Discovered scrcpy so candidates old_to_new=%s push_order=%s",
+            self.so_name_list,
+            list(reversed(self.so_name_list)),
+        )
         self.so_md5_map = dict()
         self._init_so_md5_map()
         self.is_use_unix_socket_video_so = False

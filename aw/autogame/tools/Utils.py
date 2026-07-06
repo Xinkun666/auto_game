@@ -257,6 +257,7 @@ def _normalize_frame_decision(runtime_logs):
         "method",
         "result",
         "next_action",
+        "frame_log",
         "observed_infos",
         "control_actions",
     }
@@ -415,6 +416,7 @@ def _build_semantic_frame_log(stage, group_name, safe_info, info_keys, frame_dec
     )
 
     return {
+        "frame_log": _semantic_text(frame_decision.get("frame_log")),
         "current_stage": {
             "stage": stage or "",
             "group": group_name or "",

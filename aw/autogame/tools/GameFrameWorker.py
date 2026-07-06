@@ -1938,6 +1938,7 @@ class FrameWorker(threading.Thread):
             raise
         self.frame_log_snapshotter = self._load_frame_log_hook(project_case, "get_recent_frame_log_snapshot")
         self.frame_log_context_beginner = self._load_frame_log_hook(project_case, "begin_frame_log_context")
+        self.frame_log_stepper = self._load_frame_log_hook(project_case, "log_step")
 
         self.buffer = buffer
         self.driver = driver
@@ -2169,6 +2170,7 @@ class FrameWorker(threading.Thread):
         method=None,
         result=None,
         next_action=None,
+        frame_log=None,
     ):
         self.current_frame_decision = {
             "observation": str(observation or ""),
@@ -2179,6 +2181,31 @@ class FrameWorker(threading.Thread):
             "result": str(result or ""),
             "next_action": str(next_action or action or decision or ""),
         }
+        if frame_log is not None:
+            self.current_frame_decision["frame_log"] = str(frame_log or "")
+
+    def frame_log(self, message, target=None):
+        text = str(message or "").strip()
+        if not text:
+            return False
+
+        target_text = str(target or self.current_stage or "")
+        self.set_frame_decision(
+            observation=text,
+            target=target_text,
+            decision=text,
+            action=text,
+            next_action=text,
+            frame_log=text,
+        )
+
+        stepper = getattr(self, "frame_log_stepper", None)
+        if callable(stepper):
+            try:
+                stepper(text, target=target_text, action=text, method="", result="")
+            except Exception as exc:
+                print(f"[FrameWorker] 写入 frame_log 结构日志失败: {exc}")
+        return True
 
     def _build_frame_decision(self):
         decision = dict(self.current_frame_decision or {})

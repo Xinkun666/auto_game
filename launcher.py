@@ -1323,12 +1323,17 @@ def _format_history_logic(
     *,
     seen_text: str,
     stage_name: str,
+    frame_log: str,
     semantic_judgment: dict,
     semantic_branch: dict,
     decision_payload: dict,
     code_branch: dict,
     next_action: str,
 ) -> list[str]:
+    plain_log = _clean_history_text(frame_log, "")
+    if plain_log:
+        return [f"- {plain_log}"]
+
     branch_name = _clean_history_text(
         semantic_branch.get("name")
         or code_branch.get("target")
@@ -1508,6 +1513,12 @@ def format_history_frame_details(frame_record: dict) -> str:
     semantic_judgment = semantic_log.get("judgment") if isinstance(semantic_log.get("judgment"), dict) else {}
     semantic_branch = semantic_log.get("branch") if isinstance(semantic_log.get("branch"), dict) else {}
     semantic_actions = semantic_log.get("actions") if isinstance(semantic_log.get("actions"), list) else []
+    frame_log = (
+        decision_payload.get("frame_log")
+        or semantic_log.get("frame_log")
+        or payload.get("frame_log")
+        or ""
+    )
 
     lines.extend([
         "",
@@ -1521,6 +1532,7 @@ def format_history_frame_details(frame_record: dict) -> str:
         *_format_history_logic(
             seen_text=seen_summary,
             stage_name=stage_name,
+            frame_log=frame_log,
             semantic_judgment=semantic_judgment,
             semantic_branch=semantic_branch,
             decision_payload=decision_payload,

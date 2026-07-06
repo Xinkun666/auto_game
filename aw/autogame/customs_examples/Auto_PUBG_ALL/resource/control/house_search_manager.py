@@ -5474,6 +5474,7 @@ class HouseSceneSearchManager(HouseSearchManager):
     WATER_ESCAPE_STUCK_DISTANCE = 0.6
     WATER_ESCAPE_SIDE_SWITCH_ATTEMPTS = 3
     WATER_ESCAPE_MAX_ATTEMPTS = 5
+    WATER_FLOAT_RESET_MISSING_FRAMES = 5
     FORBIDDEN_ESCAPE_SEARCH_RADIUS = 120
     FORBIDDEN_ESCAPE_ARRIVAL_DISTANCE = 3.0
     FORBIDDEN_ESCAPE_FORWARD_DURA = 700
@@ -6066,6 +6067,8 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.water_escape_total_attempts = 0
         self.water_escape_last_loc = None
         self.water_escape_stuck_frames = 0
+        self.water_float_pressed_in_episode = False
+        self.water_float_missing_frames = self.WATER_FLOAT_RESET_MISSING_FRAMES
         self.r_city_pre_search_completed = True
 
     def _handle_r_city_pre_search_route(self, w: "FrameWorker", current_loc) -> bool:
@@ -6644,7 +6647,22 @@ class HouseSceneSearchManager(HouseSearchManager):
         self._refresh_frame_and_handle_jump(w)
 
     def _is_in_water(self, w: "FrameWorker") -> bool:
-        return bool(w.get_info("上浮"))
+        visible = bool(w.get_info("上浮"))
+        self._update_water_float_state(visible)
+        return visible
+
+    def _update_water_float_state(self, visible: bool):
+        if visible:
+            self.water_float_missing_frames = 0
+            return
+        missing_frames = getattr(
+            self,
+            "water_float_missing_frames",
+            self.WATER_FLOAT_RESET_MISSING_FRAMES,
+        )
+        self.water_float_missing_frames = missing_frames + 1
+        if self.water_float_missing_frames >= self.WATER_FLOAT_RESET_MISSING_FRAMES:
+            self.water_float_pressed_in_episode = False
 
     def _current_navigation_target_location(self, current_loc=None):
         if self.current_r_city_target:
@@ -6660,7 +6678,14 @@ class HouseSceneSearchManager(HouseSearchManager):
     def _handle_water_escape(self, w: "FrameWorker", current_loc, current_direction):
         target_loc = self._current_navigation_target_location(current_loc)
 
-        self.stop_auto_forward(w)
+        float_visible = self._is_in_water(w)
+        should_press_float = float_visible and not getattr(
+            self,
+            "water_float_pressed_in_episode",
+            False,
+        )
+        if should_press_float:
+            self.stop_auto_forward(w)
         before_loc = self._location_tuple(current_loc)
         self._set_frame_decision(
             w,
@@ -6675,7 +6700,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             f"attempt={self.water_escape_total_attempts + 1}, target={target_loc}"
         )
 
-        if w.get_info("上浮"):
+        if should_press_float:
             self._set_search_frame_decision(
                 w,
                 "当前搜房分支：水区脱困长按上浮",
@@ -6691,7 +6716,10 @@ class HouseSceneSearchManager(HouseSearchManager):
                 result="若仍在水中则对准目标并启动自动前进",
             )
             w.click("上浮", duration_ms=self.WATER_FLOAT_DURA)
+            self.water_float_pressed_in_episode = True
             self._refresh_frame_and_handle_jump(w, "水区长按上浮后")
+        elif float_visible:
+            print("[RCityWater] 本轮落水已长按过上浮，继续保持自动前进，不重复点击上浮")
 
         if not self._is_in_water(w):
             print("[RCityWater] 上浮按钮已消失，认为已离开水域，回到陆地搜房逻辑")

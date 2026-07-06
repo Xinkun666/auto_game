@@ -1,4 +1,6 @@
 import grpc
+import json
+import os
 import threading
 from aw.autogame.stream_client.hos_sdk.communication.proto import scrcpy_pb2, scrcpy_pb2_grpc
 from aw.autogame.stream_client.hos_sdk.ScreenCapCallback import ScreenCapCallback
@@ -8,7 +10,36 @@ from aw.autogame.stream_client.hos_sdk.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-FIRST_FRAME_TIMEOUT = 4  # 首帧超时时间（秒）
+DEFAULT_FIRST_FRAME_TIMEOUT = 15.0  # 首帧超时时间（秒）
+CONFIG_PATH = os.path.join("aw", "autogame", "config", "config.json")
+
+
+def _read_autogame_config(config_path=CONFIG_PATH):
+    if not os.path.exists(config_path):
+        return {}
+    try:
+        with open(config_path, "r", encoding="utf-8") as file:
+            return json.load(file)
+    except Exception:
+        return {}
+
+
+def _coerce_timeout_seconds(value, default):
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        return default
+    if timeout <= 0:
+        return default
+    return timeout
+
+
+def resolve_first_frame_timeout():
+    config = _read_autogame_config()
+    value = os.environ.get("AUTOGAME_HOSCRCPY_FIRST_FRAME_TIMEOUT")
+    if value is None and isinstance(config, dict):
+        value = config.get("hoscrcpy_first_frame_timeout")
+    return _coerce_timeout_seconds(value, DEFAULT_FIRST_FRAME_TIMEOUT)
 
 
 class RpcManager(object):
@@ -21,13 +52,14 @@ class RpcManager(object):
         self.stub = scrcpy_pb2_grpc.ScrcpyServiceStub(self.channel)
         self.screenCapCallback = None
         self.on_first_frame_timeout = on_first_frame_timeout
+        self.first_frame_timeout = resolve_first_frame_timeout()
         self._timeout_timer = None
         self._first_frame_timeout_triggered = False
         self._rpc_call = None
 
     def _on_first_frame_timeout(self):
         """首帧超时回调，取消gRPC流"""
-        logger.warning("首帧超时（%d秒），取消gRPC流...", FIRST_FRAME_TIMEOUT)
+        logger.warning("首帧超时（%.1f秒），取消gRPC流...", self.first_frame_timeout)
         self._first_frame_timeout_triggered = True
         if self._rpc_call:
             self._rpc_call.cancel()
@@ -44,7 +76,7 @@ class RpcManager(object):
             logger.info("scrcpy grpc onStart called")
             # 仅首次投屏启动首帧超时计时器，重试时不启动
             if self.on_first_frame_timeout:
-                self._timeout_timer = threading.Timer(FIRST_FRAME_TIMEOUT, self._on_first_frame_timeout)
+                self._timeout_timer = threading.Timer(self.first_frame_timeout, self._on_first_frame_timeout)
                 self._timeout_timer.daemon = True
                 self._timeout_timer.start()
             first_frame_received = False

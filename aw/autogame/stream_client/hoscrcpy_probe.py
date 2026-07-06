@@ -371,7 +371,7 @@ def apply_hoscrcpy_env_overrides(args) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="检测 HOScrcpy 抓图流是否能收到首帧")
-    parser.add_argument("--timeout", type=float, default=15.0, help="等待首帧的超时时间，单位秒")
+    parser.add_argument("--timeout", type=float, default=60.0, help="等待首帧的超时时间，单位秒")
     parser.add_argument("--sn", default=None, help="HDC 设备 SN；不填则读取配置或 hdc list targets 的第一个设备")
     parser.add_argument("--ip", default=None, help="HOScrcpy SDK 连接 IP，默认走配置或 127.0.0.1")
     parser.add_argument("--port", type=int, default=None, help="HDC server 端口，默认走配置或 8710")

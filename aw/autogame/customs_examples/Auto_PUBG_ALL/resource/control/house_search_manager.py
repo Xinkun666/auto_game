@@ -5654,6 +5654,24 @@ class HouseSceneSearchManager(HouseSearchManager):
                     f"[RCitySearch] 当前落点 {current_loc} 与入门点 {target_loc} 在同一不可通行区域，"
                     f"距离 {dist:.2f}，直接按入门点方向继续冲，不走最近安全点绕路"
                 )
+            elif self._is_reentered_forbidden_escape_region(current_loc):
+                route_target = self.r_city_route_target or {}
+                route_target_loc = route_target.get("approach_location") or route_target.get("location")
+                self._set_frame_decision(
+                    w,
+                    (
+                        f"当前位置 {current_loc} 再次进入刚逃离过的不可通行连通区域，"
+                        f"规划路线目标={route_target_loc}，距离入门点={dist:.2f}"
+                    ),
+                    "不重新寻找安全点，继续沿黑区脱离后规划出的路线前往入门点",
+                    action="继续沿已规划路径",
+                    method="same_forbidden_region(current_loc, forbidden_escape_region_anchor)",
+                    result="避免在同一黑区反复脱离和重规划",
+                )
+                print(
+                    f"[RCitySearch] 当前位置 {current_loc} 回到上次逃离的同一不可通行区域，"
+                    "保留既有脱离后路线，不重复触发黑区脱离"
+                )
             else:
                 self._set_frame_decision(
                     w,
@@ -5693,6 +5711,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             self.r_city_route_path = []
             self.r_city_route_index = 0
             self.r_city_route_target = None
+            self.forbidden_escape_region_anchor = None
 
         if self.status == "FAST_NAV":
             self._set_frame_decision(
@@ -6041,6 +6060,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_side_probe_target = None
         self.r_city_side_probe_count = 0
         self.forbidden_escape_target = None
+        self.forbidden_escape_region_anchor = None
         self.water_escape_side = None
         self.water_escape_side_attempts = 0
         self.water_escape_total_attempts = 0
@@ -6138,6 +6158,15 @@ class HouseSceneSearchManager(HouseSearchManager):
             print(f"[RCitySearch] 不可通行区域连通判断失败，按不同区域处理: {exc}")
             return False
 
+    def _is_reentered_forbidden_escape_region(self, current_loc) -> bool:
+        route_target = self.r_city_route_target or {}
+        if route_target.get("id") != "forbidden_escape_to_entry" or not self.r_city_route_path:
+            return False
+        anchor = self._location_tuple(getattr(self, "forbidden_escape_region_anchor", None))
+        if anchor is None:
+            return False
+        return self._same_forbidden_region(current_loc, anchor)
+
     def _distance_to_r_city(self, current_loc):
         loc = self._location_tuple(current_loc)
         if loc is None or not self.r_city_targets:
@@ -6173,6 +6202,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_route_target = None
         self.r_city_route_path = []
         self.r_city_route_index = 0
+        self.forbidden_escape_region_anchor = None
         self.status = self.STATUS_ROUTE_TO_R_CITY
         callback(w, self.r_city_landing_target, reason)
         return True
@@ -6217,6 +6247,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             "entry_direction": self.active_entry.get("direction", 0),
         }
         self.status = self.STATUS_ROUTE_TO_R_CITY
+        self.forbidden_escape_region_anchor = None
         self.stop_auto_forward(w)
         self.history_locations = []
         self.r_city_route_stuck_cycles = 0
@@ -6377,6 +6408,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             self.r_city_route_target = None
             self.r_city_route_path = []
             self.r_city_route_index = 0
+            self.forbidden_escape_region_anchor = None
             return
 
         if not self.r_city_route_target or not self.r_city_route_path:
@@ -6411,6 +6443,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             self.r_city_route_target = None
             self.r_city_route_path = []
             self.status = "IDLE"
+            self.forbidden_escape_region_anchor = None
             return
 
         if self.update_and_check_stuck(current_loc):
@@ -6432,6 +6465,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 self.r_city_route_target = None
                 self.r_city_route_path = []
                 self.r_city_route_stuck_cycles = 0
+                self.forbidden_escape_region_anchor = None
             self.active_entry = {
                 "location": waypoint,
                 "direction": int(calculate_angle(current_loc, waypoint) or current_direction or 0),
@@ -6489,6 +6523,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             self.r_city_route_path = []
             self.r_city_route_index = 0
             self.r_city_route_target = None
+            self.forbidden_escape_region_anchor = None
             return []
 
         self.r_city_route_path = path
@@ -6555,6 +6590,8 @@ class HouseSceneSearchManager(HouseSearchManager):
             return
 
         planned_entry_path = self._plan_route_from_escape_point_to_entry(safe_target, target_loc)
+        if planned_entry_path:
+            self.forbidden_escape_region_anchor = self._location_tuple(current_loc)
         if target_loc is not None:
             self._set_search_frame_decision(
                 w,
@@ -6823,6 +6860,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_route_target = None
         self.r_city_route_path = []
         self.r_city_route_index = 0
+        self.forbidden_escape_region_anchor = None
         self.r_city_entry_large_backoff_count = 0
         self.r_city_side_probe_target = None
         self.r_city_side_probe_count = 0

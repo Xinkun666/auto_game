@@ -131,6 +131,10 @@ DEVICE_LOG_SETTLE_INTERVAL_SECONDS = 0.2
 DEVICE_LOG_STOP_WAIT_TIMEOUT_SECONDS = 15.0
 HDC_SHELL_TIMEOUT_SECONDS = float(os.environ.get("AUTOGAME_HDC_SHELL_TIMEOUT_SECONDS", "5"))
 TEST_PROFILE_SCREEN_MODES = {
+    "power": "0",
+    "function": "1",
+}
+PUBG_CASE_SCREEN_MODES = {
     "power": "2",
     "function": "2",
 }
@@ -440,9 +444,10 @@ def close_pyinstaller_splash(context: str) -> bool:
         return False
 
 
-def resolve_screen_mode_for_test_profile(test_profile: str) -> str:
+def resolve_screen_mode_for_test_profile(test_profile: str, target_case: Optional[str] = None) -> str:
     profile = str(test_profile or "").strip().lower()
-    return TEST_PROFILE_SCREEN_MODES.get(profile, TEST_PROFILE_SCREEN_MODES["power"])
+    screen_modes = PUBG_CASE_SCREEN_MODES if is_pubg_testcase_target_case(target_case) else TEST_PROFILE_SCREEN_MODES
+    return screen_modes.get(profile, screen_modes["power"])
 
 
 def resolve_test_profile_from_radio_selection(power_checked: bool, function_checked: bool) -> str:
@@ -476,7 +481,8 @@ def write_screen_mode_config(screen_mode: str, config_path: Path = AUTOGAME_CONF
 def build_launcher_plan_env_values(plan: Optional[dict]) -> dict[str, str]:
     plan = plan or {}
     test_profile = str(plan.get("test_profile") or "power")
-    screen_mode = str(plan.get("screen_mode") or resolve_screen_mode_for_test_profile(test_profile))
+    target_case = str(plan.get("target_case") or "")
+    screen_mode = str(plan.get("screen_mode") or resolve_screen_mode_for_test_profile(test_profile, target_case))
     case_loop_count = int(plan.get("case_loop_count") or 1)
     return {
         "AUTOGAME_TEST_PROFILE": test_profile,
@@ -3815,7 +3821,7 @@ class LauncherWindow(QWidget):
         )
         if not should_use_sp_recording_for_profile(test_profile):
             cleanup_apps.discard(DEFAULT_SP_PACKAGE)
-        screen_mode = resolve_screen_mode_for_test_profile(test_profile)
+        screen_mode = resolve_screen_mode_for_test_profile(test_profile, target_case)
         runtime_description = ""
         if is_pubg_testcase_target_case(target_case):
             runtime_description = PUBG_CASE_RUNTIME_DESCRIPTION

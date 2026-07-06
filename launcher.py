@@ -1332,7 +1332,14 @@ def _format_history_logic(
     next_action: str,
 ) -> list[str]:
     if isinstance(frame_logs, list):
-        lines = [f"- {_clean_history_text(item, '')}" for item in frame_logs if _clean_history_text(item, "")]
+        lines = []
+        for item in frame_logs:
+            text = _clean_history_text(item, "")
+            if not text:
+                continue
+            if lines:
+                lines.append("")
+            lines.append(f"- {text}")
         if lines:
             return lines
 

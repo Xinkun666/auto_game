@@ -1324,12 +1324,18 @@ def _format_history_logic(
     seen_text: str,
     stage_name: str,
     frame_log: str,
+    frame_logs: list,
     semantic_judgment: dict,
     semantic_branch: dict,
     decision_payload: dict,
     code_branch: dict,
     next_action: str,
 ) -> list[str]:
+    if isinstance(frame_logs, list):
+        lines = [f"- {_clean_history_text(item, '')}" for item in frame_logs if _clean_history_text(item, "")]
+        if lines:
+            return lines
+
     plain_log = _clean_history_text(frame_log, "")
     if plain_log:
         return [f"- {plain_log}"]
@@ -1519,6 +1525,12 @@ def format_history_frame_details(frame_record: dict) -> str:
         or payload.get("frame_log")
         or ""
     )
+    frame_logs = (
+        decision_payload.get("frame_logs")
+        or semantic_log.get("frame_logs")
+        or payload.get("frame_logs")
+        or []
+    )
 
     lines.extend([
         "",
@@ -1528,11 +1540,12 @@ def format_history_frame_details(frame_record: dict) -> str:
         "",
         *_format_history_info(info_payload),
         "",
-        "跟上逻辑",
+        "日志信息",
         *_format_history_logic(
             seen_text=seen_summary,
             stage_name=stage_name,
             frame_log=frame_log,
+            frame_logs=frame_logs,
             semantic_judgment=semantic_judgment,
             semantic_branch=semantic_branch,
             decision_payload=decision_payload,
@@ -2866,7 +2879,7 @@ class LauncherWindow(QWidget):
         self.history_frame_image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.history_frame_log_edit = QPlainTextEdit()
         self.history_frame_log_edit.setReadOnly(True)
-        self.history_frame_log_edit.setPlaceholderText("选择历史输出后显示这一帧的阶段、info、跟上逻辑和控制信息...")
+        self.history_frame_log_edit.setPlaceholderText("选择历史输出后显示这一帧的阶段、info、日志信息和控制信息...")
         frame_splitter.addWidget(self.history_frame_image_label)
         frame_splitter.addWidget(self.history_frame_log_edit)
         frame_splitter.setStretchFactor(0, 3)

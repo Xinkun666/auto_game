@@ -755,12 +755,14 @@ class RunningManager:
 
     def process(self, w: "FrameWorker"):
         self._frame_worker = w
+        w.frame_log("进入跑图模块：这一帧先检查终局，再读取当前位置，后面所有跑图判断都基于这帧位置和方向")
         if self._handle_terminal_state(w, "跑图模块入口"):
             return
 
         location = self._get_location(w)
         if location is None:
             print("[Running] 位置无效，尝试小幅前探刷新坐标...")
+            w.frame_log("跑图观察：这一帧没有拿到有效小地图坐标，所以不能规划路径，只轻推摇杆让下一帧刷新坐标")
             log_step(
                 "当前跑图帧日志：跑图阶段当前帧位置无效，无法计算目标方向和路径距离",
                 target="当前跑图分支：位置无效",
@@ -781,6 +783,10 @@ class RunningManager:
             return
 
         direction = self._get_scalar(w.get_info("direction"))
+        w.frame_log(
+            f"跑图观察：当前位置={location}，方向={direction}，"
+            f"路径点数量={len(self.road_list)}，当前是否找车={self.finding_car}"
+        )
         log_step(
             f"当前跑图帧日志：跑图阶段入口观察：当前位置={location}，当前方位={direction}，"
             f"finding_car={self.finding_car}，car_search_mode={self.car_search_mode}，"
@@ -802,13 +808,16 @@ class RunningManager:
         self._update_circle_angle(w.get_info("white_angle"))
         forced_route_active = self._has_forced_route()
         if not forced_route_active:
+            w.frame_log("跑图决策：当前没有强制路线，所以先根据阶段时间和找车状态刷新是否继续找车")
             self._refresh_finding_car_policy(w, location, direction)
 
+        w.frame_log("跑图检查：先看是否处在刚下车保护窗口，避免刚下车就误点驾驶或误切状态")
         if self._handle_recent_vehicle_exit(w, location, direction):
             return
 
         if self._is_in_vehicle(w):
             print("[Running] 检测到已经上车，切换到开车阶段")
+            w.frame_log("跑图观察：当前帧已经出现车内/驾驶状态，所以停止跑图移动并切换到开车阶段")
             self._log_running_state("检测到已上车", location, direction, "切换到开车阶段")
             if hasattr(w, "set_frame_decision"):
                 w.set_frame_decision(
@@ -828,21 +837,26 @@ class RunningManager:
             return
 
         if self._ensure_first_person_view(w, location, direction):
+            w.frame_log("跑图决策：当前视角不是预期的第一人称，所以本帧先调整视角，不继续路径推进")
             return
 
         if self._is_in_water(w):
+            w.frame_log("跑图观察：当前人物在水中或水边，所以进入水区脱离逻辑")
             self._handle_water_escape(w, location, direction)
             return
 
+        w.frame_log("跑图检查：如果刚从水里出来，要先判断是否卡在岸边")
         if self._handle_recent_water_exit_stuck(w, location, direction):
             return
 
+        w.frame_log("跑图检查：先判断当前位置是否在不可通行区域或黑区，命中时优先脱离")
         if self._handle_forbidden_escape(w, location, direction):
             return
 
         self._click_jump_if_available(w, location, direction)
 
         if forced_route_active:
+            w.frame_log("跑图决策：当前存在强制路线，所以优先按强制目标推进，不走普通找车/进圈路线")
             self._process_forced_route(w, location, direction)
             return
 
@@ -854,23 +868,28 @@ class RunningManager:
 
         if self.find_car_times >= len(self.PRECISE_FACE_DIRECTIONS):
             if self.finding_car and self.car_search_mode == self.CAR_SEARCH_GARAGE:
+                w.frame_log("跑图决策：车库多角度找车都失败，所以从车库找车切换到道路找车")
                 self._switch_to_roadside_car_search("车库多角度视觉找车未成功")
                 return
             print(f"[Running] 已连续{len(self.PRECISE_FACE_DIRECTIONS)}次未成功上车，结束当前局")
+            w.frame_log("跑图决策：连续多个角度都没有成功上车，认为找车失败，本局进入结束流程")
             self._log_running_state("上车尝试已达上限", location, direction, "结束当前局")
             self._handle_death(w)
             return
 
         if self.correct_position_times >= 5:
             if self.finding_car and self.car_search_mode == self.CAR_SEARCH_GARAGE:
+                w.frame_log("跑图决策：车库上车点精调多次无进展，所以改走道路找车路线")
                 self._switch_to_roadside_car_search("车库上车点精调长时间无进展")
                 return
             print("[Running] 连续5次未找到车辆交互点，结束当前局")
+            w.frame_log("跑图决策：连续多次精调仍找不到车辆交互点，所以结束当前局")
             self._log_running_state("精调阶段长时间无进展", location, direction, "结束当前局")
             self._handle_death(w)
             return
 
         if self.precise_entering_car:
+            w.frame_log("跑图决策：已经进入精准上车流程，所以本帧继续处理靠近车辆和点击驾驶按钮")
             self._process_precise_entry(w, location, direction)
             return
 
@@ -880,9 +899,11 @@ class RunningManager:
             and not self.garage_to_roadside_route_active
             and self._handle_roadside_vehicle_entry(w, location, direction)
         ):
+            w.frame_log("跑图决策：道路找车流程发现可上车机会，本帧交给道路车辆上车逻辑")
             return
 
         if self._handle_location_jump(location):
+            w.frame_log("跑图观察：当前位置和上一帧跳变明显，所以先重规划路径，避免沿旧路径误走")
             if not self.loading_road or not self.road_list:
                 self._load_path(location)
             if not self.road_list:
@@ -894,29 +915,36 @@ class RunningManager:
 
         if self.trapped:
             if self._try_house_exit_when_indoor(w, location, direction, "人物困死"):
+                w.frame_log("跑图决策：人物困死且可能在屋内，所以先交给出房模块尝试脱离")
                 return
             if not self.trapped:
                 print("[Running] 人物困死但后视角复核为室外，先按普通脱困处理")
+                w.frame_log("跑图决策：困死复核后确认不在屋内，所以按普通脱困动作恢复移动")
                 self._perform_unstuck_action(w, location)
                 return
             print("[Running] 人物长时间在局部区域打转，结束当前局")
+            w.frame_log("跑图决策：人物长时间困在局部区域且无法出房，所以结束当前局")
             self._log_running_state("人物困死", location, direction, "结束当前局")
             self._handle_death(w)
             return
 
         if self.stuck:
             if self._try_house_exit_when_indoor(w, location, direction, "人物卡住"):
+                w.frame_log("跑图决策：人物卡住且疑似在屋内，所以先尝试出房而不是直接乱动")
                 return
             print("[Running] 人物卡住，执行脱困")
+            w.frame_log("跑图决策：人物卡住但不需要出房，所以执行普通脱困动作")
             self._log_running_state("人物卡死", location, direction, "执行脱困")
             self._perform_unstuck_action(w, location)
             return
 
         if not self.loading_road or not self.road_list:
+            w.frame_log("跑图决策：当前没有可用路径，所以根据当前位置重新加载路径")
             self._load_path(location)
 
         if not self.road_list:
             print("[Running] 当前没有可执行路径")
+            w.frame_log("跑图结果：路径加载后仍没有可执行路径，所以本帧不移动，等待下一帧重新判断")
             if self._handle_priority_car_route_finished(w, location, direction, "指定寻车路线已走完"):
                 return
             return
@@ -925,6 +953,7 @@ class RunningManager:
             self._advance_waypoint_by_projection(location)
         if not self.road_list:
             print("[Running] 当前路径已按投影走完，下一帧重新规划")
+            w.frame_log("跑图决策：当前路径已按投影判断走完，所以清空路径并等下一帧重新规划")
             if self._handle_priority_car_route_finished(w, location, direction, "指定寻车路线投影判定已走完"):
                 return
             self._mark_running_route_completed_if_needed(location, "投影判定路径走完")
@@ -934,13 +963,16 @@ class RunningManager:
         target = self.road_list[0]
         dist = get_distance(location, target)
         print(f"[Running] Loc: {location}, Target: {target}, Dist: {dist:.2f}")
+        w.frame_log(f"跑图目标：当前路径点是 {target}，距离 {dist:.2f}，本帧围绕这个点决定移动方式")
 
+        w.frame_log("跑图检查：如果当前是车库转道路找车路线，先判断是否需要前推脱离车库")
         if self._handle_garage_to_roadside_forward_push(w, location, direction, target):
             return
 
         arrival_tolerance = self._get_current_waypoint_tolerance()
         if 0 <= dist < arrival_tolerance:
             print(f"[Running] 到达 {target} 点附近")
+            w.frame_log("跑图决策：已经到达当前路径点容差范围内，所以消费路径点并处理下一目标")
             self._handle_waypoint_arrival(w, location, direction, target, dist)
             return
 
@@ -949,9 +981,11 @@ class RunningManager:
             and 0 <= dist <= self.WAYPOINT_PRECISE_APPROACH_DISTANCE
         ):
             print(f"[Running] 距离目标点 {dist:.2f}，切换精确逼近")
+            w.frame_log("跑图决策：距离路径点很近，需要从普通导航切换到精确逼近")
             self._precise_approach_waypoint(w, location, direction, target, dist)
             return
 
+        w.frame_log("跑图决策：还没到路径点，也不需要特殊处理，所以按当前路径点计算方向并移动")
         self._move_towards_target(w, location, direction, target)
 
     def _log_running_state(
@@ -996,6 +1030,12 @@ class RunningManager:
             result="等待本帧动作执行后由下一帧重新识别位置/场景",
         )
         worker = getattr(self, "_frame_worker", None)
+        frame_logger = getattr(worker, "frame_log", None)
+        if callable(frame_logger):
+            frame_logger(
+                f"跑图内部判断：{situation}；当前位置={location}，方向={direction_text}，"
+                f"目标={target_text}，距离={dist_text}；接下来{decision}"
+            )
         setter = getattr(worker, "set_frame_decision", None)
         if callable(setter):
             setter(

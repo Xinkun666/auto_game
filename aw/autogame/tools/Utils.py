@@ -258,6 +258,7 @@ def _normalize_frame_decision(runtime_logs):
         "result",
         "next_action",
         "frame_log",
+        "frame_logs",
         "observed_infos",
         "control_actions",
     }
@@ -417,6 +418,11 @@ def _build_semantic_frame_log(stage, group_name, safe_info, info_keys, frame_dec
 
     return {
         "frame_log": _semantic_text(frame_decision.get("frame_log")),
+        "frame_logs": [
+            _semantic_text(item)
+            for item in frame_decision.get("frame_logs", [])
+            if _semantic_text(item)
+        ] if isinstance(frame_decision.get("frame_logs"), list) else [],
         "current_stage": {
             "stage": stage or "",
             "group": group_name or "",

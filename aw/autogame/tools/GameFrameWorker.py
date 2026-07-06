@@ -1938,7 +1938,6 @@ class FrameWorker(threading.Thread):
             raise
         self.frame_log_snapshotter = self._load_frame_log_hook(project_case, "get_recent_frame_log_snapshot")
         self.frame_log_context_beginner = self._load_frame_log_hook(project_case, "begin_frame_log_context")
-        self.frame_log_stepper = self._load_frame_log_hook(project_case, "log_step")
 
         self.buffer = buffer
         self.driver = driver
@@ -1972,6 +1971,7 @@ class FrameWorker(threading.Thread):
         self.frame = None
         self.current_frame_observations = []
         self.current_frame_actions = []
+        self.current_frame_logs = []
         self.current_frame_decision = {}
         self.current_frame_flushed = False
         self.last_gc_time = time.time()
@@ -2066,6 +2066,7 @@ class FrameWorker(threading.Thread):
     def _reset_frame_decision(self):
         self.current_frame_observations = []
         self.current_frame_actions = []
+        self.current_frame_logs = []
         self.current_frame_decision = {}
 
     @staticmethod
@@ -2171,7 +2172,18 @@ class FrameWorker(threading.Thread):
         result=None,
         next_action=None,
         frame_log=None,
+        frame_logs=None,
     ):
+        log_items = []
+        if isinstance(frame_logs, (list, tuple)):
+            log_items.extend(str(item).strip() for item in frame_logs if str(item or "").strip())
+        if frame_log is not None:
+            text_log = str(frame_log or "").strip()
+            if text_log:
+                log_items.append(text_log)
+        if not log_items:
+            log_items = list(getattr(self, "current_frame_logs", []))
+
         self.current_frame_decision = {
             "observation": str(observation or ""),
             "target": str(target or self.current_stage or ""),
@@ -2181,30 +2193,23 @@ class FrameWorker(threading.Thread):
             "result": str(result or ""),
             "next_action": str(next_action or action or decision or ""),
         }
-        if frame_log is not None:
-            self.current_frame_decision["frame_log"] = str(frame_log or "")
+        if log_items:
+            self.current_frame_logs = list(log_items)
+            self.current_frame_decision["frame_logs"] = list(log_items)
+            self.current_frame_decision["frame_log"] = log_items[-1]
 
     def frame_log(self, message, target=None):
         text = str(message or "").strip()
         if not text:
             return False
 
-        target_text = str(target or self.current_stage or "")
-        self.set_frame_decision(
-            observation=text,
-            target=target_text,
-            decision=text,
-            action=text,
-            next_action=text,
-            frame_log=text,
-        )
-
-        stepper = getattr(self, "frame_log_stepper", None)
-        if callable(stepper):
-            try:
-                stepper(text, target=target_text, action=text, method="", result="")
-            except Exception as exc:
-                print(f"[FrameWorker] 写入 frame_log 结构日志失败: {exc}")
+        existing_logs = list(getattr(self, "current_frame_logs", []))
+        existing_logs.append(text)
+        self.current_frame_logs = existing_logs
+        if not isinstance(getattr(self, "current_frame_decision", None), dict):
+            self.current_frame_decision = {}
+        self.current_frame_decision["frame_logs"] = list(existing_logs)
+        self.current_frame_decision["frame_log"] = text
         return True
 
     def _build_frame_decision(self):

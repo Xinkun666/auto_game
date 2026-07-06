@@ -380,6 +380,12 @@ class HouseSearchManager:
         result: str = "",
         target: str = "搜房阶段",
     ):
+        frame_logger = getattr(w, "frame_log", None)
+        if callable(frame_logger):
+            action_text = action or decision
+            frame_logger(
+                f"搜房日志：目标是{target}；本帧观察到{observation}；接下来{action_text}"
+            )
         log_step(
             f"当前搜房帧日志：{observation}",
             target=target,
@@ -481,11 +487,13 @@ class HouseSearchManager:
         )
 
     def process(self, w: 'FrameWorker'):
+        w.frame_log("进入搜房模块：这一帧先确认是否需要中止，再处理落地视角、位置、目标房屋、进门/搜房/出房分支")
         if self._should_abort(w):
             return
 
         # 0. 基础设置：落地后首帧刷新画面 + 切第一人称
         if not self.first_view:
+            w.frame_log("搜房观察：这是落地后的首帧搜房流程，所以先刷新画面并切到第一人称，保证后续入门导航稳定")
             self._set_frame_decision(
                 w,
                 "搜房阶段落地后首帧，准备刷新画面并切第一人称",
@@ -503,6 +511,7 @@ class HouseSearchManager:
         if location_raw is None:
             self.location_missing_frames += 1
             print('位置值是None，等待位置刷新...')
+            w.frame_log("搜房观察：当前位置为空，所以先刷新画面；如果连续缺失，就轻推摇杆刷新小地图坐标")
             self._set_frame_decision(
                 w,
                 f"搜房阶段当前位置缺失，连续缺失 {self.location_missing_frames} 帧",
@@ -522,6 +531,7 @@ class HouseSearchManager:
         if location is None:
             self.location_missing_frames += 1
             print('位置值无效，等待位置刷新...')
+            w.frame_log(f"搜房观察：当前位置值无效 raw={location_raw}，所以等待下一帧重新识别坐标")
             self._set_frame_decision(
                 w,
                 f"搜房阶段位置值无效，原始位置={location_raw}",

@@ -90,6 +90,12 @@ class HouseExitManager:
         result: str = "",
         target: str = "出房兜底阶段",
     ):
+        frame_logger = getattr(w, "frame_log", None)
+        if callable(frame_logger):
+            action_text = action or decision
+            frame_logger(
+                f"出房日志：目标是{target}；本帧观察到{observation}；接下来{action_text}"
+            )
         log_step(
             f"当前出房帧日志：{observation}",
             target=target,
@@ -110,10 +116,12 @@ class HouseExitManager:
         )
 
     def process(self, w: "FrameWorker") -> bool:
+        w.frame_log("进入出房兜底模块：这一帧先看是否死亡/结算，再看 house_scene，最后按门、窗、墙和室外信号选择出房动作")
         if self._handle_terminal_state(w, "检测到死亡或结算界面，结束出房兜底流程"):
             return True
 
         house_scene = self._get_house_scene(w)
+        w.frame_log(f"出房观察：当前 house_scene={house_scene}，后续出房判断都基于这个室内/室外/贴墙状态")
         self._set_frame_decision(
             w,
             f"出房兜底：当前 house_scene={house_scene}",
@@ -149,6 +157,7 @@ class HouseExitManager:
         if visible_result is not None:
             return visible_result
 
+        w.frame_log("出房决策：当前视野里没有直接可用的门或窗，所以进入扫描锚点搜索出口")
         self._set_frame_decision(
             w,
             f"出房兜底未直接看到门/窗，house_scene={house_scene}",
@@ -165,6 +174,7 @@ class HouseExitManager:
         door = self._find_largest_target(detections, self.DOOR_CLASS_IDS)
         if door:
             print("[HouseExit] 发现门，准备出门")
+            w.frame_log(f"出房观察：forward_scene 里看到了门 {door}，所以停止自动前进并进入对门出房流程")
             self._set_frame_decision(
                 w,
                 f"当前帧 forward_scene 发现门，door={door}",
@@ -179,6 +189,7 @@ class HouseExitManager:
         window = self._find_largest_target(detections, self.WINDOW_CLASS_IDS)
         if window:
             print("[HouseExit] 发现窗，准备翻窗")
+            w.frame_log(f"出房观察：forward_scene 里看到了窗 {window}，所以停止自动前进并进入对窗翻出流程")
             self._set_frame_decision(
                 w,
                 f"当前帧 forward_scene 发现窗，window={window}",

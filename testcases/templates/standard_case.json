@@ -1,0 +1,12 @@
+{
+    "description": "Standard template config for OpenHarmony devicetest test cases",
+    "environment": [
+        {
+            "type": "device",
+            "label": "phone"
+        }
+    ],
+    "driver": {
+        "type": "DeviceTest"
+    }
+}

@@ -1277,31 +1277,163 @@ def load_history_frame_records(record: dict) -> list[dict]:
     return frames
 
 
-def _format_history_log_entries(entries: list[dict]) -> list[str]:
-    lines = []
-    if not isinstance(entries, list):
-        return lines
-    for entry in entries[-8:]:
-        if not isinstance(entry, dict):
-            continue
-        message = str(entry.get("message") or entry.get("raw_message") or "").strip()
-        if message:
-            lines.append(f"- {message}")
-            continue
-        observation = str(entry.get("observation") or "").strip()
-        action = str(entry.get("action") or "").strip()
-        if observation or action:
-            lines.append(f"- {observation} {action}".strip())
+def _clean_history_text(value, default: str = "-") -> str:
+    text = str(value or "").strip()
+    return text if text and text != "-" else default
+
+
+def _strip_seen_prefix(text: str) -> str:
+    value = _clean_history_text(text, "")
+    for prefix in ("看到 ", "看到"):
+        if value.startswith(prefix):
+            return value[len(prefix):].strip(" ：:")
+    return value
+
+
+def _extract_seen_text(semantic_perception: dict, seen: dict, info_payload: dict) -> str:
+    for source in (semantic_perception, seen):
+        if isinstance(source, dict):
+            info_keys = source.get("info_keys")
+            if isinstance(info_keys, list) and info_keys:
+                return ", ".join(str(key) for key in info_keys)
+            summary = _strip_seen_prefix(str(source.get("summary") or ""))
+            if summary:
+                return summary
+    if isinstance(info_payload, dict):
+        active_keys = []
+        for key, value in info_payload.items():
+            text = str(value).strip()
+            if text and text not in {"False", "None", "[]", "{}"}:
+                active_keys.append(str(key))
+        if active_keys:
+            return ", ".join(active_keys)
+    return "-"
+
+
+def _format_history_info(info_payload: dict) -> list[str]:
+    if not isinstance(info_payload, dict) or not info_payload:
+        return ["- info: -"]
+    lines = ["- info:"]
+    for key, value in list(info_payload.items())[:80]:
+        lines.append(f"  {key}: {value}")
     return lines
 
 
-def _format_semantic_values(values: dict, limit: int = 24) -> list[str]:
-    lines = []
-    if not isinstance(values, dict):
-        return lines
-    for key, value in list(values.items())[:limit]:
-        lines.append(f"- {key}: {value}")
+def _format_history_logic(
+    *,
+    seen_text: str,
+    stage_name: str,
+    semantic_judgment: dict,
+    semantic_branch: dict,
+    decision_payload: dict,
+    code_branch: dict,
+    next_action: str,
+) -> list[str]:
+    branch_name = _clean_history_text(
+        semantic_branch.get("name")
+        or code_branch.get("target")
+        or decision_payload.get("target")
+        or stage_name,
+        "",
+    )
+    observation = _clean_history_text(
+        semantic_judgment.get("reason")
+        or decision_payload.get("observation")
+        or code_branch.get("observation"),
+        "",
+    )
+    action = _clean_history_text(
+        semantic_judgment.get("decision")
+        or decision_payload.get("decision")
+        or decision_payload.get("action")
+        or code_branch.get("action")
+        or next_action,
+        "",
+    )
+    method = _clean_history_text(
+        semantic_judgment.get("evidence")
+        or decision_payload.get("method")
+        or code_branch.get("method"),
+        "",
+    )
+    result = _clean_history_text(
+        semantic_judgment.get("result_expectation")
+        or decision_payload.get("result")
+        or code_branch.get("result"),
+        "",
+    )
+
+    lines = [f"- 看到: {_clean_history_text(seen_text)}"]
+    if branch_name:
+        lines.append(f"- 逻辑: {branch_name}")
+    if observation and observation != seen_text:
+        lines.append(f"- 判断: {observation}")
+    if action:
+        lines.append(f"- 要做: {action}")
+    if method:
+        lines.append(f"- 方法: {method}")
+    if result:
+        lines.append(f"- 结果: {result}")
+    if len(lines) == 1 and _clean_history_text(stage_name, ""):
+        lines.append(f"- 逻辑: {stage_name}")
     return lines
+
+
+def _numeric_param(value):
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_action_params(params: dict, duration: str) -> list[str]:
+    if not isinstance(params, dict):
+        params = {}
+    preferred_order = [
+        "x_bias",
+        "y_bias",
+        "dura",
+        "wait",
+        "duration_ms",
+        "duration",
+        "finger_id",
+        "backend",
+    ]
+    parts = []
+    used = set()
+    for key in preferred_order:
+        value = _clean_history_text(params.get(key), "")
+        if value:
+            parts.append(f"{key}={value}")
+            used.add(key)
+    for key, value in params.items():
+        if key in used:
+            continue
+        text = _clean_history_text(value, "")
+        if text:
+            parts.append(f"{key}={text}")
+    duration_text = _clean_history_text(duration, "")
+    if duration_text and not any(item.startswith(("dura=", "duration=", "duration_ms=")) for item in parts):
+        parts.append(f"duration={duration_text}")
+    return parts
+
+
+def _history_action_verb(raw_name: str, action_name: str, params: dict, duration: str, start_pos: str, end_pos: str) -> str:
+    duration_ms = (
+        _numeric_param(params.get("duration_ms") if isinstance(params, dict) else None)
+        or _numeric_param(params.get("duration") if isinstance(params, dict) else None)
+        or _numeric_param(duration)
+    )
+    if raw_name == "click" and duration_ms is not None and duration_ms >= 800:
+        return "长按了"
+    if raw_name == "click" or action_name == "click":
+        return "点击了"
+    swipe_actions = {"tap_single", "tap_double", "uinput_tap_single", "move_press", "move_to", "move_up"}
+    semantic_swipes = {"move_forward", "move_backward", "move_lateral", "turn_view", "move_control"}
+    has_bias = isinstance(params, dict) and any(_clean_history_text(params.get(key), "") for key in ("x_bias", "y_bias"))
+    if raw_name in swipe_actions and (has_bias or start_pos or end_pos or action_name in semantic_swipes):
+        return "滑动了"
+    return "执行了"
 
 
 def _format_semantic_actions(actions: list[dict]) -> list[str]:
@@ -1311,21 +1443,35 @@ def _format_semantic_actions(actions: list[dict]) -> list[str]:
     for action in actions[-12:]:
         if not isinstance(action, dict):
             continue
-        name = action.get("action") or action.get("name") or "-"
-        target = action.get("target") or "-"
-        control_point = action.get("control_point") or target
-        actual_pos = action.get("actual_pos") or "-"
-        start_pos = action.get("start_pos") or "-"
-        end_pos = action.get("end_pos") or "-"
+        raw_name = _clean_history_text(action.get("name"), "")
+        action_name = _clean_history_text(action.get("action"), raw_name)
+        target = _clean_history_text(action.get("target"), "")
+        control_point = _clean_history_text(action.get("control_point"), target)
+        target_text = control_point or target or action_name or raw_name or "控制点"
+        actual_pos = _clean_history_text(action.get("actual_pos"), "")
+        start_pos = _clean_history_text(action.get("start_pos"), "")
+        end_pos = _clean_history_text(action.get("end_pos"), "")
         params = action.get("params") if isinstance(action.get("params"), dict) else {}
-        duration = action.get("duration") or params.get("dura") or params.get("duration") or "-"
-        reason = action.get("reason") or "-"
-        params_text = ", ".join(f"{key}={value}" for key, value in params.items()) or "-"
-        lines.append(
-            f"- action={name}; control_point={control_point}; target={target}; "
-            f"actual_pos={actual_pos}; start={start_pos}; end={end_pos}; "
-            f"duration={duration}; params={params_text}; reason={reason}"
-        )
+        duration = _clean_history_text(action.get("duration") or params.get("dura") or params.get("duration"), "")
+        reason = _clean_history_text(action.get("reason"), "")
+        verb = _history_action_verb(raw_name, action_name, params, duration, start_pos, end_pos)
+        detail_parts = []
+        if actual_pos:
+            detail_parts.append(f"actual_pos={actual_pos}")
+        if start_pos:
+            detail_parts.append(f"start={start_pos}")
+        if end_pos:
+            detail_parts.append(f"end={end_pos}")
+        detail_parts.extend(_format_action_params(params, duration))
+        if reason:
+            if detail_parts:
+                lines.append(f"- {verb}{target_text}: {', '.join(detail_parts)}; reason={reason}")
+            else:
+                lines.append(f"- {verb}{target_text}: reason={reason}")
+        elif detail_parts:
+            lines.append(f"- {verb}{target_text}: {', '.join(detail_parts)}")
+        else:
+            lines.append(f"- {verb}{target_text}")
     return lines or ["- 暂无控制动作"]
 
 
@@ -1347,21 +1493,18 @@ def format_history_frame_details(frame_record: dict) -> str:
     decision_payload = payload.get("decision") if isinstance(payload.get("decision"), dict) else {}
     code_branch = payload.get("code_branch") if isinstance(payload.get("code_branch"), dict) else {}
     next_action = str(payload.get("next_action") or "").strip() or "-"
-    summary = str(payload.get("frame_summary") or "").strip()
-    seen_summary = str(seen.get("summary") or "").strip()
-    if not seen_summary and info_payload:
-        seen_summary = "看到 " + ", ".join(str(key) for key in info_payload.keys())
+    seen_summary = _extract_seen_text(
+        semantic_log.get("perception") if isinstance(semantic_log.get("perception"), dict) else {},
+        seen,
+        info_payload,
+    )
 
     lines = [
         f"帧: {frame_info.get('image') or Path(str(frame_record.get('image_path') or '')).name}",
         f"序号: {frame_info.get('index', frame_record.get('index', '-'))}",
     ]
 
-    if summary:
-        lines.extend(["", "帧摘要", f"- {summary}"])
-
     semantic_stage = semantic_log.get("current_stage") if isinstance(semantic_log.get("current_stage"), dict) else {}
-    semantic_perception = semantic_log.get("perception") if isinstance(semantic_log.get("perception"), dict) else {}
     semantic_judgment = semantic_log.get("judgment") if isinstance(semantic_log.get("judgment"), dict) else {}
     semantic_branch = semantic_log.get("branch") if isinstance(semantic_log.get("branch"), dict) else {}
     semantic_actions = semantic_log.get("actions") if isinstance(semantic_log.get("actions"), list) else []
@@ -1370,81 +1513,24 @@ def format_history_frame_details(frame_record: dict) -> str:
         "",
         "当前阶段",
         f"- stage: {semantic_stage.get('stage') or stage_name}",
-        f"- scene/子状态: {semantic_stage.get('scene_state') or '-'}",
         f"- group: {semantic_stage.get('group') or stage_group}",
-        f"- frame_index: {semantic_stage.get('frame_index', frame_info.get('index', frame_record.get('index', '-')))}",
         "",
-        "当前感知结果",
-        f"- {semantic_perception.get('summary') or seen_summary or '-'}",
-    ])
-    semantic_values = _format_semantic_values(semantic_perception.get("critical_values"))
-    if semantic_values:
-        lines.extend(semantic_values)
-
-    lines.extend([
+        *_format_history_info(info_payload),
         "",
-        "当前判断",
-        f"- reason: {semantic_judgment.get('reason') or decision_payload.get('observation') or code_branch.get('observation') or '-'}",
-        f"- decision: {semantic_judgment.get('decision') or decision_payload.get('decision') or code_branch.get('action') or next_action}",
-        f"- evidence: {semantic_judgment.get('evidence') or decision_payload.get('method') or code_branch.get('method') or '-'}",
-        f"- result: {semantic_judgment.get('result_expectation') or decision_payload.get('result') or code_branch.get('result') or '-'}",
+        "跟上逻辑",
+        *_format_history_logic(
+            seen_text=seen_summary,
+            stage_name=stage_name,
+            semantic_judgment=semantic_judgment,
+            semantic_branch=semantic_branch,
+            decision_payload=decision_payload,
+            code_branch=code_branch,
+            next_action=next_action,
+        ),
         "",
-        "当前分支",
-        f"- branch: {semantic_branch.get('name') or code_branch.get('target') or decision_payload.get('target') or '-'}",
-        f"- observation: {semantic_branch.get('observation') or code_branch.get('observation') or decision_payload.get('observation') or '-'}",
-        f"- action: {semantic_branch.get('action') or code_branch.get('action') or decision_payload.get('action') or '-'}",
-        f"- method: {semantic_branch.get('method') or code_branch.get('method') or decision_payload.get('method') or '-'}",
-        f"- result: {semantic_branch.get('result') or code_branch.get('result') or decision_payload.get('result') or '-'}",
-        "",
-        "当前动作",
+        "控制信息",
         *_format_semantic_actions(semantic_actions),
     ])
-
-    lines.extend([
-        "",
-        "阶段信息",
-        f"- 阶段: {stage_name}",
-        f"- 分组: {stage_group}",
-        "",
-        "这一帧看到了",
-        f"- {seen_summary or '-'}",
-    ])
-
-    if decision_payload:
-        lines.extend([
-            "",
-            "本帧决策",
-            f"- 观察: {decision_payload.get('observation') or '-'}",
-            f"- 决策: {decision_payload.get('decision') or decision_payload.get('action') or '-'}",
-            f"- 控制: {decision_payload.get('method') or '-'}",
-            f"- 结果: {decision_payload.get('result') or '-'}",
-        ])
-
-    if info_payload:
-        lines.append("- info:")
-        for key, value in list(info_payload.items())[:80]:
-            lines.append(f"  {key}: {value}")
-
-    lines.extend([
-        "",
-        "代码分支",
-        f"- 目标/分支: {code_branch.get('target') or '-'}",
-        f"- 观察: {code_branch.get('observation') or '-'}",
-        f"- 决策: {code_branch.get('action') or '-'}",
-        f"- 控制: {code_branch.get('method') or '-'}",
-        f"- 结果: {code_branch.get('result') or '-'}",
-        "",
-        "下一步",
-        f"- {next_action}",
-    ])
-
-    time_lines = _format_history_log_entries(payload.get("time_logs", []))
-    if time_lines:
-        lines.extend(["", "时间日志", *time_lines])
-
-    logic_lines = _format_history_log_entries(payload.get("logic_logs", []))
-    if logic_lines:
-        lines.extend(["", "逻辑日志", *logic_lines])
 
     return "\n".join(lines)
 
@@ -2768,7 +2854,7 @@ class LauncherWindow(QWidget):
         self.history_frame_image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.history_frame_log_edit = QPlainTextEdit()
         self.history_frame_log_edit.setReadOnly(True)
-        self.history_frame_log_edit.setPlaceholderText("选择历史输出后显示这一帧的阶段、info、时间日志和代码分支...")
+        self.history_frame_log_edit.setPlaceholderText("选择历史输出后显示这一帧的阶段、info、跟上逻辑和控制信息...")
         frame_splitter.addWidget(self.history_frame_image_label)
         frame_splitter.addWidget(self.history_frame_log_edit)
         frame_splitter.setStretchFactor(0, 3)

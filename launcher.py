@@ -137,7 +137,7 @@ TEST_PROFILE_SCREEN_MODES = {
 STREAM_DISCONNECT_POLICY_PRESERVE = "preserve"
 STREAM_DISCONNECT_POLICY_DISABLED = "disabled"
 STREAM_DISCONNECT_POLICY_STOP_ONLY = "stop_only"
-PUBG_CASE_KEYWORDS = ("和平精英", "pubg")
+PUBG_CASE_TARGET_CASE = "auto_pubg"
 PUBG_CASE_DEFAULT_LOOP_COUNT = 2
 PUBG_CASE_RUNTIME_DESCRIPTION = "和平精英用例默认10分钟搜房、10分钟开车、10分钟跑图，总测试时长60分钟，要循环2次。"
 LOG_FILTER_ALL = "总的"
@@ -386,34 +386,18 @@ def extract_package_names(py_file: Path) -> list[str]:
     return sorted(packages)
 
 
-def is_pubg_testcase_keyword_match(*values) -> bool:
-    text = "\n".join(str(value or "") for value in values)
-    lower_text = text.lower()
-    return any(keyword in text or keyword in lower_text for keyword in PUBG_CASE_KEYWORDS)
-
-
-def _read_text_for_keyword_match(path: Optional[Path]) -> str:
-    if path is None:
-        return ""
-    try:
-        if Path(path).exists():
-            return Path(path).read_text(encoding="utf-8")
-    except Exception:
-        LOGGER.debug("read testcase text for keyword match failed: %s", path, exc_info=True)
-    return ""
+def is_pubg_testcase_target_case(target_case: Optional[str]) -> bool:
+    return str(target_case or "").strip() == PUBG_CASE_TARGET_CASE
 
 
 def is_pubg_testcase_file(py_file: Optional[Path], parsed: Optional[dict] = None) -> bool:
+    if parsed is None and py_file is not None:
+        try:
+            parsed = parse_case_vars(py_file)
+        except Exception:
+            parsed = {}
     parsed = parsed or {}
-    values = [
-        py_file,
-        py_file.name if py_file else "",
-        py_file.parent.name if py_file else "",
-        parsed.get("project_case", ""),
-        parsed.get("target_case", ""),
-        _read_text_for_keyword_match(py_file),
-    ]
-    return is_pubg_testcase_keyword_match(*values)
+    return is_pubg_testcase_target_case(parsed.get("target_case"))
 
 
 def resolve_label_project_dir(project_case: str) -> Optional[Path]:
@@ -3833,7 +3817,7 @@ class LauncherWindow(QWidget):
             cleanup_apps.discard(DEFAULT_SP_PACKAGE)
         screen_mode = resolve_screen_mode_for_test_profile(test_profile)
         runtime_description = ""
-        if is_pubg_testcase_keyword_match(testcase_label, project_case, target_case):
+        if is_pubg_testcase_target_case(target_case):
             runtime_description = PUBG_CASE_RUNTIME_DESCRIPTION
         plan = {
             "mode": mode,

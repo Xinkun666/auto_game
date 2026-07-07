@@ -1907,6 +1907,7 @@ class Controller:
 class FrameWorker(threading.Thread):
     LAUNCHER_INACTIVITY_TIMEOUT_SECONDS = 5 * 60
     WATCHDOG_CHECK_INTERVAL_SECONDS = 1.0
+    POST_CONTROL_REFRESH_SETTLE_SECONDS = 0.25
 
     def __init__(self, buffer, driver=None, logger=None, controller_backend=None, controller_options=None):
         super().__init__()
@@ -1950,6 +1951,8 @@ class FrameWorker(threading.Thread):
         self.failure_details = {}
         self._failure_lock = threading.Lock()
         self.last_control_action_time = time.monotonic()
+        self.post_control_refresh_settle_seconds = self._resolve_post_control_refresh_settle_seconds()
+        self._post_control_refresh_ready_at = 0.0
         self.launcher_watchdog_enabled = self._is_launcher_mode()
         self.launcher_inactivity_timeout_seconds = self._resolve_launcher_inactivity_timeout_seconds()
         self._watchdog_stop_event = threading.Event()
@@ -2052,16 +2055,107 @@ class FrameWorker(threading.Thread):
             return float(self.LAUNCHER_INACTIVITY_TIMEOUT_SECONDS)
         return max(0.0, minutes * 60.0)
 
+    def _resolve_post_control_refresh_settle_seconds(self):
+        raw_value = os.environ.get("AUTOGAME_POST_CONTROL_REFRESH_SETTLE_SECONDS", "").strip()
+        if not raw_value:
+            return float(self.POST_CONTROL_REFRESH_SETTLE_SECONDS)
+        try:
+            return max(0.0, float(raw_value))
+        except ValueError:
+            return float(self.POST_CONTROL_REFRESH_SETTLE_SECONDS)
+
     def _wrap_control_action(self, action_name, action):
         def _wrapped(*args, **kwargs):
             result = action(*args, **kwargs)
-            self._record_control_action(action_name)
+            self._record_control_action(action_name, args, kwargs, result)
             self._record_frame_action(action_name, args, kwargs, result)
             return result
         return _wrapped
 
-    def _record_control_action(self, action_name=None):
-        self.last_control_action_time = time.monotonic()
+    @staticmethod
+    def _control_trace_value(trace_result, key, default=None):
+        if not isinstance(trace_result, dict):
+            return default
+        return trace_result.get(key, default)
+
+    @staticmethod
+    def _control_bool_param(value, default=True):
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() not in {"0", "false", "no", "none", "off"}
+
+    @staticmethod
+    def _control_ms_param(kwargs, trace_result, key, default=0.0):
+        for source in (kwargs, trace_result):
+            if not isinstance(source, dict) or key not in source:
+                continue
+            try:
+                return max(0.0, float(str(source.get(key)).strip()))
+            except (TypeError, ValueError):
+                continue
+        return float(default)
+
+    def _estimate_async_control_remaining_seconds(self, action_name, kwargs=None, trace_result=None):
+        kwargs = kwargs or {}
+        backend = str(self._control_trace_value(trace_result, "backend", "") or "").strip().lower()
+        if backend != "sendevent":
+            return 0.0
+
+        if action_name == "tap_single":
+            if not self._control_bool_param(kwargs.get("release"), default=True):
+                return 0.0
+            return self._control_ms_param(kwargs, trace_result, "wait") / 1000.0
+
+        if action_name == "tap_double":
+            release1 = self._control_bool_param(kwargs.get("release1"), default=True)
+            release2 = self._control_bool_param(kwargs.get("release2"), default=True)
+            if not (release1 or release2):
+                return 0.0
+            return self._control_ms_param(kwargs, trace_result, "wait") / 1000.0
+
+        if action_name == "click_down":
+            return self._control_ms_param(kwargs, trace_result, "dura") / 1000.0
+
+        return 0.0
+
+    def _record_control_action(self, action_name=None, args=None, kwargs=None, trace_result=None):
+        now = time.monotonic()
+        self.last_control_action_time = now
+
+        executed = str(self._control_trace_value(trace_result, "executed", "True")).strip().lower()
+        if executed == "false":
+            return
+
+        remaining_seconds = self._estimate_async_control_remaining_seconds(
+            action_name,
+            kwargs=kwargs,
+            trace_result=trace_result,
+        )
+        ready_at = now + remaining_seconds
+        previous_ready_at = float(getattr(self, "_post_control_refresh_ready_at", 0.0) or 0.0)
+        self._post_control_refresh_ready_at = max(previous_ready_at, ready_at)
+
+    def _wait_for_post_control_refresh_settle(self):
+        ready_at = float(getattr(self, "_post_control_refresh_ready_at", 0.0) or 0.0)
+        if ready_at <= 0:
+            return 0.0
+
+        settle_seconds = float(
+            getattr(
+                self,
+                "post_control_refresh_settle_seconds",
+                self.POST_CONTROL_REFRESH_SETTLE_SECONDS,
+            )
+            or 0.0
+        )
+        target_time = ready_at + max(0.0, settle_seconds)
+        remaining = target_time - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+        self._post_control_refresh_ready_at = 0.0
+        return max(0.0, remaining)
 
     def _reset_frame_decision(self):
         self.current_frame_observations = []
@@ -2491,6 +2585,7 @@ class FrameWorker(threading.Thread):
         self.failure_reason = None
         self.failure_details = {}
         self.last_control_action_time = time.monotonic()
+        self._post_control_refresh_ready_at = 0.0
         self.thread = threading.Thread(target=self.loop, daemon=True)
         self.thread.start()
 
@@ -2597,6 +2692,7 @@ class FrameWorker(threading.Thread):
 
     def refresh_frame(self):
         self._flush_current_frame_log()
+        self._wait_for_post_control_refresh_settle()
         frame = self.buffer.get_latest(must_new=True)
         if frame is None:
             print("[FrameWorker] 刷新失败：缓冲区暂无数据")

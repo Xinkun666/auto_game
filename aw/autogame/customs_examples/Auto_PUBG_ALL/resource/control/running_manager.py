@@ -484,6 +484,7 @@ class RunningManager:
     WATER_EXIT_SIDE_SWIPES = 2
     WATER_EXIT_SIDE_DURA = 900
     WATER_EXIT_SIDE_WAIT = 1500
+    WATER_FLOAT_RESET_MISSING_FRAMES = 5
     HOUSE_SCENE_REAR_CONFIRM_TURNS = 3
     HOUSE_SCENE_RESTORE_TURNS = 2
     # 刚下车后，忽略附近车辆交互的保护时间，避免立刻又上车
@@ -583,6 +584,8 @@ class RunningManager:
         self.water_escape_target: Optional[Tuple[int, int]] = None
         self.water_swim_last_location: Optional[Tuple[int, int]] = None
         self.water_swim_stuck_frames = 0
+        self.water_float_pressed_in_episode = False
+        self.water_float_missing_frames = self.WATER_FLOAT_RESET_MISSING_FRAMES
         self.forced_route_target: Optional[Tuple[int, int]] = None
         self.forced_route_finish_stage: Optional[str] = None
         self.forced_route_reason: Optional[str] = None
@@ -648,6 +651,8 @@ class RunningManager:
         self.water_escape_target = None
         self.water_swim_last_location = None
         self.water_swim_stuck_frames = 0
+        self.water_float_pressed_in_episode = False
+        self.water_float_missing_frames = self.WATER_FLOAT_RESET_MISSING_FRAMES
         self.unstuck_reference_loc = None
         self.unstuck_area_attempts = 0
         self._clear_forced_route()
@@ -1204,7 +1209,23 @@ class RunningManager:
         return on_foot_ui_missing and vehicle_ui_visible
 
     def _is_in_water(self, w: "FrameWorker") -> bool:
-        return bool(w.get_info("上浮"))
+        visible = bool(w.get_info("上浮"))
+        self._update_water_float_state(visible)
+        return visible
+
+    def _update_water_float_state(self, visible: bool):
+        if visible:
+            self.water_float_missing_frames = 0
+            return
+
+        missing_frames = getattr(
+            self,
+            "water_float_missing_frames",
+            self.WATER_FLOAT_RESET_MISSING_FRAMES,
+        )
+        self.water_float_missing_frames = missing_frames + 1
+        if self.water_float_missing_frames >= self.WATER_FLOAT_RESET_MISSING_FRAMES:
+            self.water_float_pressed_in_episode = False
 
     def _is_dead(self, w: "FrameWorker") -> bool:
         return bool(w.get_info("变身")) or bool(w.get_info("红色血条"))
@@ -2111,18 +2132,24 @@ class RunningManager:
         location: Tuple[int, int],
         direction: Optional[float],
     ):
-        self.stop_auto_forward(w)
         target = self._get_running_target(location)
         self.water_escape_target = target
-        self._log_running_state("检测到落水", location, direction, "执行上浮脱困", target)
+        self._log_running_state("检测到落水", location, direction, "执行水中自动前进脱困", target)
 
         if not self._is_in_water(w):
             self._mark_water_escape_finished(w, location, direction, target)
             return
 
-        print("[Running] 检测到上浮图标，长按1秒上浮，随后对准目标并点击自动前进")
-        w.click("上浮", duration_ms=self.WATER_FLOAT_DURA)
-        w.refresh_frame()
+        should_press_float = not getattr(self, "water_float_pressed_in_episode", False)
+        if should_press_float:
+            self.stop_auto_forward(w)
+            print("[Running] 检测到上浮图标，长按1秒上浮，随后对准目标并点击自动前进")
+            w.click("上浮", duration_ms=self.WATER_FLOAT_DURA)
+            self.water_float_pressed_in_episode = True
+            self.water_float_missing_frames = 0
+            w.refresh_frame()
+        else:
+            print("[Running] 本轮落水已长按过上浮，保持自动前进，不重复点击上浮")
 
         updated_location = self._get_location(w) or location
         updated_direction = self._get_scalar(w.get_info("direction"))
@@ -2172,6 +2199,8 @@ class RunningManager:
             self.water_exit_clock.reset()
         self.water_swim_last_location = None
         self.water_swim_stuck_frames = 0
+        self.water_float_pressed_in_episode = False
+        self.water_float_missing_frames = self.WATER_FLOAT_RESET_MISSING_FRAMES
         self.loading_road = False
         self.current_segment_start = None
 

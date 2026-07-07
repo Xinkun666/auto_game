@@ -88,8 +88,8 @@ def render_entry_map(
     entries_json: Path,
     output_image: Path,
     *,
-    arrow_length: int = 22,
-    point_radius: int = 4,
+    arrow_length: int = 5,
+    point_radius: int = 0,
     label_entries: bool = True,
 ) -> Path:
     map_image = Path(map_image)
@@ -143,14 +143,17 @@ def _draw_entry_marker(
     end_x = x + vector_x * arrow_length
     end_y = y + vector_y * arrow_length
 
-    draw.line((x, y, end_x, end_y), fill=(255, 218, 64, 255), width=3)
+    draw.line((x, y, end_x, end_y), fill=(255, 218, 64, 255), width=1)
     _draw_arrow_head(draw, end_x, end_y, vector_x, vector_y)
-    draw.ellipse(
-        (x - point_radius, y - point_radius, x + point_radius, y + point_radius),
-        fill=(255, 64, 64, 255),
-        outline=(255, 255, 255, 255),
-        width=2,
-    )
+    if point_radius <= 0:
+        draw.point((x, y), fill=(255, 64, 64, 255))
+    else:
+        draw.ellipse(
+            (x - point_radius, y - point_radius, x + point_radius, y + point_radius),
+            fill=(255, 64, 64, 255),
+            outline=(255, 255, 255, 255),
+            width=1,
+        )
 
     if label:
         label_text = f"h{entry.house_id}e{entry.entry_index} entry_dir={int(round(entry.entry_dir))}"
@@ -164,7 +167,7 @@ def _draw_arrow_head(
     vector_x: float,
     vector_y: float,
     *,
-    size: int = 8,
+    size: int = 2,
 ) -> None:
     angle = math.atan2(vector_y, vector_x)
     left = angle + math.radians(150)
@@ -210,8 +213,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--map-image", type=Path, default=DEFAULT_MAP_IMAGE)
     parser.add_argument("--entries-json", type=Path, default=DEFAULT_ENTRIES_JSON)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_IMAGE)
-    parser.add_argument("--arrow-length", type=int, default=22)
-    parser.add_argument("--point-radius", type=int, default=4)
+    parser.add_argument("--arrow-length", type=int, default=5)
+    parser.add_argument("--point-radius", type=int, default=0)
     parser.add_argument("--no-labels", action="store_true")
     return parser.parse_args(argv)
 

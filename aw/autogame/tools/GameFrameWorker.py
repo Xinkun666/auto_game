@@ -2122,6 +2122,87 @@ class FrameWorker(threading.Thread):
         return str(action_name)
 
     @staticmethod
+    def _numeric_control_param(value):
+        try:
+            return float(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _control_log_action_verb(raw_name, action_name, params, duration, start_pos, end_pos):
+        duration_ms = (
+            FrameWorker._numeric_control_param(params.get("duration_ms") if isinstance(params, dict) else None)
+            or FrameWorker._numeric_control_param(params.get("duration") if isinstance(params, dict) else None)
+            or FrameWorker._numeric_control_param(duration)
+        )
+        if raw_name == "click" and duration_ms is not None and duration_ms >= 800:
+            return "长按了"
+        if raw_name == "click" or action_name == "click":
+            return "点击了"
+        swipe_actions = {"tap_single", "tap_double", "uinput_tap_single", "move_press", "move_to", "move_up"}
+        semantic_swipes = {"move_forward", "move_backward", "move_lateral", "turn_view", "move_control"}
+        has_bias = isinstance(params, dict) and any(str(params.get(key) or "").strip() for key in ("x_bias", "y_bias"))
+        if raw_name in swipe_actions and (has_bias or start_pos or end_pos or action_name in semantic_swipes):
+            return "滑动了"
+        return "执行了"
+
+    @staticmethod
+    def _format_control_log_params(params, duration):
+        if not isinstance(params, dict):
+            params = {}
+        preferred_order = [
+            "x_bias",
+            "y_bias",
+            "dura",
+            "wait",
+            "duration_ms",
+            "duration",
+            "finger_id",
+            "backend",
+        ]
+        parts = []
+        used = set()
+        for key in preferred_order:
+            value = str(params.get(key) or "").strip()
+            if value:
+                parts.append(f"{key}={value}")
+                used.add(key)
+        for key, value in params.items():
+            if key in used:
+                continue
+            text = str(value or "").strip()
+            if text:
+                parts.append(f"{key}={text}")
+        duration_text = str(duration or "").strip()
+        if duration_text and not any(item.startswith(("dura=", "duration=", "duration_ms=")) for item in parts):
+            parts.append(f"duration={duration_text}")
+        return parts
+
+    def _format_control_frame_log(self, action):
+        if not isinstance(action, dict):
+            return ""
+        raw_name = str(action.get("name") or "").strip()
+        action_name = str(action.get("action") or raw_name).strip()
+        target = str(action.get("control_point") or action.get("target") or action_name or raw_name or "控制点").strip()
+        actual_pos = str(action.get("actual_pos") or "").strip()
+        start_pos = str(action.get("start_pos") or "").strip()
+        end_pos = str(action.get("end_pos") or "").strip()
+        params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        duration = str(action.get("duration") or params.get("dura") or params.get("duration") or "").strip()
+        verb = self._control_log_action_verb(raw_name, action_name, params, duration, start_pos, end_pos)
+        detail_parts = []
+        if actual_pos:
+            detail_parts.append(f"actual_pos={actual_pos}")
+        if start_pos:
+            detail_parts.append(f"start={start_pos}")
+        if end_pos:
+            detail_parts.append(f"end={end_pos}")
+        detail_parts.extend(self._format_control_log_params(params, duration))
+        if detail_parts:
+            return f"控制信息：{verb}{target}: {', '.join(detail_parts)}"
+        return f"控制信息：{verb}{target}"
+
+    @staticmethod
     def _normalize_control_trace(trace_result):
         if not isinstance(trace_result, dict):
             return {}
@@ -2144,7 +2225,7 @@ class FrameWorker(threading.Thread):
             or self.current_frame_decision.get("observation")
             or ""
         )
-        self.current_frame_actions.append({
+        frame_action = {
             "name": str(action_name),
             "action": self._semantic_frame_action_name(action_name, args, kwargs),
             "description": self._describe_frame_action(action_name, args, kwargs),
@@ -2160,7 +2241,9 @@ class FrameWorker(threading.Thread):
             "control_trace": control_trace,
             "args": [str(arg) for arg in args[:3]],
             "kwargs": {str(key): str(value) for key, value in kwargs.items()},
-        })
+        }
+        self.current_frame_actions.append(frame_action)
+        self.frame_log(self._format_control_frame_log(frame_action))
 
     def set_frame_decision(
         self,

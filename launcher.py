@@ -1403,6 +1403,55 @@ def _format_history_logic(
     return lines
 
 
+def _strip_control_history_log_prefix(text: str) -> str:
+    value = _clean_history_text(text, "")
+    for prefix in ("控制信息：", "控制信息:", "控制信息"):
+        if value.startswith(prefix):
+            return value[len(prefix):].strip(" ：:")
+    return ""
+
+
+def _split_history_control_logs(frame_log: str, frame_logs: list) -> tuple[str, list[str], list[str]]:
+    logic_logs = []
+    control_logs = []
+
+    if isinstance(frame_logs, list) and frame_logs:
+        for item in frame_logs:
+            text = _clean_history_text(item, "")
+            if not text:
+                continue
+            control_text = _strip_control_history_log_prefix(text)
+            if control_text:
+                control_logs.append(control_text)
+            else:
+                logic_logs.append(text)
+        return "", logic_logs, control_logs
+
+    plain_log = _clean_history_text(frame_log, "")
+    if not plain_log:
+        return "", [], []
+    control_text = _strip_control_history_log_prefix(plain_log)
+    if control_text:
+        return "", [], [control_text]
+    return plain_log, [], []
+
+
+def _format_control_frame_logs(control_logs: list[str]) -> list[str]:
+    lines = []
+    for item in control_logs:
+        text = _clean_history_text(item, "")
+        if text:
+            lines.append(f"- {text}")
+    return lines
+
+
+def _format_history_control(control_logs: list[str], semantic_actions: list[dict]) -> list[str]:
+    control_lines = _format_control_frame_logs(control_logs)
+    if control_lines:
+        return control_lines
+    return _format_semantic_actions(semantic_actions)
+
+
 def _numeric_param(value):
     try:
         return float(str(value).strip())
@@ -1544,6 +1593,7 @@ def format_history_frame_details(frame_record: dict) -> str:
         or payload.get("frame_logs")
         or []
     )
+    logic_frame_log, logic_frame_logs, control_frame_logs = _split_history_control_logs(frame_log, frame_logs)
 
     lines.extend([
         "",
@@ -1557,8 +1607,8 @@ def format_history_frame_details(frame_record: dict) -> str:
         *_format_history_logic(
             seen_text=seen_summary,
             stage_name=stage_name,
-            frame_log=frame_log,
-            frame_logs=frame_logs,
+            frame_log=logic_frame_log,
+            frame_logs=logic_frame_logs,
             semantic_judgment=semantic_judgment,
             semantic_branch=semantic_branch,
             decision_payload=decision_payload,
@@ -1567,7 +1617,7 @@ def format_history_frame_details(frame_record: dict) -> str:
         ),
         "",
         "控制信息",
-        *_format_semantic_actions(semantic_actions),
+        *_format_history_control(control_frame_logs, semantic_actions),
     ])
 
     return "\n".join(lines)

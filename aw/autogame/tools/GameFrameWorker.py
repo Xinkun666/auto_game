@@ -1907,7 +1907,7 @@ class Controller:
 class FrameWorker(threading.Thread):
     LAUNCHER_INACTIVITY_TIMEOUT_SECONDS = 5 * 60
     WATCHDOG_CHECK_INTERVAL_SECONDS = 1.0
-    POST_CONTROL_REFRESH_SETTLE_SECONDS = 0.25
+    POST_CONTROL_REFRESH_SETTLE_SECONDS = 0.5
 
     def __init__(self, buffer, driver=None, logger=None, controller_backend=None, controller_options=None):
         super().__init__()

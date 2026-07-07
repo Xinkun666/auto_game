@@ -5677,12 +5677,14 @@ class HouseSceneSearchManager(HouseSearchManager):
                     ),
                     "真实入门点还在20距离外，此时不进入搜房Nav，切到跑图阶段用自动前进、避障和路径规划继续接近",
                     action="远距离转跑图阶段",
-                    method="r_city_entry_route_callback() or _start_r_city_entry_map_navigation()",
+                    method="_start_r_city_entry_map_navigation() or r_city_entry_route_callback()",
                     result="到真实入门点20距离内后再回到搜房Nav",
                 )
-                if self._request_r_city_entry_route(w, target_loc, target_dist):
+                if self._handle_far_entry_forbidden_escape(w, current_loc, current_direction, target_loc):
                     return
                 if self._start_r_city_entry_map_navigation(w, current_loc, target_dist):
+                    return
+                if self._request_r_city_entry_route(w, target_loc, target_dist):
                     return
                 self._defer_r_city_entry_until_nav_range(
                     w,
@@ -5792,12 +5794,14 @@ class HouseSceneSearchManager(HouseSearchManager):
                     ),
                     "真实入门点距离仍属于跑图范围，不继续搜房阶段摇杆Nav，交给跑图阶段自动前进、避障和路径规划",
                     action="退回跑图阶段",
-                    method="r_city_entry_route_callback() or _start_r_city_entry_map_navigation()",
+                    method="_start_r_city_entry_map_navigation() or r_city_entry_route_callback()",
                     result="到真实入门点20距离内再回到搜房Nav进门流程",
                 )
-                if self._request_r_city_entry_route(w, entry_loc, entry_dist):
+                if self._handle_far_entry_forbidden_escape(w, current_loc, current_direction, entry_loc):
                     return
                 if self._start_r_city_entry_map_navigation(w, current_loc, entry_dist):
+                    return
+                if self._request_r_city_entry_route(w, entry_loc, entry_dist):
                     return
                 self._defer_r_city_entry_until_nav_range(
                     w,
@@ -6285,6 +6289,36 @@ class HouseSceneSearchManager(HouseSearchManager):
         callback(w, self.r_city_landing_target, reason)
         return True
 
+    def _handle_far_entry_forbidden_escape(
+        self,
+        w: "FrameWorker",
+        current_loc,
+        current_direction,
+        target_loc,
+    ) -> bool:
+        if target_loc is None:
+            return False
+        if self._is_walkable(current_loc):
+            return False
+        if self._same_forbidden_region(current_loc, target_loc):
+            return False
+        if self._is_reentered_forbidden_escape_region(current_loc):
+            return False
+
+        self._set_frame_decision(
+            w,
+            (
+                f"远距离入门点路线前，发现当前位置 {current_loc} 不可通行，"
+                f"且和最近入门点 {target_loc} 不在同一不可通行区域"
+            ),
+            "先逃离当前不可通行区域；到达可通行区域后再判断是否需要A*规划到入门点安全点",
+            action="优先黑区脱离",
+            method="_handle_forbidden_escape()",
+            result="避免从错误黑区直接规划或硬冲入门点",
+        )
+        self._handle_forbidden_escape(w, current_loc, current_direction, target_loc=target_loc)
+        return True
+
     def _start_r_city_entry_map_navigation(self, w: "FrameWorker", current_loc, route_dist: float) -> bool:
         if not self.active_entry:
             return False
@@ -6311,6 +6345,24 @@ class HouseSceneSearchManager(HouseSearchManager):
                 action="等待路线导航兜底",
                 method="map_tool.plan_path() returned empty",
                 result="调用方会保留R城路线导航状态",
+            )
+            return False
+
+        if len(path) <= 1 and route_dist > self.R_CITY_ENTRY_MAP_NAV_DISTANCE:
+            print(
+                f"[RCitySearch] 真实入门点距离 {route_dist:.2f} > {self.R_CITY_ENTRY_MAP_NAV_DISTANCE:.1f}，"
+                f"但当前位置已经在接入点 {route_target_loc}，A* 没有可推进路径，回退跑图路线"
+            )
+            self._set_frame_decision(
+                w,
+                (
+                    f"真实入门点距离 {route_dist:.2f} > {self.R_CITY_ENTRY_MAP_NAV_DISTANCE:.1f}，"
+                    f"当前位置={start_loc}，接入点={route_target_loc}，A*路径点数={len(path)}"
+                ),
+                "当前位置已在入门点安全接入点但真实入门点仍在20外，A*无法继续缩短距离，回退跑图阶段",
+                action="放弃无效A*路径",
+                method="len(path) <= 1",
+                result="后续尝试r_city_entry_route_callback",
             )
             return False
 
@@ -6643,12 +6695,14 @@ class HouseSceneSearchManager(HouseSearchManager):
                 ),
                 "按人物实际位置重选后，当前可用入门点仍不在Nav范围内，所以继续交给跑图/路线导航接近",
                 action="继续跑图接近入门点",
-                method="r_city_entry_route_callback() or _start_r_city_entry_map_navigation()",
+                method="_start_r_city_entry_map_navigation() or r_city_entry_route_callback()",
                 result="真实入门点20距离内才进入Nav",
             )
-            if self._request_r_city_entry_route(w, target_loc, target_dist):
+            if self._handle_far_entry_forbidden_escape(w, loc, current_direction, target_loc):
                 return True
             if self._start_r_city_entry_map_navigation(w, loc, target_dist):
+                return True
+            if self._request_r_city_entry_route(w, target_loc, target_dist):
                 return True
             self._defer_r_city_entry_until_nav_range(
                 w,

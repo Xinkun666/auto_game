@@ -6872,17 +6872,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             self.active_entry = None
             return
 
-        def score(target):
-            dist = get_distance(loc, target["approach_location"])
-            angle_penalty = 0.0
-            target_angle = calculate_angle(loc, target["approach_location"])
-            _, _, diff = calculate_move_count(current_direction, target_angle)
-            if diff is not None:
-                angle_penalty = diff / 18.0
-            failure_penalty = self.r_city_failed_counts.get(target["id"], 0) * 15.0
-            return dist + angle_penalty + failure_penalty
-
-        target = min(candidates, key=score)
+        target = min(candidates, key=lambda item: get_distance(loc, item["approach_location"]))
         self._lock_r_city_target(target)
 
     def _lock_r_city_target(self, target):

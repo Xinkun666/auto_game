@@ -2690,9 +2690,10 @@ class FrameWorker(threading.Thread):
             self._queue_visual_frame()
         return True
 
-    def refresh_frame(self):
+    def refresh_frame(self, settle: bool = True):
         self._flush_current_frame_log()
-        self._wait_for_post_control_refresh_settle()
+        if settle:
+            self._wait_for_post_control_refresh_settle()
         frame = self.buffer.get_latest(must_new=True)
         if frame is None:
             print("[FrameWorker] 刷新失败：缓冲区暂无数据")

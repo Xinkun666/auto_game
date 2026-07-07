@@ -2147,7 +2147,7 @@ class RunningManager:
             w.click("上浮", duration_ms=self.WATER_FLOAT_DURA)
             self.water_float_pressed_in_episode = True
             self.water_float_missing_frames = 0
-            w.refresh_frame()
+            w.refresh_frame(settle=False)
         else:
             print("[Running] 本轮落水已长按过上浮，保持自动前进，不重复点击上浮")
 
@@ -2167,7 +2167,7 @@ class RunningManager:
         if not self.auto_forward:
             w.click("自动前进")
             self.auto_forward = True
-        w.refresh_frame()
+        w.refresh_frame(settle=False)
 
         if not self._is_in_water(w) or w.get_info("左拳头") or w.get_info("子弹"):
             self._mark_water_escape_finished(
@@ -2238,7 +2238,7 @@ class RunningManager:
                 dura=self.WATER_EXIT_SIDE_DURA,
                 wait=self.WATER_EXIT_SIDE_WAIT,
             )
-            w.refresh_frame()
+            w.refresh_frame(settle=False)
             if not self._is_in_water(w) or w.get_info("左拳头") or w.get_info("子弹"):
                 self._mark_water_escape_finished(
                     w,
@@ -2256,7 +2256,7 @@ class RunningManager:
         if not self.auto_forward:
             w.click("自动前进")
             self.auto_forward = True
-        w.refresh_frame()
+        w.refresh_frame(settle=False)
         self.water_swim_last_location = self._get_location(w) or updated_location
         self.water_swim_stuck_frames = 0
         self.loading_road = False

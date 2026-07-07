@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +31,18 @@ DEFAULT_ENTRIES_JSON = (
     / "house_entries_summary.json"
 )
 DEFAULT_OUTPUT_IMAGE = Path(__file__).resolve().parent / "hpjg_entry_points_with_dirs.png"
+DIGIT_PIXELS = {
+    "0": ("111", "101", "101", "101", "111"),
+    "1": ("010", "110", "010", "010", "111"),
+    "2": ("111", "001", "111", "100", "111"),
+    "3": ("111", "001", "111", "001", "111"),
+    "4": ("101", "101", "111", "001", "001"),
+    "5": ("111", "100", "111", "001", "111"),
+    "6": ("111", "100", "111", "101", "111"),
+    "7": ("111", "001", "010", "010", "010"),
+    "8": ("111", "101", "111", "101", "111"),
+    "9": ("111", "101", "111", "001", "111"),
+}
 
 
 @dataclass(frozen=True)
@@ -88,9 +100,8 @@ def render_entry_map(
     entries_json: Path,
     output_image: Path,
     *,
-    arrow_length: int = 3,
     point_radius: int = 0,
-    label_entries: bool = False,
+    direction_numbers: bool = True,
 ) -> Path:
     map_image = Path(map_image)
     entries_json = Path(entries_json)
@@ -107,15 +118,22 @@ def render_entry_map(
     image = Image.open(map_image).convert("RGBA")
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    font = _load_font(11)
     out_of_bounds: list[EntryPoint] = []
 
     for entry in entries:
+        print(
+            f"{entry.entry_id} location={entry.location} entry_dir={int(round(entry.entry_dir))}"
+        )
         x, y = entry.location
         if x < 0 or y < 0 or x >= image.width or y >= image.height:
             out_of_bounds.append(entry)
             continue
-        _draw_entry_marker(draw, entry, arrow_length=arrow_length, point_radius=point_radius, font=font, label=label_entries)
+        _draw_entry_marker(
+            draw,
+            entry,
+            point_radius=point_radius,
+            direction_numbers=direction_numbers,
+        )
 
     result = Image.alpha_composite(image, overlay).convert("RGBA")
     output_image.parent.mkdir(parents=True, exist_ok=True)
@@ -133,18 +151,11 @@ def _draw_entry_marker(
     draw: ImageDraw.ImageDraw,
     entry: EntryPoint,
     *,
-    arrow_length: int,
     point_radius: int,
-    font: ImageFont.ImageFont,
-    label: bool,
+    direction_numbers: bool,
 ) -> None:
     x, y = entry.location
-    vector_x, vector_y = entry_direction_vector(entry.entry_dir)
-    end_x = x + vector_x * arrow_length
-    end_y = y + vector_y * arrow_length
 
-    draw.line((x, y, end_x, end_y), fill=(255, 218, 64, 255), width=1)
-    _draw_arrow_head(draw, end_x, end_y, vector_x, vector_y)
     if point_radius <= 0:
         draw.point((x, y), fill=(255, 64, 64, 255))
     else:
@@ -155,48 +166,43 @@ def _draw_entry_marker(
             width=1,
         )
 
-    if label:
-        label_text = f"h{entry.house_id}e{entry.entry_index} entry_dir={int(round(entry.entry_dir))}"
-        _draw_label(draw, label_text, x + point_radius + 3, y + point_radius + 3, font)
+    if direction_numbers:
+        direction_text = str(int(round(entry.entry_dir)) % 360)
+        text_width = _pixel_text_width(direction_text)
+        _draw_pixel_text(
+            draw,
+            direction_text,
+            x - text_width - 1,
+            y + max(1, point_radius + 1),
+            fill=(64, 255, 255, 255),
+        )
 
 
-def _draw_arrow_head(
+def _draw_pixel_text(
     draw: ImageDraw.ImageDraw,
-    tip_x: float,
-    tip_y: float,
-    vector_x: float,
-    vector_y: float,
+    text: str,
+    x: int,
+    y: int,
     *,
-    size: int = 1,
+    fill: tuple[int, int, int, int],
 ) -> None:
-    angle = math.atan2(vector_y, vector_x)
-    left = angle + math.radians(150)
-    right = angle - math.radians(150)
-    points = [
-        (tip_x, tip_y),
-        (tip_x + math.cos(left) * size, tip_y + math.sin(left) * size),
-        (tip_x + math.cos(right) * size, tip_y + math.sin(right) * size),
-    ]
-    draw.polygon(points, fill=(255, 218, 64, 255))
-
-
-def _draw_label(draw: ImageDraw.ImageDraw, text: str, x: int, y: int, font: ImageFont.ImageFont) -> None:
-    bbox = draw.textbbox((x, y), text, font=font)
-    pad = 2
-    draw.rectangle(
-        (bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad),
-        fill=(0, 0, 0, 170),
-    )
-    draw.text((x, y), text, fill=(255, 255, 255, 255), font=font)
-
-
-def _load_font(size: int) -> ImageFont.ImageFont:
-    for name in ("Arial.ttf", "DejaVuSans.ttf"):
-        try:
-            return ImageFont.truetype(name, size=size)
-        except OSError:
+    cursor_x = int(x)
+    for char in text:
+        pattern = DIGIT_PIXELS.get(char)
+        if pattern is None:
+            cursor_x += 4
             continue
-    return ImageFont.load_default()
+        for row_index, row in enumerate(pattern):
+            for col_index, value in enumerate(row):
+                if value == "1":
+                    draw.point((cursor_x + col_index, y + row_index), fill=fill)
+        cursor_x += 4
+
+
+def _pixel_text_width(text: str) -> int:
+    if not text:
+        return 0
+    return len(text) * 4 - 1
 
 
 def _house_sort_key(item: tuple[str, object]) -> tuple[int, object]:
@@ -208,14 +214,13 @@ def _house_sort_key(item: tuple[str, object]) -> tuple[int, object]:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Mark PUBG house entry points and entry_dir arrows on hpjg.png.",
+        description="Mark PUBG house entry points and tiny entry_dir numbers on hpjg.png.",
     )
     parser.add_argument("--map-image", type=Path, default=DEFAULT_MAP_IMAGE)
     parser.add_argument("--entries-json", type=Path, default=DEFAULT_ENTRIES_JSON)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_IMAGE)
-    parser.add_argument("--arrow-length", type=int, default=3)
     parser.add_argument("--point-radius", type=int, default=0)
-    parser.add_argument("--labels", action="store_true", help="show hXeY entry_dir labels")
+    parser.add_argument("--no-direction-numbers", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -226,9 +231,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.map_image,
             args.entries_json,
             args.output,
-            arrow_length=args.arrow_length,
             point_radius=args.point_radius,
-            label_entries=args.labels,
+            direction_numbers=not args.no_direction_numbers,
         )
     except Exception as exc:
         print(f"[ERROR] {exc}")

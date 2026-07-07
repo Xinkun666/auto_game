@@ -5,7 +5,10 @@ import time
 from typing import Callable, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_manager import HouseExitManager
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_navigation import MapNavigator
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_navigation import (
+    MapNavigator,
+    save_route_image_for_log,
+)
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import (
     calculate_angle,
     calculate_move_count,
@@ -13,7 +16,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_g
     execute_view_turn,
     get_distance,
     get_adaptive_forward_motion,
-    is_location_stagnant, draw_points_with_arrows,
+    is_location_stagnant,
     update_adaptive_forward_motion,
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_path_utils import find_path, get_resolution
@@ -1740,12 +1743,41 @@ class RunningManager:
         self.current_segment_start = location if self.loading_road else None
         if self.loading_road:
             print(f"[Running] 路径已加载: {self.road_list}")
-            try:
-                draw_points_with_arrows(self.road_list)
-            except Exception as exc:
-                print(f"[Running] 绘制路径调试图失败: {exc}")
+            self._log_loaded_route_image(location, "跑图道路路径已加载")
         else:
             print("[Running] 路径加载失败")
+
+    def _log_loaded_route_image(self, location: Tuple[int, int], reason: str = "跑图路径已加载"):
+        route_points = list(getattr(self, "road_list", []) or [])
+        if not route_points:
+            return None
+
+        try:
+            route_image_name, route_image_error = save_route_image_for_log(
+                route_points,
+                start_pos=location,
+                end_pos=route_points[-1],
+            )
+        except Exception as exc:
+            route_image_name = None
+            route_image_error = str(exc)
+
+        observation = (
+            f"道路路径规划完成：reason={reason}，current_loc={location}，"
+            f"path_points={len(route_points)}，final_target={route_points[-1]}"
+        )
+        if route_image_name:
+            result = f"已经规划好路径，图片名称是 {route_image_name}"
+        else:
+            result = f"已经规划好路径，但路径图未生成：{route_image_error}"
+        log_step(
+            observation,
+            target="道路路径规划",
+            action="把道路拓扑/道路点路线绘制到本轮日志 route 目录",
+            method="save_route_image_for_log(self.road_list)",
+            result=result,
+        )
+        return route_image_name
 
     def _load_forced_route_path(self, location: Tuple[int, int]):
         target = self.forced_route_target

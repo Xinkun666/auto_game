@@ -5322,6 +5322,7 @@ class HouseSceneSearchManager(HouseSearchManager):
     R_CITY_DEFAULT_HOUSE_ARRIVAL_DISTANCE = 2.0
     R_CITY_DEFAULT_EARLY_ENTRY_SCENE_DISTANCE = 5.0
     R_CITY_ROUTE_WAYPOINT_DISTANCE = 3.0
+    R_CITY_ROUTE_ENTRY_HANDOFF_DISTANCE = 10.0
     R_CITY_ROUTE_REPLAN_STUCK_CYCLES = 2
     R_CITY_FAILED_TARGET_LIMIT = 2
     ENTRY_AUTO_FORWARD_DISTANCE = 15.0
@@ -6273,7 +6274,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             "当前位置离R城较远，先用map_navigation规划到入门点附近的可通行接入点；进门仍使用真实入门点",
             action="启动R城入门点地图导航",
             method="map_tool.plan_path(current_loc, entry_approach); status=ROUTE_TO_R_CITY",
-            result="进入R城50距离内后停止路线导航，再直接FAST_NAV冲最近入门点",
+            result="到安全接入点或入门点10距离内后停止路线导航，并按实际位置重选最近入门点",
         )
         print(
             f"[RCitySearch] 距离R城 {r_city_dist:.2f} > {self.R_CITY_ENTRY_MAP_NAV_DISTANCE:.1f}，"
@@ -6401,28 +6402,11 @@ class HouseSceneSearchManager(HouseSearchManager):
                 f"R城路线导航：当前位置={current_loc}，当前方位={current_direction}，"
                 f"最近R城入门点距离={distance_to_r_city}"
             ),
-            "继续按规划路线前往R城接入点，到达R城附近后重新选择最近入门点",
+            "继续按规划路线前往最近入门点安全接入点；到安全点或入门点10距离内后重新选择最近入门点",
             action="执行R城路线导航",
             method="_handle_route_to_r_city()",
-            result="接近R城后恢复搜房选点",
+            result="接近安全点或入门点后切入FAST_NAV/PRECISE_NAV",
         )
-        if distance_to_r_city is not None and distance_to_r_city <= self.r_city_near_distance:
-            print(f"[RCityRoute] 已进入R城附近 dist={distance_to_r_city:.2f}，开始选房")
-            self._set_frame_decision(
-                w,
-                f"已进入R城附近，dist={distance_to_r_city:.2f}",
-                "停止跑图路线，回到搜房选最近入门点",
-                action="回到搜房选点",
-                method="status=IDLE",
-                result="下一帧选择最近入门点",
-            )
-            self.stop_auto_forward(w)
-            self.status = "IDLE"
-            self.r_city_route_target = None
-            self.r_city_route_path = []
-            self.r_city_route_index = 0
-            self.forbidden_escape_region_anchor = None
-            return
 
         if not self.r_city_route_target or not self.r_city_route_path:
             self.r_city_route_target = self._select_r_city_route_target(current_loc)
@@ -6450,6 +6434,9 @@ class HouseSceneSearchManager(HouseSearchManager):
                 f"target={self.r_city_route_target['approach_location']}, "
                 f"path_points={len(self.r_city_route_path)}"
             )
+
+        if self._handoff_r_city_route_to_entry_nav_if_close(w, current_loc, current_direction):
+            return
 
         waypoint = self._current_r_city_route_waypoint(current_loc)
         if waypoint is None:
@@ -6507,6 +6494,70 @@ class HouseSceneSearchManager(HouseSearchManager):
             w.click("自动前进")
             self.auto_forward = True
         self.handle_jump_logic(w)
+
+    def _handoff_r_city_route_to_entry_nav_if_close(self, w: "FrameWorker", current_loc, current_direction) -> bool:
+        loc = self._location_tuple(current_loc)
+        if loc is None or not self.r_city_route_target:
+            return False
+
+        route_target = self.r_city_route_target
+        safe_loc = self._location_tuple(route_target.get("approach_location"))
+        entry_loc = self._location_tuple(route_target.get("location"))
+        distances = []
+        if safe_loc is not None:
+            distances.append(("最近安全点", safe_loc, get_distance(loc, safe_loc)))
+        if entry_loc is not None:
+            distances.append(("入门点", entry_loc, get_distance(loc, entry_loc)))
+        if not distances:
+            return False
+
+        trigger_name, trigger_loc, trigger_dist = min(distances, key=lambda item: item[2])
+        if trigger_dist > self.R_CITY_ROUTE_ENTRY_HANDOFF_DISTANCE:
+            return False
+
+        print(
+            f"[RCityRoute] 已接近{trigger_name} {trigger_loc} dist={trigger_dist:.2f}，"
+            "停止路线自动前进，并按当前位置动态重选最近入门点"
+        )
+        self.stop_auto_forward(w)
+        self.current_house_id = None
+        self.current_r_city_target = None
+        self.active_entry = None
+        self.r_city_route_target = None
+        self.r_city_route_path = []
+        self.r_city_route_index = 0
+        self.r_city_route_stuck_cycles = 0
+        self.forbidden_escape_region_anchor = None
+        self.history_locations = []
+
+        self._select_next_r_city_house(loc, current_direction)
+        if not self.current_house_id:
+            self._set_frame_decision(
+                w,
+                f"R城路线已到{trigger_name}10距离内，但当前位置={loc} 没有可用入门点",
+                "结束R城搜房，避免路线结束后无目标乱跑",
+                action="结束R城搜房",
+                method="_finish_r_city_searching()",
+                result="切换后续阶段",
+            )
+            self._finish_r_city_searching(w, "R城路线交接后无可用入门点")
+            return True
+
+        target_loc = self.active_entry["location"]
+        target_dist = get_distance(loc, target_loc)
+        self.status = "PRECISE_NAV" if target_dist <= self.ENTRY_AUTO_FORWARD_DISTANCE else "FAST_NAV"
+        self._set_frame_decision(
+            w,
+            (
+                f"R城路线已到{trigger_name}10距离内，当前位置={loc}，"
+                f"动态重选最近入门点={target_loc}，房屋={self.current_house_id}，距离={target_dist:.2f}"
+            ),
+            "停止路线自动前进后，按人物实际位置重新选择最近入门点，再进入FAST_NAV/PRECISE_NAV",
+            action=f"切换{self.status}",
+            method="stop_auto_forward(); _select_next_r_city_house(); status=FAST_NAV/PRECISE_NAV",
+            result="下一帧按最新入门点执行近距导航",
+        )
+        return True
 
     def _current_r_city_route_waypoint(self, current_loc):
         if not self.r_city_route_path:
@@ -6872,7 +6923,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             self.active_entry = None
             return
 
-        target = min(candidates, key=lambda item: get_distance(loc, item["approach_location"]))
+        target = min(candidates, key=lambda item: get_distance(loc, item["location"]))
         self._lock_r_city_target(target)
 
     def _lock_r_city_target(self, target):

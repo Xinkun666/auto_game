@@ -5403,7 +5403,7 @@ class HouseSceneSearchManager(HouseSearchManager):
     R_CITY_PRECISE_NAV_ALIGN_TOLERANCE = 10
     R_CITY_PRECISE_NAV_ALIGN_MAX_STEPS = 1
     R_CITY_PRECISE_NAV_MIN_WAIT = 300
-    R_CITY_PRECISE_NAV_MAX_WAIT = 3000
+    R_CITY_PRECISE_NAV_MAX_WAIT = 12000
     R_CITY_ENTRY_FAST_MIN_DURA = 520
     R_CITY_ENTRY_FAST_MIN_WAIT = 275
     R_CITY_ENTRY_SLOW_MIN_DURA = 460
@@ -7191,7 +7191,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _precise_nav_wait_ms(self, dist, fallback_wait: int) -> int:
         try:
-            wait = int(round(max(0.0, float(dist)) * 0.1875 * 1000))
+            wait = int(round(max(0.0, float(dist)) * 0.55 * 1000))
         except (TypeError, ValueError):
             wait = int(fallback_wait)
         return max(

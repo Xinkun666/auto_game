@@ -456,11 +456,17 @@ def resolve_test_profile_from_radio_selection(power_checked: bool, function_chec
     return "power"
 
 
+def normalize_launcher_screen_mode(screen_mode: str) -> str:
+    raw_mode = str(screen_mode).strip()
+    if raw_mode not in {"0", "1", "2"}:
+        raise ValueError(f"unsupported screen_mode: {screen_mode}")
+    # Launcher profile buttons now always use HOS mode; accept old plan values but do not persist them.
+    return "2"
+
+
 def write_screen_mode_config(screen_mode: str, config_path: Path = AUTOGAME_CONFIG_FILE) -> None:
     config_path = Path(config_path)
-    screen_mode = str(screen_mode).strip()
-    if screen_mode not in {"0", "1", "2"}:
-        raise ValueError(f"unsupported screen_mode: {screen_mode}")
+    screen_mode = normalize_launcher_screen_mode(screen_mode)
 
     config = {}
     if config_path.exists():
@@ -482,7 +488,9 @@ def build_launcher_plan_env_values(plan: Optional[dict]) -> dict[str, str]:
     plan = plan or {}
     test_profile = str(plan.get("test_profile") or "power")
     target_case = str(plan.get("target_case") or "")
-    screen_mode = str(plan.get("screen_mode") or resolve_screen_mode_for_test_profile(test_profile, target_case))
+    screen_mode = normalize_launcher_screen_mode(
+        plan.get("screen_mode") or resolve_screen_mode_for_test_profile(test_profile, target_case)
+    )
     case_loop_count = int(plan.get("case_loop_count") or 1)
     return {
         "AUTOGAME_TEST_PROFILE": test_profile,
@@ -4825,7 +4833,8 @@ class LauncherWindow(QWidget):
         self.process.kill()
 
     def _prepare_capture_mode_for_plan(self, plan: dict) -> bool:
-        screen_mode = str(plan.get("screen_mode") or "0")
+        screen_mode = normalize_launcher_screen_mode(plan.get("screen_mode") or "2")
+        plan["screen_mode"] = screen_mode
         test_profile = str(plan.get("test_profile") or "power")
         try:
             write_screen_mode_config(screen_mode)

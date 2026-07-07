@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -31,18 +31,6 @@ DEFAULT_ENTRIES_JSON = (
     / "house_entries_summary.json"
 )
 DEFAULT_OUTPUT_IMAGE = Path(__file__).resolve().parent / "hpjg_entry_points_with_dirs.png"
-DIGIT_PIXELS = {
-    "0": ("111", "101", "101", "101", "111"),
-    "1": ("010", "110", "010", "010", "111"),
-    "2": ("111", "001", "111", "100", "111"),
-    "3": ("111", "001", "111", "001", "111"),
-    "4": ("101", "101", "111", "001", "001"),
-    "5": ("111", "100", "111", "001", "111"),
-    "6": ("111", "100", "111", "101", "111"),
-    "7": ("111", "001", "010", "010", "010"),
-    "8": ("111", "101", "111", "101", "111"),
-    "9": ("111", "101", "111", "001", "111"),
-}
 
 
 @dataclass(frozen=True)
@@ -102,6 +90,7 @@ def render_entry_map(
     *,
     point_radius: int = 0,
     direction_numbers: bool = True,
+    direction_number_size: int = 1,
 ) -> Path:
     map_image = Path(map_image)
     entries_json = Path(entries_json)
@@ -118,6 +107,7 @@ def render_entry_map(
     image = Image.open(map_image).convert("RGBA")
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
+    direction_font = _load_tiny_font(direction_number_size) if direction_numbers else None
     out_of_bounds: list[EntryPoint] = []
 
     for entry in entries:
@@ -133,6 +123,7 @@ def render_entry_map(
             entry,
             point_radius=point_radius,
             direction_numbers=direction_numbers,
+            direction_font=direction_font,
         )
 
     result = Image.alpha_composite(image, overlay).convert("RGBA")
@@ -153,6 +144,7 @@ def _draw_entry_marker(
     *,
     point_radius: int,
     direction_numbers: bool,
+    direction_font: Optional[ImageFont.ImageFont],
 ) -> None:
     x, y = entry.location
 
@@ -166,43 +158,32 @@ def _draw_entry_marker(
             width=1,
         )
 
-    if direction_numbers:
+    if direction_numbers and direction_font is not None:
         direction_text = str(int(round(entry.entry_dir)) % 360)
-        text_width = _pixel_text_width(direction_text)
-        _draw_pixel_text(
-            draw,
+        text_width = _tiny_text_width(draw, direction_text, direction_font)
+        draw.text(
+            (x - text_width - 1, y + max(1, point_radius + 1)),
             direction_text,
-            x - text_width - 1,
-            y + max(1, point_radius + 1),
             fill=(64, 255, 255, 255),
+            font=direction_font,
         )
 
 
-def _draw_pixel_text(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    x: int,
-    y: int,
-    *,
-    fill: tuple[int, int, int, int],
-) -> None:
-    cursor_x = int(x)
-    for char in text:
-        pattern = DIGIT_PIXELS.get(char)
-        if pattern is None:
-            cursor_x += 4
+def _load_tiny_font(size: int) -> ImageFont.ImageFont:
+    font_size = max(1, int(size))
+    for name in ("Arial.ttf", "DejaVuSans.ttf"):
+        try:
+            return ImageFont.truetype(name, size=font_size)
+        except OSError:
             continue
-        for row_index, row in enumerate(pattern):
-            for col_index, value in enumerate(row):
-                if value == "1":
-                    draw.point((cursor_x + col_index, y + row_index), fill=fill)
-        cursor_x += 4
+    raise RuntimeError("tiny TrueType font not found: tried Arial.ttf and DejaVuSans.ttf")
 
 
-def _pixel_text_width(text: str) -> int:
+def _tiny_text_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> int:
     if not text:
         return 0
-    return len(text) * 4 - 1
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return int(bbox[2] - bbox[0])
 
 
 def _house_sort_key(item: tuple[str, object]) -> tuple[int, object]:
@@ -220,6 +201,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--entries-json", type=Path, default=DEFAULT_ENTRIES_JSON)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_IMAGE)
     parser.add_argument("--point-radius", type=int, default=0)
+    parser.add_argument("--direction-number-size", type=int, default=1)
     parser.add_argument("--no-direction-numbers", action="store_true")
     return parser.parse_args(argv)
 
@@ -233,6 +215,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.output,
             point_radius=args.point_radius,
             direction_numbers=not args.no_direction_numbers,
+            direction_number_size=args.direction_number_size,
         )
     except Exception as exc:
         print(f"[ERROR] {exc}")

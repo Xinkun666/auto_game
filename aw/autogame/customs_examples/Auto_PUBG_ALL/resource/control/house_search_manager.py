@@ -2860,7 +2860,7 @@ class HouseSearchManager:
         target_loc = self.active_entry['location']
         dist = get_distance(current_loc, target_loc)
 
-        # --- 快速前进 (距离 > 30.0 才使用自动前进) ---
+        # --- 快速导航：远距也使用角度校准 + 摇杆推进 ---
         if self.status == "FAST_NAV":
             self._set_search_frame_decision(
                 w,
@@ -2872,9 +2872,9 @@ class HouseSearchManager:
                     dist=f"{dist:.2f}",
                     extra=f"current_direction={current_direction}, auto_forward={self.auto_forward}",
                 ),
-                "距离入门点较远，先对准入门点并保持自动前进，期间只处理贴墙/跳跃/卡住",
-                action="对准入门点并自动前进",
-                method="align_direction(); click(自动前进); handle_jump_logic()",
+                "距离入门点较远，先用主导航角度校准到10度内，再滑动摇杆推进一段时间",
+                action="对准入门点并摇杆推进",
+                method="align_direction(threshold=10, max_steps=1); tap_single(摇杆)",
                 result="进入近距离后切 PRECISE_NAV",
             )
             nav_scene_result = self._handle_nav_near_entry_scene_if_needed(w, "FAST_NAV", "导航中")
@@ -2935,26 +2935,49 @@ class HouseSearchManager:
                 self.status = "PRECISE_NAV"
                 return
 
-            self.align_direction(w, target_loc)
-
-            if not self.auto_forward:
+            self.stop_auto_forward(w)
+            aligned = self.align_direction(w, target_loc, threshold=10, max_steps=1)
+            if not aligned:
                 self._set_search_frame_decision(
                     w,
-                    "当前搜房分支：FAST_NAV启动自动前进",
+                    "当前搜房分支：FAST_NAV角度调整中",
                     self._entry_observation(
                         w,
                         current_loc=current_loc,
                         target_loc=target_loc,
                         dist=f"{dist:.2f}",
-                        extra="auto_forward=False",
+                        extra="角度未进入10度容差，本帧只调整视角",
                     ),
-                    "方向已对准或本轮已尝试对准，点击自动前进朝入门点移动",
-                    action="点击自动前进",
-                    method="click(自动前进)",
-                    result="保持自动前进直到进入PRECISE_NAV或遇到障碍",
+                    "FAST_NAV 和 PRECISE_NAV 使用同一套主导航角度校准，角度未对齐时不前推",
+                    action="等待角度对齐",
+                    method="align_direction(threshold=10, max_steps=1)",
+                    result="下一帧继续按入门点方向校准",
                 )
-                w.click('自动前进')
-                self.auto_forward = True
+                return
+
+            before_dist = dist
+            mode = self._entry_forward_mode(dist)
+            y_bias, dura, wait = self._get_entry_move_params(dist)
+            self._set_search_frame_decision(
+                w,
+                "当前搜房分支：FAST_NAV摇杆推进",
+                self._entry_observation(
+                    w,
+                    current_loc=current_loc,
+                    target_loc=target_loc,
+                    dist=f"{dist:.2f}",
+                    extra=f"mode={mode}, y_bias={y_bias}, dura={dura}, wait={wait}",
+                ),
+                "方向进入10度容差后，不再点击自动前进，而是按计算出的时长滑动摇杆推进",
+                action=f"{self._entry_forward_mode_label(mode)}靠近入门点",
+                method=f"tap_single(摇杆, y_bias={y_bias}, dura={dura}, wait={wait})",
+                result="刷新后用距离反馈更新推进模型",
+            )
+            w.tap_single('摇杆', y_bias=y_bias, dura=dura, wait=wait)
+            self._refresh_frame_and_handle_jump(w)
+            after_loc = self._get_current_location(w)
+            after_dist = get_distance(after_loc, target_loc) if after_loc is not None else None
+            update_adaptive_forward_motion(mode, before_dist, before_dist, after_dist, y_bias, dura, wait)
 
             self.handle_jump_logic(w)
 
@@ -3044,7 +3067,7 @@ class HouseSearchManager:
 
             self.stop_auto_forward(w)
 
-            aligned = self.align_direction(w, target_loc)
+            aligned = self.align_direction(w, target_loc, threshold=10, max_steps=1)
             if not aligned:
                 self.history_locations = []
                 self._set_search_frame_decision(
@@ -3059,7 +3082,7 @@ class HouseSearchManager:
                     ),
                     "PRECISE_NAV 正在停下来调整角度，本帧不判断卡住、不触发避障",
                     action="等待角度对齐",
-                    method="align_direction()",
+                    method="align_direction(threshold=10, max_steps=1)",
                     result="下一帧继续按入门点方向校准",
                 )
                 return
@@ -5380,11 +5403,11 @@ class HouseSceneSearchManager(HouseSearchManager):
     R_CITY_PRECISE_NAV_ALIGN_TOLERANCE = 10
     R_CITY_PRECISE_NAV_ALIGN_MAX_STEPS = 1
     R_CITY_PRECISE_NAV_MIN_WAIT = 300
-    R_CITY_PRECISE_NAV_MAX_WAIT = 12000
+    R_CITY_PRECISE_NAV_MAX_WAIT = 3000
     R_CITY_ENTRY_FAST_MIN_DURA = 520
-    R_CITY_ENTRY_FAST_MIN_WAIT = 1100
+    R_CITY_ENTRY_FAST_MIN_WAIT = 275
     R_CITY_ENTRY_SLOW_MIN_DURA = 460
-    R_CITY_ENTRY_SLOW_MIN_WAIT = 1300
+    R_CITY_ENTRY_SLOW_MIN_WAIT = 325
     ENTRY_WINDOW_JUMP_SETTLE_SECONDS = 0.25
     OPEN_DOOR_SETTLE_SECONDS = 0.8
     ENTRY_OPEN_DOOR_SHORT_PUSH_RATIO = 1.0 / 3.0
@@ -5733,8 +5756,8 @@ class HouseSceneSearchManager(HouseSearchManager):
                     f"距离={dist:.2f}，方位={current_direction}"
                 ),
                 "继续快速导航到锁定入门点，期间只处理卡住、贴门墙和跳跃",
-                action="朝入门点自动前进",
-                method="align_direction(); click(自动前进); handle_jump_logic()",
+                action="朝入门点摇杆推进",
+                method="align_direction(threshold=10, max_steps=1); tap_single(摇杆)",
                 result="到达分段导航范围后切PRECISE_NAV",
             )
             nav_scene_result = self._handle_nav_near_entry_scene_if_needed(w, "FAST_NAV", "R城导航中")
@@ -5790,28 +5813,9 @@ class HouseSceneSearchManager(HouseSearchManager):
                 self.status = "PRECISE_NAV"
                 return
 
-            self.align_direction(w, target_loc)
-
-            if not self.auto_forward:
-                self._set_search_frame_decision(
-                    w,
-                    "当前搜房分支：R城FAST_NAV启动自动前进",
-                    self._entry_observation(
-                        w,
-                        current_loc=current_loc,
-                        target_loc=target_loc,
-                        dist=f"{dist:.2f}",
-                        extra="auto_forward=False",
-                    ),
-                    "R城FAST_NAV已对准当前入门点，点击自动前进快速靠近",
-                    action="点击自动前进",
-                    method="click(自动前进)",
-                    result="下一帧继续朝同一入门点导航",
-                )
-                w.click("自动前进")
-                self.auto_forward = True
-
-            self.handle_jump_logic(w)
+            self.stop_auto_forward(w)
+            if self._move_precisely_to_entry_point(w, current_loc, target_loc, dist, phase_label="FAST_NAV"):
+                self.handle_jump_logic(w)
             return
 
         if self.status == "PRECISE_NAV":
@@ -5870,7 +5874,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 return
 
             self.stop_auto_forward(w)
-            if self._move_precisely_to_entry_point(w, current_loc, target_loc, dist):
+            if self._move_precisely_to_entry_point(w, current_loc, target_loc, dist, phase_label="PRECISE_NAV"):
                 self.handle_jump_logic(w)
                 return
 
@@ -7087,7 +7091,14 @@ class HouseSceneSearchManager(HouseSearchManager):
         print("[RCitySearch] 推进中卡住且仍在室外，执行室外绕障")
         return self.execute_unstuck_logic(w, current_loc)
 
-    def _move_precisely_to_entry_point(self, w: "FrameWorker", current_loc, target_loc, dist: float) -> bool:
+    def _move_precisely_to_entry_point(
+        self,
+        w: "FrameWorker",
+        current_loc,
+        target_loc,
+        dist: float,
+        phase_label: str = "PRECISE_NAV",
+    ) -> bool:
         current_dir = w.get_info("direction")
         target_angle = calculate_angle(current_loc, target_loc)
         turn_dir, _, diff = calculate_move_count(current_dir, target_angle)
@@ -7109,7 +7120,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             )
             self._set_search_frame_decision(
                 w,
-                "当前搜房分支：PRECISE_NAV角度未对齐",
+                f"当前搜房分支：{phase_label}角度未对齐",
                 self._entry_observation(
                     w,
                     current_loc=current_loc,
@@ -7122,7 +7133,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 ),
                 "角度还未进入容差，本帧不推摇杆，避免斜着撞到门/墙",
                 action="等待下一帧继续对齐",
-                method="align_direction()",
+                method=f"align_direction(threshold={align_threshold}, max_steps={align_max_steps})",
                 result="下一帧继续角度校准",
             )
             return True
@@ -7134,7 +7145,16 @@ class HouseSceneSearchManager(HouseSearchManager):
             f"y_bias={y_bias}, dura={dura}, wait={wait}, "
             f"目标角={target_angle}, 当前角差={diff:.1f}"
         )
-        return self._tap_entry_forward_with_learning(w, target_loc, dist, mode, y_bias, dura, wait)
+        return self._tap_entry_forward_with_learning(
+            w,
+            target_loc,
+            dist,
+            mode,
+            y_bias,
+            dura,
+            wait,
+            phase_label=phase_label,
+        )
 
     @staticmethod
     def _entry_micro_dura(dist: float, base_dura: int, max_dura: int) -> int:
@@ -7171,7 +7191,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _precise_nav_wait_ms(self, dist, fallback_wait: int) -> int:
         try:
-            wait = int(round(max(0.0, float(dist)) * 0.75 * 1000))
+            wait = int(round(max(0.0, float(dist)) * 0.1875 * 1000))
         except (TypeError, ValueError):
             wait = int(fallback_wait)
         return max(
@@ -7192,6 +7212,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         fallback_y_bias: int,
         fallback_dura: int,
         fallback_wait: int,
+        phase_label: str = "PRECISE_NAV",
     ) -> bool:
         before_dist = self._get_current_entry_distance(w, target_loc)
         if before_dist is None:
@@ -7224,7 +7245,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             if not aligned:
                 self._set_search_frame_decision(
                     w,
-                    "当前搜房分支：R城PRECISE_NAV小步前角度未对齐",
+                    f"当前搜房分支：R城{phase_label}小步前角度未对齐",
                     self._entry_observation(
                         w,
                         current_loc=current_loc,

@@ -88,9 +88,9 @@ def render_entry_map(
     entries_json: Path,
     output_image: Path,
     *,
-    arrow_length: int = 5,
+    arrow_length: int = 3,
     point_radius: int = 0,
-    label_entries: bool = True,
+    label_entries: bool = False,
 ) -> Path:
     map_image = Path(map_image)
     entries_json = Path(entries_json)
@@ -167,7 +167,7 @@ def _draw_arrow_head(
     vector_x: float,
     vector_y: float,
     *,
-    size: int = 2,
+    size: int = 1,
 ) -> None:
     angle = math.atan2(vector_y, vector_x)
     left = angle + math.radians(150)
@@ -213,9 +213,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--map-image", type=Path, default=DEFAULT_MAP_IMAGE)
     parser.add_argument("--entries-json", type=Path, default=DEFAULT_ENTRIES_JSON)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_IMAGE)
-    parser.add_argument("--arrow-length", type=int, default=5)
+    parser.add_argument("--arrow-length", type=int, default=3)
     parser.add_argument("--point-radius", type=int, default=0)
-    parser.add_argument("--no-labels", action="store_true")
+    parser.add_argument("--labels", action="store_true", help="show hXeY entry_dir labels")
     return parser.parse_args(argv)
 
 
@@ -228,7 +228,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.output,
             arrow_length=args.arrow_length,
             point_radius=args.point_radius,
-            label_entries=not args.no_labels,
+            label_entries=args.labels,
         )
     except Exception as exc:
         print(f"[ERROR] {exc}")

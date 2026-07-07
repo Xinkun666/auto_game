@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 import argparse
 import json
-import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -41,13 +40,6 @@ class EntryPoint:
     location: tuple[int, int]
     entry_dir: float
     source_image: str
-
-
-def entry_direction_vector(entry_dir: float) -> tuple[float, float]:
-    angle = math.radians(float(entry_dir))
-    x = round(math.sin(angle), 10)
-    y = round(-math.cos(angle), 10)
-    return (0.0 if x == -0.0 else x, 0.0 if y == -0.0 else y)
 
 
 def load_house_entries(entries_json: Path) -> list[EntryPoint]:
@@ -89,8 +81,6 @@ def render_entry_map(
     output_image: Path,
     *,
     point_radius: int = 0,
-    direction_numbers: bool = True,
-    direction_number_size: int = 1,
 ) -> Path:
     map_image = Path(map_image)
     entries_json = Path(entries_json)
@@ -107,7 +97,6 @@ def render_entry_map(
     image = Image.open(map_image).convert("RGBA")
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    direction_font = _load_tiny_font(direction_number_size) if direction_numbers else None
     out_of_bounds: list[EntryPoint] = []
 
     for entry in entries:
@@ -122,8 +111,6 @@ def render_entry_map(
             draw,
             entry,
             point_radius=point_radius,
-            direction_numbers=direction_numbers,
-            direction_font=direction_font,
         )
 
     result = Image.alpha_composite(image, overlay).convert("RGBA")
@@ -143,8 +130,6 @@ def _draw_entry_marker(
     entry: EntryPoint,
     *,
     point_radius: int,
-    direction_numbers: bool,
-    direction_font: Optional[ImageFont.ImageFont],
 ) -> None:
     x, y = entry.location
 
@@ -158,33 +143,6 @@ def _draw_entry_marker(
             width=1,
         )
 
-    if direction_numbers and direction_font is not None:
-        direction_text = str(int(round(entry.entry_dir)) % 360)
-        text_width = _tiny_text_width(draw, direction_text, direction_font)
-        draw.text(
-            (x - text_width - 1, y + max(1, point_radius + 1)),
-            direction_text,
-            fill=(64, 255, 255, 255),
-            font=direction_font,
-        )
-
-
-def _load_tiny_font(size: int) -> ImageFont.ImageFont:
-    font_size = max(1, int(size))
-    for name in ("Arial.ttf", "DejaVuSans.ttf"):
-        try:
-            return ImageFont.truetype(name, size=font_size)
-        except OSError:
-            continue
-    raise RuntimeError("tiny TrueType font not found: tried Arial.ttf and DejaVuSans.ttf")
-
-
-def _tiny_text_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> int:
-    if not text:
-        return 0
-    bbox = draw.textbbox((0, 0), text, font=font)
-    return int(bbox[2] - bbox[0])
-
 
 def _house_sort_key(item: tuple[str, object]) -> tuple[int, object]:
     house_id = str(item[0])
@@ -195,14 +153,12 @@ def _house_sort_key(item: tuple[str, object]) -> tuple[int, object]:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Mark PUBG house entry points and tiny entry_dir numbers on hpjg.png.",
+        description="Mark PUBG house entry points on hpjg.png and print each entry_dir.",
     )
     parser.add_argument("--map-image", type=Path, default=DEFAULT_MAP_IMAGE)
     parser.add_argument("--entries-json", type=Path, default=DEFAULT_ENTRIES_JSON)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_IMAGE)
     parser.add_argument("--point-radius", type=int, default=0)
-    parser.add_argument("--direction-number-size", type=int, default=1)
-    parser.add_argument("--no-direction-numbers", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -214,8 +170,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.entries_json,
             args.output,
             point_radius=args.point_radius,
-            direction_numbers=not args.no_direction_numbers,
-            direction_number_size=args.direction_number_size,
         )
     except Exception as exc:
         print(f"[ERROR] {exc}")

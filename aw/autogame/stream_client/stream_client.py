@@ -101,6 +101,16 @@ def _resolve_str_option(env_name, config, config_name, default=""):
     return str(default or "").strip()
 
 
+def _normalize_hos_decoder_backend(value):
+    backend = str(value or "pyav").strip().lower()
+    if backend in ("gst", "gstreamer"):
+        return "gstreamer"
+    if backend in ("av", "ffmpeg", "pyav"):
+        return "pyav"
+    print("[HOS] Unknown hoscrcpy_decoder=%s, using pyav." % backend, flush=True)
+    return "pyav"
+
+
 class FrameBuffer:
     def __init__(self, size=5):
         self.size = size
@@ -156,10 +166,20 @@ global_buffer = FrameBuffer(size=5)
 
 def apply_rotation(frame, rotation):
     """
-    根据 rotation 对 PIL.Image 做旋转
+    根据 rotation 对 PIL.Image / numpy RGB 帧做旋转
     rotation: 0 / 90 / 180 / 270
     """
     if rotation == 0:
+        return frame
+
+    if isinstance(frame, np.ndarray):
+        if rotation == 90:
+            return np.ascontiguousarray(np.rot90(frame, 1))
+        if rotation == 180:
+            return np.ascontiguousarray(np.rot90(frame, 2))
+        if rotation == 270:
+            return np.ascontiguousarray(np.rot90(frame, 3))
+        print("[Stream] Invalid rotation:", rotation)
         return frame
 
     elif rotation == 90:
@@ -813,6 +833,168 @@ class PyAVH264Decoder:
         return frames
 
 
+class GStreamerH264Decoder:
+    FEED_QUEUE_SIZE = 1
+    FRAME_QUEUE_SIZE = 1
+
+    PIPELINE = (
+        'appsrc name=src is-live=true format=time do-timestamp=true block=false '
+        'max-bytes=1048576 caps="video/x-h264,stream-format=byte-stream" ! '
+        'h264parse ! queue name=q1 max-size-buffers=1 leaky=downstream ! '
+        'avdec_h264 name=decoder ! '
+        'queue name=q2 max-size-buffers=1 leaky=downstream ! '
+        'videoconvert ! video/x-raw,format=RGB ! '
+        'appsink name=sink emit-signals=true drop=true max-buffers=1 sync=false'
+    )
+
+    def __init__(self, feed_queue_size=None):
+        self.feed_queue_size = max(1, int(feed_queue_size or self.FEED_QUEUE_SIZE))
+        self.feed_queue = queue.Queue(maxsize=self.feed_queue_size)
+        self.frame_queue = queue.Queue(maxsize=self.FRAME_QUEUE_SIZE)
+        self.pipeline = None
+        self.appsrc = None
+        self.appsink = None
+        self.Gst = None
+        self._closed = False
+        self._feed_thread = None
+
+        self._init_pipeline()
+
+    @staticmethod
+    def _put_latest(target_queue, item):
+        try:
+            target_queue.put_nowait(item)
+            return
+        except queue.Full:
+            pass
+
+        try:
+            target_queue.get_nowait()
+        except queue.Empty:
+            pass
+
+        try:
+            target_queue.put_nowait(item)
+        except queue.Full:
+            pass
+
+    def _init_pipeline(self):
+        try:
+            import gi
+
+            gi.require_version("Gst", "1.0")
+            from gi.repository import Gst
+        except Exception as exc:
+            raise RuntimeError(
+                "HOScrcpy GStreamer 解码需要安装 GStreamer/PyGObject，例如："
+                "brew install gstreamer gst-plugins-base gst-plugins-good gst-libav pygobject3"
+            ) from exc
+
+        Gst.init(None)
+        self.Gst = Gst
+        self.pipeline = Gst.parse_launch(self.PIPELINE)
+        self.appsrc = self.pipeline.get_by_name("src")
+        self.appsink = self.pipeline.get_by_name("sink")
+
+        decoder = self.pipeline.get_by_name("decoder")
+        if decoder is not None:
+            try:
+                decoder.set_property("max-threads", 1)
+            except Exception:
+                pass
+
+        if self.appsink is None or self.appsrc is None:
+            raise RuntimeError("GStreamer pipeline 初始化失败：缺少 appsrc/appsink")
+
+        self.appsink.connect("new-sample", self._on_new_sample)
+        self.pipeline.set_state(Gst.State.PLAYING)
+        self._feed_thread = threading.Thread(
+            target=self._feed_loop,
+            name="HOSGStreamerFeed",
+            daemon=True,
+        )
+        self._feed_thread.start()
+
+    def _on_new_sample(self, sink):
+        sample = sink.emit("pull-sample")
+        if sample is None:
+            return self.Gst.FlowReturn.OK
+
+        buffer = sample.get_buffer()
+        caps = sample.get_caps()
+        structure = caps.get_structure(0) if caps is not None and caps.get_size() else None
+        if structure is None:
+            return self.Gst.FlowReturn.OK
+
+        width = int(structure.get_value("width"))
+        height = int(structure.get_value("height"))
+        ok, info = buffer.map(self.Gst.MapFlags.READ)
+        if not ok:
+            return self.Gst.FlowReturn.OK
+
+        try:
+            frame = np.frombuffer(info.data, dtype=np.uint8).reshape((height, width, 3)).copy()
+        except Exception:
+            return self.Gst.FlowReturn.OK
+        finally:
+            buffer.unmap(info)
+
+        self._put_latest(self.frame_queue, frame)
+        return self.Gst.FlowReturn.OK
+
+    def _feed_loop(self):
+        while not self._closed:
+            try:
+                data = self.feed_queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+
+            try:
+                gst_buffer = self.Gst.Buffer.new_wrapped(data)
+                self.appsrc.emit("push-buffer", gst_buffer)
+            except Exception as exc:
+                if not self._closed:
+                    print("[HOS] GStreamer push-buffer warning: %s" % exc, flush=True)
+            finally:
+                try:
+                    self.feed_queue.task_done()
+                except Exception:
+                    pass
+
+    def decode(self, data):
+        if self._closed:
+            return []
+
+        self._put_latest(self.feed_queue, bytes(data))
+
+        latest_frame = None
+        while True:
+            try:
+                latest_frame = self.frame_queue.get_nowait()
+            except queue.Empty:
+                break
+        return [latest_frame] if latest_frame is not None else []
+
+    def close(self):
+        self._closed = True
+        if self.appsrc is not None:
+            try:
+                self.appsrc.emit("end-of-stream")
+            except Exception:
+                pass
+        if (
+            self._feed_thread
+            and self._feed_thread.is_alive()
+            and threading.current_thread() is not self._feed_thread
+        ):
+            self._feed_thread.join(timeout=0.2)
+        if self.pipeline is not None and self.Gst is not None:
+            try:
+                self.pipeline.set_state(self.Gst.State.NULL)
+            except Exception:
+                pass
+
+
 class HOSScrcpyStreamClient:
     def __init__(
         self,
@@ -820,6 +1002,7 @@ class HOSScrcpyStreamClient:
         save_frame=False,
         rotation_mode=0,
         decoder=None,
+        decoder_backend=None,
         device_factory=None,
     ):
         self.buffer = buffer
@@ -842,6 +1025,16 @@ class HOSScrcpyStreamClient:
         self._start_monotonic = None
 
         config = _read_autogame_config()
+        requested_decoder_backend = decoder_backend or _resolve_str_option(
+            "AUTOGAME_HOSCRCPY_DECODER",
+            config,
+            "hoscrcpy_decoder",
+            "gstreamer",
+        )
+        self.decoder_backend = (
+            "custom" if decoder is not None else _normalize_hos_decoder_backend(requested_decoder_backend)
+        )
+        self._decoder_fallback_reason = ""
         self.sn = _resolve_str_option("AUTOGAME_HOSCRCPY_SN", config, "hoscrcpy_sn", "")
         self.ip = _resolve_str_option("AUTOGAME_HOSCRCPY_IP", config, "hoscrcpy_ip", "127.0.0.1") or "127.0.0.1"
         self.port = _resolve_int_option("AUTOGAME_HOSCRCPY_PORT", config, "hoscrcpy_port", 8710)
@@ -924,6 +1117,7 @@ class HOSScrcpyStreamClient:
             self.running = False
             self._stop_event.set()
             self._stop_device()
+            self._close_decoder()
             try:
                 self.save_queue.put_nowait(None)
             except Exception:
@@ -937,6 +1131,7 @@ class HOSScrcpyStreamClient:
         self.running = False
         self._stop_event.set()
         self._stop_device()
+        self._close_decoder()
         try:
             self.save_queue.put(None, timeout=1)
         except Exception:
@@ -1020,6 +1215,34 @@ class HOSScrcpyStreamClient:
 
         return _Callback()
 
+    def _create_decoder(self):
+        if self.decoder_backend == "gstreamer":
+            try:
+                print("[HOS] Using GStreamer H264 decoder.", flush=True)
+                feed_queue_size = getattr(GStreamerH264Decoder, "FEED_QUEUE_SIZE", 1)
+                return GStreamerH264Decoder(feed_queue_size=feed_queue_size)
+            except Exception as exc:
+                self._decoder_fallback_reason = str(exc)
+                self.decoder_backend = "pyav"
+                print(
+                    "[HOS] GStreamer decoder unavailable, fallback to PyAV: %s" % exc,
+                    flush=True,
+                )
+        print("[HOS] Using PyAV H264 decoder.", flush=True)
+        return PyAVH264Decoder()
+
+    def _close_decoder(self):
+        decoder = self.decoder
+        if decoder is None:
+            return
+        close = getattr(decoder, "close", None)
+        if close is not None:
+            try:
+                close()
+            except Exception as exc:
+                print("[HOS] Decoder close warning: %s" % exc, flush=True)
+            self.decoder = None
+
     def _handle_stream_bytes(self, data):
         if not data:
             return
@@ -1029,7 +1252,7 @@ class HOSScrcpyStreamClient:
         if self._callback_data_count == 1:
             print("[HOS] First H264 buffer received: bytes=%s" % self._last_data_bytes, flush=True)
         if self.decoder is None:
-            self.decoder = PyAVH264Decoder()
+            self.decoder = self._create_decoder()
         frames = self.decoder.decode(data) or []
         if not frames and self._callback_data_count <= 3:
             print(
@@ -1078,6 +1301,8 @@ class HOSScrcpyStreamClient:
             "bit_rate": self.bit_rate,
             "device_port": self.device_port,
             "encoder_type": self.encoder_type,
+            "decoder_backend": self.decoder_backend,
+            "decoder_fallback_reason": self._decoder_fallback_reason,
             "ready_received": self._ready_received,
             "first_frame_received": self._first_frame_received,
             "callback_data_count": self._callback_data_count,

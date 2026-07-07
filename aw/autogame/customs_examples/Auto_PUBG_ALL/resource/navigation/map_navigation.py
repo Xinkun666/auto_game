@@ -2,13 +2,82 @@ import cv2
 import math
 import random
 import heapq
+import time
+from itertools import count
 from collections import deque
 import os
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import log_step
+from aw.autogame.tools.Utils import resolve_process_temp_logs_dir, write_image_unicode
 
-RESOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
+NAVIGATION_DIR = os.path.dirname(os.path.abspath(__file__))
+RESOURCE_DIR = os.path.dirname(NAVIGATION_DIR)
 DEFAULT_ROUTE_IMAGE_PATH = os.path.join(RESOURCE_DIR, "map", "hpjy.png")
 DEFAULT_ROUTE_OUTPUT_PATH = os.path.join("aw", "autogame", "temp", "road", "route.jpg")
+_ROUTE_IMAGE_COUNTER = count(1)
+
+
+def _route_point(value):
+    try:
+        return (int(round(float(value[0]))), int(round(float(value[1]))))
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _route_image_filename(start, end):
+    start_loc = _route_point(start) or ("x", "x")
+    end_loc = _route_point(end) or ("x", "x")
+    timestamp = time.strftime("%Y%m%d%H%M%S")
+    seq = next(_ROUTE_IMAGE_COUNTER)
+    return (
+        f"route_{timestamp}_{seq:04d}_"
+        f"{start_loc[0]}_{start_loc[1]}_to_{end_loc[0]}_{end_loc[1]}.png"
+    )
+
+
+def save_route_image_for_log(
+    road_list,
+    start_pos=None,
+    end_pos=None,
+    image_path=None,
+):
+    if not road_list:
+        return None, "路径点为空"
+
+    image_path = image_path or DEFAULT_ROUTE_IMAGE_PATH
+    if not os.path.exists(image_path):
+        return None, f"底图不存在: {image_path}"
+
+    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if image is None:
+        return None, f"底图读取失败: {image_path}"
+
+    points = [_route_point(point) for point in road_list]
+    points = [point for point in points if point is not None]
+    if not points:
+        return None, "路径点无法解析"
+
+    route_dir = resolve_process_temp_logs_dir() / "route"
+    route_dir.mkdir(parents=True, exist_ok=True)
+    start = start_pos if start_pos is not None else points[0]
+    end = end_pos if end_pos is not None else points[-1]
+    filename = _route_image_filename(start, end)
+    output_path = route_dir / filename
+
+    line_color = (0, 220, 0)
+    point_color = (0, 0, 255)
+    start_color = (255, 0, 0)
+    end_color = (0, 165, 255)
+    for index, point in enumerate(points):
+        if index > 0:
+            cv2.line(image, points[index - 1], point, line_color, 2, lineType=cv2.LINE_AA)
+        cv2.circle(image, point, 3, point_color, -1, lineType=cv2.LINE_AA)
+    cv2.circle(image, points[0], 4, start_color, -1, lineType=cv2.LINE_AA)
+    cv2.circle(image, points[-1], 4, end_color, -1, lineType=cv2.LINE_AA)
+
+    if not write_image_unicode(output_path, image):
+        return None, f"路径图写入失败: {output_path}"
+    return f"route/{filename}", None
+
 
 class MapNavigator:
     def __init__(self, map_mask_path = r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/map/hpjy_mask.tif'):
@@ -243,13 +312,24 @@ class MapNavigator:
         # --- 第二步：路径平滑 (Floyd's Algorithm / Line of Sight) ---
         # A* 生成的路径是基于格子的锯齿状，这里我们将其简化为直线段
         smoothed_path = self._smooth_path(path)
+        route_image_name, route_image_error = save_route_image_for_log(smoothed_path, start, end)
+        if route_image_name:
+            route_result = (
+                f"已经规划好路径，图片名称是 {route_image_name}；"
+                f"下一步使用首个路径点 {smoothed_path[0] if smoothed_path else None} 导航"
+            )
+        else:
+            route_result = (
+                f"已经规划好路径，但路径图未生成：{route_image_error}；"
+                f"下一步使用首个路径点 {smoothed_path[0] if smoothed_path else None} 导航"
+            )
         log_step(
             f"路径规划成功：current_loc={start}, target_loc={end}, "
             f"raw_points={len(path)}, smooth_points={len(smoothed_path)}",
             target="地图路径规划",
             action="把 A* 原始路径压缩成更少的直线路径点",
             method="_smooth_path(path)",
-            result=f"下一步使用首个路径点 {smoothed_path[0] if smoothed_path else None} 导航",
+            result=route_result,
         )
         return smoothed_path
 
@@ -620,7 +700,9 @@ def draw_points_with_arrows(
     output_dir = os.path.dirname(output_path)
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir)
-    cv2.imwrite(output_path, image)
+    if not write_image_unicode(output_path, image):
+        print(f"警告：路线绘图写入失败 -> {output_path}")
+        return
     print(f"结果已保存到: {output_path}")
 
 if __name__ == '__main__':

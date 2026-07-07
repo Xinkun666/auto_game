@@ -328,7 +328,8 @@ class RunningManager:
     """
 
     # 短时卡死判定窗口：连续多少帧位置不变算“卡住”
-    STUCK_HISTORY_LEN = 10
+    STUCK_HISTORY_LEN = 5
+    STUCK_MOVEMENT_EPSILON = 1.5
     # 长时困死判定窗口：连续多少帧都在局部小范围打转算“困死”
     TRAPPED_HISTORY_LEN = 50
     # 距离目标点 10 内停止自动前进，改用短摇杆精确逼近；小于 5 才消费该路径点。
@@ -345,6 +346,11 @@ class RunningManager:
     UNSTUCK_REPEAT_RADIUS = 3.0
     UNSTUCK_SAME_POINT_RADIUS = 3.0
     UNSTUCK_BACK_Y_BIAS = 300
+    UNSTUCK_SIDE_X_BIAS = 360
+    UNSTUCK_SIDE_FORWARD_Y_BIAS = -180
+    UNSTUCK_ESCALATED_SIDE_X_BIAS = 540
+    UNSTUCK_REPLAN_ATTEMPT_LIMIT = 3
+    UNSTUCK_JUMP_CONTROLS = ("跳跃", "翻越")
     WAYPOINT_PROJECTION_PASS_RATIO = 1.0
     WAYPOINT_PROJECTION_CORRIDOR = 12.0
     # 单帧位置跳变超过这个距离时，认为定位异常，需要重规划
@@ -592,6 +598,8 @@ class RunningManager:
         self.forced_route_arrival_distance = self.DEFAULT_FORCED_ROUTE_ARRIVAL_DISTANCE
         self.unstuck_reference_loc: Optional[Tuple[int, int]] = None
         self.unstuck_area_attempts = 0
+        self.unstuck_failed_sides: Set[str] = set()
+        self.unstuck_last_side: Optional[str] = None
 
     def reset(self, finding_car: bool = True):
         self.road_list = []
@@ -655,6 +663,8 @@ class RunningManager:
         self.water_float_missing_frames = self.WATER_FLOAT_RESET_MISSING_FRAMES
         self.unstuck_reference_loc = None
         self.unstuck_area_attempts = 0
+        self.unstuck_failed_sides = set()
+        self.unstuck_last_side = None
         self._clear_forced_route()
         self.house_exit_manager.reset()
         print("[Running] 状态已重置!")
@@ -697,6 +707,10 @@ class RunningManager:
         self.roadside_car_lost_after_forward_pushes = 0
         self.roadside_car_forward_pushes = 0
         self.roadside_car_steps = 0
+        self.unstuck_reference_loc = None
+        self.unstuck_area_attempts = 0
+        self.unstuck_failed_sides = set()
+        self.unstuck_last_side = None
         print(
             f"[Running] 启动临时跑图路线: reason={reason}, "
             f"target={self.forced_route_target}, finish_stage={finish_stage}, "
@@ -1583,9 +1597,11 @@ class RunningManager:
             self.locations.pop(0)
 
         if len(self.locations) >= self.STUCK_HISTORY_LEN:
-            self.stuck = all(loc == self.locations[0] for loc in self.locations)
+            origin = self.locations[0]
+            max_move = max(get_distance(origin, loc) for loc in self.locations)
+            self.stuck = max_move <= self.STUCK_MOVEMENT_EPSILON
             if self.stuck:
-                print("[Running] 检测到短时卡死")
+                print(f"[Running] 检测到短时卡死: frames={len(self.locations)}, max_move={max_move:.2f}")
         else:
             self.stuck = False
 
@@ -2466,6 +2482,7 @@ class RunningManager:
             w.refresh_frame()
 
     def _record_unstuck_attempt_area(self, current_loc: Tuple[int, int]) -> int:
+        self._ensure_unstuck_memory()
         loc = check_location(current_loc)
         if loc is None:
             self.unstuck_area_attempts += 1
@@ -2479,35 +2496,110 @@ class RunningManager:
         else:
             self.unstuck_reference_loc = loc
             self.unstuck_area_attempts = 1
+            self._reset_unstuck_side_memory()
         return self.unstuck_area_attempts
+
+    def _ensure_unstuck_memory(self):
+        if not hasattr(self, "unstuck_failed_sides"):
+            self.unstuck_failed_sides = set()
+        if not hasattr(self, "unstuck_last_side"):
+            self.unstuck_last_side = None
+
+    def _reset_unstuck_side_memory(self):
+        self.unstuck_failed_sides = set()
+        self.unstuck_last_side = None
+
+    def _choose_unstuck_side(self) -> str:
+        self._ensure_unstuck_memory()
+        failed = self.unstuck_failed_sides
+        if "left" not in failed:
+            return "left"
+        if "right" not in failed:
+            return "right"
+        return "left" if self.unstuck_last_side == "right" else "right"
+
+    def _unstuck_side_x_bias(self, side: str, escalated: bool = False) -> int:
+        magnitude = self.UNSTUCK_ESCALATED_SIDE_X_BIAS if escalated else self.UNSTUCK_SIDE_X_BIAS
+        return -magnitude if side == "left" else magnitude
+
+    def _try_unstuck_jump(
+        self,
+        w: "FrameWorker",
+        current_loc: Tuple[int, int],
+    ) -> bool:
+        for control_name in self.UNSTUCK_JUMP_CONTROLS:
+            if not w.get_info(control_name):
+                continue
+
+            print(f"[Running] 卡住时发现{control_name}键，先点击尝试翻越障碍")
+            self._log_running_state("卡住发现跳跃/翻越键", current_loc, None, f"优先点击{control_name}")
+            w.click(control_name)
+            w.refresh_frame()
+            new_loc = self._get_location(w)
+            if new_loc is not None and not self._same_unstuck_point(current_loc, new_loc):
+                self._finish_unstuck_success(new_loc, f"{control_name}后")
+                return True
+
+            print(f"[Running] {control_name}后仍未离开卡点，继续后退和侧向试探")
+            self._log_running_state("跳跃/翻越未脱困", current_loc, None, "继续后退并侧向绕行")
+            return False
+
+        return False
 
     def _perform_unstuck_action(self, w: "FrameWorker", current_loc: Tuple[int, int]):
         if self._try_house_exit_when_indoor(w, current_loc, None, "脱困前检测"):
             return
 
-        self.stop_auto_forward(w)
+        if self._try_unstuck_jump(w, current_loc):
+            return
+
         attempt = self._record_unstuck_attempt_area(current_loc)
+        self.stop_auto_forward(w)
+        side = self._choose_unstuck_side()
+        escalated = attempt >= self.UNSTUCK_REPLAN_ATTEMPT_LIMIT and {"left", "right"}.issubset(
+            self.unstuck_failed_sides
+        )
+        side_x_bias = self._unstuck_side_x_bias(side, escalated=escalated)
+        side_label = "左" if side == "left" else "右"
         print(
             f"[Running] 同一区域脱困 attempt={attempt}, "
-            f"same_point_radius={self.UNSTUCK_SAME_POINT_RADIUS}, reference={self.unstuck_reference_loc}"
+            f"same_point_radius={self.UNSTUCK_SAME_POINT_RADIUS}, reference={self.unstuck_reference_loc}, "
+            f"failed_sides={sorted(self.unstuck_failed_sides)}, next_side={side_label}, escalated={escalated}"
         )
 
-        print("[Running] 人物疑似撞墙/卡住，只执行后拉避让，取消跑图绕房避障")
-        self._log_running_state("人物卡死", current_loc, None, "后拉避让后重新规划")
+        print(f"[Running] 人物疑似撞墙/卡住，先后退，再向{side_label}侧绕行试探")
+        self._log_running_state("人物卡死", current_loc, None, f"后退脱离后向{side_label}侧绕行")
         self._tap_unstuck_joystick(w, "撞墙后拉避让", 0, self.UNSTUCK_BACK_Y_BIAS)
+        self._tap_unstuck_joystick(
+            w,
+            f"后退后向{side_label}绕行试探",
+            side_x_bias,
+            self.UNSTUCK_SIDE_FORWARD_Y_BIAS,
+        )
 
         new_loc = self._get_location(w)
+        if new_loc is not None and not self._same_unstuck_point(current_loc, new_loc):
+            self._reset_unstuck_side_memory()
+            self._finish_unstuck_success(new_loc, f"向{side_label}绕行")
+            return
+
+        self.unstuck_failed_sides.add(side)
+        self.unstuck_last_side = side
         if new_loc is not None:
             self.locations = [new_loc]
             self.history_locations = [new_loc]
             self.last_valid_location = new_loc
 
-        print("[Running] 后拉避让完成，清空路径等待下一帧重新规划")
+        print(f"[Running] 向{side_label}绕行后仍未产生有效位移，记录该方向失败")
+        self._log_running_state("避障方向失败", current_loc, None, f"记录{side_label}侧失败")
         self.stuck = False
         self.trapped = False
-        self.loading_road = False
-        self.road_list = []
-        self.current_segment_start = None
+        if attempt >= self.UNSTUCK_REPLAN_ATTEMPT_LIMIT:
+            print("[Running] 同一区域连续多次脱困失败，清空当前路径等待重新规划")
+            self._log_running_state("多次避障失败", current_loc, None, "清空路径并重新规划")
+            self.loading_road = False
+            self.road_list = []
+            self.current_segment_start = None
 
     def _same_unstuck_point(self, origin: Tuple[int, int], loc: Optional[Tuple[int, int]]) -> bool:
         if loc is None:
@@ -2524,6 +2616,9 @@ class RunningManager:
         self.locations = [new_loc]
         self.history_locations = [new_loc]
         self.last_valid_location = new_loc
+        self.unstuck_reference_loc = None
+        self.unstuck_area_attempts = 0
+        self._reset_unstuck_side_memory()
 
     def _tap_unstuck_joystick(
         self,

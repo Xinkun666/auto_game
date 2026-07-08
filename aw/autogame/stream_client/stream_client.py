@@ -1009,6 +1009,7 @@ class HOSScrcpyStreamClient:
         self.running = False
         self.main_thread = None
         self._stop_event = threading.Event()
+        self._stream_error_event = threading.Event()
         self.rotation_mode = rotation_mode
         self.decoder = decoder
         self.device_factory = device_factory
@@ -1043,6 +1044,28 @@ class HOSScrcpyStreamClient:
         self.bit_rate = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_BIT_RATE", config, "hoscrcpy_bit_rate", 2))
         self.device_port = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_DEVICE_PORT", config, "hoscrcpy_device_port", 5000))
         self.encoder_type = _resolve_str_option("AUTOGAME_HOSCRCPY_ENCODER_TYPE", config, "hoscrcpy_encoder_type", "0") or "0"
+        self.max_reconnect_attempts = max(0, _resolve_int_option(
+            "AUTOGAME_HOSCRCPY_RECONNECT_RETRIES",
+            config,
+            "hoscrcpy_reconnect_retries",
+            3,
+        ))
+        self.reconnect_base_delay = max(0.0, _resolve_float_option(
+            "AUTOGAME_HOSCRCPY_RECONNECT_BASE_DELAY",
+            config,
+            "hoscrcpy_reconnect_base_delay",
+            1.0,
+        ))
+        self.reconnect_max_delay = max(
+            self.reconnect_base_delay,
+            _resolve_float_option(
+                "AUTOGAME_HOSCRCPY_RECONNECT_MAX_DELAY",
+                config,
+                "hoscrcpy_reconnect_max_delay",
+                5.0,
+            ),
+        )
+        self._reconnect_attempt = 0
 
         self.save_frame_disabled = _resolve_bool_option(
             "AUTOGAME_DISABLE_SAVE_FRAMES",
@@ -1075,6 +1098,7 @@ class HOSScrcpyStreamClient:
             return
         self._diagnostic_stage = "backend_starting"
         self._stop_event.clear()
+        self._stream_error_event.clear()
         self.main_thread = threading.Thread(target=self.run, name="HOSMainThread", daemon=True)
         self.main_thread.start()
         print("[HOS] Backend started.")
@@ -1082,40 +1106,78 @@ class HOSScrcpyStreamClient:
     def run(self):
         self.running = True
         self._stop_event.clear()
+        self._stream_error_event.clear()
         self._last_error = None
-        self._diagnostic_stage = "creating_device"
+        self._reconnect_attempt = 0
         self._start_monotonic = time.monotonic()
         if self.save_frame:
             self._start_save_worker()
 
         try:
-            self.device = self._create_device()
-            self._diagnostic_stage = "creating_callback"
-            callback = self._create_callback()
-            print(
-                "[HOS] Starting HOScrcpy stream: sn=%s ip=%s port=%s scale=%s fps=%s bitrate=%s"
-                % (self.sn, self.ip, self.port, self.scale, self.frame_rate, self.bit_rate),
-                flush=True,
-            )
-            self._diagnostic_stage = "starting_capture"
-            self.device.start_capture_screen(callback)
-            self._diagnostic_stage = "capture_started_waiting_frames"
+            reconnect_attempt = 0
             while self.running and not self._stop_event.is_set():
-                if self._last_error is not None:
+                retry_delay = None
+                self._last_error = None
+                self._stream_error_event.clear()
+                try:
+                    self._diagnostic_stage = "creating_device"
+                    self.device = self._create_device()
+                    self._diagnostic_stage = "creating_callback"
+                    callback = self._create_callback()
+                    print(
+                        "[HOS] Starting HOScrcpy stream: sn=%s ip=%s port=%s scale=%s fps=%s bitrate=%s"
+                        % (self.sn, self.ip, self.port, self.scale, self.frame_rate, self.bit_rate),
+                        flush=True,
+                    )
+                    self._diagnostic_stage = "starting_capture"
+                    self.device.start_capture_screen(callback)
+                    if self._last_error is None:
+                        reconnect_attempt = 0
+                        self._reconnect_attempt = 0
+                    self._diagnostic_stage = "capture_started_waiting_frames"
+                    while self.running and not self._stop_event.is_set():
+                        if self._last_error is not None or self._stream_error_event.is_set():
+                            break
+                        self._stop_event.wait(0.2)
+                    if not self.running or self._stop_event.is_set():
+                        break
+                    if self._last_error is not None:
+                        raise RuntimeError("HOScrcpy stream failed: %s" % self._last_error)
+                    raise RuntimeError("HOScrcpy stream interrupted without error")
+                except Exception as exc:
+                    if not self.running or self._stop_event.is_set():
+                        break
+                    reconnect_attempt += 1
+                    self._reconnect_attempt = reconnect_attempt
+                    if reconnect_attempt > self.max_reconnect_attempts:
+                        self._last_error = exc
+                        self._diagnostic_stage = "runtime_error"
+                        message = "[HOS] Runtime Error: %s" % exc
+                        print(message, flush=True)
+                        self._write_disconnect_signal(
+                            "hoscrcpy_runtime_error",
+                            message,
+                            reconnect_attempt,
+                        )
+                        raise
+                    retry_delay = self._get_reconnect_delay(reconnect_attempt)
+                    self._diagnostic_stage = "reconnect_wait"
+                    print(
+                        "[HOS] Stream interrupted: %s. Reconnect in %.1fs (attempt=%d/%d)."
+                        % (exc, retry_delay, reconnect_attempt, self.max_reconnect_attempts),
+                        flush=True,
+                    )
+                finally:
+                    self._stop_device()
+                    self._close_decoder()
+                if retry_delay is None:
                     break
-                self._stop_event.wait(0.2)
-            if self._last_error is not None:
-                raise RuntimeError("HOScrcpy stream failed: %s" % self._last_error)
-        except Exception as exc:
-            self._last_error = exc
-            self._diagnostic_stage = "runtime_error"
-            message = "[HOS] Runtime Error: %s" % exc
-            print(message, flush=True)
-            self._write_disconnect_signal("hoscrcpy_runtime_error", message, 1)
-            raise
+                if self._stop_event.wait(retry_delay):
+                    break
         finally:
             self.running = False
             self._stop_event.set()
+            self._stream_error_event.set()
             self._stop_device()
             self._close_decoder()
             try:
@@ -1130,6 +1192,7 @@ class HOSScrcpyStreamClient:
         print("[HOS] Stopping client...")
         self.running = False
         self._stop_event.set()
+        self._stream_error_event.set()
         self._stop_device()
         self._close_decoder()
         try:
@@ -1236,11 +1299,15 @@ class HOSScrcpyStreamClient:
         if decoder is None:
             return
         close = getattr(decoder, "close", None)
+        closed = False
         if close is not None:
             try:
                 close()
+                closed = True
             except Exception as exc:
                 print("[HOS] Decoder close warning: %s" % exc, flush=True)
+                closed = True
+        if closed or self.decoder_backend != "custom":
             self.decoder = None
 
     def _handle_stream_bytes(self, data):
@@ -1278,8 +1345,7 @@ class HOSScrcpyStreamClient:
         self._diagnostic_stage = "stream_error"
         message = "[HOS] Stream Error: %s" % err
         print(message, flush=True)
-        self._write_disconnect_signal("hoscrcpy_stream_error", message, 1)
-        self._stop_event.set()
+        self._stream_error_event.set()
 
     def diagnostic_snapshot(self):
         main_thread = self.main_thread
@@ -1309,6 +1375,8 @@ class HOSScrcpyStreamClient:
             "last_data_bytes": self._last_data_bytes,
             "decoded_frame_count": self._decoded_frame_count,
             "last_error": str(self._last_error) if self._last_error is not None else "",
+            "reconnect_attempt": self._reconnect_attempt,
+            "max_reconnect_attempts": self.max_reconnect_attempts,
             "elapsed_seconds": elapsed,
         }
         if device_inner is not None:
@@ -1381,6 +1449,11 @@ class HOSScrcpyStreamClient:
                 device.stop_capture_screen()
             except Exception as exc:
                 print("[HOS] Stop capture warning: %s" % exc)
+
+    def _get_reconnect_delay(self, attempt: int) -> float:
+        attempt = max(1, int(attempt))
+        delay = self.reconnect_base_delay * (2 ** (attempt - 1))
+        return min(self.reconnect_max_delay, delay)
 
     def _write_disconnect_signal(self, reason, message, attempt):
         archive_dir = os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()

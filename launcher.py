@@ -663,6 +663,54 @@ def stream_frame_to_qpixmap(frame) -> QPixmap:
     return QPixmap()
 
 
+def _positive_int(value) -> Optional[int]:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _size_from_mapping(value) -> tuple[Optional[int], Optional[int]]:
+    if not isinstance(value, dict):
+        return None, None
+    width = _positive_int(value.get("width") or value.get("screen_width"))
+    height = _positive_int(value.get("height") or value.get("screen_height"))
+    if width and height:
+        return width, height
+
+    for key in ("size", "screen_size", "frame_size", "resolution"):
+        raw_size = value.get(key)
+        if isinstance(raw_size, dict):
+            width, height = _size_from_mapping(raw_size)
+            if width and height:
+                return width, height
+        elif isinstance(raw_size, (list, tuple)) and len(raw_size) >= 2:
+            width = _positive_int(raw_size[0])
+            height = _positive_int(raw_size[1])
+            if width and height:
+                return width, height
+
+    return None, None
+
+
+def resolve_preview_render_screen_size(payload, pixmap=None) -> tuple[Optional[int], Optional[int]]:
+    payload = payload if isinstance(payload, dict) else {}
+    frame_info = payload.get("frame")
+    for source in (frame_info, payload.get("screen"), payload):
+        width, height = _size_from_mapping(source)
+        if width and height:
+            return width, height
+
+    if pixmap is not None:
+        width = _positive_int(pixmap.width())
+        height = _positive_int(pixmap.height())
+        if width and height:
+            return width, height
+
+    return None, None
+
+
 def stream_disconnect_policy_for_screen_mode(screen_mode: str) -> str:
     mode = str(screen_mode).strip()
     if mode == "1":
@@ -4039,7 +4087,7 @@ class LauncherWindow(QWidget):
         pixmap = self.latest_preview_pixmap.copy()
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        screen_width, screen_height = get_resolution()
+        screen_width, screen_height = resolve_preview_render_screen_size(payload, self.latest_preview_pixmap)
 
         colors = {}
         if show_overlay:

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Dict, NamedTuple, Optional
 
 from PyQt6.QtCore import QByteArray, QObject, QProcess, QProcessEnvironment, Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QDesktopServices, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextCursor
+from PyQt6.QtGui import QColor, QDesktopServices, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -46,7 +46,7 @@ from PyQt6.QtWidgets import (
 
 from aw.autogame.tools.ProcessUtils import hidden_subprocess_context, hidden_subprocess_kwargs, install_hidden_subprocess_patch, resolve_hdc_executable, start_hidden_subprocess_window_suppressor
 from aw.autogame.tools.GameLaunchProfile import DEFAULT_SP_PACKAGE, should_use_sp_recording_for_profile
-from aw.autogame.tools.Utils import archive_run_artifacts, get_resolution, resolve_run_archive_dir, select_scene_resolution
+from aw.autogame.tools.Utils import archive_run_artifacts, get_display_rotation, get_resolution, get_screen_mode, resolve_run_archive_dir, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 
 class AppPaths(NamedTuple):
@@ -612,6 +612,55 @@ def check_capture_stream_for_screen_mode(
                 local_path.unlink()
         except Exception:
             pass
+
+
+def stream_frame_to_qpixmap(frame) -> QPixmap:
+    if frame is None:
+        return QPixmap()
+
+    try:
+        if hasattr(frame, "convert") and hasattr(frame, "size"):
+            rgb_frame = frame.convert("RGB")
+            width, height = rgb_frame.size
+            raw = rgb_frame.tobytes("raw", "RGB")
+            image = QImage(raw, width, height, width * 3, QImage.Format.Format_RGB888)
+            return QPixmap.fromImage(image.copy())
+
+        import numpy as np
+
+        array = np.asarray(frame)
+        if array.size <= 0:
+            return QPixmap()
+        if array.dtype != np.uint8:
+            array = np.clip(array, 0, 255).astype(np.uint8)
+
+        if array.ndim == 2:
+            gray = np.ascontiguousarray(array)
+            height, width = gray.shape
+            image = QImage(
+                gray.data,
+                width,
+                height,
+                gray.strides[0],
+                QImage.Format.Format_Grayscale8,
+            )
+            return QPixmap.fromImage(image.copy())
+
+        if array.ndim == 3 and array.shape[2] >= 3:
+            rgb = np.ascontiguousarray(array[:, :, :3])
+            height, width, _channels = rgb.shape
+            image = QImage(
+                rgb.data,
+                width,
+                height,
+                rgb.strides[0],
+                QImage.Format.Format_RGB888,
+            )
+            return QPixmap.fromImage(image.copy())
+    except Exception:
+        log_exception("stream frame to pixmap failed")
+
+    return QPixmap()
 
 
 def stream_disconnect_policy_for_screen_mode(screen_mode: str) -> str:
@@ -1994,13 +2043,12 @@ def resolve_preview_stage_scenes(stage_entry, scene_pool_info=None) -> dict[str,
 
 
 class LauncherWindow(QWidget):
-    restart_phone_script_finished = pyqtSignal(bool, str)
+    stream_verification_failed = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
         LOGGER.info("LauncherWindow init start")
         self.process: Optional[QProcess] = None
-        self.restart_phone_script_running = False
         self.selected_testcase_file: Optional[Path] = None
         self._updating_targets = False
         self.latest_preview_file: Optional[Path] = None
@@ -2010,13 +2058,15 @@ class LauncherWindow(QWidget):
         self.preview_info_cache: dict[str, dict] = {}
         self.preview_timer = QTimer(self)
         self.preview_timer.setInterval(150)
+        self.stream_verify_timer = QTimer(self)
+        self.stream_verify_timer.setInterval(80)
         self.safety_timer = QTimer(self)
         self.safety_timer.setInterval(5000)
         self.run_timeout_timer = QTimer(self)
         self.run_timeout_timer.setSingleShot(True)
         self.stream_disconnect_signal_timer = QTimer(self)
         self.stream_disconnect_signal_timer.setInterval(500)
-        self.restart_phone_script_finished.connect(self._finish_restart_phone_script)
+        self.stream_verification_failed.connect(self._handle_stream_verification_failed)
 
         self.batch_active = False
         self.stop_requested = False
@@ -2040,6 +2090,13 @@ class LauncherWindow(QWidget):
         self.preview_target_info_height = 90
         self.preview_target_info_width = 360
         self._adjusting_preview_splitter = False
+        self.stream_verify_active = False
+        self.stream_verify_first_frame_seen = False
+        self.stream_verify_screen_mode = ""
+        self.stream_verify_client = None
+        self.stream_verify_buffer = None
+        self.stream_verify_thread: Optional[threading.Thread] = None
+        self.stream_verify_lock = threading.Lock()
         self.preset_buttons: list[QPushButton] = []
         self.theme_mode = "light"
         self.inputs_enabled = True
@@ -2162,8 +2219,8 @@ class LauncherWindow(QWidget):
 
         self.start_button = QPushButton("启动")
         self.start_button.setProperty("primaryButton", True)
-        self.restart_phone_button = QPushButton("重启手机")
-        self.restart_phone_button.setToolTip("执行 launcher 同目录下的 restart.bat 重启手机")
+        self.stream_verify_button = QPushButton("验证流")
+        self.stream_verify_button.setToolTip("按 config.json 的 screen_mode 启动对应抓流验证，并在预览区域显示实时画面")
         self.stop_button = QPushButton("停止")
         self.stop_button.setProperty("dangerButton", True)
         self.stop_button.setEnabled(False)
@@ -2859,7 +2916,7 @@ class LauncherWindow(QWidget):
         action_layout.addWidget(self.preview_overlay_button)
         action_layout.addWidget(self.preview_points_button)
         action_layout.addStretch(1)
-        action_layout.addWidget(self.restart_phone_button)
+        action_layout.addWidget(self.stream_verify_button)
         main_layout.addWidget(action_bar, 0)
 
         status_strip = QWidget()
@@ -3085,7 +3142,7 @@ class LauncherWindow(QWidget):
         self.refresh_button.clicked.connect(self._refresh_config_choices)
         self.project_combo.currentTextChanged.connect(self._on_project_changed)
         self.start_button.clicked.connect(self._start_run)
-        self.restart_phone_button.clicked.connect(self._restart_phone_from_button)
+        self.stream_verify_button.clicked.connect(self._toggle_stream_verification)
         self.stop_button.clicked.connect(self._stop_run)
         self.open_history_button.clicked.connect(self._show_history_page)
         self.history_refresh_button.clicked.connect(self._refresh_history_outputs)
@@ -3103,6 +3160,7 @@ class LauncherWindow(QWidget):
         for filter_name, button in self.output_filter_buttons.items():
             button.clicked.connect(lambda checked=False, name=filter_name: self._set_output_log_filter(name))
         self.preview_timer.timeout.connect(self._poll_preview_frame)
+        self.stream_verify_timer.timeout.connect(self._poll_stream_verification_frame)
         self.safety_timer.timeout.connect(self._check_and_start_if_safe)
         self.run_timeout_timer.timeout.connect(self._handle_run_timeout)
         self.stream_disconnect_signal_timer.timeout.connect(self._poll_stream_disconnect_signal)
@@ -3233,6 +3291,10 @@ class LauncherWindow(QWidget):
         super().resizeEvent(event)
         self._adjust_preview_splitter_sizes()
         self._refresh_preview_pixmap()
+
+    def closeEvent(self, event):
+        self._stop_stream_verification("")
+        super().closeEvent(event)
 
     def _sync_mode_ui(self):
         LOGGER.debug("sync_mode_ui: testcase_mode=%s", self.mode_testcase.isChecked())
@@ -3718,7 +3780,7 @@ class LauncherWindow(QWidget):
         self.mode_direct.setEnabled(enabled)
         self.refresh_button.setEnabled(enabled)
         self.open_history_button.setEnabled(enabled)
-        self.restart_phone_button.setEnabled(enabled and not self.restart_phone_script_running)
+        self.stream_verify_button.setEnabled(enabled or self.stream_verify_active)
         self.project_combo.setEnabled(enabled)
         self.target_combo.setEnabled(enabled)
         self.run_count_spin.setEnabled(enabled)
@@ -4173,7 +4235,7 @@ class LauncherWindow(QWidget):
         self.output_edit.clear()
         self._clear_preview_files()
         self.start_button.setEnabled(False)
-        self.restart_phone_button.setEnabled(False)
+        self.stream_verify_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self._set_inputs_enabled(False)
         self._set_status("已开始批量执行，准备进行安全检查。")
@@ -4224,7 +4286,7 @@ class LauncherWindow(QWidget):
         self.current_run_start_timestamp = None
         self.current_run_archive_dir = None
         self.start_button.setEnabled(True)
-        self.restart_phone_button.setEnabled(not self.restart_phone_script_running)
+        self.stream_verify_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self._set_inputs_enabled(True)
         self.preview_timer.stop()
@@ -5034,50 +5096,222 @@ class LauncherWindow(QWidget):
             return False
         return True
 
-    def _restart_phone_from_button(self):
-        if self.restart_phone_script_running:
+    def _toggle_stream_verification(self):
+        if self.stream_verify_active:
+            self._stop_stream_verification("验证流已关闭。")
             return
+        self._start_stream_verification()
+
+    def _start_stream_verification(self):
         if self.batch_active or self.process is not None:
             QMessageBox.information(self, "运行中", "当前已有任务在运行，请先停止。")
             return
 
-        script_path = APP_DIR / "restart.bat"
-        if not script_path.is_file():
-            message = f"未找到重启脚本：{script_path}"
-            LOGGER.warning("restart phone script missing: %s", script_path)
-            self._log_message(f"[Launcher] {message}\n", level=logging.WARNING)
-            QMessageBox.warning(self, "重启手机", message)
+        try:
+            screen_mode = str(get_screen_mode(str(AUTOGAME_CONFIG_FILE))).strip()
+            if screen_mode not in {"0", "1", "2"}:
+                raise ValueError(f"未知 screen_mode: {screen_mode}")
+            from aw.autogame.stream_client.stream_client import FrameBuffer
+
+            buffer = FrameBuffer(size=1)
+        except Exception as exc:
+            message = f"验证流准备失败：{exc}"
+            log_exception("stream verification prepare failed")
+            self._log_message(f"[Launcher] {message}\n", level=logging.ERROR)
+            QMessageBox.warning(self, "验证流", message)
             return
 
-        self.restart_phone_script_running = True
+        with self.stream_verify_lock:
+            self.stream_verify_active = True
+            self.stream_verify_first_frame_seen = False
+            self.stream_verify_screen_mode = screen_mode
+            self.stream_verify_buffer = buffer
+            self.stream_verify_client = None
+
+        self.stream_verify_button.setText("验证中...")
+        self.stream_verify_button.setEnabled(True)
         self.start_button.setEnabled(False)
-        self.restart_phone_button.setEnabled(False)
-        self._log_message(f"[Launcher] 正在执行重启手机脚本：{script_path}\n")
+        self.stream_verify_timer.start()
+        self._set_status(f"正在验证视频流，screen_mode={screen_mode}。")
+        self._log_message(f"[Launcher] 正在验证视频流，screen_mode={screen_mode}。\n")
+
         thread = threading.Thread(
-            target=self._run_restart_phone_script,
-            args=(script_path,),
+            target=self._start_stream_client_for_verification,
+            args=(screen_mode, buffer),
             daemon=True,
-            name="launcher-restart-phone",
+            name=f"launcher-stream-verify-{screen_mode}",
         )
+        self.stream_verify_thread = thread
         thread.start()
 
-    def _run_restart_phone_script(self, script_path: Path):
+    def _resolve_stream_verification_capture_size(
+        self,
+        screen_width: Optional[int],
+        screen_height: Optional[int],
+    ) -> tuple[int, int]:
+        width = 720
+        height = None
         try:
-            launch_restart_bat_with_system_shell(script_path)
-            self.restart_phone_script_finished.emit(True, "已通过 cmd 打开 restart.bat。")
-        except Exception as exc:
-            log_exception(f"restart phone script failed: script_path={script_path}")
-            self.restart_phone_script_finished.emit(False, f"执行 restart.bat 失败：{exc}")
+            config = json.loads(AUTOGAME_CONFIG_FILE.read_text(encoding="utf-8"))
+            if isinstance(config, dict):
+                width = int(config.get("width") or width)
+                raw_height = config.get("height")
+                if raw_height:
+                    height = int(raw_height)
+        except Exception:
+            log_exception("read stream verification capture size failed")
 
-    def _finish_restart_phone_script(self, success: bool, message: str):
-        self.restart_phone_script_running = False
-        if not self.batch_active and self.process is None:
-            self.start_button.setEnabled(True)
-            self.restart_phone_button.setEnabled(True)
-        level = logging.INFO if success else logging.ERROR
-        self._log_message(f"[Launcher] {message}\n", level=level)
-        if not success:
-            QMessageBox.warning(self, "重启手机", message)
+        if height is None:
+            if screen_width and screen_height:
+                short_side = min(int(screen_width), int(screen_height))
+                long_side = max(int(screen_width), int(screen_height))
+                if short_side > 0:
+                    height = int(width * (long_side / short_side))
+            if height is None:
+                height = 1280
+
+        return width, height
+
+    def _start_stream_client_for_verification(self, screen_mode: str, buffer):
+        client = None
+        try:
+            from aw.autogame.tools.GameAutomator import create_stream_client_for_mode
+
+            screen_width, screen_height = get_resolution()
+            capture_width, capture_height = self._resolve_stream_verification_capture_size(
+                screen_width,
+                screen_height,
+            )
+            screen_width = screen_width or capture_width
+            screen_height = screen_height or capture_height
+            display_rotation = get_display_rotation() if screen_mode == "0" else None
+            client = create_stream_client_for_mode(
+                screen_mode,
+                buffer,
+                screen_width,
+                screen_height,
+                capture_width,
+                capture_height,
+                display_rotation,
+            )
+            if hasattr(client, "set_save_frame"):
+                client.set_save_frame(False)
+
+            with self.stream_verify_lock:
+                if (
+                    not self.stream_verify_active
+                    or self.stream_verify_buffer is not buffer
+                    or self.stream_verify_screen_mode != screen_mode
+                ):
+                    return
+                self.stream_verify_client = client
+
+            if screen_mode == "0":
+                client.start_backend(
+                    lowh=0,
+                    highh=10000,
+                    skip=20,
+                    width=capture_width,
+                    height=capture_height,
+                )
+            else:
+                client.start_backend()
+            LOGGER.info(
+                "stream verification client started: screen_mode=%s capture=%sx%s screen=%sx%s",
+                screen_mode,
+                capture_width,
+                capture_height,
+                screen_width,
+                screen_height,
+            )
+        except Exception as exc:
+            log_exception("stream verification start failed")
+            if client is not None:
+                try:
+                    client.stop()
+                except Exception:
+                    pass
+            self.stream_verification_failed.emit(f"验证流启动失败：{exc}")
+
+    def _handle_stream_verification_failed(self, message: str):
+        if not self.stream_verify_active:
+            return
+        self._stop_stream_verification("")
+        self._log_message(f"[Launcher] {message}\n", level=logging.ERROR)
+        self._set_status(message)
+        QMessageBox.warning(self, "验证流", message)
+
+    def _stop_stream_verification(self, message: str = "验证流已关闭。"):
+        self.stream_verify_timer.stop()
+        with self.stream_verify_lock:
+            client = self.stream_verify_client
+            self.stream_verify_active = False
+            self.stream_verify_first_frame_seen = False
+            self.stream_verify_screen_mode = ""
+            self.stream_verify_client = None
+            self.stream_verify_buffer = None
+
+        if client is not None:
+            try:
+                client.stop()
+            except Exception:
+                log_exception("stop stream verification client failed")
+
+        self.stream_verify_button.setText("验证流")
+        self.stream_verify_button.setEnabled(not self.batch_active and self.process is None)
+        self.start_button.setEnabled(not self.batch_active and self.process is None)
+        if message:
+            self._set_status(message)
+            self._log_message(f"[Launcher] {message}\n")
+
+    def _poll_stream_verification_frame(self):
+        if not self.stream_verify_active or self.stream_verify_buffer is None:
+            return
+
+        frame = self.stream_verify_buffer.get_latest(timeout=0.01)
+        if frame is None:
+            self._check_stream_verification_client_state()
+            return
+
+        pixmap = stream_frame_to_qpixmap(frame)
+        if pixmap.isNull():
+            return
+
+        if not self.stream_verify_first_frame_seen:
+            self.stream_verify_first_frame_seen = True
+            self.stream_verify_button.setText("关闭流")
+            self._set_status(f"验证流已出图，screen_mode={self.stream_verify_screen_mode}。")
+            self._log_message(
+                f"[Launcher] 验证流已出图，screen_mode={self.stream_verify_screen_mode}。\n"
+            )
+
+        payload = {
+            "stage": "验证流",
+            "screen_mode": self.stream_verify_screen_mode,
+            "frame": {
+                "source": "launcher_stream_verification",
+                "width": pixmap.width(),
+                "height": pixmap.height(),
+            },
+        }
+        self.latest_preview_file = None
+        self.latest_preview_pixmap = pixmap
+        self.latest_preview_payload = payload
+        self.preview_image_label.setText("")
+        self._adjust_preview_splitter_sizes()
+        self._refresh_preview_pixmap()
+        self.preview_info_edit.setPlainText(json.dumps(payload, ensure_ascii=False, indent=2))
+
+    def _check_stream_verification_client_state(self):
+        client = self.stream_verify_client
+        if client is None or self.stream_verify_first_frame_seen:
+            return
+
+        main_thread = getattr(client, "main_thread", None)
+        if main_thread is not None and not main_thread.is_alive():
+            last_error = getattr(client, "_last_error", None)
+            message = str(last_error) if last_error is not None else "验证流未拿到首帧，客户端已退出。"
+            self._handle_stream_verification_failed(f"验证流已停止：{message}")
 
     def _start_run(self):
         LOGGER.info(

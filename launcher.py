@@ -492,7 +492,7 @@ def build_launcher_plan_env_values(plan: Optional[dict]) -> dict[str, str]:
         plan.get("screen_mode") or resolve_screen_mode_for_test_profile(test_profile, target_case)
     )
     case_loop_count = int(plan.get("case_loop_count") or 1)
-    return {
+    env_values = {
         "AUTOGAME_TEST_PROFILE": test_profile,
         "AUTOGAME_SCREEN_MODE": screen_mode,
         "AUTOGAME_SINGLE_CASE_LOOPS": str(max(1, case_loop_count)),
@@ -502,6 +502,12 @@ def build_launcher_plan_env_values(plan: Optional[dict]) -> dict[str, str]:
         "AUTOGAME_SAVE_FRAMES_DIR": str(LOG_DIR / "process_save_frames"),
         "AUTOGAME_TMP_FRAMES_DIR": str(TEMP_DIR / "tmp_frames"),
     }
+    screen_width = _positive_int(plan.get("screen_width"))
+    screen_height = _positive_int(plan.get("screen_height"))
+    if screen_width and screen_height:
+        env_values["AUTOGAME_SCREEN_WIDTH"] = str(screen_width)
+        env_values["AUTOGAME_SCREEN_HEIGHT"] = str(screen_height)
+    return env_values
 
 
 def _decode_process_output(output) -> str:
@@ -694,13 +700,30 @@ def _size_from_mapping(value) -> tuple[Optional[int], Optional[int]]:
     return None, None
 
 
-def resolve_preview_render_screen_size(payload, pixmap=None) -> tuple[Optional[int], Optional[int]]:
+def resolve_preview_render_screen_size(
+    payload,
+    pixmap=None,
+    locked_screen_size=None,
+) -> tuple[Optional[int], Optional[int]]:
     payload = payload if isinstance(payload, dict) else {}
-    frame_info = payload.get("frame")
-    for source in (frame_info, payload.get("screen"), payload):
+    locked_width = None
+    locked_height = None
+    if isinstance(locked_screen_size, (list, tuple)) and len(locked_screen_size) >= 2:
+        locked_width = _positive_int(locked_screen_size[0])
+        locked_height = _positive_int(locked_screen_size[1])
+
+    for source in (payload.get("screen"), payload):
         width, height = _size_from_mapping(source)
         if width and height:
             return width, height
+
+    if locked_width and locked_height:
+        return locked_width, locked_height
+
+    frame_info = payload.get("frame")
+    width, height = _size_from_mapping(frame_info)
+    if width and height:
+        return width, height
 
     if pixmap is not None:
         width = _positive_int(pixmap.width())
@@ -709,6 +732,29 @@ def resolve_preview_render_screen_size(payload, pixmap=None) -> tuple[Optional[i
             return width, height
 
     return None, None
+
+
+def resolve_preview_payload_stage_name(payload) -> str:
+    payload = payload if isinstance(payload, dict) else {}
+
+    for source in (
+        payload.get("stage"),
+        payload.get("phase"),
+        (payload.get("semantic_log") or {}).get("current_stage")
+        if isinstance(payload.get("semantic_log"), dict)
+        else None,
+    ):
+        if isinstance(source, dict):
+            for key in ("name", "stage"):
+                value = str(source.get(key) or "").strip()
+                if value:
+                    return value
+        elif source:
+            value = str(source).strip()
+            if value:
+                return value
+
+    return ""
 
 
 def stream_disconnect_policy_for_screen_mode(screen_mode: str) -> str:
@@ -2138,6 +2184,7 @@ class LauncherWindow(QWidget):
         self.preview_target_info_height = 90
         self.preview_target_info_width = 360
         self._adjusting_preview_splitter = False
+        self.preview_render_screen_size: Optional[tuple[int, int]] = None
         self.stream_verify_active = False
         self.stream_verify_first_frame_seen = False
         self.stream_verify_screen_mode = ""
@@ -3822,6 +3869,49 @@ class LauncherWindow(QWidget):
         )
         return env
 
+    def _set_preview_render_screen_size(self, width, height, source: str):
+        width = _positive_int(width)
+        height = _positive_int(height)
+        if not width or not height:
+            return False
+        self.preview_render_screen_size = (width, height)
+        LOGGER.info(
+            "preview render screen size locked: %sx%s source=%s",
+            width,
+            height,
+            source,
+        )
+        return True
+
+    def _lock_preview_render_screen_size_for_plan(self, plan: dict) -> tuple[Optional[int], Optional[int]]:
+        plan = plan if isinstance(plan, dict) else {}
+        width = _positive_int(plan.get("screen_width"))
+        height = _positive_int(plan.get("screen_height"))
+        if width and height:
+            self._set_preview_render_screen_size(width, height, "plan")
+            return width, height
+
+        try:
+            width, height = get_resolution()
+        except Exception:
+            log_exception("lock preview render screen size failed")
+            width, height = None, None
+
+        if self._set_preview_render_screen_size(width, height, "startup"):
+            plan["screen_width"] = int(width)
+            plan["screen_height"] = int(height)
+            return int(width), int(height)
+
+        self.preview_render_screen_size = None
+        return None, None
+
+    def _get_preview_render_screen_size(self, payload) -> tuple[Optional[int], Optional[int]]:
+        return resolve_preview_render_screen_size(
+            payload,
+            self.latest_preview_pixmap,
+            self.preview_render_screen_size,
+        )
+
     def _set_inputs_enabled(self, enabled: bool):
         self.inputs_enabled = enabled
         self.mode_testcase.setEnabled(enabled)
@@ -3948,7 +4038,11 @@ class LauncherWindow(QWidget):
         if self.latest_preview_pixmap is None:
             LOGGER.debug("render preview fail: no latest preview pixmap")
             return False
-        display_pixmap = self._build_preview_display_pixmap()
+        try:
+            display_pixmap = self._build_preview_display_pixmap()
+        except Exception:
+            log_exception("build preview overlay failed; fallback to raw pixmap")
+            display_pixmap = self.latest_preview_pixmap
         if display_pixmap.isNull():
             LOGGER.warning(
                 "render preview fail: display pixmap is null latest_frame=%s",
@@ -4074,7 +4168,7 @@ class LauncherWindow(QWidget):
             return self.latest_preview_pixmap
 
         payload = self.latest_preview_payload or {}
-        stage = payload.get("stage")
+        stage = resolve_preview_payload_stage_name(payload)
         project_case = self._get_preview_project_case()
         project_info = self._load_preview_project_info(project_case)
         stage_info = project_info.get("stage_info", {})
@@ -4086,42 +4180,43 @@ class LauncherWindow(QWidget):
 
         pixmap = self.latest_preview_pixmap.copy()
         painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        screen_width, screen_height = resolve_preview_render_screen_size(payload, self.latest_preview_pixmap)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            screen_width, screen_height = self._get_preview_render_screen_size(payload)
 
-        colors = {}
-        if show_overlay:
-            colors["areas"] = QColor(80, 220, 120)
-            colors["special_areas"] = QColor(255, 140, 80)
-        if show_points:
-            colors["points"] = QColor(80, 190, 255)
+            colors = {}
+            if show_overlay:
+                colors["areas"] = QColor(80, 220, 120)
+                colors["special_areas"] = QColor(255, 140, 80)
+            if show_points:
+                colors["points"] = QColor(80, 190, 255)
 
-        for scene_name, scene_data in scenes.items():
-            if not isinstance(scene_data, dict):
-                continue
-            scene_data = select_scene_resolution(scene_data, screen_width, screen_height)
-            for item_type, color in colors.items():
-                items = scene_data.get(item_type, {})
-                if not isinstance(items, dict):
+            for scene_name, scene_data in scenes.items():
+                if not isinstance(scene_data, dict):
                     continue
-                for item_name, item_data in items.items():
-                    if not isinstance(item_data, dict):
+                scene_data = select_scene_resolution(scene_data, screen_width, screen_height)
+                for item_type, color in colors.items():
+                    items = scene_data.get(item_type, {})
+                    if not isinstance(items, dict):
                         continue
-                    label = f"{scene_name}/{item_name}"
-                    self._draw_stage_rect(
-                        painter,
-                        item_data,
-                        pixmap.width(),
-                        pixmap.height(),
-                        int(scene_data.get("width") or pixmap.width()),
-                        int(scene_data.get("height") or pixmap.height()),
-                        screen_width,
-                        screen_height,
-                        color,
-                        label,
-                    )
-
-        painter.end()
+                    for item_name, item_data in items.items():
+                        if not isinstance(item_data, dict):
+                            continue
+                        label = f"{scene_name}/{item_name}"
+                        self._draw_stage_rect(
+                            painter,
+                            item_data,
+                            pixmap.width(),
+                            pixmap.height(),
+                            int(scene_data.get("width") or pixmap.width()),
+                            int(scene_data.get("height") or pixmap.height()),
+                            screen_width,
+                            screen_height,
+                            color,
+                            label,
+                        )
+        finally:
+            painter.end()
         return pixmap
 
     def _poll_preview_frame(self):
@@ -4273,6 +4368,7 @@ class LauncherWindow(QWidget):
     def _begin_batch(self, plan: dict):
         LOGGER.info("begin_batch: %s", plan)
         self.current_plan = plan
+        screen_width, screen_height = self._lock_preview_render_screen_size_for_plan(plan)
         self.current_batch_start_timestamp = time.strftime("%Y%m%d%H%M%S")
         self.current_run_start_timestamp = None
         self.batch_active = True
@@ -4293,6 +4389,7 @@ class LauncherWindow(QWidget):
         self._log_message(
             f"[Launcher] 批量运行开始，mode={plan['mode']}, runs={plan['run_count']}, "
             f"test_profile={plan['test_profile']}, screen_mode={plan['screen_mode']}, "
+            f"screen_size={screen_width}x{screen_height}, "
             f"case_loops={plan['case_loop_count']}, "
             f"generate_preview_video={plan['generate_preview_video']}, "
             f"safe_temp={plan['safe_temp']}°C, safe_battery={plan['safe_battery']}%, "
@@ -5232,6 +5329,7 @@ class LauncherWindow(QWidget):
             )
             screen_width = screen_width or capture_width
             screen_height = screen_height or capture_height
+            self._set_preview_render_screen_size(screen_width, screen_height, "stream_verification")
             display_rotation = get_display_rotation() if screen_mode == "0" else None
             client = create_stream_client_for_mode(
                 screen_mode,

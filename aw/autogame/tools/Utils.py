@@ -1125,6 +1125,29 @@ def select_scene_resolution(scene_content, screen_width=None, screen_height=None
     return next(iter(resolutions.values()))
 
 
+def lock_stage_info_scene_resolutions(stage_info, screen_width=None, screen_height=None):
+    if not isinstance(stage_info, dict):
+        return {}
+
+    locked_stage_info = {}
+    for stage_name, stage_content in stage_info.items():
+        if not isinstance(stage_content, dict):
+            locked_stage_info[stage_name] = stage_content
+            continue
+
+        locked_stage = dict(stage_content)
+        scenes = stage_content.get("scenes", {})
+        if isinstance(scenes, dict):
+            locked_scenes = {}
+            for scene_name, scene_content in scenes.items():
+                selected_scene = select_scene_resolution(scene_content, screen_width, screen_height)
+                locked_scenes[scene_name] = dict(selected_scene) if isinstance(selected_scene, dict) else selected_scene
+            locked_stage["scenes"] = locked_scenes
+        locked_stage_info[stage_name] = locked_stage
+
+    return locked_stage_info
+
+
 def extract_absolute_points(stage_info):
     """
     将游戏各阶段场景中的控点（Points）从百分比归一化坐标转换为屏幕绝对像素坐标。
@@ -1150,12 +1173,12 @@ def extract_absolute_points(stage_info):
     """
     absolute_points = {}
     screen_w, screen_h = get_runtime_screen_resolution()
+    stage_info = lock_stage_info_scene_resolutions(stage_info, screen_w, screen_h)
 
     for stage_name, stage_content in stage_info.items():
         scenes = stage_content.get('scenes', {})
 
         for scene_name, scene_content in scenes.items():
-            scene_content = select_scene_resolution(scene_content, screen_w, screen_h)
             # 获取当前场景的画布大小（标注时的原始分辨率）
             img_w = scene_content.get('width', 1)
             img_h = scene_content.get('height', 1)

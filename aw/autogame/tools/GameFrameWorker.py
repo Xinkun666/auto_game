@@ -1923,7 +1923,6 @@ class FrameWorker(threading.Thread):
         info_path = f"aw.autogame.customs_examples.{project_case}.info"
         info_module = importlib.import_module(info_path)
         self.stage_dict = getattr(info_module, "STAGE_DICT")
-        raw_stage_info = getattr(info_module, "STAGE_INFO")
 
         case_name = os.environ.get("TARGET_GAME_CASE")
         if not case_name:
@@ -1957,17 +1956,17 @@ class FrameWorker(threading.Thread):
         self.launcher_inactivity_timeout_seconds = self._resolve_launcher_inactivity_timeout_seconds()
         self._watchdog_stop_event = threading.Event()
         self._watchdog_thread = None
+        self.stage_resolver = StageLogicController()
 
         # 触控后端统一从 config.json 读取，controller_backend 仅保留兼容旧调用签名。
         touch_backend = get_touch_backend()
         self.controller = Controller(
             driver,
             self,
-            raw_stage_info,
+            self.stage_resolver.stage_info,
             backend=touch_backend,
             backend_options=controller_options,
         )
-        self.stage_resolver = StageLogicController()
         self.stage_info = {}
         self.current_stage = None
         self.current_group = DEFAULT_GROUP_NAME

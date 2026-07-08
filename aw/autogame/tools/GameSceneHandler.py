@@ -272,9 +272,14 @@ class StageLogicController:
         info_mod = importlib.import_module(module_path)
 
         self.project_name = getattr(info_mod, "PROJECT_NAME")
-        self.stage_info = getattr(info_mod, "STAGE_INFO")
-
         self.processor = GameImageProcessor(project_case)
+        raw_stage_info = getattr(info_mod, "STAGE_INFO")
+        self.stage_info = lock_stage_info_scene_resolutions(
+            raw_stage_info,
+            self.processor.screen_w,
+            self.processor.screen_h,
+        )
+        print(f"[{self.project_name}] 场景分辨率已锁定: {self.processor.screen_w}x{self.processor.screen_h}")
         print(f"[{self.project_name}] 逻辑控制器已就绪。")
 
     def get_stage_groups(self, stage_name):
@@ -341,7 +346,6 @@ class StageLogicController:
 
         # 遍历该阶段下的所有场景和区域
         for scene_name, scene_info in scenes.items():
-            scene_info = select_scene_resolution(scene_info, self.processor.screen_w, self.processor.screen_h)
             origin_w = scene_info.get('width')
             origin_h = scene_info.get('height')
 

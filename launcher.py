@@ -1886,6 +1886,113 @@ def force_stop_apps(apps: list[str]) -> list[str]:
     return stopped
 
 
+def _preview_scene_pool_lookup(scene_pool_info) -> dict[str, dict]:
+    if not isinstance(scene_pool_info, dict):
+        return {}
+    pool_scenes = scene_pool_info.get("scenes", {})
+    if not isinstance(pool_scenes, dict):
+        return {}
+
+    lookup = {}
+    for scene_dir, scene_data in pool_scenes.items():
+        if not isinstance(scene_data, dict):
+            continue
+        scene_dir_text = str(scene_dir or "").strip()
+        if scene_dir_text:
+            lookup[scene_dir_text] = scene_data
+        scene_name = str(scene_data.get("name") or "").strip()
+        if scene_name:
+            lookup.setdefault(scene_name, scene_data)
+    return lookup
+
+
+def _is_preview_scene_data(value) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if "resolutions" in value:
+        return True
+    return any(key in value for key in ("areas", "points", "special_areas"))
+
+
+def _preview_scene_reference_candidates(scene_name: str, scene_ref) -> list[str]:
+    candidates = []
+    if isinstance(scene_ref, str):
+        candidates.append(scene_ref)
+    elif isinstance(scene_ref, dict):
+        for key in (
+            "dir",
+            "scene_dir",
+            "scene_pool_dir",
+            "scene_pool_ref",
+            "ref",
+            "scene",
+            "name",
+        ):
+            value = str(scene_ref.get(key) or "").strip()
+            if value:
+                candidates.append(value)
+    scene_name = str(scene_name or "").strip()
+    if scene_name:
+        candidates.append(scene_name)
+
+    result = []
+    seen = set()
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
+
+
+def resolve_preview_stage_scenes(stage_entry, scene_pool_info=None) -> dict[str, dict]:
+    if not isinstance(stage_entry, dict):
+        return {}
+
+    raw_scenes = stage_entry.get("scenes", {})
+    if isinstance(raw_scenes, dict):
+        raw_entries = list(raw_scenes.items())
+    elif isinstance(raw_scenes, list):
+        raw_entries = []
+        for item in raw_scenes:
+            if isinstance(item, dict):
+                name = (
+                    item.get("name")
+                    or item.get("scene")
+                    or item.get("dir")
+                    or item.get("scene_dir")
+                )
+                raw_entries.append((str(name or "").strip(), item))
+            elif isinstance(item, str):
+                raw_entries.append((item, item))
+    else:
+        return {}
+
+    pool_lookup = _preview_scene_pool_lookup(scene_pool_info)
+    resolved = {}
+    for raw_name, raw_scene in raw_entries:
+        scene_name = str(raw_name or "").strip()
+        scene_data = raw_scene if _is_preview_scene_data(raw_scene) else None
+        if scene_data is None:
+            for candidate in _preview_scene_reference_candidates(scene_name, raw_scene):
+                candidate_data = pool_lookup.get(candidate)
+                if _is_preview_scene_data(candidate_data):
+                    scene_data = candidate_data
+                    break
+        if not isinstance(scene_data, dict):
+            continue
+
+        display_name = scene_name
+        if isinstance(raw_scene, str):
+            display_name = str(scene_data.get("name") or scene_name or raw_scene).strip()
+        elif isinstance(raw_scene, dict):
+            display_name = str(raw_scene.get("name") or scene_data.get("name") or scene_name).strip()
+        if not display_name:
+            display_name = str(scene_data.get("name") or "场景").strip()
+        resolved[display_name] = scene_data
+    return resolved
+
+
 class LauncherWindow(QWidget):
     restart_phone_script_finished = pyqtSignal(bool, str)
 
@@ -1900,6 +2007,7 @@ class LauncherWindow(QWidget):
         self.latest_preview_pixmap: Optional[QPixmap] = None
         self.latest_preview_payload: Optional[dict] = None
         self.stage_info_cache: dict[str, dict] = {}
+        self.preview_info_cache: dict[str, dict] = {}
         self.preview_timer = QTimer(self)
         self.preview_timer.setInterval(150)
         self.safety_timer = QTimer(self)
@@ -3197,6 +3305,8 @@ class LauncherWindow(QWidget):
         project = self.project_combo.currentText().strip()
         target = self.target_combo.currentText().strip()
         LOGGER.info("refresh_config_choices: project=%s target=%s", project, target)
+        self.preview_info_cache.clear()
+        self.stage_info_cache.clear()
         self._load_project_cases(preferred=project)
         self._load_target_cases(preferred=target)
         self._sync_testcase_controls_state()
@@ -3304,6 +3414,8 @@ class LauncherWindow(QWidget):
         LOGGER.info("show launcher page")
         project = self.project_combo.currentText().strip()
         target = self.target_combo.currentText().strip()
+        self.preview_info_cache.clear()
+        self.stage_info_cache.clear()
         self.page_stack.setCurrentWidget(self.launcher_page)
         self._load_project_cases(preferred=project)
         self._load_target_cases(preferred=target)
@@ -3760,25 +3872,40 @@ class LauncherWindow(QWidget):
             return str(self.current_plan.get("project_case") or "").strip()
         return self.project_combo.currentText().strip()
 
-    def _load_stage_info(self, project_case: str) -> dict:
+    def _load_preview_project_info(self, project_case: str) -> dict:
         if not project_case:
             return {}
-        if project_case in self.stage_info_cache:
-            return self.stage_info_cache[project_case]
+        if project_case in self.preview_info_cache:
+            return self.preview_info_cache[project_case]
 
         try:
-            module = importlib.import_module(
-                f"aw.autogame.customs_examples.{project_case}.info"
-            )
+            importlib.invalidate_caches()
+            module_name = f"aw.autogame.customs_examples.{project_case}.info"
+            if module_name in sys.modules:
+                module = importlib.reload(sys.modules[module_name])
+            else:
+                module = importlib.import_module(module_name)
             stage_info = getattr(module, "STAGE_INFO", {})
+            scene_pool = getattr(module, "SCENE_POOL", {})
         except Exception:
-            log_exception(f"load stage info failed: project_case={project_case}")
+            log_exception(f"load preview project info failed: project_case={project_case}")
             stage_info = {}
+            scene_pool = {}
 
         if not isinstance(stage_info, dict):
             stage_info = {}
+        if not isinstance(scene_pool, dict):
+            scene_pool = {}
+        project_info = {
+            "stage_info": stage_info,
+            "scene_pool": scene_pool,
+        }
+        self.preview_info_cache[project_case] = project_info
         self.stage_info_cache[project_case] = stage_info
-        return stage_info
+        return project_info
+
+    def _load_stage_info(self, project_case: str) -> dict:
+        return self._load_preview_project_info(project_case).get("stage_info", {})
 
     def _draw_stage_rect(
         self,
@@ -3839,9 +3966,11 @@ class LauncherWindow(QWidget):
         payload = self.latest_preview_payload or {}
         stage = payload.get("stage")
         project_case = self._get_preview_project_case()
-        stage_info = self._load_stage_info(project_case)
+        project_info = self._load_preview_project_info(project_case)
+        stage_info = project_info.get("stage_info", {})
+        scene_pool = project_info.get("scene_pool", {})
         stage_entry = stage_info.get(stage, {}) if isinstance(stage_info, dict) else {}
-        scenes = stage_entry.get("scenes", {}) if isinstance(stage_entry, dict) else {}
+        scenes = resolve_preview_stage_scenes(stage_entry, scene_pool)
         if not scenes:
             return self.latest_preview_pixmap
 

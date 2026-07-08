@@ -2608,6 +2608,7 @@ class FrameWorker(threading.Thread):
         self.running = False
         self.finished = True
         self._watchdog_stop_event.set()
+        self._flush_current_frame_log()
 
         if self._watchdog_thread and threading.current_thread() is not self._watchdog_thread:
             self._watchdog_thread.join(timeout=1.0)

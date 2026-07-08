@@ -39,6 +39,10 @@ class HouseSearchManager:
     INITIAL_LOCATION_MAX_SAMPLES = 6
     INITIAL_LOCATION_STABLE_DISTANCE = 2.5
     INITIAL_LOCATION_JUMP_RESET_DISTANCE = 8.0
+    LANDING_LOCATION_PROBE_Y_BIAS = -120
+    LANDING_LOCATION_PROBE_DURA = 180
+    LANDING_LOCATION_PROBE_WAIT = 360
+    LANDING_LOCATION_STABLE_MAX_JUMP_DISTANCE = 100.0
     ENTRY_AUTO_FORWARD_DISTANCE = 30.0
     ENTRY_COARSE_MOVE_DISTANCE = 15.0
     ENTRY_ARRIVAL_DISTANCE = 1.0
@@ -272,6 +276,7 @@ class HouseSearchManager:
         self.location_missing_frames = 0
         self.last_valid_location = None
         self.initial_location_samples = []
+        self.landing_location_confirmed = False
         self.route_stuck_reference_loc = None
         self.route_stuck_bypass_attempts = 0
         self.house_bypass_unstuck_pause_until = 0.0
@@ -363,6 +368,7 @@ class HouseSearchManager:
         self.location_missing_frames = 0
         self.last_valid_location = None
         self.initial_location_samples = []
+        self.landing_location_confirmed = False
         self.route_stuck_reference_loc = None
         self.route_stuck_bypass_attempts = 0
         self.house_bypass_unstuck_pause_until = 0.0
@@ -491,23 +497,19 @@ class HouseSearchManager:
         if self._should_abort(w):
             return
 
-        # 0. 基础设置：落地后首帧刷新画面 + 切第一人称
-        if not self.first_view:
-            w.frame_log("搜房观察：这是落地后的首帧搜房流程，所以先刷新画面并切到第一人称，保证后续入门导航稳定")
-            self._set_frame_decision(
-                w,
-                "搜房阶段落地后首帧，准备刷新画面并切第一人称",
-                "先刷新两帧处理跳跃提示，然后点击人称，确保后续入门点导航使用稳定视角",
-                action="刷新画面并点击人称",
-                method="_refresh_frame_and_handle_jump() x2 + w.click(人称)",
-                result="下一帧开始读取位置并选择最近入门点",
-            )
-            self._refresh_frame_and_handle_jump(w)
-            self._refresh_frame_and_handle_jump(w)
-            w.click('人称')
-            self.first_view = True
+        confirmed_landing_location = None
 
-        location_raw = w.get_info('location')
+        # 0. 基础设置：落地后先用当前位置做一次前探刷新，确认坐标稳定后再切第一人称。
+        if not self.first_view:
+            confirmed_landing_location = self._confirm_landing_location_before_first_view(w)
+            if confirmed_landing_location is None:
+                return
+
+        location_raw = (
+            [confirmed_landing_location]
+            if confirmed_landing_location is not None
+            else w.get_info('location')
+        )
         if location_raw is None:
             self.location_missing_frames += 1
             print('位置值是None，等待位置刷新...')
@@ -556,6 +558,97 @@ class HouseSearchManager:
             result="本帧由具体搜房分支继续细化决策",
         )
         self.searching_logic(w, location, direction)
+
+    def _confirm_landing_location_before_first_view(self, w: 'FrameWorker'):
+        first_loc = self._remember_valid_location(w.get_info('location'))
+        if first_loc is None:
+            self.location_missing_frames += 1
+            print('落地首帧位置值无效，先刷新等待位置稳定...')
+            w.frame_log("搜房观察：落地首帧当前位置为空，所以先刷新画面；连续缺失时轻推摇杆刷新小地图坐标")
+            self._set_frame_decision(
+                w,
+                f"搜房阶段落地首帧当前位置缺失，连续缺失 {self.location_missing_frames} 帧",
+                "先刷新画面等待坐标恢复，连续缺失时轻推摇杆刷新小地图坐标",
+                action="刷新画面，必要时轻推摇杆",
+                method="_refresh_frame_and_handle_jump(); tap_single(摇杆)",
+                result="等待下一帧重新识别当前位置后再切第一人称",
+            )
+            self._refresh_frame_and_handle_jump(w, "落地首帧坐标缺失")
+            if self.location_missing_frames >= 3:
+                w.tap_single('摇杆', y_bias=-120, wait=300)
+            return None
+
+        self.location_missing_frames = 0
+        self._set_frame_decision(
+            w,
+            f"搜房阶段落地首帧读取当前位置={first_loc}",
+            "先轻推摇杆并刷新第二帧，用前后坐标差确认小地图坐标是否稳定，再切第一人称",
+            action="前推刷新落地坐标",
+            method=(
+                f"tap_single(摇杆, y_bias={self.LANDING_LOCATION_PROBE_Y_BIAS}, "
+                f"dura={self.LANDING_LOCATION_PROBE_DURA}, wait={self.LANDING_LOCATION_PROBE_WAIT}); "
+                "_refresh_frame_and_handle_jump()"
+            ),
+            result="坐标稳定后点击人称并继续入门点判断",
+        )
+        print(f"[Searching] 落地首帧当前位置={first_loc}，轻推摇杆后刷新第二帧确认坐标稳定")
+        w.tap_single(
+            '摇杆',
+            y_bias=self.LANDING_LOCATION_PROBE_Y_BIAS,
+            dura=self.LANDING_LOCATION_PROBE_DURA,
+            wait=self.LANDING_LOCATION_PROBE_WAIT,
+        )
+        self._refresh_frame_and_handle_jump(w, "落地首帧前推后确认坐标")
+
+        second_loc = self._remember_valid_location(w.get_info('location'))
+        if second_loc is None:
+            print("[Searching] 落地前推后第二帧位置仍无效，等待下一帧重新确认")
+            self._set_frame_decision(
+                w,
+                f"落地前推后第二帧位置无效，首帧位置={first_loc}",
+                "第二帧仍没有有效小地图坐标，暂不切第一人称，也不选择入门点",
+                action="等待下一帧",
+                method="等待下一帧重新执行落地坐标确认",
+                result="避免用无效坐标进入黑区/入门点判断",
+            )
+            return None
+
+        location_delta = get_distance(first_loc, second_loc)
+        if location_delta > self.LANDING_LOCATION_STABLE_MAX_JUMP_DISTANCE:
+            print(
+                f"[Searching] 落地前推后坐标跳变 {location_delta:.2f} > "
+                f"{self.LANDING_LOCATION_STABLE_MAX_JUMP_DISTANCE:.1f}，暂不切人称或选入门点"
+            )
+            self.initial_location_samples = [second_loc]
+            self._set_frame_decision(
+                w,
+                (
+                    f"落地前推后坐标跳变过大：first={first_loc}, second={second_loc}, "
+                    f"delta={location_delta:.2f}"
+                ),
+                "判断当前帧坐标仍在落地漂移/刷新，先等待下一帧重新确认稳定位置",
+                action="等待落地坐标稳定",
+                method="比较前推前后两帧 location",
+                result="本帧不切第一人称，不进入黑区和入门点判断",
+            )
+            return None
+
+        self.initial_location_samples = [second_loc]
+        self.landing_location_confirmed = True
+        self._set_frame_decision(
+            w,
+            (
+                f"落地前推后坐标稳定：first={first_loc}, second={second_loc}, "
+                f"delta={location_delta:.2f}"
+            ),
+            "坐标稳定，可以切第一人称并继续不可通行区域/入门点判断",
+            action="点击人称并进入搜房判断",
+            method="w.click(人称)",
+            result="本帧继续使用确认后的第二帧坐标",
+        )
+        w.click('人称')
+        self.first_view = True
+        return second_loc
 
     def _should_abort(self, w: 'FrameWorker'):
         callback = getattr(self, "abort_callback", None)
@@ -3384,6 +3477,12 @@ class HouseSearchManager:
     def _get_stable_initial_location(self, current_loc):
         """落地后等待小地图坐标稳定，避免沿用跳伞前旧位置选错最近入口。"""
         loc = tuple(current_loc)
+        if getattr(self, "landing_location_confirmed", False):
+            self.landing_location_confirmed = False
+            self.initial_location_samples = [loc]
+            print(f"[Searching] 落地位置已通过前推两帧确认: {loc}")
+            return loc
+
         if self.initial_location_samples:
             prev = self.initial_location_samples[-1]
             jump_dist = get_distance(prev, loc)

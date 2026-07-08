@@ -4254,9 +4254,14 @@ class HouseSearchManager:
 
     def _align_to_door_detection(self, w, door, tolerance_px=80, phase_label="DoorAlign"):
         strict_after_backoff = self._consume_entry_door_strict_align_after_backoff()
+        frame_logger = getattr(w, "frame_log", None)
         for step in range(self.ENTRY_DOOR_FINAL_ALIGN_MAX_STEPS):
             offset_real, door_area_ratio, frame_w = self._get_visible_door_center_offset(w, door)
             if offset_real is None:
+                if callable(frame_logger):
+                    frame_logger(
+                        f"对准门：{phase_label} 当前帧没有重新识别到门，停止本轮对准，等待重新获取门目标"
+                    )
                 return False
 
             if strict_after_backoff:
@@ -4269,6 +4274,11 @@ class HouseSearchManager:
                     f"threshold={center_threshold}, door_area_ratio={door_area_ratio}, "
                     f"strict_after_backoff={strict_after_backoff}"
                 )
+                if callable(frame_logger):
+                    frame_logger(
+                        f"对准门：{phase_label} 门中心已进入容差，offset={offset_real:.1f}px，"
+                        f"threshold={center_threshold}，area={door_area_ratio}，本轮不再滑动视角"
+                    )
                 return True
 
             adjust_val = int(offset_real * self.ENTRY_DOOR_ALIGN_STEP_RATIO)
@@ -4283,6 +4293,11 @@ class HouseSearchManager:
                 f"wait={self.ENTRY_DOOR_ALIGN_WAIT}, threshold={center_threshold}, "
                 f"door_area_ratio={door_area_ratio}, strict_after_backoff={strict_after_backoff}"
             )
+            if callable(frame_logger):
+                frame_logger(
+                    f"对准门：{phase_label} 门中心偏移 {offset_real:.1f}px，"
+                    f"滑动视角 x_bias={adjust_val}，然后等待最新帧重新找门"
+                )
             self._set_search_frame_decision(
                 w,
                 "当前进房分支：门中心偏移，微调视角",
@@ -4312,8 +4327,16 @@ class HouseSearchManager:
             )
             refreshed = self._refresh_door_after_view_adjust(w, phase_label)
             if refreshed is None:
+                if callable(frame_logger):
+                    frame_logger(
+                        f"对准门：{phase_label} 滑动视角并刷新后没有重新看到门，本轮对准失败"
+                    )
                 return False
             door = refreshed
+        if callable(frame_logger):
+            frame_logger(
+                f"对准门：{phase_label} 已尝试 {self.ENTRY_DOOR_FINAL_ALIGN_MAX_STEPS} 次仍未进入容差，本轮对准失败"
+            )
         return False
 
     def _advance_towards_entry_door(self, w):

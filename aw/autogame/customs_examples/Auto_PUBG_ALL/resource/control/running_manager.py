@@ -1069,6 +1069,12 @@ class RunningManager:
                 result="等待本帧动作执行后由下一帧重新识别位置/场景",
             )
 
+    @staticmethod
+    def _frame_log(w: "FrameWorker", message: str):
+        frame_logger = getattr(w, "frame_log", None)
+        if callable(frame_logger):
+            frame_logger(message)
+
     def _get_location(self, w: "FrameWorker") -> Optional[Tuple[int, int]]:
         info = w.get_info("location")
         if info is None:
@@ -2921,6 +2927,11 @@ class RunningManager:
                 f"前推后丢失 {self.roadside_car_lost_after_forward_pushes}/"
                 f"{self.ROADSIDE_CAR_LOST_FORWARD_LIMIT}，保持方向继续靠近"
             )
+            self._frame_log(
+                w,
+                f"路边追车：当前帧没有识别到车辆，丢失 {self.roadside_car_lost_rounds}/"
+                f"{self.ROADSIDE_CAR_LOST_LIMIT}，先保持原方向靠近"
+            )
             if self.roadside_car_lost_after_forward_pushes > self.ROADSIDE_CAR_LOST_FORWARD_LIMIT:
                 self._give_up_roadside_car_pursuit("前推后连续丢失车辆，判定为误识别")
                 return True
@@ -2938,6 +2949,11 @@ class RunningManager:
                 f"[Running] 路边追车已对准车辆，前推靠近 "
                 f"{self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}"
             )
+            self._frame_log(
+                w,
+                f"路边追车：车辆已经进入中心容差，准备前推靠近 "
+                f"{self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}"
+            )
 
         if aligned is None and self.roadside_car_last_forward_motion is not None:
             forward_bias_y, forward_dura, forward_wait = self._get_lost_car_half_forward_motion()
@@ -2951,6 +2967,11 @@ class RunningManager:
             f"[Running] 路边追车前推 y_bias={forward_bias_y}, "
             f"dura={forward_dura}ms, wait={forward_wait}ms, "
             f"car_area_ratio={self.roadside_car_last_area_ratio}"
+        )
+        self._frame_log(
+            w,
+            f"路边追车：前推靠近车辆 y_bias={forward_bias_y}，dura={forward_dura}ms，"
+            f"wait={forward_wait}ms，area={self.roadside_car_last_area_ratio}，动作后刷新画面"
         )
         w.tap_single(
             "摇杆",
@@ -2977,6 +2998,11 @@ class RunningManager:
                     f"{self.roadside_car_forward_pushes} 次，未超过 "
                     f"{self.CAR_FORWARD_LOST_BACKOFF_MIN_PUSHES} 次，"
                     "不执行后拉，继续向前找车"
+                )
+                self._frame_log(
+                    w,
+                    f"路边追车：前推后车辆暂时消失，但只向该车前推 "
+                    f"{self.roadside_car_forward_pushes} 次，先不后拉，继续向前找车"
                 )
                 return True
             recover_result = self._recover_car_lost_after_forward_push(
@@ -3299,6 +3325,7 @@ class RunningManager:
 
     def _attempt_drive_after_move(self, w: "FrameWorker", reason: str) -> bool:
         print(f"[Running] {reason}，尝试点击驾驶按钮")
+        self._frame_log(w, f"上车检查：{reason}，先看当前帧是否出现驾驶按钮")
         location = self._get_location(w)
         direction = self._get_scalar(w.get_info("direction"))
         if location is not None:
@@ -3306,9 +3333,11 @@ class RunningManager:
 
         drive_btn = w.get_info("驾驶")
         if not drive_btn:
+            self._frame_log(w, f"上车检查：{reason} 当前帧没有驾驶按钮，继续对准或靠近车辆")
             return False
 
         print("[Running] 检测到驾驶按钮，执行上车")
+        self._frame_log(w, f"上车检查：{reason} 已看到驾驶按钮，立即点击上车")
         if location is not None:
             self._log_running_state("检测到驾驶按钮", location, direction, "点击上车")
         w.click(drive_btn)
@@ -3316,6 +3345,7 @@ class RunningManager:
 
     def _click_drive_directly_after_move(self, w: "FrameWorker", reason: str) -> bool:
         print(f"[Running] {reason}，不预检查按钮，直接点击驾驶")
+        self._frame_log(w, f"上车尝试：{reason}，直接点击驾驶按钮并刷新确认是否上车")
         location = self._get_location(w)
         direction = self._get_scalar(w.get_info("direction"))
         if location is not None:
@@ -3329,6 +3359,7 @@ class RunningManager:
         w.refresh_frame()
         if self._is_in_vehicle(w):
             print("[Running] 上车成功")
+            self._frame_log(w, "上车结果：点击驾驶后刷新到车内状态，上车成功，切换到开车阶段")
             entry_source = self.active_vehicle_entry_source or (
                 self.VEHICLE_ENTRY_GARAGE if self.precise_entering_car else self.VEHICLE_ENTRY_UNKNOWN
             )
@@ -3341,6 +3372,7 @@ class RunningManager:
             return True
 
         print("[Running] 点击驾驶后仍未上车")
+        self._frame_log(w, "上车结果：点击驾驶后刷新仍不是车内状态，本轮上车失败")
         return False
 
     def _handle_visual_entry_failure(self, w: "FrameWorker"):
@@ -3707,6 +3739,7 @@ class RunningManager:
     def _align_to_visible_car(self, w: "FrameWorker") -> Optional[bool]:
         offset_real = self._get_visible_car_center_offset(w)
         if offset_real is None:
+            self._frame_log(w, "对准车：当前帧没有识别到车辆，无法做视觉中心对准")
             return None
 
         center_threshold = self._get_car_align_center_threshold()
@@ -3714,6 +3747,11 @@ class RunningManager:
             print(
                 f"[Running] 车辆已大致对准，offset={offset_real:.2f}px, "
                 f"threshold={center_threshold}, car_area_ratio={self.roadside_car_last_area_ratio}"
+            )
+            self._frame_log(
+                w,
+                f"对准车：车辆中心已进入容差，offset={offset_real:.1f}px，"
+                f"threshold={center_threshold}，area={self.roadside_car_last_area_ratio}"
             )
             return True
 
@@ -3723,6 +3761,11 @@ class RunningManager:
             f"[Running] 使用视角对准车辆，x_bias={adjust_val}, "
             f"offset={offset_real:.2f}px, threshold={center_threshold}, "
             f"car_area_ratio={self.roadside_car_last_area_ratio}"
+        )
+        self._frame_log(
+            w,
+            f"对准车：车辆中心偏移 {offset_real:.1f}px，滑动视角 x_bias={adjust_val}，"
+            f"dura={self.CAR_ALIGN_DURA}ms，wait={self.CAR_ALIGN_WAIT}ms，动作后刷新画面"
         )
         w.tap_single("视角", x_bias=adjust_val, dura=self.CAR_ALIGN_DURA, wait=self.CAR_ALIGN_WAIT)
         w.refresh_frame()
@@ -3756,12 +3799,18 @@ class RunningManager:
                 offset_real = self._get_visible_car_center_offset(w)
                 if offset_real is None:
                     print("[Running] sendevent+uinput 靠车时未检测到车辆，停止新方案")
+                    self._frame_log(w, "对准车：sendevent+uinput 靠车时没看到车辆，停止混合靠车方案")
                     return False
 
                 forward_bias_y, _, _ = self._get_dynamic_car_forward_motion()
                 print(
                     f"[Running] sendevent 按住摇杆靠车 {step_text}: "
                     f"y_bias={forward_bias_y}, car_area_ratio={self.roadside_car_last_area_ratio}"
+                )
+                self._frame_log(
+                    w,
+                    f"对准车：sendevent 按住摇杆靠近车辆 {step_text}，"
+                    f"y_bias={forward_bias_y}，area={self.roadside_car_last_area_ratio}"
                 )
 
                 if not joystick_pressed:
@@ -3788,6 +3837,11 @@ class RunningManager:
                         f"[Running] uinput 同步调整视角靠车 {step_text}: "
                         f"x_bias={view_bias}, offset={offset_real:.2f}px, threshold={center_threshold}"
                     )
+                    self._frame_log(
+                        w,
+                        f"对准车：靠车过程中车辆偏移 {offset_real:.1f}px，"
+                        f"同步滑动视角 x_bias={view_bias}，threshold={center_threshold}"
+                    )
                     w.uinput_tap_single(
                         "视角",
                         x_bias=view_bias,
@@ -3799,15 +3853,22 @@ class RunningManager:
                         f"[Running] sendevent+uinput 近车已大致对准 {step_text}: "
                         f"offset={offset_real:.2f}px, threshold={center_threshold}"
                     )
+                    self._frame_log(
+                        w,
+                        f"对准车：靠车过程中车辆已在中心容差内 {step_text}，"
+                        f"offset={offset_real:.1f}px，threshold={center_threshold}"
+                    )
 
                 w.refresh_frame()
                 if w.get_info("驾驶"):
                     print("[Running] sendevent+uinput 靠车检测到驾驶按钮，松开摇杆后点击上车")
+                    self._frame_log(w, "对准车：靠车刷新后看到驾驶按钮，松开摇杆并点击上车")
                     w.move_up(0)
                     joystick_pressed = False
                     return self._attempt_drive_after_move(w, f"sendevent+uinput 靠车后点击驾驶 {step_text}")
 
             print("[Running] sendevent+uinput 靠车达到步数上限，未检测到驾驶按钮")
+            self._frame_log(w, "对准车：sendevent+uinput 靠车达到步数上限，仍没有看到驾驶按钮")
             return False
         except Exception as exc:
             print(f"[Running] sendevent+uinput 靠车异常，准备回退原始方案: {exc}")
@@ -3831,16 +3892,26 @@ class RunningManager:
             pushing_visible_target = aligned is not None or visible_target_forward_pushes > 0
             if aligned is None:
                 print("[Running] 当前画面未检测到车辆，保持朝向向前推进")
+                self._frame_log(w, "对准车：当前画面未检测到车辆，保持朝向小步前推找驾驶按钮")
             elif not aligned:
                 continue
             else:
                 print(f"[Running] 已对准车辆，执行前推尝试上车 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}")
+                self._frame_log(
+                    w,
+                    f"对准车：车辆已对准，执行第 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS} 次前推尝试上车"
+                )
 
             forward_bias_y, forward_dura, forward_wait = self._get_dynamic_car_forward_motion()
             print(
                 f"[Running] 视觉对车前推 y_bias={forward_bias_y}, "
                 f"dura={forward_dura}ms, wait={forward_wait}ms, "
                 f"car_area_ratio={self.roadside_car_last_area_ratio}"
+            )
+            self._frame_log(
+                w,
+                f"对准车：视觉前推 y_bias={forward_bias_y}，dura={forward_dura}ms，"
+                f"wait={forward_wait}ms，area={self.roadside_car_last_area_ratio}，动作后刷新画面"
             )
             w.tap_single(
                 "摇杆",
@@ -3864,6 +3935,11 @@ class RunningManager:
                         f"[Running] 视觉对车前推后车辆消失 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}，"
                         f"但仅向该车前推 {visible_target_forward_pushes} 次，未超过 "
                         f"{self.CAR_FORWARD_LOST_BACKOFF_MIN_PUSHES} 次，不后拉，继续向前找车"
+                    )
+                    self._frame_log(
+                        w,
+                        f"对准车：视觉前推后车辆消失，但只向该车前推 {visible_target_forward_pushes} 次，"
+                        "先不后拉，继续向前找车"
                     )
                     continue
                 recover_result = self._recover_car_lost_after_forward_push(
@@ -3907,6 +3983,11 @@ class RunningManager:
             f"后拉 {self.CAR_FORWARD_LOST_BACKOFF_WAIT}ms "
             "复核驾驶按钮和车辆位置"
         )
+        self._frame_log(
+            w,
+            f"对准车：{reason}{push_text}，可能已经滑过车辆，先后拉 "
+            f"{self.CAR_FORWARD_LOST_BACKOFF_WAIT}ms 再复核驾驶按钮和车辆位置"
+        )
         w.tap_single(
             "摇杆",
             y_bias=self.CAR_FORWARD_LOST_BACKOFF_Y_BIAS,
@@ -3925,9 +4006,11 @@ class RunningManager:
                 self.roadside_car_last_area_ratio = area_ratio
                 self.roadside_car_peak_area_ratio = max(self.roadside_car_peak_area_ratio or 0.0, area_ratio)
             print(f"[Running] {reason}后拉后重新发现车辆，area_ratio={area_ratio}")
+            self._frame_log(w, f"对准车：后拉刷新后重新看到车辆，area={area_ratio}，继续视觉对车")
             return "visible"
 
         print(f"[Running] {reason}后拉后仍未发现车辆，继续原方向向前找车")
+        self._frame_log(w, "对准车：后拉刷新后仍没看到车辆，放弃这次近车复核，继续原方向找车")
         return "forward"
 
     def _align_to_point(

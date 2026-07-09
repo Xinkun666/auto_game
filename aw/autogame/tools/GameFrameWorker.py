@@ -1908,6 +1908,8 @@ class FrameWorker(threading.Thread):
     LAUNCHER_INACTIVITY_TIMEOUT_SECONDS = 5 * 60
     WATCHDOG_CHECK_INTERVAL_SECONDS = 1.0
     POST_CONTROL_REFRESH_SETTLE_SECONDS = 0.5
+    STREAM_RECOVERY_WAIT_POLL_SECONDS = 5.0
+    STREAM_RECOVERY_WAIT_LOG_INTERVAL_SECONDS = 15.0
 
     def __init__(self, buffer, driver=None, logger=None, controller_backend=None, controller_options=None):
         super().__init__()
@@ -1952,6 +1954,10 @@ class FrameWorker(threading.Thread):
         self.last_control_action_time = time.monotonic()
         self.post_control_refresh_settle_seconds = self._resolve_post_control_refresh_settle_seconds()
         self._post_control_refresh_ready_at = 0.0
+        self.wait_for_stream_recovery = self._resolve_wait_for_stream_recovery()
+        self.stream_recovery_wait_poll_seconds = self._resolve_stream_recovery_wait_poll_seconds()
+        self.stream_recovery_wait_log_interval_seconds = self._resolve_stream_recovery_wait_log_interval_seconds()
+        self._stream_recovery_waiting = False
         self.launcher_watchdog_enabled = self._is_launcher_mode()
         self.launcher_inactivity_timeout_seconds = self._resolve_launcher_inactivity_timeout_seconds()
         self._watchdog_stop_event = threading.Event()
@@ -2062,6 +2068,43 @@ class FrameWorker(threading.Thread):
             return max(0.0, float(raw_value))
         except ValueError:
             return float(self.POST_CONTROL_REFRESH_SETTLE_SECONDS)
+
+    @staticmethod
+    def _env_flag_enabled(name, default=False):
+        raw_value = os.environ.get(name, "").strip().lower()
+        if not raw_value:
+            return bool(default)
+        return raw_value in {"1", "true", "yes", "on"}
+
+    def _resolve_wait_for_stream_recovery(self):
+        raw_value = os.environ.get("AUTOGAME_WAIT_FOR_STREAM_RECOVERY", "").strip()
+        if raw_value:
+            return self._env_flag_enabled("AUTOGAME_WAIT_FOR_STREAM_RECOVERY", False)
+        screen_mode = os.environ.get("AUTOGAME_SCREEN_MODE", "").strip()
+        if not screen_mode:
+            try:
+                screen_mode = str(get_screen_mode()).strip()
+            except Exception:
+                screen_mode = ""
+        return screen_mode == "2"
+
+    def _resolve_stream_recovery_wait_poll_seconds(self):
+        raw_value = os.environ.get("AUTOGAME_STREAM_RECOVERY_WAIT_POLL_SECONDS", "").strip()
+        if not raw_value:
+            return float(self.STREAM_RECOVERY_WAIT_POLL_SECONDS)
+        try:
+            return max(0.01, float(raw_value))
+        except ValueError:
+            return float(self.STREAM_RECOVERY_WAIT_POLL_SECONDS)
+
+    def _resolve_stream_recovery_wait_log_interval_seconds(self):
+        raw_value = os.environ.get("AUTOGAME_STREAM_RECOVERY_WAIT_LOG_INTERVAL_SECONDS", "").strip()
+        if not raw_value:
+            return float(self.STREAM_RECOVERY_WAIT_LOG_INTERVAL_SECONDS)
+        try:
+            return max(0.0, float(raw_value))
+        except ValueError:
+            return float(self.STREAM_RECOVERY_WAIT_LOG_INTERVAL_SECONDS)
 
     def _wrap_control_action(self, action_name, action):
         def _wrapped(*args, **kwargs):
@@ -2532,24 +2575,70 @@ class FrameWorker(threading.Thread):
 
     def _watch_launcher_inactivity(self):
         while not self._watchdog_stop_event.wait(self.WATCHDOG_CHECK_INTERVAL_SECONDS):
-            if not self.running:
+            if self._watch_launcher_inactivity_tick():
                 return
-            if self.failed:
-                return
-            if not self.launcher_watchdog_enabled:
-                return
-            if self.launcher_inactivity_timeout_seconds <= 0:
-                return
-            idle_seconds = time.monotonic() - self.last_control_action_time
-            if idle_seconds < self.launcher_inactivity_timeout_seconds:
-                continue
-            self._handle_launcher_inactivity_timeout()
-            return
+
+    def _watch_launcher_inactivity_tick(self, now=None):
+        if not self.running:
+            return True
+        if self.failed:
+            return True
+        if not self.launcher_watchdog_enabled:
+            return True
+        if self.launcher_inactivity_timeout_seconds <= 0:
+            return True
+        if getattr(self, "_stream_recovery_waiting", False):
+            return False
+        now = time.monotonic() if now is None else float(now)
+        idle_seconds = now - self.last_control_action_time
+        if idle_seconds < self.launcher_inactivity_timeout_seconds:
+            return False
+        self._handle_launcher_inactivity_timeout()
+        return True
+
+    def _wait_for_stream_recovery_frame(self, purpose: str = ""):
+        poll_seconds = float(getattr(
+            self,
+            "stream_recovery_wait_poll_seconds",
+            self.STREAM_RECOVERY_WAIT_POLL_SECONDS,
+        ))
+        log_interval = float(getattr(
+            self,
+            "stream_recovery_wait_log_interval_seconds",
+            self.STREAM_RECOVERY_WAIT_LOG_INTERVAL_SECONDS,
+        ))
+        wait_started_at = time.monotonic()
+        last_log_at = wait_started_at - log_interval
+        purpose_text = f"({purpose})" if purpose else ""
+        self._stream_recovery_waiting = True
+        try:
+            while getattr(self, "running", True):
+                now = time.monotonic()
+                if log_interval <= 0 or now - last_log_at >= log_interval:
+                    waited = int(max(0.0, now - wait_started_at))
+                    print(f"[FrameWorker] HOScrcpy 流暂无新帧{purpose_text}，用例暂停等待流恢复，已等待 {waited}s。")
+                    last_log_at = now
+                frame = self.buffer.get_latest(timeout=poll_seconds)
+                if frame is not None:
+                    waited = int(max(0.0, time.monotonic() - wait_started_at))
+                    print(f"[FrameWorker] HOScrcpy 流已恢复{purpose_text}，等待 {waited}s 后继续用例。")
+                    return frame
+            return None
+        finally:
+            self._stream_recovery_waiting = False
+
+    def _get_latest_frame_for_logic(self, must_new=False, purpose: str = ""):
+        frame = self.buffer.get_latest(must_new=must_new)
+        if frame is not None:
+            return frame
+        if not getattr(self, "wait_for_stream_recovery", False):
+            return None
+        return self._wait_for_stream_recovery_frame(purpose)
 
     def loop(self):
         print("GameFrameWorker 引擎已启动")
         while self.running:
-            frame = self.buffer.get_latest()
+            frame = self._get_latest_frame_for_logic(purpose="主循环")
             if frame is None:
                 time.sleep(0.1)
                 continue
@@ -2585,6 +2674,7 @@ class FrameWorker(threading.Thread):
         self.failure_details = {}
         self.last_control_action_time = time.monotonic()
         self._post_control_refresh_ready_at = 0.0
+        self._stream_recovery_waiting = False
         self.thread = threading.Thread(target=self.loop, daemon=True)
         self.thread.start()
 
@@ -2694,7 +2784,7 @@ class FrameWorker(threading.Thread):
         self._flush_current_frame_log()
         if settle:
             self._wait_for_post_control_refresh_settle()
-        frame = self.buffer.get_latest(must_new=True)
+        frame = self._get_latest_frame_for_logic(must_new=True, purpose="刷新帧")
         if frame is None:
             print("[FrameWorker] 刷新失败：缓冲区暂无数据")
             return False

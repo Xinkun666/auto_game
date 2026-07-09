@@ -118,7 +118,6 @@ STREAM_DISCONNECT_PATTERNS = (
     "[Stream] gRPC Error:",
     "[Stream] Runtime Error:",
     "[HOS] Runtime Error:",
-    "[HOS] Stream Error:",
 )
 SP_RECORD_EVER_STARTED_MARKERS = (
     "[Timer] sp 记录已开始",
@@ -141,6 +140,7 @@ PUBG_CASE_SCREEN_MODES = {
 STREAM_DISCONNECT_POLICY_PRESERVE = "preserve"
 STREAM_DISCONNECT_POLICY_DISABLED = "disabled"
 STREAM_DISCONNECT_POLICY_STOP_ONLY = "stop_only"
+STREAM_DISCONNECT_POLICY_STREAM_ONLY = "stream_only"
 PUBG_CASE_TARGET_CASE = "auto_pubg"
 PUBG_CASE_DEFAULT_LOOP_COUNT = 2
 PUBG_CASE_RUNTIME_DESCRIPTION = "和平精英用例默认10分钟搜房、10分钟开车、10分钟跑图，总测试时长60分钟，要循环2次。"
@@ -762,7 +762,7 @@ def stream_disconnect_policy_for_screen_mode(screen_mode: str) -> str:
     if mode == "1":
         return STREAM_DISCONNECT_POLICY_DISABLED
     if mode == "2":
-        return STREAM_DISCONNECT_POLICY_STOP_ONLY
+        return STREAM_DISCONNECT_POLICY_STREAM_ONLY
     return STREAM_DISCONNECT_POLICY_PRESERVE
 
 
@@ -4842,6 +4842,12 @@ class LauncherWindow(QWidget):
         screen_mode = str(self.current_plan.get("screen_mode") or "").strip()
         return stream_disconnect_policy_for_screen_mode(screen_mode) == STREAM_DISCONNECT_POLICY_STOP_ONLY
 
+    def _current_plan_recovers_stream_only_on_disconnect(self) -> bool:
+        if self.current_plan is None:
+            return False
+        screen_mode = str(self.current_plan.get("screen_mode") or "").strip()
+        return stream_disconnect_policy_for_screen_mode(screen_mode) == STREAM_DISCONNECT_POLICY_STREAM_ONLY
+
     def _capture_stream_disconnect_screenshot(self, archive_dir: Path) -> Optional[Path]:
         screenshot_dir = archive_dir / "stream_disconnect_screenshots"
         screenshot_dir.mkdir(parents=True, exist_ok=True)
@@ -4962,15 +4968,18 @@ class LauncherWindow(QWidget):
         self.current_run_stream_disconnected = True
         uses_sp_recording = self._current_plan_uses_sp_recording()
         stop_only_disconnect = self._current_plan_stops_on_stream_disconnect()
-        if stop_only_disconnect:
+        stream_only_disconnect = self._current_plan_recovers_stream_only_on_disconnect()
+        if stop_only_disconnect or stream_only_disconnect:
             self.current_run_stream_disconnect_startup = True
         elif uses_sp_recording:
             self.current_run_stream_disconnect_startup = not self.current_run_sp_started
         else:
             self.current_run_stream_disconnect_startup = not self.current_run_stream_started
         self.current_run_stream_disconnect_message = str(message or source or "stream disconnected")
-        if stop_only_disconnect:
-            phase_text = "HOScrcpy停止"
+        if stream_only_disconnect:
+            phase_text = "HOScrcpy流恢复"
+        elif stop_only_disconnect:
+            phase_text = "流停止"
         elif self.current_run_stream_disconnect_startup:
             phase_text = "启动阶段" if uses_sp_recording else "启动阶段(首帧未到达)"
         else:
@@ -4980,7 +4989,11 @@ class LauncherWindow(QWidget):
             f"{self.current_run_stream_disconnect_message}\n"
         )
         if self.current_run_stream_disconnect_startup:
-            if stop_only_disconnect:
+            if stream_only_disconnect:
+                self._log_message(
+                    "[Launcher] HOScrcpy 抓图流断开，正在停止当前子进程；随后只恢复流服务并重跑当前用例。\n"
+                )
+            elif stop_only_disconnect:
                 self._log_message(
                     "[Launcher] HOScrcpy 抓图流断开，当前任务已停止。"
                     "不截图、不保存 SP、不归档本轮日志，直接停止当前子进程。\n"
@@ -4996,9 +5009,13 @@ class LauncherWindow(QWidget):
                     "不截图、不归档本轮日志，直接停止当前子进程并准备重启。\n"
                 )
             status_text = (
-                "HOScrcpy 流断连，正在停止当前子进程。"
-                if stop_only_disconnect
-                else "启动阶段 gRPC 流断连，正在停止当前子进程并准备重启手机。"
+                "HOScrcpy 流断连，正在停止当前子进程；随后只恢复流服务并重跑当前用例。"
+                if stream_only_disconnect
+                else (
+                    "HOScrcpy 流断连，正在停止当前子进程。"
+                    if stop_only_disconnect
+                    else "启动阶段 gRPC 流断连，正在停止当前子进程并准备重启手机。"
+                )
             )
             self._set_status(status_text)
             self._request_stream_disconnect_process_exit(immediate=True)
@@ -5024,7 +5041,10 @@ class LauncherWindow(QWidget):
             return
 
         if immediate:
-            self._log_message("[Launcher] 启动阶段断流：立即终止当前子进程，随后执行重启恢复。\n")
+            if self._current_plan_recovers_stream_only_on_disconnect():
+                self._log_message("[Launcher] HOScrcpy 断流：立即终止当前子进程，随后只恢复流服务。\n")
+            else:
+                self._log_message("[Launcher] 启动阶段断流：立即终止当前子进程，随后执行重启恢复。\n")
             self.process.terminate()
             QTimer.singleShot(
                 STREAM_DISCONNECT_FORCE_KILL_TIMEOUT_MS,
@@ -5627,6 +5647,15 @@ class LauncherWindow(QWidget):
         self._log_message("[Launcher] 流服务初始化完成。\n")
         return True
 
+    def _recover_stream_only_for_stream_disconnect(self) -> bool:
+        self._log_message(
+            "[Launcher] HOScrcpy 断流恢复：不重启手机，只重新启动当前用例；"
+            "HOS SDK 会重新 setup、拉起投屏服务并等待新帧。\n"
+        )
+        self._set_runtime("运行信息：检测到 HOScrcpy 断流，正在只恢复流服务。")
+        QApplication.processEvents()
+        return True
+
     def _restart_device_for_stream_disconnect(self) -> bool:
         self._log_message("[Launcher] 开始执行断流恢复命令。\n")
         self._set_runtime("运行信息：检测到断流，正在重启手机并等待开机。")
@@ -5707,6 +5736,23 @@ class LauncherWindow(QWidget):
 
         if self.current_run_stream_disconnected:
             if self.current_run_stream_disconnect_startup:
+                if self._current_plan_recovers_stream_only_on_disconnect():
+                    if not self._recover_stream_only_for_stream_disconnect():
+                        self._finish_batch("HOScrcpy 流恢复失败，批量任务已终止。")
+                        return
+                    self._set_status(
+                        f"第 {self.current_run_index + 1}/{self.current_plan['run_count']} 次 HOScrcpy 断流，"
+                        "已只恢复流服务，准备重跑当前用例。"
+                    )
+                    self._set_runtime(
+                        f"运行信息：HOScrcpy 断流已恢复流服务，准备重新执行第 "
+                        f"{self.current_run_index + 1}/{self.current_plan['run_count']} 次。"
+                    )
+                    self._check_and_start_if_safe()
+                    if self.batch_active and self.process is None and not self.safety_timer.isActive():
+                        self.safety_timer.start()
+                    return
+
                 if self._current_plan_stops_on_stream_disconnect():
                     self._log_message(
                         "[Launcher] 本次 HOScrcpy 断流按直接停止处理，不计入已执行次数，"

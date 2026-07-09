@@ -5521,7 +5521,8 @@ class AutoStudioWindow(QMainWindow):
         return new_project
 
     def import_project(self):
-        import_dir = QFileDialog.getExistingDirectory(self, "选择导入目录")
+        default_import_dir = os.path.join(self.get_project_root_dir(), "customs_examples")
+        import_dir = QFileDialog.getExistingDirectory(self, "选择导入项目目录", default_import_dir)
         if not import_dir:
             return
         try:

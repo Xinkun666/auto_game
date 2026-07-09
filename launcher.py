@@ -4970,14 +4970,14 @@ class LauncherWindow(QWidget):
         uses_sp_recording = self._current_plan_uses_sp_recording()
         stop_only_disconnect = self._current_plan_stops_on_stream_disconnect()
         stream_only_disconnect = self._current_plan_recovers_stream_only_on_disconnect()
-        if stop_only_disconnect or stream_only_disconnect:
+        if stop_only_disconnect:
             self.current_run_stream_disconnect_startup = True
         elif uses_sp_recording:
             self.current_run_stream_disconnect_startup = not self.current_run_sp_started
         else:
             self.current_run_stream_disconnect_startup = not self.current_run_stream_started
         self.current_run_stream_disconnect_message = str(message or source or "stream disconnected")
-        if stream_only_disconnect:
+        if stream_only_disconnect and self.current_run_stream_disconnect_startup:
             phase_text = "HOScrcpy流恢复"
         elif stop_only_disconnect:
             phase_text = "流停止"
@@ -5653,7 +5653,7 @@ class LauncherWindow(QWidget):
 
     def _recover_stream_only_for_stream_disconnect(self) -> bool:
         self._log_message(
-            "[Launcher] HOScrcpy 断流恢复：不重启手机，只重新启动当前用例；"
+            "[Launcher] HOScrcpy 断流恢复：不重启手机，只重新启动用例；"
             "HOS SDK 会重新 setup、拉起投屏服务并等待新帧。\n"
         )
         self._set_runtime("运行信息：检测到 HOScrcpy 断流，正在只恢复流服务。")
@@ -5795,6 +5795,24 @@ class LauncherWindow(QWidget):
                 )
                 self._cleanup_apps_between_runs("最后一轮断流后清理")
                 self._finish_batch("所有运行次数已完成。最后一轮断流已归档，未执行重启。")
+                return
+
+            if self._current_plan_recovers_stream_only_on_disconnect():
+                if not self._recover_stream_only_for_stream_disconnect():
+                    self._finish_batch("HOScrcpy 流恢复失败，批量任务已终止。")
+                    return
+                next_run = self.current_run_index + 1
+                self._set_status(
+                    f"第 {self.current_run_index}/{self.current_plan['run_count']} 次因 HOScrcpy 断流结束，"
+                    f"已只恢复流服务，检查第 {next_run} 次启动条件。"
+                )
+                self._set_runtime(
+                    f"运行信息：已完成 {self.current_run_index}/{self.current_plan['run_count']} 次，"
+                    "HOScrcpy 断流已保存并恢复流服务，准备下一次安全检查。"
+                )
+                self._check_and_start_if_safe()
+                if self.batch_active and self.process is None and not self.safety_timer.isActive():
+                    self.safety_timer.start()
                 return
 
             if not self._restart_device_for_stream_disconnect():

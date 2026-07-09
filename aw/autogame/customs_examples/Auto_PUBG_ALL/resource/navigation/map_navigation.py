@@ -23,6 +23,34 @@ def _route_point(value):
         return None
 
 
+def smooth_path_by_line_of_sight(path, line_is_walkable):
+    """Collapse intermediate path points when the segment between two points is walkable."""
+    points = []
+    for point in path or []:
+        loc = _route_point(point)
+        if loc is not None:
+            points.append(loc)
+    if len(points) < 3 or not callable(line_is_walkable):
+        return points
+
+    smoothed_path = [points[0]]
+    current_idx = 0
+    while current_idx < len(points) - 1:
+        next_idx = current_idx + 1
+        for candidate_idx in range(len(points) - 1, current_idx, -1):
+            try:
+                visible = bool(line_is_walkable(points[current_idx], points[candidate_idx]))
+            except Exception:
+                visible = False
+            if visible:
+                next_idx = candidate_idx
+                break
+        smoothed_path.append(points[next_idx])
+        current_idx = next_idx
+
+    return smoothed_path
+
+
 def _route_image_filename(start, end):
     start_loc = _route_point(start) or ("x", "x")
     end_loc = _route_point(end) or ("x", "x")
@@ -379,24 +407,10 @@ class MapNavigator:
         """
         简化路径：如果点A和点C之间可以直接连线（无障碍），则去掉点B
         """
-        if len(path) < 3:
-            return path
+        return smooth_path_by_line_of_sight(path, self.line_is_walkable)
 
-        smoothed_path = [path[0]]
-        current_idx = 0
-
-        while current_idx < len(path) - 1:
-            # 尝试找最远的可视点
-            next_idx = current_idx + 1
-            for i in range(len(path) - 1, current_idx, -1):
-                if self._check_line_of_sight(path[current_idx], path[i]):
-                    next_idx = i
-                    break
-
-            smoothed_path.append(path[next_idx])
-            current_idx = next_idx
-
-        return smoothed_path
+    def line_is_walkable(self, p1, p2):
+        return self._check_line_of_sight(p1, p2)
 
     def _check_line_of_sight(self, p1, p2):
         """使用Bresenham算法或采样法检查两点连线是否有障碍"""
@@ -408,7 +422,7 @@ class MapNavigator:
         if dist == 0: return True
 
         steps = int(dist)  # 每像素检查一次
-        for i in range(steps):
+        for i in range(steps + 1):
             t = i / steps
             x = x1 + (x2 - x1) * t
             y = y1 + (y2 - y1) * t

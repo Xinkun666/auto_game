@@ -8,6 +8,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_mana
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_navigation import (
     MapNavigator,
     save_route_image_for_log,
+    smooth_path_by_line_of_sight,
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import (
     calculate_angle,
@@ -1798,7 +1799,7 @@ class RunningManager:
 
         print(f"[Running] 正在加载临时跑图路线: {location} -> {route_target} (entry={target})")
         self._log_running_state("临时路线规划", location, None, self.forced_route_reason or "前往目标", route_target)
-        self.road_list = self.map_tool.plan_path(location, route_target) or []
+        self.road_list = self._plan_path(location, route_target)
         if not self.road_list:
             print("[Running] 临时路线A*为空，退回真实入门点单点兜底")
             self.road_list = [target]
@@ -1807,17 +1808,39 @@ class RunningManager:
         self.current_road_node = None
         self.current_running_route_kind = self.RUNNING_ROUTE_FORCED
 
+    def _plan_path(self, start: Tuple[int, int], target: Tuple[int, int]) -> List[Tuple[int, int]]:
+        planner = getattr(self.map_tool, "plan_path", None)
+        if not callable(planner):
+            return []
+        path = planner(start, target) or []
+        return self._smooth_planned_path(path)
+
+    def _smooth_planned_path(self, path) -> List[Tuple[int, int]]:
+        points = []
+        for point in path or []:
+            try:
+                points.append((int(round(float(point[0]))), int(round(float(point[1])))))
+            except (TypeError, ValueError, IndexError):
+                continue
+
+        line_checker = getattr(self.map_tool, "line_is_walkable", None)
+        if not callable(line_checker):
+            line_checker = getattr(self.map_tool, "_check_line_of_sight", None)
+        if not callable(line_checker):
+            return points
+        return smooth_path_by_line_of_sight(points, line_checker)
+
     def _load_garage_find_path(self, location: Tuple[int, int]):
         print("[Running] 正在加载车库优先寻车路径...")
         self._log_running_state("正在加载车库寻车路径", location, None, "先去车库取车")
         self.current_road_node = None
 
         if get_distance(location, self.R_CITY) > 50:
-            approach_path = self.map_tool.plan_path(location, self.R_CITY) or []
-            garage_path = find_path(self.R_CITY) or self.map_tool.plan_path(self.R_CITY, self.CAR_ENTRY_POINT) or []
+            approach_path = self._plan_path(location, self.R_CITY)
+            garage_path = find_path(self.R_CITY) or self._plan_path(self.R_CITY, self.CAR_ENTRY_POINT)
             self.road_list = self._merge_paths(approach_path, garage_path)
         else:
-            self.road_list = find_path(location) or self.map_tool.plan_path(location, self.CAR_ENTRY_POINT) or []
+            self.road_list = find_path(location) or self._plan_path(location, self.CAR_ENTRY_POINT)
 
         if not self.road_list or tuple(map(int, self.road_list[-1])) != self.CAR_ENTRY_POINT:
             self.road_list = self._merge_paths(self.road_list, [self.CAR_ENTRY_POINT])
@@ -2062,7 +2085,7 @@ class RunningManager:
                 f"road_dist={road_dist:.2f}, current_dist={dist_to_node:.2f}"
             )
             if dist_to_node <= self.WAYPOINT_TOLERANCE:
-                self.road_list = self.map_tool.plan_path(location, target_point) or [target_point]
+                self.road_list = self._plan_path(location, target_point) or [target_point]
             else:
                 self.road_list = self.road_helper.plan_to_node(location, road_node)
             self.last_circle_target_point = target_point
@@ -2074,7 +2097,7 @@ class RunningManager:
             f"(nearest={road_node}, dist={road_dist:.2f})，回退 A*+mask"
         )
         self.current_road_node = None
-        self.road_list = self.map_tool.plan_path(location, target_point)
+        self.road_list = self._plan_path(location, target_point)
         self.last_circle_target_point = target_point
         self.current_running_route_kind = self.RUNNING_ROUTE_CIRCLE
 
@@ -2096,7 +2119,7 @@ class RunningManager:
             candidate = tuple(map(int, candidate))
             if get_distance(location, candidate) <= self.WAYPOINT_TOLERANCE:
                 continue
-            path = self.map_tool.plan_path(location, candidate)
+            path = self._plan_path(location, candidate)
             if path:
                 self.current_road_node = None
                 self.road_list = path
@@ -2752,38 +2775,70 @@ class RunningManager:
         )
 
     def _advance_waypoint_by_projection(self, location: Tuple[int, int]):
+        if not self.road_list:
+            return
+
+        if self.current_segment_start is None:
+            self.current_segment_start = location
+
+        while self.road_list and get_distance(location, self.road_list[0]) <= self.WAYPOINT_TOLERANCE:
+            self._consume_projected_waypoint(
+                "距离进入容差",
+                extra=f"dist={get_distance(location, self.road_list[0]):.2f}",
+            )
+
         while len(self.road_list) >= 2:
-            if self.current_segment_start is None:
-                self.current_segment_start = location
-                return
+            projected_index, projected_ratio, projected_dist = self._projected_route_target_index(location)
+            if projected_index > 0:
+                for _ in range(projected_index):
+                    self._consume_projected_waypoint(
+                        "当前位置已投影到后续路径线段",
+                        extra=f"segment_target_index={projected_index}, ratio={projected_ratio:.2f}, dist={projected_dist:.2f}",
+                    )
+                continue
 
             target = self.road_list[0]
-            next_target = self.road_list[1]
             passed_current = self._projection_ratio(self.current_segment_start, target, location)
-            next_ratio, next_dist = self._projection_ratio_and_distance(target, next_target, location)
-
-            should_advance = (
-                passed_current >= self.WAYPOINT_PROJECTION_PASS_RATIO
-                or (0.0 <= next_ratio <= 1.0 and next_dist <= self.WAYPOINT_PROJECTION_CORRIDOR)
-            )
-            if not should_advance:
+            if passed_current < self.WAYPOINT_PROJECTION_PASS_RATIO:
                 return
 
-            reached = self.road_list.pop(0)
-            self.current_segment_start = reached
-            if self.current_running_route_kind == self.RUNNING_ROUTE_PRIORITY_CAR_SEARCH:
-                self._mark_priority_car_waypoint_reached(reached)
-            print(
-                f"[Running] 投影已越过锚点，切换下一个目标: reached={reached}, "
-                f"passed={passed_current:.2f}, next_ratio={next_ratio:.2f}, next_dist={next_dist:.2f}"
+            self._consume_projected_waypoint(
+                "投影已越过当前锚点",
+                extra=f"passed={passed_current:.2f}",
             )
-            if self.current_road_node is not None and get_distance(reached, self.current_road_node) <= self.ROAD_NODE_REACHED_TOLERANCE:
-                self.visited_road_nodes.add(self.current_road_node)
-                self.current_road_node = None
 
         if not self.road_list:
             self.loading_road = False
             self.current_segment_start = None
+
+    def _projected_route_target_index(self, location: Tuple[int, int]) -> Tuple[int, float, float]:
+        best_index = 0
+        best_ratio = 0.0
+        best_dist = float("inf")
+        for segment_index in range(len(self.road_list) - 1):
+            ratio, dist = self._projection_ratio_and_distance(
+                self.road_list[segment_index],
+                self.road_list[segment_index + 1],
+                location,
+            )
+            if 0.0 <= ratio <= 1.0 and dist <= self.WAYPOINT_PROJECTION_CORRIDOR:
+                best_index = segment_index + 1
+                best_ratio = ratio
+                best_dist = dist
+        return best_index, best_ratio, best_dist
+
+    def _consume_projected_waypoint(self, reason: str, extra: str = ""):
+        if not self.road_list:
+            return
+        reached = self.road_list.pop(0)
+        self.current_segment_start = reached
+        if self.current_running_route_kind == self.RUNNING_ROUTE_PRIORITY_CAR_SEARCH:
+            self._mark_priority_car_waypoint_reached(reached)
+        if self.current_road_node is not None and get_distance(reached, self.current_road_node) <= self.ROAD_NODE_REACHED_TOLERANCE:
+            self.visited_road_nodes.add(self.current_road_node)
+            self.current_road_node = None
+        suffix = f", {extra}" if extra else ""
+        print(f"[Running] {reason}，切换下一个目标: reached={reached}{suffix}")
 
     def _projection_ratio(self, start: Tuple[int, int], end: Tuple[int, int], point: Tuple[int, int]) -> float:
         ratio, _ = self._projection_ratio_and_distance(start, end, point)

@@ -5,7 +5,10 @@ import time
 from typing import TYPE_CHECKING, Optional
 import cv2
 import numpy as np
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_navigation import MapNavigator
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_navigation import (
+    MapNavigator,
+    smooth_path_by_line_of_sight,
+)
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import *
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_manager import HouseExitManager
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import TimeoutTracker
@@ -5560,7 +5563,8 @@ class HouseSceneSearchManager(HouseSearchManager):
     R_CITY_ENTRY_MAP_NAV_DISTANCE = 20.0
     R_CITY_DEFAULT_HOUSE_ARRIVAL_DISTANCE = 2.0
     R_CITY_DEFAULT_EARLY_ENTRY_SCENE_DISTANCE = 5.0
-    R_CITY_ROUTE_WAYPOINT_DISTANCE = 3.0
+    R_CITY_ROUTE_WAYPOINT_DISTANCE = 5.0
+    R_CITY_ROUTE_PROJECTION_CORRIDOR = 12.0
     R_CITY_ROUTE_ENTRY_HANDOFF_DISTANCE = 20.0
     R_CITY_ROUTE_REPLAN_STUCK_CYCLES = 2
     R_CITY_FAILED_TARGET_LIMIT = 2
@@ -6790,7 +6794,20 @@ class HouseSceneSearchManager(HouseSearchManager):
             loc = self._location_tuple(point)
             if loc is not None:
                 result.append(loc)
-        return result
+        return self._smooth_planned_path(result)
+
+    def _smooth_planned_path(self, path):
+        points = []
+        for point in path or []:
+            loc = self._location_tuple(point)
+            if loc is not None:
+                points.append(loc)
+        line_checker = getattr(self.map_tool, "line_is_walkable", None)
+        if not callable(line_checker):
+            line_checker = getattr(self.map_tool, "_check_line_of_sight", None)
+        if not callable(line_checker):
+            return points
+        return smooth_path_by_line_of_sight(points, line_checker)
 
     @staticmethod
     def _path_length(path) -> float:
@@ -6992,12 +7009,63 @@ class HouseSceneSearchManager(HouseSearchManager):
     def _current_r_city_route_waypoint(self, current_loc):
         if not self.r_city_route_path:
             return None
+        loc = self._location_tuple(current_loc)
+        if loc is None:
+            return None
+        self._advance_r_city_route_index_by_projection(loc)
         while self.r_city_route_index < len(self.r_city_route_path):
             waypoint = self.r_city_route_path[self.r_city_route_index]
-            if get_distance(current_loc, waypoint) > self.R_CITY_ROUTE_WAYPOINT_DISTANCE:
+            if get_distance(loc, waypoint) > self.R_CITY_ROUTE_WAYPOINT_DISTANCE:
                 return waypoint
+            print(
+                f"[RCityRoute] 路径点 {waypoint} 已进入 {self.R_CITY_ROUTE_WAYPOINT_DISTANCE:g} 距离内，"
+                "切换下一个路径点"
+            )
             self.r_city_route_index += 1
         return None
+
+    def _advance_r_city_route_index_by_projection(self, current_loc):
+        path = getattr(self, "r_city_route_path", None) or []
+        start_index = int(getattr(self, "r_city_route_index", 0) or 0)
+        if start_index < 0 or start_index >= len(path) - 1:
+            return
+
+        best_index = start_index
+        best_ratio = 0.0
+        best_dist = float("inf")
+        for segment_index in range(start_index, len(path) - 1):
+            ratio, dist = self._projection_ratio_and_distance(
+                path[segment_index],
+                path[segment_index + 1],
+                current_loc,
+            )
+            if 0.0 <= ratio <= 1.0 and dist <= self.R_CITY_ROUTE_PROJECTION_CORRIDOR:
+                best_index = segment_index + 1
+                best_ratio = ratio
+                best_dist = dist
+
+        if best_index > start_index:
+            print(
+                f"[RCityRoute] 当前位置 {current_loc} 已投影到后续路径线段，"
+                f"route_index {start_index}->{best_index}, ratio={best_ratio:.2f}, dist={best_dist:.2f}"
+            )
+            self.r_city_route_index = best_index
+
+    @staticmethod
+    def _projection_ratio_and_distance(start, end, point):
+        sx, sy = start
+        ex, ey = end
+        px, py = point
+        vx = ex - sx
+        vy = ey - sy
+        length_sq = vx * vx + vy * vy
+        if length_sq <= 0:
+            return 0.0, get_distance(point, end)
+        ratio = ((px - sx) * vx + (py - sy) * vy) / float(length_sq)
+        clamped = max(0.0, min(1.0, ratio))
+        proj_x = sx + vx * clamped
+        proj_y = sy + vy * clamped
+        return ratio, get_distance(point, (proj_x, proj_y))
 
     def _plan_route_from_escape_point_to_entry(self, safe_target, entry_target):
         safe_loc = self._location_tuple(safe_target)

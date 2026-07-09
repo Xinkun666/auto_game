@@ -327,9 +327,8 @@ class RunningManager:
     - w.refresh_frame()
     """
 
-    # 短时卡死判定窗口：连续多少帧位置不变算“卡住”
+    # 短时卡死判定窗口：连续5帧坐标完全相同才算“卡住”
     STUCK_HISTORY_LEN = 5
-    STUCK_MOVEMENT_EPSILON = 1.5
     # 长时困死判定窗口：连续多少帧都在局部小范围打转算“困死”
     TRAPPED_HISTORY_LEN = 50
     # 距离目标点 10 内停止自动前进，改用短摇杆精确逼近；小于 5 才消费该路径点。
@@ -1603,11 +1602,13 @@ class RunningManager:
             self.locations.pop(0)
 
         if len(self.locations) >= self.STUCK_HISTORY_LEN:
-            origin = self.locations[0]
-            max_move = max(get_distance(origin, loc) for loc in self.locations)
-            self.stuck = max_move <= self.STUCK_MOVEMENT_EPSILON
+            try:
+                origin = (self.locations[0][0], self.locations[0][1])
+                self.stuck = all((loc[0], loc[1]) == origin for loc in self.locations)
+            except (TypeError, IndexError):
+                self.stuck = False
             if self.stuck:
-                print(f"[Running] 检测到短时卡死: frames={len(self.locations)}, max_move={max_move:.2f}")
+                print(f"[Running] 检测到短时卡死: 连续{len(self.locations)}帧坐标完全一致 location={origin}")
         else:
             self.stuck = False
 

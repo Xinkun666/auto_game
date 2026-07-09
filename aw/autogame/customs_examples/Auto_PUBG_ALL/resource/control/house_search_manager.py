@@ -233,8 +233,8 @@ class HouseSearchManager:
 
         # --- 卡顿检测相关变量 ---
         self.history_locations = []
-        self.max_history_len = 5  # 记录最近10次位置
-        self.stuck_threshold = 0.5  # 判定卡住的距离阈值
+        self.max_history_len = 5  # 连续5帧坐标完全相同才判定卡死
+        self.stuck_threshold = 0.5  # 脱困/绕障后的位移复核阈值
 
         self.searching_number = 0
 
@@ -2991,12 +2991,9 @@ class HouseSearchManager:
                         current_loc=current_loc,
                         target_loc=target_loc,
                         dist=f"{dist:.2f}",
-                        extra=(
-                            f"连续 {len(self.history_locations)} 帧位置变化小于 "
-                            f"{self.stuck_threshold}"
-                        ),
+                        extra=f"连续 {len(self.history_locations)} 帧坐标完全一致",
                     ),
-                    "快速导航期间位置几乎不变，判断卡住，先避障而不是继续向前撞",
+                    "快速导航期间连续5帧坐标完全一致，判断卡住，先避障而不是继续向前撞",
                     action="执行Nav快推段脱困",
                     method="execute_unstuck_logic()",
                     result="脱困后继续当前入门点或重选目标",
@@ -3190,12 +3187,9 @@ class HouseSearchManager:
                         current_loc=current_loc,
                         target_loc=target_loc,
                         dist=f"{dist:.2f}",
-                        extra=(
-                            f"连续 {len(self.history_locations)} 帧位置变化小于 "
-                            f"{self.stuck_threshold}"
-                        ),
+                        extra=f"连续 {len(self.history_locations)} 帧坐标完全一致",
                     ),
-                    "角度已对齐但位置几乎不变，判断卡住，先脱困再继续入门点目标",
+                    "角度已对齐但连续5帧坐标完全一致，判断卡住，先脱困再继续入门点目标",
                     action="执行Nav精推段脱困",
                     method="execute_unstuck_logic()",
                     result="脱困后继续入门点推进或重选目标",
@@ -3469,10 +3463,11 @@ class HouseSearchManager:
         if len(self.history_locations) < self.max_history_len:
             return False
 
-        x_coords = [loc[0] for loc in self.history_locations]
-        y_coords = [loc[1] for loc in self.history_locations]
-        max_dist = math.sqrt((max(x_coords) - min(x_coords)) ** 2 + (max(y_coords) - min(y_coords)) ** 2)
-        return max_dist < self.stuck_threshold
+        try:
+            first = (self.history_locations[0][0], self.history_locations[0][1])
+            return all((loc[0], loc[1]) == first for loc in self.history_locations)
+        except (TypeError, IndexError):
+            return False
 
     def _get_stable_initial_location(self, current_loc):
         """落地后等待小地图坐标稳定，避免沿用跳伞前旧位置选错最近入口。"""

@@ -1537,17 +1537,14 @@ class RunningManager:
         self._log_running_state("人物位于不可通行区域", location, direction, "先脱离黑区再规划路径", safe_point, dist)
 
         if w.get_info("跳跃") and self.jump_click_cooldown.try_acquire(self.JUMP_CLICK_COOLDOWN):
-            print("[Running] 不可通行区域发现跳跃键，先跳跃并朝安全点前推")
+            print("[Running] 不可通行区域发现跳跃键，先跳跃并朝安全点自动前进")
             w.click("跳跃")
             time.sleep(0.15)
             if direction is not None:
                 self._align_to_point(w, location, direction, safe_point, threshold=8)
-            w.tap_single(
-                "摇杆",
-                y_bias=-300,
-                dura=self.FORBIDDEN_ESCAPE_FORWARD_DURA,
-                wait=self.FORBIDDEN_ESCAPE_FORWARD_WAIT,
-            )
+            if not self.auto_forward:
+                w.click("自动前进")
+                self.auto_forward = True
             w.refresh_frame()
             return True
 
@@ -1556,12 +1553,9 @@ class RunningManager:
             if not aligned:
                 return True
 
-        w.tap_single(
-            "摇杆",
-            y_bias=-300,
-            dura=self.FORBIDDEN_ESCAPE_FORWARD_DURA,
-            wait=self.FORBIDDEN_ESCAPE_FORWARD_WAIT,
-        )
+        if not self.auto_forward:
+            w.click("自动前进")
+            self.auto_forward = True
         w.refresh_frame()
         return True
 

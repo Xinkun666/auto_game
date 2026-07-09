@@ -6528,24 +6528,6 @@ class HouseSceneSearchManager(HouseSearchManager):
             )
             return False
 
-        if len(path) <= 1 and route_dist > self.R_CITY_ENTRY_MAP_NAV_DISTANCE:
-            print(
-                f"[RCitySearch] 真实入门点距离 {route_dist:.2f} > {self.R_CITY_ENTRY_MAP_NAV_DISTANCE:.1f}，"
-                f"但当前位置已经在接入点 {route_target_loc}，A* 没有可推进路径，回退跑图路线"
-            )
-            self._set_frame_decision(
-                w,
-                (
-                    f"真实入门点距离 {route_dist:.2f} > {self.R_CITY_ENTRY_MAP_NAV_DISTANCE:.1f}，"
-                    f"当前位置={start_loc}，接入点={route_target_loc}，A*路径点数={len(path)}"
-                ),
-                "当前位置已在入门点安全接入点但真实入门点仍在20外，A*无法继续缩短距离，回退跑图阶段",
-                action="放弃无效A*路径",
-                method="len(path) <= 1",
-                result="后续尝试r_city_entry_route_callback",
-            )
-            return False
-
         self.r_city_route_path = path
         self.r_city_route_index = 0
         self.r_city_route_target = {

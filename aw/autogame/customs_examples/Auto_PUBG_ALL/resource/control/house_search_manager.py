@@ -124,6 +124,7 @@ class HouseSearchManager:
     ROUTE_STUCK_BACKOFF_BASE_WAIT = 850
     ROUTE_STUCK_BACKOFF_WAIT_STEP = 300
     ROUTE_STUCK_BACKOFF_MAX_WAIT = 1800
+    STUCK_HISTORY_LEN = 7
     ROUTE_STUCK_HOUSE_BYPASS_TURN_DEGREES = 60
     ROUTE_STUCK_HOUSE_BYPASS_VIEW_X_BIAS = 360
     ROUTE_STUCK_HOUSE_BYPASS_VIEW_DURA = 300
@@ -238,7 +239,7 @@ class HouseSearchManager:
 
         # --- 卡顿检测相关变量 ---
         self.history_locations = []
-        self.max_history_len = 5  # 连续5帧坐标完全相同才判定卡死
+        self.max_history_len = self.STUCK_HISTORY_LEN  # 连续7帧坐标完全相同才判定卡死
         self.stuck_threshold = 0.5  # 脱困/绕障后的位移复核阈值
 
         self.searching_number = 0
@@ -521,6 +522,7 @@ class HouseSearchManager:
             self.location_missing_frames += 1
             print('位置值是None，等待位置刷新...')
             w.frame_log("搜房观察：当前位置为空，所以轻推摇杆前探并刷新画面，下一帧重新读取坐标")
+            self._reset_stuck_history_for_frame_wait("搜房阶段当前位置缺失")
             self._set_frame_decision(
                 w,
                 f"搜房阶段当前位置缺失，连续缺失 {self.location_missing_frames} 帧",
@@ -539,6 +541,7 @@ class HouseSearchManager:
             self.location_missing_frames += 1
             print('位置值无效，等待位置刷新...')
             w.frame_log(f"搜房观察：当前位置值无效 raw={location_raw}，所以轻推摇杆前探并刷新坐标")
+            self._reset_stuck_history_for_frame_wait("搜房阶段位置值无效")
             self._set_frame_decision(
                 w,
                 f"搜房阶段位置值无效，原始位置={location_raw}",
@@ -561,6 +564,7 @@ class HouseSearchManager:
                 x_bias = -x_bias
             print("方向值无效，轻微滑动视角刷新方向...")
             w.frame_log(f"搜房观察：当前位置有效但方向值无效 direction={direction}，轻滑视角后下一帧重读")
+            self._reset_stuck_history_for_frame_wait("搜房阶段方向值无效")
             self._set_frame_decision(
                 w,
                 f"搜房阶段方向值无效，当前位置={location}，direction={direction}",
@@ -595,6 +599,7 @@ class HouseSearchManager:
             self.location_missing_frames += 1
             print('落地首帧位置值无效，先刷新等待位置稳定...')
             w.frame_log("搜房观察：落地首帧当前位置为空，所以先刷新画面；连续缺失时轻推摇杆刷新小地图坐标")
+            self._reset_stuck_history_for_frame_wait("落地首帧坐标缺失")
             self._set_frame_decision(
                 w,
                 f"搜房阶段落地首帧当前位置缺失，连续缺失 {self.location_missing_frames} 帧",
@@ -633,6 +638,7 @@ class HouseSearchManager:
         second_loc = self._remember_valid_location(w.get_info('location'))
         if second_loc is None:
             print("[Searching] 落地前推后第二帧位置仍无效，等待下一帧重新确认")
+            self._reset_stuck_history_for_frame_wait("落地前推后第二帧位置无效")
             self._set_frame_decision(
                 w,
                 f"落地前推后第二帧位置无效，首帧位置={first_loc}",
@@ -650,6 +656,7 @@ class HouseSearchManager:
                 f"{self.LANDING_LOCATION_STABLE_MAX_JUMP_DISTANCE:.1f}，暂不切人称或选入门点"
             )
             self.initial_location_samples = [second_loc]
+            self._reset_stuck_history_for_frame_wait("落地前推后坐标跳变过大")
             self._set_frame_decision(
                 w,
                 (
@@ -833,6 +840,11 @@ class HouseSearchManager:
         self.route_stuck_bypass_attempts = 0
         self.house_bypass_unstuck_pause_until = 0.0
         self._reset_entry_near_micro_adjust()
+
+    def _reset_stuck_history_for_frame_wait(self, reason: str = ""):
+        if getattr(self, "history_locations", None):
+            print(f"[Stuck] {reason or '等待刷新帧'}，清空卡住窗口，避免把等待帧误判为卡死")
+        self.history_locations = []
 
     def _reset_entry_near_micro_adjust(self):
         self.entry_near_micro_adjust_attempts = 0
@@ -2986,6 +2998,7 @@ class HouseSearchManager:
             if self.initial_target_pending:
                 stable_loc = self._get_stable_initial_location(current_loc)
                 if stable_loc is None:
+                    self._reset_stuck_history_for_frame_wait("等待落地位置稳定")
                     self._set_search_frame_decision(
                         w,
                         "当前搜房分支：等待落地位置稳定",
@@ -3079,7 +3092,7 @@ class HouseSearchManager:
                         dist=f"{dist:.2f}",
                         extra=f"连续 {len(self.history_locations)} 帧坐标完全一致",
                     ),
-                    "快速导航期间连续5帧坐标完全一致，判断卡住，先避障而不是继续向前撞",
+                    f"快速导航期间连续{self.max_history_len}帧坐标完全一致，判断卡住，先避障而不是继续向前撞",
                     action="执行Nav快推段脱困",
                     method="execute_unstuck_logic()",
                     result="脱困后继续当前入门点或重选目标",
@@ -3275,7 +3288,7 @@ class HouseSearchManager:
                         dist=f"{dist:.2f}",
                         extra=f"连续 {len(self.history_locations)} 帧坐标完全一致",
                     ),
-                    "角度已对齐但连续5帧坐标完全一致，判断卡住，先脱困再继续入门点目标",
+                    f"角度已对齐但连续{self.max_history_len}帧坐标完全一致，判断卡住，先脱困再继续入门点目标",
                     action="执行Nav精推段脱困",
                     method="execute_unstuck_logic()",
                     result="脱困后继续入门点推进或重选目标",
@@ -5812,6 +5825,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         if self.initial_target_pending:
             stable_loc = self._get_stable_initial_location(current_loc)
             if stable_loc is None:
+                self._reset_stuck_history_for_frame_wait("R城等待落地初始位置稳定")
                 self._set_frame_decision(
                     w,
                     f"R城落地初始位置还不稳定，当前采样位置={current_loc}",

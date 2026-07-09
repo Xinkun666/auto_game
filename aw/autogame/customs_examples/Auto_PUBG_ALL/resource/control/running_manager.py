@@ -327,8 +327,8 @@ class RunningManager:
     - w.refresh_frame()
     """
 
-    # 短时卡死判定窗口：连续5帧坐标完全相同才算“卡住”
-    STUCK_HISTORY_LEN = 5
+    # 短时卡死判定窗口：连续7帧坐标完全相同才算“卡住”
+    STUCK_HISTORY_LEN = 7
     # 长时困死判定窗口：连续多少帧都在局部小范围打转算“困死”
     TRAPPED_HISTORY_LEN = 50
     # 距离目标点 10 内停止自动前进，改用短摇杆精确逼近；小于 5 才消费该路径点。

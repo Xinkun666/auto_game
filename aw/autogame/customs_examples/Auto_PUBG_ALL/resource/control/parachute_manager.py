@@ -169,7 +169,7 @@ class ParachuteManager:
             f"prior_dist={self.prior_dist:.2f}，last_dist={self.last_dist}",
             "继续根据距离趋势判断是否到达跳伞窗口",
             action="保持跳伞监控",
-            method="检查最近距离趋势、路线确认窗口和三帧跳伞窗口",
+            method="检查最近距离趋势、路线确认窗口和跳伞窗口",
             result="未确认前不执行跳伞",
         )
 
@@ -392,14 +392,53 @@ class ParachuteManager:
 
     def _confirm_jump_window(self, current_dist: float, location, w: 'FrameWorker') -> bool:
         """
-        当前帧进入跳伞范围时不立刻跳，等待下一帧后用 [前一帧, 候选帧, 后一帧]
-        做距离和坐标连贯性确认。这样可以过滤一帧定位/识别异常导致的距离突降。
+        当前帧从阈值外连续进入跳伞范围时立刻跳伞。
+        如果没有可用的前一帧连续性证据，再回退到 [前一帧, 候选帧, 后一帧]
+        做距离和坐标连贯性确认，过滤一帧定位/识别异常导致的距离突降。
         """
         self.jump_confirm_distances.append(float(current_dist))
         self.jump_confirm_locations.append(tuple(location))
         if len(self.jump_confirm_distances) > 3:
             self.jump_confirm_distances = self.jump_confirm_distances[-3:]
             self.jump_confirm_locations = self.jump_confirm_locations[-3:]
+
+        if (
+            len(self.jump_confirm_distances) == 2
+            and self.jump_confirm_distances[0] > self.TRIGGER_DIST
+            and current_dist <= self.TRIGGER_DIST
+        ):
+            prev_loc, current_loc = self.jump_confirm_locations
+            location_step = get_distance(prev_loc, current_loc)
+            if (
+                self._is_valid_distance(location_step)
+                and location_step <= self.JUMP_LOCATION_CONTINUITY_MAX_STEP
+            ):
+                print(
+                    f"[Parachute] 当前帧连续进入跳伞范围，立即跳伞: "
+                    f"prev={self.jump_confirm_distances[0]:.2f}, "
+                    f"current={current_dist:.2f}, step={location_step:.2f}, "
+                    f"threshold={self.TRIGGER_DIST}"
+                )
+                w.frame_log(
+                    f"当前观察到上一帧距离 {self.jump_confirm_distances[0]:.2f} 仍在阈值外，"
+                    f"当前帧距离 {current_dist:.2f} 已进入跳伞范围，且坐标连续 step={location_step:.2f}，"
+                    "所以本帧立即点击跳伞"
+                )
+                log_step(
+                    f"跳伞开伞两帧确认通过：prev={self.jump_confirm_distances[0]:.2f}，"
+                    f"current={current_dist:.2f}，locations={self.jump_confirm_locations}，"
+                    f"location_step={location_step:.2f}",
+                    target="当前跳伞分支：连续入阈值",
+                    action="立即执行跳伞和俯冲滑行",
+                    method="_confirm_jump_window 两帧连续跨入阈值",
+                    result="下一步点击跳伞并进入落地阶段",
+                )
+                return True
+
+            w.frame_log(
+                f"当前观察到距离进入跳伞范围，但前后两帧坐标不连续 step={location_step}，"
+                "所以继续等待三帧窗口确认"
+            )
 
         if len(self.jump_confirm_distances) < 3:
             if current_dist <= self.TRIGGER_DIST:

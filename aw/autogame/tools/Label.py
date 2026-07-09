@@ -2498,6 +2498,14 @@ class AutoStudioWindow(QMainWindow):
                 return stage
         return None
 
+    def _find_scene_pool_group_for_scene(self, scene_data: SceneData) -> Optional[SceneGroupData]:
+        if not self.project or not scene_data:
+            return None
+        for group in self.project.scene_groups:
+            if any(scene is scene_data for scene in group.scenes):
+                return group
+        return None
+
     def _find_scene_peers(self, scene_data: SceneData) -> List[SceneData]:
         stage = self._find_stage_for_scene(scene_data)
         if not stage:
@@ -3932,13 +3940,13 @@ class AutoStudioWindow(QMainWindow):
         scene_data.image_width, scene_data.image_height = new_size
         return resized_items
 
-    def _refresh_tree_for_scene(self, scene_data: SceneData):
+    def _refresh_tree_for_scene(self, scene_data: SceneData, preferred_tree=None):
         stage = self._find_stage_for_scene(scene_data)
-        if stage:
+        if stage and preferred_tree is not getattr(self, "scene_pool_tree", None):
             self.last_expand_stage_id = stage.id
         self.last_expand_scene_id = scene_data.id
         self.update_tree_view()
-        self.select_data_in_tree(scene_data)
+        self.select_data_in_tree(scene_data, preferred_tree=preferred_tree)
 
     def _find_scene_with_image_size(self, scenes: List[SceneData], image_size: Tuple[int, int]) -> Optional[SceneData]:
         for scene in scenes:
@@ -3971,9 +3979,47 @@ class AutoStudioWindow(QMainWindow):
         scene_data: SceneData,
         image_path: str,
         pixmap: QPixmap,
+        scene_group: Optional[SceneGroupData] = None,
     ) -> CaptureResolutionApplyResult:
-        stage = self._find_stage_for_scene(scene_data)
         new_size = (pixmap.width(), pixmap.height())
+        if scene_group is not None:
+            same_name_scenes = [scene for scene in scene_group.scenes if scene.name == scene_data.name]
+            existing_scene = self._find_scene_with_image_size(same_name_scenes, new_size)
+            if existing_scene:
+                resized_items = self._replace_scene_image(existing_scene, image_path, pixmap)
+                return CaptureResolutionApplyResult(
+                    scene=existing_scene,
+                    action="replaced_existing" if existing_scene is not scene_data else "replaced_current",
+                    resized_items=resized_items,
+                )
+
+            source_scene = self._select_resolution_template_scene(same_name_scenes, scene_data, new_size)
+            if source_scene is None or new_size[0] <= 0 or new_size[1] <= 0:
+                resized_items = self._replace_scene_image(scene_data, image_path, pixmap)
+                return CaptureResolutionApplyResult(scene=scene_data, action="replaced_current", resized_items=resized_items)
+
+            source_size = self._get_scene_image_size(source_scene)
+            new_scene = SceneData(
+                id=str(random.randint(1000, 9999)),
+                name=scene_data.name,
+                image_path=image_path,
+                pixmap=pixmap,
+                image_width=new_size[0],
+                image_height=new_size[1],
+                items=[
+                    self._clone_item_for_scene_size(item, source_size, new_size)
+                    for item in source_scene.items
+                ],
+            )
+            scene_group.scenes.append(new_scene)
+            return CaptureResolutionApplyResult(
+                scene=new_scene,
+                action="created",
+                resized_items=bool(new_scene.items),
+                source_scene=source_scene,
+            )
+
+        stage = self._find_stage_for_scene(scene_data)
         if not stage or new_size[0] <= 0 or new_size[1] <= 0:
             resized_items = self._replace_scene_image(scene_data, image_path, pixmap)
             return CaptureResolutionApplyResult(scene=scene_data, action="replaced_current", resized_items=resized_items)
@@ -4237,14 +4283,25 @@ class AutoStudioWindow(QMainWindow):
         if not img:
             QMessageBox.critical(self, "抓图失败", "读取截图文件失败，请检查路径或权限。")
             return
-        apply_result = self._apply_capture_pixmap_to_scene_resolution(scene_data, local_path, img)
+        capture_from_pool = (
+            getattr(self, "_active_tree_widget", None)
+            is getattr(self, "scene_pool_tree", None)
+        )
+        scene_group = self._find_scene_pool_group_for_scene(scene_data) if capture_from_pool else None
+        apply_result = self._apply_capture_pixmap_to_scene_resolution(
+            scene_data,
+            local_path,
+            img,
+            scene_group=scene_group,
+        )
         target_scene = apply_result.scene
-        self.current_stage = self._find_stage_for_scene(target_scene)
+        preferred_tree = getattr(self, "scene_pool_tree", None) if capture_from_pool else None
+        self.current_stage = None if capture_from_pool else self._find_stage_for_scene(target_scene)
         self.set_current_work_stage(self.current_stage)
         self.current_scene = target_scene
         self.canvas.set_image(img)
         self.canvas.redraw_overlays(target_scene)
-        self._refresh_tree_for_scene(target_scene)
+        self._refresh_tree_for_scene(target_scene, preferred_tree=preferred_tree)
         if apply_result.action == "created":
             self.status_label.setText(
                 f"抓图成功，检测到新分辨率 {target_scene.image_width} * {target_scene.image_height}，"

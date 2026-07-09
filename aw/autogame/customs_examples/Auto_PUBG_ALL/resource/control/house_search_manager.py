@@ -166,12 +166,12 @@ class HouseSearchManager:
     ENTRY_DOOR_MISSING_BACKOFF_Y_BIAS = 320
     ENTRY_DOOR_MISSING_BACKOFF_DURA = 300
     ENTRY_DOOR_MISSING_BACKOFF_WAIT = 520
-    ENTRY_DOOR_MISSING_LEFT_SWEEP_X_BIAS = 240
-    ENTRY_DOOR_MISSING_LEFT_SWEEP_DURA = 180
-    ENTRY_DOOR_MISSING_LEFT_SWEEP_WAIT = 420
-    ENTRY_DOOR_MISSING_RIGHT_SWEEP_X_BIAS = 520
-    ENTRY_DOOR_MISSING_RIGHT_SWEEP_DURA = 360
-    ENTRY_DOOR_MISSING_RIGHT_SWEEP_WAIT = 680
+    ENTRY_DOOR_MISSING_STRICT_FORWARD_Y_BIAS = -420
+    ENTRY_DOOR_MISSING_STRICT_FORWARD_DURA = 650
+    ENTRY_DOOR_MISSING_STRICT_FORWARD_WAIT = 850
+    ENTRY_DOOR_MISSING_WALL_BACKOFF_Y_BIAS = 200
+    ENTRY_DOOR_MISSING_WALL_BACKOFF_DURA = 200
+    ENTRY_DOOR_MISSING_WALL_BACKOFF_WAIT = 520
     ENTRY_NEAR_WALL_SIDE_ESCAPE_X_BIAS = 120
     ENTRY_NEAR_WALL_SIDE_ESCAPE_DURA = 160
     ENTRY_NEAR_WALL_SIDE_ESCAPE_WAIT = 320
@@ -2236,10 +2236,10 @@ class HouseSearchManager:
             w,
             "当前进房分支：入门点微调完成后正前方找门",
             self._entry_observation(w, extra="入门点距离已微调到近似0，开始检查正前方门框"),
-            "先检查正前方是否已有门；没有门再后拉扩视野并左右滑动找门",
+            "先检查正前方是否已有门；没有门先后拉扩视野，仍没门则严格回正入门方向后大前推",
             action="正前方找门",
             method="find_largest_door()",
-            result="找到门则对准前推；没门则进入扩视野流程",
+            result="找到门则对准前推；没门则进入回正方向大前推兜底",
         )
         print(f"[{phase_label}] 入门点距离已微调到 0/近似0，开始看正前方有没有门")
         door = self.find_largest_door(w)
@@ -2282,54 +2282,106 @@ class HouseSearchManager:
             self._mark_entry_door_strict_align_after_backoff()
             return door
 
-        sweeps = (
-            (
-                "left",
-                -self.ENTRY_DOOR_MISSING_LEFT_SWEEP_X_BIAS,
-                self.ENTRY_DOOR_MISSING_LEFT_SWEEP_DURA,
-                self.ENTRY_DOOR_MISSING_LEFT_SWEEP_WAIT,
-                "先向左滑动摇杆找门",
+        return self._push_missing_entry_door_after_strict_align(w, phase_label)
+
+    def _push_missing_entry_door_after_strict_align(self, w: 'FrameWorker', phase_label='Nav'):
+        ideal_angle = self.active_entry.get('direction') if self.active_entry else None
+        if ideal_angle is None:
+            print(f"[{phase_label}] 后拉扩视野后仍没看到门，但缺少入门方向，舍弃当前入门点")
+            return None
+
+        self._set_search_frame_decision(
+            w,
+            "当前进房分支：后拉扩视野后仍没看到门，严格回正入门方向",
+            self._entry_observation(
+                w,
+                target_loc=self.active_entry.get('location') if self.active_entry else None,
+                extra=(
+                    f"ideal_angle={ideal_angle}, "
+                    f"threshold={getattr(self, 'ENTRY_DIRECTION_ALIGN_TOLERANCE', self.ENTRY_NEAR_ALIGN_TOLERANCE)}"
+                ),
             ),
-            (
-                "right",
-                self.ENTRY_DOOR_MISSING_RIGHT_SWEEP_X_BIAS,
-                self.ENTRY_DOOR_MISSING_RIGHT_SWEEP_DURA,
-                self.ENTRY_DOOR_MISSING_RIGHT_SWEEP_WAIT,
-                "再向右更大幅度滑动摇杆找门",
-            ),
+            "后拉扩视野后仍没有门，不再左右扫门，先把视角严格回到入门点记录方向",
+            action="严格回正入门方向",
+            method="_align_near_entry_direction(threshold=5)",
+            result="方向对齐后执行大前推确认是否已经进门",
         )
-        for side, x_bias, dura, wait, label in sweeps:
+        print(f"[{phase_label}] 后拉扩视野后仍没看到门，严格回正入门方向 ideal_angle={ideal_angle}")
+        if not self._align_near_entry_direction(w, ideal_angle):
+            print(f"[{phase_label}] 入门方向仍未严格对齐，等待下一帧继续校准")
+            return "adjusting"
+
+        print(
+            f"[{phase_label}] 入门方向已严格回正但仍没门，执行大前推确认进门: "
+            f"y_bias={self.ENTRY_DOOR_MISSING_STRICT_FORWARD_Y_BIAS}, "
+            f"dura={self.ENTRY_DOOR_MISSING_STRICT_FORWARD_DURA}, "
+            f"wait={self.ENTRY_DOOR_MISSING_STRICT_FORWARD_WAIT}"
+        )
+        self._set_search_frame_decision(
+            w,
+            "当前进房分支：入门方向已严格回正但仍没门，执行大前推确认进门",
+            self._entry_observation(
+                w,
+                target_loc=self.active_entry.get('location') if self.active_entry else None,
+                extra=f"ideal_angle={ideal_angle}",
+            ),
+            "看不到门但已站在入门点且方向正确，直接沿入门方向大前推确认是否穿门",
+            action="大前推确认进门",
+            method=(
+                f"tap_single(摇杆, y_bias={self.ENTRY_DOOR_MISSING_STRICT_FORWARD_Y_BIAS}, "
+                f"dura={self.ENTRY_DOOR_MISSING_STRICT_FORWARD_DURA}, "
+                f"wait={self.ENTRY_DOOR_MISSING_STRICT_FORWARD_WAIT})"
+            ),
+            result="前推后如 indoor 则搜房；如撞墙则小后拉复核",
+        )
+        w.tap_single(
+            '摇杆',
+            y_bias=self.ENTRY_DOOR_MISSING_STRICT_FORWARD_Y_BIAS,
+            dura=self.ENTRY_DOOR_MISSING_STRICT_FORWARD_DURA,
+            wait=self.ENTRY_DOOR_MISSING_STRICT_FORWARD_WAIT,
+        )
+        self._refresh_frame_and_handle_jump(w)
+        if self._is_indoor(w):
+            print(f"[{phase_label}] 大前推后 house_scene=indoor，确认已经进门")
+            return "indoor"
+
+        scene = self._get_house_scene(w)
+        if scene == self.HOUSE_NEAR_WALL:
             self._set_search_frame_decision(
                 w,
-                f"当前进房分支：{label}",
+                "当前进房分支：大前推后撞墙，稍微后拉复核是否已进门",
                 self._entry_observation(
                     w,
-                    extra=(
-                        f"后拉后仍未看到门，side={self._side_label(side)}，"
-                        f"x_bias={x_bias}, dura={dura}, wait={wait}"
-                    ),
+                    target_loc=self.active_entry.get('location') if self.active_entry else None,
+                    extra=f"scene={self._house_scene_label(scene)}",
                 ),
-                "通过左右滑动摇杆改变门框相对位置，继续寻找当前入门点对应门",
-                action=label,
-                method=f"tap_single(摇杆, x_bias={x_bias}, y_bias=0, dura={dura}, wait={wait})",
-                result="滑动后如进屋则搜房，如看到门则对准门前推",
+                "大前推撞到门墙后，不立即判失败，先小幅后拉并复核是否已经进入室内",
+                action="小后拉复核",
+                method=(
+                    f"tap_single(摇杆, y_bias={self.ENTRY_DOOR_MISSING_WALL_BACKOFF_Y_BIAS}, "
+                    f"dura={self.ENTRY_DOOR_MISSING_WALL_BACKOFF_DURA}, "
+                    f"wait={self.ENTRY_DOOR_MISSING_WALL_BACKOFF_WAIT})"
+                ),
+                result="后拉后如 indoor 则搜房，否则舍弃当前入门点",
             )
             print(
-                f"[{phase_label}] {label}: side={self._side_label(side)}, "
-                f"x_bias={x_bias}, dura={dura}, wait={wait}"
+                f"[{phase_label}] 大前推后撞墙，稍微后拉复核是否已进门: "
+                f"y_bias={self.ENTRY_DOOR_MISSING_WALL_BACKOFF_Y_BIAS}, "
+                f"dura={self.ENTRY_DOOR_MISSING_WALL_BACKOFF_DURA}, "
+                f"wait={self.ENTRY_DOOR_MISSING_WALL_BACKOFF_WAIT}"
             )
-            w.tap_single('摇杆', x_bias=x_bias, y_bias=0, dura=dura, wait=wait)
+            w.tap_single(
+                '摇杆',
+                y_bias=self.ENTRY_DOOR_MISSING_WALL_BACKOFF_Y_BIAS,
+                dura=self.ENTRY_DOOR_MISSING_WALL_BACKOFF_DURA,
+                wait=self.ENTRY_DOOR_MISSING_WALL_BACKOFF_WAIT,
+            )
             self._refresh_frame_and_handle_jump(w)
             if self._is_indoor(w):
-                print(f"[{phase_label}] {label}后 house_scene=indoor，直接启动搜房")
+                print(f"[{phase_label}] 撞墙后拉复核 house_scene=indoor，确认已经进门")
                 return "indoor"
-            door = self.find_largest_door(w)
-            if door is not None:
-                print(f"[{phase_label}] {label}后看到门，进入对准门流程: door={door}")
-                self._mark_entry_door_strict_align_after_backoff()
-                return door
 
-        print(f"[{phase_label}] 后拉/左右滑动后仍没看到门，舍弃当前入门点")
+        print(f"[{phase_label}] 大前推/撞墙后拉后仍未进房，舍弃当前入门点")
         return None
 
     def _push_aligned_entry_door_and_check_indoor(self, w: 'FrameWorker', phase_label='Nav', initial_door=None) -> str:
@@ -2339,10 +2391,12 @@ class HouseSearchManager:
                 return "aborted"
 
             if door is None:
-                print(f"[{phase_label}] 前推前门目标丢失，重新正前方看门；没门就左右滑动摇杆找门")
+                print(f"[{phase_label}] 前推前门目标丢失，重新正前方看门；没门就回正入门方向大前推确认")
                 door = self._scan_entry_door_after_micro_adjust(w, phase_label)
                 if door == "indoor":
                     return "indoor"
+                if door == "adjusting":
+                    return "adjusting"
                 if door is None:
                     return "failed"
 
@@ -2437,6 +2491,8 @@ class HouseSearchManager:
         door = self._scan_entry_door_after_micro_adjust(w, phase_label)
         if door == "indoor":
             return "indoor"
+        if door == "adjusting":
+            return "adjusting"
         if door is None:
             self._mark_current_entry_failed("入门点微调完成后仍未定位到门")
             return "failed"

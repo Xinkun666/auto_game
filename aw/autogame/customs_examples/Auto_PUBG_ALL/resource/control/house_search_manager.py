@@ -5773,7 +5773,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 "先锁定最近入门点；只有真实入门点距离进入20以内，搜房阶段才接管为Nav摇杆导航",
                 action="锁定最近入门点",
                 method="_select_next_r_city_house(); check real entry distance",
-                result="远距离切跑图阶段，真实入门点20距离内才进入Nav",
+                result="远距离切跑图阶段，跑图阶段按黑区/直冲/A*判断；真实入门点20距离内进入Nav精推段",
             )
             print(
                 f"[RCitySearch] 落地后锁定最近入门点 {self.active_entry['location']}，"
@@ -5792,9 +5792,9 @@ class HouseSceneSearchManager(HouseSearchManager):
                         f"真实入门点 {target_loc} 距离={target_dist:.2f} > "
                         f"{self.R_CITY_ENTRY_RUNNING_ROUTE_DISTANCE:.1f}{route_context}"
                     ),
-                    "真实入门点还在20距离外，此时不进入搜房Nav，优先切到跑图阶段计入跑图时间",
+                    "真实入门点还在20距离外，此时不进入搜房Nav，切到跑图阶段计入跑图时间；跑图阶段再执行黑区/直冲/A*策略",
                     action="远距离转跑图阶段",
-                    method="r_city_entry_route_callback(); fallback map_navigation",
+                    method="r_city_entry_route_callback()",
                     result="到真实入门点20距离内后切回搜房阶段并进入Nav精推段",
                 )
                 if self._request_r_city_entry_route(w, target_loc, target_dist):
@@ -5909,9 +5909,9 @@ class HouseSceneSearchManager(HouseSearchManager):
                         f"Nav复核发现真实入门点 {entry_loc} 距离={entry_dist:.2f} > "
                         f"{self.R_CITY_ENTRY_RUNNING_ROUTE_DISTANCE:.1f}{route_context}"
                     ),
-                    "真实入门点距离仍属于跑图范围，不继续搜房阶段摇杆Nav，优先交给跑图阶段计时和接近",
+                    "真实入门点距离仍属于跑图范围，不继续搜房阶段摇杆Nav，切到跑图阶段计时；跑图阶段再执行黑区/直冲/A*策略",
                     action="退回跑图阶段",
-                    method="r_city_entry_route_callback(); fallback map_navigation",
+                    method="r_city_entry_route_callback()",
                     result="到真实入门点20距离内再回到搜房Nav精推进门流程",
                 )
                 if self._request_r_city_entry_route(w, entry_loc, entry_dist):
@@ -6584,7 +6584,10 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.history_locations = []
         self.initial_location_samples = []
         self.initial_target_pending = True
-        if not callback(w, target_loc, reason, self.R_CITY_ENTRY_RUNNING_ROUTE_DISTANCE):
+        approach_loc = None
+        if self.active_entry:
+            approach_loc = self._location_tuple(self.active_entry.get("approach_location"))
+        if not callback(w, target_loc, reason, self.R_CITY_ENTRY_RUNNING_ROUTE_DISTANCE, approach_loc):
             return False
         self.current_house_id = None
         self.current_r_city_target = None
@@ -6851,9 +6854,9 @@ class HouseSceneSearchManager(HouseSearchManager):
                     f"R城路线到达原入门点20距离内，但动态重选后的真实入门点 {target_loc} "
                     f"距离={target_dist:.2f} > {self.R_CITY_ROUTE_ENTRY_HANDOFF_DISTANCE:.1f}"
                 ),
-                "按人物实际位置重选后，当前可用入门点仍不在Nav范围内，所以优先交给跑图阶段继续接近并计时",
+                "按人物实际位置重选后，当前可用入门点仍不在Nav范围内，所以继续交给跑图阶段计时；跑图阶段再执行黑区/直冲/A*策略",
                 action="继续跑图接近入门点",
-                method="r_city_entry_route_callback(); fallback map_navigation",
+                method="r_city_entry_route_callback()",
                 result="真实入门点20距离内才切回搜房Nav精推段",
             )
             if self._request_r_city_entry_route(w, target_loc, target_dist):

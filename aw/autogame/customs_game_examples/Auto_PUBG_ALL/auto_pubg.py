@@ -394,6 +394,7 @@ def route_to_r_city_entry_point(
     target,
     reason: str,
     arrival_distance: float,
+    approach_location=None,
 ):
     global searching_view_synced, searching_to_running_notified
 
@@ -417,6 +418,7 @@ def route_to_r_city_entry_point(
         finish_stage="搜房阶段",
         reason=reason,
         arrival_distance=arrival_distance,
+        approach_target=approach_location,
     )
     running_manager.set_view_mode(RunningManager.VIEW_MODE_FIRST)
     searching_view_synced = True

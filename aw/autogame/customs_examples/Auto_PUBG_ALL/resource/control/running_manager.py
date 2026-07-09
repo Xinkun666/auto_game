@@ -501,8 +501,6 @@ class RunningManager:
     FORBIDDEN_ESCAPE_SEARCH_DIST = 120
     FORBIDDEN_ESCAPE_FORWARD_DURA = 700
     FORBIDDEN_ESCAPE_FORWARD_WAIT = 900
-    # 临时路线目标很近时，优先按跳伞偏差处理，直接朝目标点行进。
-    FORCED_ROUTE_FORBIDDEN_DIRECT_DISTANCE = 200.0
     # 道路巡游/进圈策略
     ROAD_NODE_REACHED_TOLERANCE = 3.0
     ROAD_PATROL_MIN_NODE_DISTANCE = 8.0
@@ -592,6 +590,7 @@ class RunningManager:
         self.water_float_pressed_in_episode = False
         self.water_float_missing_frames = self.WATER_FLOAT_RESET_MISSING_FRAMES
         self.forced_route_target: Optional[Tuple[int, int]] = None
+        self.forced_route_approach_target: Optional[Tuple[int, int]] = None
         self.forced_route_finish_stage: Optional[str] = None
         self.forced_route_reason: Optional[str] = None
         self.forced_route_arrival_distance = self.DEFAULT_FORCED_ROUTE_ARRIVAL_DISTANCE
@@ -674,8 +673,10 @@ class RunningManager:
         finish_stage: str,
         reason: str,
         arrival_distance: float = DEFAULT_FORCED_ROUTE_ARRIVAL_DISTANCE,
+        approach_target: Optional[Tuple[int, int]] = None,
     ):
         self.forced_route_target = tuple(map(int, target))
+        self.forced_route_approach_target = tuple(map(int, approach_target)) if approach_target else None
         self.forced_route_finish_stage = finish_stage
         self.forced_route_reason = reason
         self.forced_route_arrival_distance = max(0.0, float(arrival_distance))
@@ -724,6 +725,7 @@ class RunningManager:
 
     def _clear_forced_route(self):
         self.forced_route_target = None
+        self.forced_route_approach_target = None
         self.forced_route_finish_stage = None
         self.forced_route_reason = None
         self.forced_route_arrival_distance = self.DEFAULT_FORCED_ROUTE_ARRIVAL_DISTANCE
@@ -738,8 +740,23 @@ class RunningManager:
         if self.map_tool.is_walkable(location):
             return False
 
-        dist_to_forced_target = get_distance(location, self.forced_route_target)
-        return 0 <= dist_to_forced_target <= self.FORCED_ROUTE_FORBIDDEN_DIRECT_DISTANCE
+        return self._same_forbidden_region(location, self.forced_route_target)
+
+    def _forced_route_line_only_crosses_target_region(
+        self,
+        location: Tuple[int, int],
+        target: Tuple[int, int],
+    ) -> bool:
+        if not self.map_tool.is_walkable(location):
+            return False
+        checker = getattr(self.map_tool, "line_only_crosses_target_forbidden_region", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(location, target))
+        except Exception as exc:
+            print(f"[Running] 临时路线直线黑区判断失败，按需要A*处理: {exc}")
+            return False
 
     def _same_forbidden_region(self, location: Tuple[int, int], target: Tuple[int, int]) -> bool:
         checker = getattr(self.map_tool, "same_forbidden_region", None)
@@ -750,19 +767,6 @@ class RunningManager:
         except Exception as exc:
             print(f"[Running] 不可通行区域连通判断失败，按不同区域处理: {exc}")
             return False
-
-    def _should_direct_escape_to_forced_route_target(self, location: Tuple[int, int]) -> bool:
-        if not self._has_forced_route() or self.forced_route_target is None:
-            return False
-
-        if self.map_tool.is_walkable(location):
-            return False
-
-        dist_to_forced_target = get_distance(location, self.forced_route_target)
-        if 0 <= dist_to_forced_target <= self.forced_route_arrival_distance:
-            return False
-
-        return not self._same_forbidden_region(location, self.forced_route_target)
 
     def set_game_time(self, game_time: Optional[float] = None):
         started_at = self.match_clock.start(game_time)
@@ -1488,53 +1492,18 @@ class RunningManager:
             target = self.forced_route_target
             dist_to_target = get_distance(location, target)
             print(
-                f"[Running] 当前位于不可通行区域，但距离临时路线目标 {target} "
-                f"{dist_to_target:.2f} <= {self.FORCED_ROUTE_FORBIDDEN_DIRECT_DISTANCE:.0f}，"
-                "按跳伞偏差直接朝目标点行进"
+                f"[Running] 当前位于不可通行区域，且与临时目标 {target} 属于同一不可通行区域，"
+                f"距离 {dist_to_target:.2f}，交给强制路线直接朝目标点推进"
             )
             self._log_running_state(
-                "不可通行区域靠近临时目标",
+                "不可通行区域与临时目标同区",
                 location,
                 direction,
-                "跳过黑区脱离，直接朝临时目标行进",
+                "跳过安全点脱离，直接朝临时目标行进",
                 target,
                 dist_to_target,
             )
             return False
-
-        if self._should_direct_escape_to_forced_route_target(location):
-            target = self.forced_route_target
-            dist_to_target = get_distance(location, target)
-            print(
-                f"[Running] 当前位于不可通行区域，临时目标 {target} 不在同一不可通行区域，"
-                f"距离 {dist_to_target:.2f}，直接对准目标点自动前进脱离"
-            )
-            self._log_running_state(
-                "不可通行区域直冲临时目标",
-                location,
-                direction,
-                "不同黑区，不走最近安全点，直接自动前进脱离当前黑区",
-                target,
-                dist_to_target,
-            )
-            self.loading_road = False
-            self.road_list = []
-            self.current_segment_start = None
-            self._check_if_stuck(location)
-            self._check_if_trapped(location)
-            if self.stuck or self.trapped:
-                print("[Running] 直冲脱离黑区时检测到卡住/困住，先执行脱困")
-                self._perform_unstuck_action(w, location)
-                return True
-            if direction is not None:
-                aligned = self._align_to_point(w, location, direction, target, threshold=8)
-                if not aligned:
-                    return True
-            self._click_jump_if_available(w, location, direction)
-            if not self.auto_forward:
-                w.click("自动前进")
-                self.auto_forward = True
-            return True
 
         self._check_if_stuck(location)
         if self.stuck:
@@ -1677,16 +1646,19 @@ class RunningManager:
             w.change_stage(finish_stage)
             return True
 
-        if self._should_direct_nav_for_near_forced_route_in_forbidden(location):
+        if (
+            self._should_direct_nav_for_near_forced_route_in_forbidden(location)
+            or self._forced_route_line_only_crosses_target_region(location, target)
+        ):
             print(
                 f"[Running] 临时路线目标 {target} 距离 {dist_to_final:.2f}，"
-                "当前位置仍不可通行，直接调整方向朝目标点前进"
+                "当前位置可直接朝目标点前进，跳过安全点和A*"
             )
             self._log_running_state(
-                "不可通行区域直奔临时目标",
+                "临时路线直奔目标",
                 location,
                 direction,
-                "跳过安全点脱离和路径规划",
+                "同目标黑区或直线只穿目标黑区，直接对准真实入门点",
                 target,
                 dist_to_final,
             )
@@ -1828,12 +1800,16 @@ class RunningManager:
         if target is None:
             self.road_list = []
             return
+        route_target = self.forced_route_approach_target or target
 
-        print(f"[Running] 正在加载临时跑图路线: {location} -> {target}")
-        self._log_running_state("临时路线规划", location, None, self.forced_route_reason or "前往目标", target)
-        self.road_list = self.map_tool.plan_path(location, target) or [target]
-        if not self.road_list or tuple(map(int, self.road_list[-1])) != target:
-            self.road_list = self._merge_paths(self.road_list, [target])
+        print(f"[Running] 正在加载临时跑图路线: {location} -> {route_target} (entry={target})")
+        self._log_running_state("临时路线规划", location, None, self.forced_route_reason or "前往目标", route_target)
+        self.road_list = self.map_tool.plan_path(location, route_target) or []
+        if not self.road_list:
+            print("[Running] 临时路线A*为空，退回真实入门点单点兜底")
+            self.road_list = [target]
+        elif tuple(map(int, self.road_list[-1])) != route_target:
+            self.road_list = self._merge_paths(self.road_list, [route_target])
         self.current_road_node = None
         self.current_running_route_kind = self.RUNNING_ROUTE_FORCED
 

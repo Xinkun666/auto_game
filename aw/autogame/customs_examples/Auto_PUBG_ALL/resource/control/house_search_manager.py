@@ -43,6 +43,11 @@ class HouseSearchManager:
     LANDING_LOCATION_PROBE_DURA = 180
     LANDING_LOCATION_PROBE_WAIT = 360
     LANDING_LOCATION_STABLE_MAX_JUMP_DISTANCE = 100.0
+    VALID_FRAME_LOCATION_RECOVERY_Y_BIAS = -120
+    VALID_FRAME_LOCATION_RECOVERY_WAIT = 300
+    VALID_FRAME_DIRECTION_RECOVERY_X_BIAS = 180
+    VALID_FRAME_DIRECTION_RECOVERY_DURA = 180
+    VALID_FRAME_DIRECTION_RECOVERY_WAIT = 300
     ENTRY_AUTO_FORWARD_DISTANCE = 30.0
     ENTRY_COARSE_MOVE_DISTANCE = 15.0
     ENTRY_ARRIVAL_DISTANCE = 1.0
@@ -274,6 +279,7 @@ class HouseSearchManager:
         self.avoid_mode = None
         self.initial_target_pending = True
         self.location_missing_frames = 0
+        self.direction_missing_frames = 0
         self.last_valid_location = None
         self.initial_location_samples = []
         self.landing_location_confirmed = False
@@ -366,6 +372,7 @@ class HouseSearchManager:
         self.avoid_mode = None
         self.initial_target_pending = True
         self.location_missing_frames = 0
+        self.direction_missing_frames = 0
         self.last_valid_location = None
         self.initial_location_samples = []
         self.landing_location_confirmed = False
@@ -513,19 +520,17 @@ class HouseSearchManager:
         if location_raw is None:
             self.location_missing_frames += 1
             print('位置值是None，等待位置刷新...')
-            w.frame_log("搜房观察：当前位置为空，所以先刷新画面；如果连续缺失，就轻推摇杆刷新小地图坐标")
+            w.frame_log("搜房观察：当前位置为空，所以轻推摇杆前探并刷新画面，下一帧重新读取坐标")
             self._set_frame_decision(
                 w,
                 f"搜房阶段当前位置缺失，连续缺失 {self.location_missing_frames} 帧",
-                "先刷新画面等待坐标恢复，连续缺失时轻推摇杆刷新小地图坐标",
-                action="刷新画面，必要时轻推摇杆",
-                method="_refresh_frame_and_handle_jump(); tap_single(摇杆)",
+                "当前位置无效时先小幅前推刷新小地图坐标，本帧不进入搜房决策，下一帧重新读取 location/direction",
+                action="轻推摇杆并刷新画面",
+                method="tap_single(摇杆); _refresh_frame_and_handle_jump()",
                 result="等待下一帧重新识别当前位置",
             )
+            w.tap_single('摇杆', y_bias=self.VALID_FRAME_LOCATION_RECOVERY_Y_BIAS, wait=self.VALID_FRAME_LOCATION_RECOVERY_WAIT)
             self._refresh_frame_and_handle_jump(w)
-            if self.location_missing_frames >= 3:
-                print('位置连续缺失，轻微移动以刷新位置...')
-                w.tap_single('摇杆', y_bias=-120, wait=300)
             return
         location = self._remember_valid_location(location_raw)
         direction = w.get_info('direction')
@@ -533,22 +538,47 @@ class HouseSearchManager:
         if location is None:
             self.location_missing_frames += 1
             print('位置值无效，等待位置刷新...')
-            w.frame_log(f"搜房观察：当前位置值无效 raw={location_raw}，所以等待下一帧重新识别坐标")
+            w.frame_log(f"搜房观察：当前位置值无效 raw={location_raw}，所以轻推摇杆前探并刷新坐标")
             self._set_frame_decision(
                 w,
                 f"搜房阶段位置值无效，原始位置={location_raw}",
-                "先刷新画面等待有效坐标，连续无效时轻推摇杆刷新小地图",
-                action="刷新画面，必要时轻推摇杆",
-                method="_refresh_frame_and_handle_jump(); tap_single(摇杆)",
+                "坐标格式无效时先小幅前推刷新小地图坐标，本帧不进入搜房决策，下一帧重新读取 location/direction",
+                action="轻推摇杆并刷新画面",
+                method="tap_single(摇杆); _refresh_frame_and_handle_jump()",
                 result="避免用异常坐标规划入门点路线",
             )
+            w.tap_single('摇杆', y_bias=self.VALID_FRAME_LOCATION_RECOVERY_Y_BIAS, wait=self.VALID_FRAME_LOCATION_RECOVERY_WAIT)
             self._refresh_frame_and_handle_jump(w)
-            if self.location_missing_frames >= 3:
-                print('位置连续无效，轻微移动以刷新位置...')
-                w.tap_single('摇杆', y_bias=-120, wait=300)
             return
 
         self.location_missing_frames = 0
+        try:
+            float(direction)
+        except (TypeError, ValueError):
+            self.direction_missing_frames = getattr(self, "direction_missing_frames", 0) + 1
+            x_bias = self.VALID_FRAME_DIRECTION_RECOVERY_X_BIAS
+            if self.direction_missing_frames % 2 == 0:
+                x_bias = -x_bias
+            print("方向值无效，轻微滑动视角刷新方向...")
+            w.frame_log(f"搜房观察：当前位置有效但方向值无效 direction={direction}，轻滑视角后下一帧重读")
+            self._set_frame_decision(
+                w,
+                f"搜房阶段方向值无效，当前位置={location}，direction={direction}",
+                "方向无效时不进入搜房决策，先左右轻滑视角刷新方向读数，下一帧重新读取 location/direction",
+                action="轻滑视角并刷新画面",
+                method="tap_single(视角); _refresh_frame_and_handle_jump()",
+                result="等待下一帧重新识别当前方位",
+            )
+            w.tap_single(
+                '视角',
+                x_bias=x_bias,
+                dura=self.VALID_FRAME_DIRECTION_RECOVERY_DURA,
+                wait=self.VALID_FRAME_DIRECTION_RECOVERY_WAIT,
+            )
+            self._refresh_frame_and_handle_jump(w)
+            return
+
+        self.direction_missing_frames = 0
         self._set_frame_decision(
             w,
             f"搜房阶段：status={self.status}，当前位置={location}，当前方位={direction}",

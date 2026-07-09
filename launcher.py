@@ -2191,6 +2191,7 @@ class LauncherWindow(QWidget):
         self.stream_verify_client = None
         self.stream_verify_buffer = None
         self.stream_verify_thread: Optional[threading.Thread] = None
+        self.stream_verify_failure_reported = False
         self.stream_verify_lock = threading.Lock()
         self.preset_buttons: list[QPushButton] = []
         self.theme_mode = "light"
@@ -5292,6 +5293,7 @@ class LauncherWindow(QWidget):
             self.stream_verify_screen_mode = screen_mode
             self.stream_verify_buffer = buffer
             self.stream_verify_client = None
+            self.stream_verify_failure_reported = False
 
         self.stream_verify_button.setText("验证中...")
         self.stream_verify_button.setEnabled(True)
@@ -5400,8 +5402,10 @@ class LauncherWindow(QWidget):
             self.stream_verification_failed.emit(f"验证流启动失败：{exc}")
 
     def _handle_stream_verification_failed(self, message: str):
-        if not self.stream_verify_active:
-            return
+        with self.stream_verify_lock:
+            if not self.stream_verify_active or self.stream_verify_failure_reported:
+                return
+            self.stream_verify_failure_reported = True
         self._stop_stream_verification("")
         self._log_message(f"[Launcher] {message}\n", level=logging.ERROR)
         self._set_status(message)

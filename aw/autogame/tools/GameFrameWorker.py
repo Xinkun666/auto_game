@@ -1,5 +1,6 @@
 import os
 import gc
+import json
 import math
 import re
 import time
@@ -2467,8 +2468,36 @@ class FrameWorker(threading.Thread):
             self.failure_code = str(code or "unknown_failure")
             self.failure_reason = str(reason or "自动化执行失败")
             self.failure_details = dict(details or {})
+        self._write_launcher_failure_signal(
+            self.failure_code,
+            self.failure_reason,
+            self.failure_details,
+        )
         print(f"[FrameWorker] 标记失败: code={self.failure_code}, reason={self.failure_reason}")
         return True
+
+    def _write_launcher_failure_signal(self, code, reason, details=None):
+        archive_dir = self._resolve_launcher_run_archive_dir()
+        if archive_dir is None:
+            return False
+
+        payload = {
+            "event": "launcher_run_failure",
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "failure_code": str(code or "unknown_failure"),
+            "failure_reason": str(reason or "自动化执行失败"),
+            "details": dict(details or {}),
+        }
+        signal_path = os.path.join(str(archive_dir), "launcher_failure_signal.json")
+        tmp_path = signal_path + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, signal_path)
+            return True
+        except Exception as exc:
+            print(f"[FrameWorker] 写入 launcher 失败信号失败: {exc}")
+            return False
 
     def _resolve_launcher_run_archive_dir(self):
         explicit_archive_dir = os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()

@@ -124,6 +124,7 @@ SP_RECORD_EVER_STARTED_MARKERS = (
     "[Timer] sp 记录已停止",
     "[Timer] sp 数据已保存",
 )
+LAUNCHER_FAILURE_SIGNAL_FILE = "launcher_failure_signal.json"
 DISMISS_REBOOT_PROMPT_ENV = "AUTOGAME_DISMISS_REBOOT_PROMPT"
 DEVICE_LOG_SETTLE_TIMEOUT_SECONDS = 3.0
 DEVICE_LOG_SETTLE_INTERVAL_SECONDS = 0.2
@@ -2176,6 +2177,10 @@ class LauncherWindow(QWidget):
         self.current_run_stream_preserved = False
         self.current_run_sp_started = False
         self.current_run_sp_state: dict = {}
+        self.current_run_failure_code = ""
+        self.current_run_failure_reason = ""
+        self.current_run_failure_details: dict = {}
+        self.current_run_inactivity_preserved = False
         self.dismiss_reboot_prompt_on_next_case_start = False
         self.preserve_device_apps_on_manual_stop = True
         self.current_batch_start_timestamp: Optional[str] = None
@@ -4426,6 +4431,10 @@ class LauncherWindow(QWidget):
         self.current_run_stream_preserved = False
         self.current_run_sp_started = False
         self.current_run_sp_state = {}
+        self.current_run_failure_code = ""
+        self.current_run_failure_reason = ""
+        self.current_run_failure_details = {}
+        self.current_run_inactivity_preserved = False
         self.dismiss_reboot_prompt_on_next_case_start = False
         self.preserve_device_apps_on_manual_stop = True
         self.current_batch_start_timestamp = None
@@ -4551,6 +4560,10 @@ class LauncherWindow(QWidget):
         self.current_run_stream_preserved = False
         self.current_run_sp_started = False
         self.current_run_sp_state = {}
+        self.current_run_failure_code = ""
+        self.current_run_failure_reason = ""
+        self.current_run_failure_details = {}
+        self.current_run_inactivity_preserved = False
         self.current_run_start_timestamp = time.strftime("%Y%m%d%H%M%S")
         self.current_run_archive_dir = None
         self._clear_preview_files()
@@ -4820,6 +4833,42 @@ class LauncherWindow(QWidget):
         ):
             self._mark_current_run_sp_started("state_file", state)
 
+    def _refresh_current_run_failure_signal(self):
+        archive_dir = self.current_run_archive_dir
+        if archive_dir is None:
+            return
+
+        signal_path = archive_dir / LAUNCHER_FAILURE_SIGNAL_FILE
+        if not signal_path.exists():
+            return
+
+        try:
+            payload = json.loads(signal_path.read_text(encoding="utf-8"))
+        except Exception:
+            log_exception(f"read launcher failure signal failed: signal_path={signal_path}")
+            return
+
+        if not isinstance(payload, dict):
+            return
+
+        failure_code = str(payload.get("failure_code") or "").strip()
+        if not failure_code:
+            return
+
+        previous_code = self.current_run_failure_code
+        self.current_run_failure_code = failure_code
+        self.current_run_failure_reason = str(payload.get("failure_reason") or "").strip()
+        details = payload.get("details")
+        self.current_run_failure_details = details if isinstance(details, dict) else {}
+        if previous_code != failure_code:
+            self._log_message(
+                f"[Launcher] 检测到子进程失败信号：code={self.current_run_failure_code}, "
+                f"reason={self.current_run_failure_reason or '未提供'}。\n"
+            )
+
+    def _current_run_failed_by_inactivity_timeout(self) -> bool:
+        return self.current_run_failure_code == "launcher_inactivity_timeout"
+
     def _current_plan_uses_sp_recording(self) -> bool:
         if self.current_plan is None:
             return True
@@ -4900,7 +4949,7 @@ class LauncherWindow(QWidget):
                 except Exception:
                     pass
 
-    def _save_sp_on_stream_disconnect(self) -> bool:
+    def _save_sp_for_preserve(self, reason_label: str) -> bool:
         try:
             resolution = get_resolution()
         except Exception:
@@ -4914,15 +4963,22 @@ class LauncherWindow(QWidget):
         x = int(round(screen_w * STREAM_DISCONNECT_SP_NORM_POS[0]))
         y = int(round(screen_h * STREAM_DISCONNECT_SP_NORM_POS[1]))
         command = f"uinput -T -d {x} {y} -i {STREAM_DISCONNECT_SP_LONG_PRESS_MS} -u {x} {y}"
+        label = str(reason_label or "SP保全").strip() or "SP保全"
 
         self._log_message(
-            f"[Launcher] 断流保全：尝试长按 SP 保存，pos=({x},{y}), duration={STREAM_DISCONNECT_SP_LONG_PRESS_MS}ms。\n"
+            f"[Launcher] {label}：尝试长按 SP 保存，pos=({x},{y}), duration={STREAM_DISCONNECT_SP_LONG_PRESS_MS}ms。\n"
         )
         result = run_hdc_shell(command)
         ok = result is not None
         if not ok:
-            self._log_message("[Launcher] 断流保全：SP 保存指令执行失败，请检查 hdc/uinput 状态。\n", level=logging.WARNING)
+            self._log_message(
+                f"[Launcher] {label}：SP 保存指令执行失败，请检查 hdc/uinput 状态。\n",
+                level=logging.WARNING,
+            )
         return ok
+
+    def _save_sp_on_stream_disconnect(self) -> bool:
+        return self._save_sp_for_preserve("断流保全")
 
     def _preserve_stream_disconnect_run_state(self):
         if self.current_run_stream_preserved:
@@ -4960,6 +5016,49 @@ class LauncherWindow(QWidget):
                 )
             except Exception:
                 log_exception(f"write stream disconnect preserve result failed: archive_dir={archive_dir}")
+
+    def _preserve_inactivity_timeout_run_state(self):
+        if self.current_run_inactivity_preserved:
+            return
+        self.current_run_inactivity_preserved = True
+
+        self._refresh_current_run_sp_state()
+        self._refresh_current_run_failure_signal()
+        archive_dir = self._resolve_current_run_archive_dir()
+        details = dict(self.current_run_failure_details or {})
+        preserve_result = {
+            "event": "inactivity_timeout_preserve",
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "run_index": self.current_run_index + 1,
+            "failure_code": self.current_run_failure_code,
+            "failure_reason": self.current_run_failure_reason,
+            "failure_details": details,
+            "sp_recording_enabled": self._current_plan_uses_sp_recording(),
+            "sp_started": self.current_run_sp_started,
+            "sp_state": self.current_run_sp_state,
+            "screenshot_path": details.get("screenshot_path"),
+            "sp_save_attempted": False,
+            "sp_save_ok": False,
+            "sp_save_skipped_reason": "",
+        }
+
+        if not self._current_plan_uses_sp_recording():
+            preserve_result["sp_save_skipped_reason"] = "sp_recording_disabled"
+        elif self.current_run_sp_state.get("sp_saved"):
+            preserve_result["sp_save_skipped_reason"] = "sp_already_saved"
+            self._log_message("[Launcher] 无操作保全：SP 状态显示已经保存，跳过重复长按。\n")
+        else:
+            preserve_result["sp_save_attempted"] = True
+            preserve_result["sp_save_ok"] = self._save_sp_for_preserve("无操作保全")
+
+        if archive_dir is not None:
+            try:
+                (archive_dir / "inactivity_timeout_preserve.json").write_text(
+                    json.dumps(preserve_result, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception:
+                log_exception(f"write inactivity timeout preserve result failed: archive_dir={archive_dir}")
 
     def _mark_stream_disconnected(self, message: str, source: str):
         if self.current_run_stream_disconnected:
@@ -5183,6 +5282,10 @@ class LauncherWindow(QWidget):
                     "stream_started": self.current_run_stream_started,
                     "sp_started": self.current_run_sp_started,
                     "sp_state": self.current_run_sp_state,
+                    "failure_code": self.current_run_failure_code,
+                    "failure_reason": self.current_run_failure_reason,
+                    "failure_details": self.current_run_failure_details,
+                    "inactivity_timeout_preserved": self.current_run_inactivity_preserved,
                     "batch_start_timestamp": self.current_batch_start_timestamp,
                     "run_start_timestamp": self.current_run_start_timestamp,
                     "inactivity_timeout_minutes": self.current_plan["inactivity_timeout_minutes"],
@@ -5712,6 +5815,13 @@ class LauncherWindow(QWidget):
             finish_prefix = "进程已手动停止"
         self._log_message(f"\n[Launcher] {finish_prefix}，exit_code={exit_code}\n")
         self._poll_preview_frame()
+        self._refresh_current_run_failure_signal()
+        if self._current_run_failed_by_inactivity_timeout():
+            self._log_message(
+                "[Launcher] 本次用例因长时间无操控主动结束，正在执行无操作保全。\n"
+            )
+            self._set_status("当前用例长时间无操控，正在长按 SP 保存并归档。")
+            self._preserve_inactivity_timeout_run_state()
         run_no = self.current_run_index + 1
         startup_stream_disconnect = (
             self.current_run_stream_disconnected

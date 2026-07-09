@@ -5804,6 +5804,8 @@ class HouseSceneSearchManager(HouseSearchManager):
                 )
                 if self._handle_far_entry_forbidden_escape(w, current_loc, current_direction, target_loc):
                     return
+                if self._start_r_city_direct_entry_rush_if_clear(w, current_loc, target_loc, target_dist, "远距离转跑图前"):
+                    return
                 if self._start_r_city_entry_map_navigation(w, current_loc, target_dist):
                     return
                 if self._request_r_city_entry_route(w, target_loc, target_dist):
@@ -5920,6 +5922,8 @@ class HouseSceneSearchManager(HouseSearchManager):
                     result="到真实入门点20距离内再回到搜房Nav进门流程",
                 )
                 if self._handle_far_entry_forbidden_escape(w, current_loc, current_direction, entry_loc):
+                    return
+                if self._start_r_city_direct_entry_rush_if_clear(w, current_loc, entry_loc, entry_dist, "Nav复核远入口"):
                     return
                 if self._start_r_city_entry_map_navigation(w, current_loc, entry_dist):
                     return
@@ -6362,6 +6366,16 @@ class HouseSceneSearchManager(HouseSearchManager):
             print(f"[RCitySearch] 不可通行区域连通判断失败，按不同区域处理: {exc}")
             return False
 
+    def _line_only_crosses_target_forbidden_region(self, current_loc, target_loc) -> bool:
+        checker = getattr(self.map_tool, "line_only_crosses_target_forbidden_region", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(current_loc, target_loc))
+        except Exception as exc:
+            print(f"[RCitySearch] 直线穿越目标黑区判断失败，按需要A*处理: {exc}")
+            return False
+
     def _is_reentered_forbidden_escape_region(self, current_loc) -> bool:
         route_target = self.r_city_route_target or {}
         if route_target.get("id") != "forbidden_escape_to_entry" or not self.r_city_route_path:
@@ -6439,6 +6453,55 @@ class HouseSceneSearchManager(HouseSearchManager):
             result="避免从错误黑区直接规划或硬冲入门点",
         )
         self._handle_forbidden_escape(w, current_loc, current_direction, target_loc=target_loc)
+        return True
+
+    def _start_r_city_direct_entry_rush_if_clear(
+        self,
+        w: "FrameWorker",
+        current_loc,
+        target_loc,
+        dist: float,
+        phase_label: str,
+    ) -> bool:
+        start_loc = self._location_tuple(current_loc)
+        target_loc = self._location_tuple(target_loc)
+        if start_loc is None or target_loc is None:
+            return False
+        if not self._is_walkable(start_loc):
+            return False
+        if not self._line_only_crosses_target_forbidden_region(start_loc, target_loc):
+            return False
+
+        self.r_city_route_path = []
+        self.r_city_route_index = 0
+        self.r_city_route_target = None
+        self.forbidden_escape_region_anchor = None
+        self.history_locations = []
+        self.status = "FAST_NAV"
+        self._set_frame_decision(
+            w,
+            (
+                f"{phase_label}：当前位置 {start_loc} 可通行，直线到真实入门点 {target_loc} "
+                f"距离={dist:.2f}，线段只穿过目标入门点所在不可通行区域"
+            ),
+            "跳过 A* 和跑图兜底，直接对准真实入门点往前冲",
+            action="直冲真实入门点",
+            method="line_only_crosses_target_forbidden_region(); align_direction(); click(自动前进)",
+            result="保持搜房FAST_NAV，直到真实入门点20距离内进入常规Nav",
+        )
+        print(
+            f"[RCitySearch] {phase_label}: start={start_loc}, entry={target_loc}, dist={dist:.2f}，"
+            "直线只穿目标黑区，跳过A*直接冲入门点"
+        )
+
+        aligned = self.align_direction(w, target_loc, threshold=10, max_steps=1)
+        if not aligned:
+            self.stop_auto_forward(w)
+            return True
+        if not self.auto_forward:
+            w.click("自动前进")
+            self.auto_forward = True
+        self.handle_jump_logic(w)
         return True
 
     def _start_r_city_entry_map_navigation(self, w: "FrameWorker", current_loc, route_dist: float) -> bool:
@@ -6821,6 +6884,8 @@ class HouseSceneSearchManager(HouseSearchManager):
                 result="真实入门点20距离内才进入Nav",
             )
             if self._handle_far_entry_forbidden_escape(w, loc, current_direction, target_loc):
+                return True
+            if self._start_r_city_direct_entry_rush_if_clear(w, loc, target_loc, target_dist, "路线交接重选远入口"):
                 return True
             if self._start_r_city_entry_map_navigation(w, loc, target_dist):
                 return True

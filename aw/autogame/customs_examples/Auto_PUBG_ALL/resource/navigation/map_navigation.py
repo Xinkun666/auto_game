@@ -144,6 +144,44 @@ class MapNavigator:
         end_label = int(labels[ey, ex])
         return start_label != 0 and start_label == end_label
 
+    def line_only_crosses_target_forbidden_region(self, start_pos, target_pos):
+        """判断起点到目标点的线段是否只穿过目标点所在的不可通行区域。"""
+        if start_pos is None or target_pos is None:
+            return False
+        try:
+            sx, sy = int(round(float(start_pos[0]))), int(round(float(start_pos[1])))
+            tx, ty = int(round(float(target_pos[0]))), int(round(float(target_pos[1])))
+        except (TypeError, ValueError, IndexError):
+            return False
+
+        if (
+            sx < 0 or sx >= self.width or sy < 0 or sy >= self.height
+            or tx < 0 or tx >= self.width or ty < 0 or ty >= self.height
+        ):
+            return False
+
+        if not self._is_walkable(sx, sy) or self._is_walkable(tx, ty):
+            return False
+
+        labels = self._forbidden_labels()
+        target_label = int(labels[ty, tx])
+        if target_label == 0:
+            return False
+
+        dx = tx - sx
+        dy = ty - sy
+        steps = max(abs(dx), abs(dy), 1)
+        for index in range(steps + 1):
+            ratio = index / steps
+            x = int(round(sx + dx * ratio))
+            y = int(round(sy + dy * ratio))
+            if x < 0 or x >= self.width or y < 0 or y >= self.height:
+                return False
+            label = int(labels[y, x])
+            if label != 0 and label != target_label:
+                return False
+        return True
+
     def nearest_walkable_within_radius(self, pos, radius):
         """在当前位置映射到 mask 后，只扫描局部半径内的可通行像素。"""
         if pos is None or len(pos) < 2:

@@ -7489,8 +7489,9 @@ class HouseSceneSearchManager(HouseSearchManager):
         if w.current_stage != "搜房阶段":
             return False
 
-        if self.current_house_id is not None:
-            self._mark_r_city_house_completed(self.current_house_id)
+        completed_house_id = self.current_house_id
+        if completed_house_id is not None:
+            self.completed_houses.add(str(completed_house_id))
         self.searching_number += 1
         completed_house_count = len(
             {
@@ -7507,9 +7508,8 @@ class HouseSceneSearchManager(HouseSearchManager):
             }
         )
         print(
-            f"[RCitySearch] 房屋 {self.current_house_id} 完成，"
-            f"已搜 {completed_house_count}/{total_house_count} 栋，"
-            f"入口完成 {len(self.r_city_completed_targets)}/{len(self.r_city_targets)}"
+            f"[RCitySearch] 房屋 {completed_house_id} 完成，"
+            f"已登记 {completed_house_count}/{total_house_count} 栋，后续跳过该 house_id"
         )
         self._refresh_frame_and_handle_jump(w)
         exit_direction = w.get_info("direction")

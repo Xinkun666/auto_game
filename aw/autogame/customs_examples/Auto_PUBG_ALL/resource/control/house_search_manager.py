@@ -5551,6 +5551,7 @@ class HouseSceneSearchManager(HouseSearchManager):
     R_CITY_PRECISE_NAV_ALIGN_MAX_STEPS = 1
     R_CITY_PRECISE_NAV_MIN_WAIT = 300
     R_CITY_PRECISE_NAV_MAX_WAIT = 12000
+    R_CITY_ENTRY_FORWARD_PROGRESS_MAX_STEPS = 12
     R_CITY_ENTRY_FAST_MIN_DURA = 520
     R_CITY_ENTRY_FAST_MIN_WAIT = 275
     R_CITY_ENTRY_SLOW_MIN_DURA = 460
@@ -7599,7 +7600,13 @@ class HouseSceneSearchManager(HouseSearchManager):
             before_dist = desired_dist
 
         previous_dist = before_dist
-        for step in range(self.ENTRY_FORWARD_MAX_STEPS):
+        progress_max_steps = max(
+            1,
+            int(getattr(self, "R_CITY_ENTRY_FORWARD_PROGRESS_MAX_STEPS", self.ENTRY_FORWARD_MAX_STEPS)),
+        )
+        step = 0
+        while step < progress_max_steps:
+            step += 1
             if self._should_abort(w):
                 return False
 
@@ -7632,7 +7639,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                         target_loc=target_loc,
                         dist=f"{current_dist:.2f}",
                         extra=(
-                            f"step={step + 1}/{self.ENTRY_FORWARD_MAX_STEPS}, "
+                            f"step={step}/{progress_max_steps}, "
                             f"current_dir={current_dir}, target_angle={target_angle}, "
                             f"threshold={self.R_CITY_PRECISE_NAV_ALIGN_TOLERANCE}"
                         ),
@@ -7659,7 +7666,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
             print(
                 f"[SceneSearch] 当前距离入门点 {target_loc} 为 {current_dist:.2f}，"
-                f"执行{self._entry_forward_mode_label(mode)}小步 {step + 1}/{self.ENTRY_FORWARD_MAX_STEPS}："
+                f"执行{self._entry_forward_mode_label(mode)}小步 {step}/{progress_max_steps}："
                 f"模型距离={distance_key}, model_y_bias={adaptive_y_bias}, "
                 f"fixed_y_bias={y_bias}, dura={dura}, model_wait={model_wait}, "
                 f"dynamic_wait={wait}, target_angle={target_angle}"
@@ -7673,7 +7680,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                     target_loc=target_loc,
                     dist=f"{current_dist:.2f}",
                     extra=(
-                        f"mode={mode}, step={step + 1}/{self.ENTRY_FORWARD_MAX_STEPS}, "
+                        f"mode={mode}, step={step}/{progress_max_steps}, "
                         f"bin={distance_key}, model_y_bias={adaptive_y_bias}, "
                         f"fixed_y_bias={y_bias}, dura={dura}, model_wait={model_wait}, "
                         f"dynamic_wait={wait}, current_dir={current_dir}, target_angle={target_angle}, "
@@ -7710,6 +7717,11 @@ class HouseSceneSearchManager(HouseSearchManager):
             if after_dist <= self.ENTRY_ARRIVAL_DISTANCE or moved <= 0:
                 break
             previous_dist = after_dist
+        else:
+            print(
+                f"[SceneSearch] 入门点 {target_loc} 已连续靠近 {progress_max_steps} 步，"
+                "结束本轮精推进保护；下一帧继续按最新距离/角度判断是否前推"
+            )
 
         return True
 

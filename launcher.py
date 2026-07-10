@@ -55,6 +55,23 @@ class AppPaths(NamedTuple):
     root_dir: Path
 
 
+class ValidationIssues:
+    """Collect launch validation results so one user action produces one dialog."""
+
+    def __init__(self):
+        self.errors: list[tuple[str, str]] = []
+        self.warnings: list[tuple[str, str]] = []
+
+    def add_error(self, title: str, message: str):
+        self.errors.append((str(title).strip(), str(message).strip()))
+
+    def add_warning(self, title: str, message: str):
+        self.warnings.append((str(title).strip(), str(message).strip()))
+
+    def has_errors(self) -> bool:
+        return bool(self.errors)
+
+
 def resolve_app_paths(
     frozen: Optional[bool] = None,
     executable: Optional[Path] = None,
@@ -3600,6 +3617,24 @@ class LauncherWindow(QWidget):
         self._sync_testcase_controls_state()
         self._refresh_preview_pixmap()
 
+    def _show_validation_issues(self, dialog_title: str, issues: ValidationIssues) -> bool:
+        for warning_title, warning_message in issues.warnings:
+            self._log_message(
+                f"[Launcher] 非阻断校验提示：{warning_title}：{warning_message}\n",
+                level=logging.WARNING,
+            )
+
+        if not issues.has_errors():
+            return False
+
+        lines = ["以下问题需要处理：", ""]
+        for index, (error_title, error_message) in enumerate(issues.errors, start=1):
+            lines.append(f"{index}. {error_title}：{error_message}")
+        message = "\n".join(lines)
+        self._log_message(f"[Launcher] {dialog_title}：{message}\n", level=logging.ERROR)
+        QMessageBox.warning(self, dialog_title, message)
+        return True
+
     def _choose_testcase_file(self) -> bool:
         LOGGER.info("choose_testcase_file dialog open")
         file_path, _ = QFileDialog.getOpenFileName(
@@ -3618,7 +3653,9 @@ class LauncherWindow(QWidget):
             rel_path = py_file.relative_to(APP_DIR)
         except ValueError:
             LOGGER.warning("choose_testcase_file invalid path: %s", py_file)
-            QMessageBox.warning(self, "路径错误", "请选择当前项目 testcases 目录下的用例文件。")
+            issues = ValidationIssues()
+            issues.add_error("路径错误", "请选择当前项目 testcases 目录下的用例文件。")
+            self._show_validation_issues("无法选择用例", issues)
             return False
 
         self.selected_testcase_file = py_file
@@ -3658,18 +3695,19 @@ class LauncherWindow(QWidget):
             self.selected_testcase_file,
             self.project_combo.currentText().strip(),
         )
+        issues = ValidationIssues()
         if self.selected_testcase_file is None:
-            QMessageBox.warning(self, "缺少用例", "请先选择一个 testcases 用例。")
-            return
-
+            issues.add_error("缺少用例", "请先选择一个 testcases 用例。")
         project_case = self.project_combo.currentText().strip()
         project_dir = resolve_label_project_dir(project_case)
-        if project_dir is None:
-            QMessageBox.warning(
-                self,
+        if not project_case:
+            issues.add_error("缺少配置", "请选择 project_case。")
+        elif project_dir is None:
+            issues.add_error(
                 "缺少标注资源",
                 f"未找到 project_case={project_case} 对应的标注资源目录或 info.py。",
             )
+        if self._show_validation_issues("无法打开标注工具", issues):
             self._sync_testcase_controls_state()
             return
 
@@ -3678,7 +3716,8 @@ class LauncherWindow(QWidget):
             self.label_tool.load_project_from_dir(str(project_dir))
         except Exception as exc:
             log_exception(f"open label tool failed: project_dir={project_dir}")
-            QMessageBox.critical(self, "打开失败", f"无法打开标注工具：\n{exc}")
+            issues.add_error("打开失败", f"无法打开标注工具：{exc}")
+            self._show_validation_issues("无法打开标注工具", issues)
             return
 
         self.label_tool_project_dir = project_dir
@@ -3865,7 +3904,9 @@ class LauncherWindow(QWidget):
             return
         archive_dir = Path(self.selected_history_record["archive_dir"])
         if not archive_dir.exists():
-            QMessageBox.warning(self, "目录不存在", f"历史输出目录不存在：\n{archive_dir}")
+            issues = ValidationIssues()
+            issues.add_error("目录不存在", f"历史输出目录不存在：{archive_dir}")
+            self._show_validation_issues("无法打开历史输出", issues)
             self._refresh_history_outputs()
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(archive_dir.resolve())))
@@ -4419,7 +4460,7 @@ class LauncherWindow(QWidget):
             json.dumps(payload, ensure_ascii=False, indent=2)
         )
 
-    def _validate_selection(self) -> Optional[tuple[str, str]]:
+    def _validate_selection(self, issues: ValidationIssues) -> Optional[tuple[str, str]]:
         project_case = self.project_combo.currentText().strip()
         target_case = self.target_combo.currentText().strip()
         LOGGER.info(
@@ -4431,30 +4472,33 @@ class LauncherWindow(QWidget):
         )
 
         if not project_case:
-            QMessageBox.warning(self, "缺少配置", "请选择 project_case。")
-            return None
-
+            issues.add_error("缺少配置", "请选择 project_case。")
         if not target_case:
-            QMessageBox.warning(self, "缺少配置", "请选择 target_case。")
+            issues.add_error("缺少配置", "请选择 target_case。")
+        if issues.has_errors():
             return None
 
         return project_case, target_case
 
-    def _collect_plan(self) -> Optional[dict]:
-        config = self._validate_selection()
-        if config is None:
-            return None
-
-        project_case, target_case = config
+    def _collect_plan(self, issues: ValidationIssues) -> Optional[dict]:
+        config = self._validate_selection(issues)
         testcase_label = None
         mode = "direct"
 
         if self.mode_testcase.isChecked():
             if self.selected_testcase_file is None:
-                QMessageBox.warning(self, "缺少用例", "testcases 模式下请先选择一个用例文件。")
-                return None
-            testcase_label = self.selected_testcase_file.relative_to(APP_DIR).with_suffix("").as_posix()
-            mode = "testcase"
+                issues.add_error("缺少用例", "testcases 模式下请先选择一个用例文件。")
+            else:
+                try:
+                    testcase_label = self.selected_testcase_file.relative_to(APP_DIR).with_suffix("").as_posix()
+                    mode = "testcase"
+                except ValueError:
+                    issues.add_error("路径错误", "所选用例不在当前项目目录内，请重新选择。")
+
+        if config is None or issues.has_errors():
+            return None
+
+        project_case, target_case = config
 
         cleanup_apps = set()
         if self.selected_testcase_file is not None:
@@ -4766,7 +4810,12 @@ class LauncherWindow(QWidget):
                 "[Launcher] 子进程启动失败，请检查日志中的 program/args/error 信息。\n",
                 level=logging.ERROR,
             )
-            QMessageBox.critical(self, "启动失败", "子进程启动失败，请检查 Python 环境。")
+            issues = ValidationIssues()
+            issues.add_error(
+                "子进程启动失败",
+                "请检查 Python 环境，并查看 launcher 日志中的 program、args 和 error 信息。",
+            )
+            self._show_validation_issues("任务未启动", issues)
             self.process.deleteLater()
             self.process = None
             self._finish_batch("启动失败，批量任务已终止。")
@@ -5478,7 +5527,7 @@ class LauncherWindow(QWidget):
         self._set_status("当前用例超过安全时间，正在停止本次运行。")
         self.process.kill()
 
-    def _prepare_capture_mode_for_plan(self, plan: dict) -> bool:
+    def _prepare_capture_mode_for_plan(self, plan: dict, issues: ValidationIssues) -> bool:
         screen_mode = normalize_launcher_screen_mode(plan.get("screen_mode") or "2")
         plan["screen_mode"] = screen_mode
         test_profile = str(plan.get("test_profile") or "power")
@@ -5486,7 +5535,7 @@ class LauncherWindow(QWidget):
             write_screen_mode_config(screen_mode)
         except Exception as exc:
             log_exception("write screen_mode config failed")
-            QMessageBox.warning(self, "截图模式配置失败", f"写入 screen_mode={screen_mode} 失败：{exc}")
+            issues.add_error("截图模式配置失败", f"写入 screen_mode={screen_mode} 失败：{exc}")
             return False
 
         profile_text = "功耗测试" if test_profile == "power" else "功能测试"
@@ -5497,7 +5546,7 @@ class LauncherWindow(QWidget):
         plan["capture_preflight_message"] = check_result.message
         self._log_message(f"[Launcher] 截图流预检：{check_result.message}\n")
         if not check_result.ok:
-            QMessageBox.warning(self, "截图流预检失败", check_result.message)
+            issues.add_error("截图流预检失败", check_result.message)
             return False
         return True
 
@@ -5732,13 +5781,17 @@ class LauncherWindow(QWidget):
             QMessageBox.information(self, "运行中", "当前已有任务在运行，请先停止。")
             return
 
-        plan = self._collect_plan()
-        if plan is None:
-            LOGGER.info("start_run aborted because plan is None")
+        issues = ValidationIssues()
+        plan = self._collect_plan(issues)
+        if plan is not None:
+            self._prepare_capture_mode_for_plan(plan, issues)
+
+        if self._show_validation_issues("无法启动任务", issues):
+            LOGGER.info("start_run aborted because validation failed")
             return
 
-        if not self._prepare_capture_mode_for_plan(plan):
-            LOGGER.info("start_run aborted because capture mode preflight failed")
+        if plan is None:
+            LOGGER.error("start_run aborted without plan and without validation issue")
             return
 
         self._begin_batch(plan)

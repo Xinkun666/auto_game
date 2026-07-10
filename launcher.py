@@ -758,6 +758,67 @@ def resolve_preview_payload_stage_name(payload) -> str:
     return ""
 
 
+def resolve_preview_payload_group_name(payload) -> str:
+    payload = payload if isinstance(payload, dict) else {}
+
+    for source in (
+        payload.get("stage"),
+        payload.get("phase"),
+        (payload.get("semantic_log") or {}).get("current_stage")
+        if isinstance(payload.get("semantic_log"), dict)
+        else None,
+    ):
+        if not isinstance(source, dict):
+            continue
+        value = str(source.get("group") or "").strip()
+        if value:
+            return value
+
+    return ""
+
+
+def resolve_preview_group_filter(stage_entry, group_name: str):
+    """Match the runtime stage-group selection used by StageLogicController."""
+    group_name = str(group_name or "").strip()
+    if not group_name or group_name == "默认" or not isinstance(stage_entry, dict):
+        return None
+
+    groups = stage_entry.get("groups", {})
+    if not isinstance(groups, dict):
+        return None
+    group_data = groups.get(group_name)
+    if group_data is None:
+        return set()
+    if isinstance(group_data, dict) and group_data.get("all"):
+        return None
+
+    allowed = set()
+    raw_items = group_data.get("items", []) if isinstance(group_data, dict) else []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        scene_name = str(item.get("scene") or "").strip()
+        item_type = str(item.get("type") or "").strip()
+        item_name = str(item.get("name") or "").strip()
+        if scene_name and item_name and item_type in {"area", "special_area"}:
+            allowed.add((scene_name, item_type, item_name))
+    return allowed
+
+
+def is_preview_stage_item_visible(group_filter, scene_name: str, item_type: str, item_name: str) -> bool:
+    if group_filter is None:
+        return True
+
+    scene_name = str(scene_name or "").strip()
+    if item_type == "points":
+        # Runtime groups only enumerate recognition areas. Points belong to an
+        # enabled scene, so keep that scene's actionable controls visible.
+        return any(scene == scene_name for scene, _kind, _name in group_filter)
+
+    group_item_type = {"areas": "area", "special_areas": "special_area"}.get(item_type)
+    return bool(group_item_type) and (scene_name, group_item_type, item_name) in group_filter
+
+
 def stream_disconnect_policy_for_screen_mode(screen_mode: str) -> str:
     mode = str(screen_mode).strip()
     if mode == "1":
@@ -4241,6 +4302,7 @@ class LauncherWindow(QWidget):
 
         payload = self.latest_preview_payload or {}
         stage = resolve_preview_payload_stage_name(payload)
+        group_name = resolve_preview_payload_group_name(payload)
         project_case = self._get_preview_project_case()
         project_info = self._load_preview_project_info(project_case)
         stage_info = project_info.get("stage_info", {})
@@ -4249,6 +4311,7 @@ class LauncherWindow(QWidget):
         scenes = resolve_preview_stage_scenes(stage_entry, scene_pool)
         if not scenes:
             return self.latest_preview_pixmap
+        group_filter = resolve_preview_group_filter(stage_entry, group_name)
 
         pixmap = self.latest_preview_pixmap.copy()
         painter = QPainter(pixmap)
@@ -4273,6 +4336,13 @@ class LauncherWindow(QWidget):
                         continue
                     for item_name, item_data in items.items():
                         if not isinstance(item_data, dict):
+                            continue
+                        if not is_preview_stage_item_visible(
+                            group_filter,
+                            scene_name,
+                            item_type,
+                            item_name,
+                        ):
                             continue
                         label = f"{scene_name}/{item_name}"
                         self._draw_stage_rect(

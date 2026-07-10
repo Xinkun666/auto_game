@@ -1368,16 +1368,7 @@ class Controller:
 
     def _get_cached_resolution(self):
         if self._cached_resolution is None:
-            env_w = os.environ.get("AUTOGAME_SCREEN_WIDTH")
-            env_h = os.environ.get("AUTOGAME_SCREEN_HEIGHT")
-            if env_w and env_h:
-                try:
-                    self._cached_resolution = (int(env_w), int(env_h))
-                    return self._cached_resolution
-                except ValueError:
-                    pass
-
-            res_w, res_h = get_resolution()
+            res_w, res_h = get_live_screen_resolution()
             if res_w is not None and res_h is not None:
                 self._cached_resolution = (int(res_w), int(res_h))
         return self._cached_resolution

@@ -986,6 +986,7 @@ class AutoStudioWindow(QMainWindow):
             project.stages.append(stage)
 
         AutoStudioWindow._ensure_project_scene_pool(project)
+        AutoStudioWindow._sync_stage_scene_resolutions_from_pool(project)
         return project
 
     @staticmethod
@@ -2255,6 +2256,29 @@ class AutoStudioWindow(QMainWindow):
         return removed_scenes
 
     @staticmethod
+    def _sync_stage_scene_resolutions_from_pool(project: Optional[ProjectData]) -> List[SceneData]:
+        """Ensure a stage reference includes every resolution of its pool scene."""
+        if not project or not project.scene_groups:
+            return []
+        added_scenes = []
+        for stage in project.stages:
+            stage_scene_ids = {id(scene) for scene in stage.scenes}
+            for scene_group in project.scene_groups:
+                versions_by_name = {}
+                for scene in scene_group.scenes:
+                    versions_by_name.setdefault(scene.name, []).append(scene)
+                for versions in versions_by_name.values():
+                    if not any(id(scene) in stage_scene_ids for scene in versions):
+                        continue
+                    for scene in versions:
+                        if id(scene) in stage_scene_ids:
+                            continue
+                        stage.scenes.append(scene)
+                        stage_scene_ids.add(id(scene))
+                        added_scenes.append(scene)
+        return added_scenes
+
+    @staticmethod
     def _stage_scene_pool_selection_entries(project: Optional[ProjectData], stage: Optional[StageData]) -> List[Dict]:
         if not project or not stage:
             return []
@@ -2377,6 +2401,7 @@ class AutoStudioWindow(QMainWindow):
             stage.scenes.append(scene)
             current_ids.add(id(scene))
             added_scenes.append(scene)
+        AutoStudioWindow._sync_stage_scene_resolutions_from_pool(project)
         return {"added": added_scenes, "removed": removed_scenes}
 
     @staticmethod
@@ -2482,6 +2507,7 @@ class AutoStudioWindow(QMainWindow):
                     continue
                 stage.scenes.append(scene)
                 current_ids.add(id(scene))
+        AutoStudioWindow._sync_stage_scene_resolutions_from_pool(project)
         return {"added": changes["added"], "removed": changes["removed"]}
 
     def _group_scenes_by_name(self, stage: StageData) -> Dict[str, List[SceneData]]:
@@ -4254,6 +4280,8 @@ class AutoStudioWindow(QMainWindow):
         if self.project:
             self._add_scene_to_project_pool(self.project, new_scene)
         self._add_scene_reference_to_stage(stage, new_scene)
+        if self.project:
+            self._sync_stage_scene_resolutions_from_pool(self.project)
         self.current_stage = stage
         self.set_current_work_stage(stage)
         self.current_scene = new_scene
@@ -4295,6 +4323,8 @@ class AutoStudioWindow(QMainWindow):
             scene_group=scene_group,
         )
         target_scene = apply_result.scene
+        if self.project and not capture_from_pool:
+            self._sync_stage_scene_resolutions_from_pool(self.project)
         preferred_tree = getattr(self, "scene_pool_tree", None) if capture_from_pool else None
         self.current_stage = None if capture_from_pool else self._find_stage_for_scene(target_scene)
         self.set_current_work_stage(self.current_stage)
@@ -5058,6 +5088,7 @@ class AutoStudioWindow(QMainWindow):
     def export_project(self):
         if not self.project: return
         self._remove_stage_scenes_missing_from_pool(self.project)
+        self._sync_stage_scene_resolutions_from_pool(self.project)
         project_root_dir = self.get_project_root_dir()
         default_export_dir = os.path.join(project_root_dir, "customs_examples")
         os.makedirs(default_export_dir, exist_ok=True)
@@ -5518,6 +5549,7 @@ class AutoStudioWindow(QMainWindow):
         AutoStudioWindow._ensure_project_scene_pool(new_project)
         if has_scene_pool_info:
             AutoStudioWindow._apply_scene_pool_info(new_project, scene_pool_info, scene_dirs_by_object_id)
+        AutoStudioWindow._sync_stage_scene_resolutions_from_pool(new_project)
         return new_project
 
     def import_project(self):

@@ -1128,6 +1128,14 @@ def get_runtime_screen_resolution():
     return None, None
 
 
+def get_live_screen_resolution():
+    """Read the phone's current display resolution, with launch-time values as fallback."""
+    screen_w, screen_h = get_resolution()
+    if screen_w and screen_h:
+        return int(screen_w), int(screen_h)
+    return get_runtime_screen_resolution()
+
+
 def select_scene_resolution(scene_content, screen_width=None, screen_height=None):
     if not isinstance(scene_content, dict) or "resolutions" not in scene_content:
         return scene_content
@@ -1198,7 +1206,7 @@ def extract_absolute_points(stage_info):
               }
     """
     absolute_points = {}
-    screen_w, screen_h = get_runtime_screen_resolution()
+    screen_w, screen_h = get_live_screen_resolution()
     stage_info = lock_stage_info_scene_resolutions(stage_info, screen_w, screen_h)
 
     for stage_name, stage_content in stage_info.items():
@@ -1218,9 +1226,12 @@ def extract_absolute_points(stage_info):
                 norm_x = (rect[0] + rect[2]) / 2
                 norm_y = (rect[1] + rect[3]) / 2
 
-                # 核心转换：归一化比例 * 原始分辨率 = 绝对像素坐标
-                abs_x = int(norm_x * img_w)
-                abs_y = int(norm_y * img_h)
+                # 控点实际点击必须以手机当前真实分辨率为基准；标注图尺寸
+                # 只保留为场景来源信息，不能作为最终触控坐标。
+                target_w = int(screen_w) if screen_w else int(img_w)
+                target_h = int(screen_h) if screen_h else int(img_h)
+                abs_x = int(norm_x * target_w)
+                abs_y = int(norm_y * target_h)
 
                 # 扁平化存储：使用 阶段_控点 作为唯一索引，方便 Controller 直接调用
                 key = f"{stage_name}_{point_name}"
@@ -1230,6 +1241,8 @@ def extract_absolute_points(stage_info):
                     "rect": list(rect),
                     "scene_width": int(img_w),
                     "scene_height": int(img_h),
+                    "screen_width": int(target_w),
+                    "screen_height": int(target_h),
                 }
                 if "anchor" in point_content:
                     absolute_points[key]["anchor"] = point_content.get("anchor")

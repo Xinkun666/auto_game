@@ -1,6 +1,5 @@
 import json
 import os
-import random
 import time
 from typing import TYPE_CHECKING, Optional
 import cv2
@@ -4448,7 +4447,17 @@ class HouseSearchManager:
         self._refresh_frame_and_handle_jump(w, f"{phase_label} 等待最新帧")
         return self.find_largest_door(w)
 
-    def _align_to_door_detection(self, w, door, tolerance_px=80, phase_label="DoorAlign"):
+    def _align_to_door_detection(
+        self,
+        w,
+        door,
+        tolerance_px=80,
+        phase_label="DoorAlign",
+        return_state: bool = False,
+    ):
+        def finish(state: str):
+            return state if return_state else state == "aligned"
+
         strict_after_backoff = self._consume_entry_door_strict_align_after_backoff()
         frame_logger = getattr(w, "frame_log", None)
         for step in range(self.ENTRY_DOOR_FINAL_ALIGN_MAX_STEPS):
@@ -4458,7 +4467,7 @@ class HouseSearchManager:
                     frame_logger(
                         f"对准门：{phase_label} 当前帧没有重新识别到门，停止本轮对准，等待重新获取门目标"
                     )
-                return False
+                return finish("lost")
 
             if strict_after_backoff:
                 center_threshold = self._get_strict_door_align_center_threshold(tolerance_px)
@@ -4475,7 +4484,7 @@ class HouseSearchManager:
                         f"对准门：{phase_label} 门中心已进入容差，offset={offset_real:.1f}px，"
                         f"threshold={center_threshold}，area={door_area_ratio}，本轮不再滑动视角"
                     )
-                return True
+                return finish("aligned")
 
             adjust_val = int(offset_real * self.ENTRY_DOOR_ALIGN_STEP_RATIO)
             adjust_val = max(
@@ -4527,13 +4536,13 @@ class HouseSearchManager:
                     frame_logger(
                         f"对准门：{phase_label} 滑动视角并刷新后没有重新看到门，本轮对准失败"
                     )
-                return False
+                return finish("lost")
             door = refreshed
         if callable(frame_logger):
             frame_logger(
                 f"对准门：{phase_label} 已尝试 {self.ENTRY_DOOR_FINAL_ALIGN_MAX_STEPS} 次仍未进入容差，本轮对准失败"
             )
-        return False
+        return finish("not_aligned")
 
     def _advance_towards_entry_door(self, w):
         door = self.find_largest_door(w)
@@ -5696,18 +5705,30 @@ class HouseSceneSearchManager(HouseSearchManager):
     EXIT_WINDOW_JUMP_FORWARD_Y_BIAS = -430
     EXIT_WINDOW_JUMP_FORWARD_DURA = 650
     EXIT_WINDOW_JUMP_FORWARD_WAIT = 850
-    SCENE_EXIT_DOOR_SCAN_CYCLES = 3
-    SCENE_EXIT_DOOR_SCAN_TURN_COUNT = 4
-    SCENE_EXIT_DOOR_SCAN_TURN_PX = 350
+    SCENE_EXIT_DOOR_SCAN_CYCLES = 1
+    SCENE_EXIT_DOOR_SCAN_TURN_COUNT = 6
+    SCENE_EXIT_SCAN_TURN_DEGREES = 60
     SCENE_EXIT_DOOR_ALIGN_TOLERANCE_PX = 120
     SCENE_EXIT_DOOR_FORWARD_Y_BIAS = -520
     SCENE_EXIT_DOOR_FORWARD_DURA = 900
     SCENE_EXIT_DOOR_FORWARD_WAIT = 1100
-    SCENE_EXIT_RANDOM_ESCAPE_SECONDS = 5.0
-    SCENE_EXIT_RANDOM_ESCAPE_POLL_SECONDS = 0.35
-    SCENE_EXIT_RANDOM_VIEW_TURNS = (-360, -240, 240, 360)
-    SCENE_EXIT_RANDOM_TURN_DURA = 160
-    SCENE_EXIT_RANDOM_TURN_WAIT = 420
+    SCENE_EXIT_DOOR_LOST_FORWARD_Y_BIAS = -320
+    SCENE_EXIT_DOOR_LOST_FORWARD_DURA = 350
+    SCENE_EXIT_DOOR_LOST_FORWARD_WAIT = 520
+    SCENE_EXIT_DOOR_LOST_SIDE_X_BIAS = 260
+    SCENE_EXIT_DOOR_LOST_SIDE_Y_BIAS = -320
+    SCENE_EXIT_DOOR_LOST_SIDE_DURA = 350
+    SCENE_EXIT_DOOR_LOST_SIDE_WAIT = 520
+    SCENE_EXIT_WINDOW_SCAN_TURN_COUNT = 6
+    SCENE_EXIT_WINDOW_ALIGN_MAX_STEPS = 6
+    SCENE_EXIT_WINDOW_ALIGN_MAX_STEP_DEGREES = 20
+    SCENE_EXIT_WINDOW_GENTLE_FORWARD_Y_BIAS = -200
+    SCENE_EXIT_WINDOW_GENTLE_FORWARD_DURA = 150
+    SCENE_EXIT_WINDOW_GENTLE_FORWARD_WAIT = 300
+    SCENE_EXIT_TARGET_ATTEMPT_LIMIT = 3
+    SCENE_EXIT_EMERGENCY_TURN_DEGREES = 30
+    SCENE_EXIT_EMERGENCY_MAX_STEPS = 60
+    SCENE_EXIT_EMERGENCY_POLL_SECONDS = 0.3
     SCENE_EXIT_WALL_BACKOFF_Y_BIAS = 380
     SCENE_EXIT_WALL_BACKOFF_DURA = 420
     SCENE_EXIT_WALL_BACKOFF_WAIT = 620
@@ -8519,7 +8540,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self._refresh_frame_and_handle_jump(w)
 
     def _exit_house(self, w: "FrameWorker") -> bool:
-        print("[SceneExit] 出房开始，只定位门：先按当前视角找门，再每次转约90度后立刻复查门")
+        print("[SceneExit] 出房开始：先按60度扫描找门；六次仍无门再找窗；三次穿门/翻窗失败后进入应急冲出")
         self._set_search_frame_decision(
             w,
             "当前搜房分支：出房开始找门",
@@ -8528,11 +8549,12 @@ class HouseSceneSearchManager(HouseSearchManager):
                 current_loc=self._get_current_location(w),
                 extra=f"house_scene={self._get_house_scene(w)}",
             ),
-            "屋内搜索结束，开始出房：优先找门，对准门后前推",
+            "屋内搜索结束，先按60度找门；无门则按60度找窗；多次失败才启动应急冲出",
             action="启动出房找门",
             method="_exit_house_by_door_scan_strategy()",
             result="出房成功则完成当前房，否则复核场景",
         )
+        self._exit_target_attempts = 0
         self.stop_auto_forward(w)
         if self._exit_house_by_door_scan_strategy(w):
             print("[SceneExit] 按门扫描出房成功")
@@ -8545,91 +8567,27 @@ class HouseSceneSearchManager(HouseSearchManager):
         return self._is_out_of_house(w)
 
     def _exit_house_by_door_scan_strategy(self, w: "FrameWorker") -> bool:
-        for cycle in range(self.SCENE_EXIT_DOOR_SCAN_CYCLES):
+        if self._try_exit_current_visible_door(w, "当前视角"):
+            return True
+
+        for turn_index in range(self.SCENE_EXIT_DOOR_SCAN_TURN_COUNT):
             if self._should_abort(w):
                 return False
-
             print(
-                f"[SceneExit] 第 {cycle + 1}/{self.SCENE_EXIT_DOOR_SCAN_CYCLES} 轮出房找门："
-                "先检查当前视角有没有门"
+                f"[SceneExit] 没看到门，顺时针转{self.SCENE_EXIT_SCAN_TURN_DEGREES}度找门 "
+                f"{turn_index + 1}/{self.SCENE_EXIT_DOOR_SCAN_TURN_COUNT}"
             )
-            if self._try_exit_current_visible_door(w, "当前视角"):
+            self._turn(w, self.SCENE_EXIT_SCAN_TURN_DEGREES)
+            self._refresh_frame_and_handle_jump(w, "出房转60度后复查门")
+            if self._is_out_of_house(w):
                 return True
-            if self._recover_exit_wall_collision(w, "当前视角没看到门后"):
-                if self._is_out_of_house(w):
-                    return True
-
-            for turn_index in range(self.SCENE_EXIT_DOOR_SCAN_TURN_COUNT):
-                if self._should_abort(w):
-                    return False
-
-                print(
-                    f"[SceneExit] 当前方向没有看到门，向同一方向转约90度找门 "
-                    f"{turn_index + 1}/{self.SCENE_EXIT_DOOR_SCAN_TURN_COUNT}: "
-                    f"x_bias={self.SCENE_EXIT_DOOR_SCAN_TURN_PX}, "
-                    f"dura={self.ROTATE_SEARCH_SWEEP_TURN_DURA}, "
-                    f"wait={self.ROTATE_SEARCH_SWEEP_TURN_WAIT}；每次转完后立刻看门"
-                )
-                self._set_search_frame_decision(
-                    w,
-                    "当前搜房分支：出房没看到门，转90度找门",
-                    self._entry_observation(
-                        w,
-                        current_loc=self._get_current_location(w),
-                        extra=(
-                            f"cycle={cycle + 1}/{self.SCENE_EXIT_DOOR_SCAN_CYCLES}, "
-                            f"turn_index={turn_index + 1}/{self.SCENE_EXIT_DOOR_SCAN_TURN_COUNT}, "
-                            f"x_bias={self.SCENE_EXIT_DOOR_SCAN_TURN_PX}"
-                        ),
-                    ),
-                    "当前视角没看到门，按固定方向转约90度并立刻复查门",
-                    action="转90度找门",
-                    method=(
-                        f"tap_single(视角, x_bias={self.SCENE_EXIT_DOOR_SCAN_TURN_PX}, "
-                        f"dura={self.ROTATE_SEARCH_SWEEP_TURN_DURA}, "
-                        f"wait={self.ROTATE_SEARCH_SWEEP_TURN_WAIT})"
-                    ),
-                    result="转向后如果看到门则对准出房",
-                )
-                self._turn_raw_pixels(w, self.SCENE_EXIT_DOOR_SCAN_TURN_PX)
-                self._refresh_frame_and_handle_jump(w, "出房转90度后复查门")
-
-                if self._is_out_of_house(w):
-                    print("[SceneExit] 转向找门过程中已通过双帧确认在屋外")
-                    return True
-                if self._try_exit_visible_door_from_current_frame(w, f"第{turn_index + 1}次转向后"):
-                    return True
-                if self._try_exit_current_visible_door(w, f"第{turn_index + 1}次转向后"):
-                    return True
-                if self._recover_exit_wall_collision(w, f"第{turn_index + 1}次转向后"):
-                    if self._is_out_of_house(w):
-                        return True
-
-            print(
-                f"[SceneExit] 连续 {self.SCENE_EXIT_DOOR_SCAN_TURN_COUNT} 次约90度转向都没看到门，"
-                f"点击自动前进并随机转换视角约 {self.SCENE_EXIT_RANDOM_ESCAPE_SECONDS:.1f}s 尝试冲出"
-            )
-            self._set_search_frame_decision(
-                w,
-                "当前搜房分支：出房多次找门失败，随机冲出",
-                self._entry_observation(
-                    w,
-                    current_loc=self._get_current_location(w),
-                    extra=(
-                        f"turn_count={self.SCENE_EXIT_DOOR_SCAN_TURN_COUNT}, "
-                        f"escape_seconds={self.SCENE_EXIT_RANDOM_ESCAPE_SECONDS:.1f}"
-                    ),
-                ),
-                "多次转向仍没看到门，启动自动前进加随机视角，尝试冲出房屋",
-                action="随机视角冲出",
-                method="_random_view_escape_for_exit()",
-                result="过程中重新看到门则停下对门出房",
-            )
-            if self._random_view_escape_for_exit(w):
+            if self._try_exit_visible_door_from_current_frame(w, f"第{turn_index + 1}次60度转向后"):
                 return True
 
-        print("[SceneExit] 多轮90度找门和随机冲出后仍未确认出房")
-        return False
+        print("[SceneExit] 连续6次60度转向仍未找到门，切换为按60度找窗翻出")
+        if self._exit_house_by_window_scan_strategy(w):
+            return True
+        return self._emergency_exit_by_auto_forward_clockwise(w, "门窗均未成功出房")
 
     def _try_exit_current_visible_door(self, w: "FrameWorker", phase_label: str) -> bool:
         self._refresh_frame_and_handle_jump(w, f"出房{phase_label}查门")
@@ -8659,15 +8617,90 @@ class HouseSceneSearchManager(HouseSearchManager):
             method=f"_align_to_door_detection(tolerance_px={self.SCENE_EXIT_DOOR_ALIGN_TOLERANCE_PX})",
             result="对准成功后大幅前推检查是否出房",
         )
-        if not self._align_to_door_detection(
+        align_state = self._align_to_door_detection(
             w,
             door,
             tolerance_px=self.SCENE_EXIT_DOOR_ALIGN_TOLERANCE_PX,
+            phase_label="SceneExitDoor",
+            return_state=True,
+        )
+        if align_state == "aligned":
+            result = self._push_exit_door_and_check_out(w, f"{phase_label}门已对准")
+        elif align_state == "lost":
+            print(f"[SceneExit] {phase_label}对准门时目标丢失，不放弃，改走直推/左前/右前门口恢复")
+            result = self._recover_lost_exit_door_and_check_out(w, phase_label)
+        else:
+            print(f"[SceneExit] {phase_label}门未进入容差，保留当前位置继续扫描找门")
+            result = False
+
+        if result:
+            return True
+        emergency_result = self._record_exit_target_attempt_failure(w, f"{phase_label}出门尝试失败")
+        return False if emergency_result is None else emergency_result
+
+    def _record_exit_target_attempt_failure(self, w: "FrameWorker", reason: str) -> Optional[bool]:
+        self._exit_target_attempts = getattr(self, "_exit_target_attempts", 0) + 1
+        print(
+            f"[SceneExit] {reason}，目标出房失败计数="
+            f"{self._exit_target_attempts}/{self.SCENE_EXIT_TARGET_ATTEMPT_LIMIT}"
+        )
+        if self._exit_target_attempts < self.SCENE_EXIT_TARGET_ATTEMPT_LIMIT:
+            return None
+        return self._emergency_exit_by_auto_forward_clockwise(
+            w,
+            f"连续{self.SCENE_EXIT_TARGET_ATTEMPT_LIMIT}次出门/翻窗失败",
+        )
+
+    def _tap_exit_motion_and_check_out(
+        self,
+        w: "FrameWorker",
+        label: str,
+        *,
+        x_bias: int = 0,
+        y_bias: int,
+        dura: int,
+        wait: int,
+    ) -> bool:
+        print(
+            f"[SceneExit] {label}: x_bias={x_bias}, y_bias={y_bias}, dura={dura}, wait={wait}"
+        )
+        w.tap_single("摇杆", x_bias=x_bias, y_bias=y_bias, dura=dura, wait=wait)
+        self._refresh_frame_and_handle_jump(w, f"{label}后复核")
+        return self._is_out_of_house(w)
+
+    def _recover_lost_exit_door_and_check_out(self, w: "FrameWorker", phase_label: str) -> bool:
+        if self._tap_exit_motion_and_check_out(
+            w,
+            f"{phase_label}门丢失后直推",
+            y_bias=self.SCENE_EXIT_DOOR_LOST_FORWARD_Y_BIAS,
+            dura=self.SCENE_EXIT_DOOR_LOST_FORWARD_DURA,
+            wait=self.SCENE_EXIT_DOOR_LOST_FORWARD_WAIT,
         ):
-            print(f"[SceneExit] {phase_label}对准门时目标丢失，继续下一步找门")
+            return True
+        if self._get_house_scene(w) != self.HOUSE_NEAR_WALL:
             return False
 
-        return self._push_exit_door_and_check_out(w, f"{phase_label}门已对准")
+        for side, x_bias in (("左", -self.SCENE_EXIT_DOOR_LOST_SIDE_X_BIAS), ("右", self.SCENE_EXIT_DOOR_LOST_SIDE_X_BIAS)):
+            if self._tap_exit_motion_and_check_out(
+                w,
+                f"门丢失直推贴墙后向{side}前推",
+                x_bias=x_bias,
+                y_bias=self.SCENE_EXIT_DOOR_LOST_SIDE_Y_BIAS,
+                dura=self.SCENE_EXIT_DOOR_LOST_SIDE_DURA,
+                wait=self.SCENE_EXIT_DOOR_LOST_SIDE_WAIT,
+            ):
+                return True
+
+        print("[SceneExit] 门丢失后直推、左前、右前均未出房，后拉后重新找门")
+        self.stop_auto_forward(w)
+        w.tap_single(
+            "摇杆",
+            y_bias=self.SCENE_EXIT_WALL_BACKOFF_Y_BIAS,
+            dura=self.SCENE_EXIT_WALL_BACKOFF_DURA,
+            wait=self.SCENE_EXIT_WALL_BACKOFF_WAIT,
+        )
+        self._refresh_frame_and_handle_jump(w, "门丢失恢复后拉后")
+        return self._is_out_of_house(w)
 
     def _push_exit_door_and_check_out(self, w: "FrameWorker", reason: str) -> bool:
         if w.get_info("开门"):
@@ -8731,124 +8764,166 @@ class HouseSceneSearchManager(HouseSearchManager):
             return self._is_out_of_house(w)
         return False
 
-    def _random_view_escape_for_exit(self, w: "FrameWorker") -> bool:
-        if not self.auto_forward:
-            print("[SceneExit] 4次转向仍没门，点击自动前进开始随机视角冲出")
-            self._set_search_frame_decision(
-                w,
-                "当前搜房分支：随机冲出启动自动前进",
-                self._entry_observation(
-                    w,
-                    current_loc=self._get_current_location(w),
-                    extra=f"escape_seconds={self.SCENE_EXIT_RANDOM_ESCAPE_SECONDS:.1f}",
-                ),
-                "出房找门失败，先点击自动前进，再随机转视角尝试冲出",
-                action="点击自动前进",
-                method="click(自动前进)",
-                result="随机视角冲出过程中持续检查门/屋外信号",
-            )
-            w.click("自动前进")
-            self.auto_forward = True
+    @staticmethod
+    def _target_area(target) -> float:
+        try:
+            return max(0.0, float(target[2]) - float(target[0])) * max(0.0, float(target[3]) - float(target[1]))
+        except (TypeError, ValueError, IndexError):
+            return 0.0
 
-        deadline = time.time() + self.SCENE_EXIT_RANDOM_ESCAPE_SECONDS
-        step = 0
-        while time.time() < deadline:
+    @staticmethod
+    def _target_side(angle: Optional[float]) -> int:
+        if angle is None or abs(angle) < 1.0:
+            return 0
+        return 1 if angle > 0 else -1
+
+    def _exit_house_by_window_scan_strategy(self, w: "FrameWorker") -> bool:
+        for turn_index in range(self.SCENE_EXIT_WINDOW_SCAN_TURN_COUNT + 1):
             if self._should_abort(w):
                 return False
+            window = self._find_largest_forward_target(w, self.EXIT_WINDOW_CLASS_IDS)
+            if window:
+                if self._exit_via_locked_window(w, window):
+                    return True
+                emergency_result = self._record_exit_target_attempt_failure(
+                    w,
+                    f"第{turn_index + 1}次窗户翻出尝试失败",
+                )
+                if emergency_result is not None:
+                    return emergency_result
 
-            step += 1
-            self._refresh_frame_and_handle_jump(w, f"出房随机冲出第{step}步")
+            if turn_index >= self.SCENE_EXIT_WINDOW_SCAN_TURN_COUNT:
+                break
+            print(
+                f"[SceneExit] 未定位到可用窗户，顺时针转{self.SCENE_EXIT_SCAN_TURN_DEGREES}度找窗 "
+                f"{turn_index + 1}/{self.SCENE_EXIT_WINDOW_SCAN_TURN_COUNT}"
+            )
+            self._turn(w, self.SCENE_EXIT_SCAN_TURN_DEGREES)
+            self._refresh_frame_and_handle_jump(w, "出房转60度后复查窗户")
             if self._is_out_of_house(w):
-                print("[SceneExit] 随机冲出过程中双帧确认已出房")
+                return True
+        return False
+
+    def _window_after_locked_adjust(self, w: "FrameWorker", locked_area: float, locked_side: int):
+        candidate = self._find_largest_forward_target(w, self.EXIT_WINDOW_CLASS_IDS)
+        if not candidate:
+            return None
+        candidate_area = self._target_area(candidate)
+        candidate_side = self._target_side(self._target_relative_angle(candidate))
+        if locked_side and candidate_side and candidate_side != locked_side:
+            print("[SceneExit] 原最大窗户丢失后出现反方向窗户，判定为其他窗户，不切换目标")
+            return None
+        if candidate_area < locked_area:
+            print(
+                f"[SceneExit] 原最大窗户丢失后候选窗面积={candidate_area:.1f} "
+                f"小于锁定面积={locked_area:.1f}，不切换目标"
+            )
+            return None
+        return candidate
+
+    def _exit_via_locked_window(self, w: "FrameWorker", window) -> bool:
+        locked_area = self._target_area(window)
+        locked_side = self._target_side(self._target_relative_angle(window))
+        target = window
+        align_state = "lost"
+        for step in range(self.SCENE_EXIT_WINDOW_ALIGN_MAX_STEPS):
+            angle = self._target_relative_angle(target)
+            if angle is None:
+                break
+            if abs(angle) <= self.EXIT_WINDOW_ALIGN_TOLERANCE_DEGREES:
+                align_state = "aligned"
+                break
+            turn_angle = max(
+                -self.SCENE_EXIT_WINDOW_ALIGN_MAX_STEP_DEGREES,
+                min(self.SCENE_EXIT_WINDOW_ALIGN_MAX_STEP_DEGREES, angle),
+            )
+            print(
+                f"[SceneExit] 锁定最大窗户，调整 {step + 1}/{self.SCENE_EXIT_WINDOW_ALIGN_MAX_STEPS}: "
+                f"turn={turn_angle:.1f}，锁定面积={locked_area:.1f}"
+            )
+            self._turn(w, turn_angle)
+            self._refresh_frame_and_handle_jump(w, "窗户调整后重新识别")
+            refreshed = self._window_after_locked_adjust(w, locked_area, locked_side)
+            if refreshed is None:
+                break
+            target = refreshed
+        else:
+            align_state = "aligned"
+
+        print(
+            f"[SceneExit] 最大窗户{('已对准' if align_state == 'aligned' else '调整中丢失')}，"
+            "仍执行一次轻微前推并检查跳跃"
+        )
+        return self._push_exit_window_once(w, align_state)
+
+    def _push_exit_window_once(self, w: "FrameWorker", align_state: str) -> bool:
+        if self._tap_exit_motion_and_check_out(
+            w,
+            f"窗户{align_state}后轻微前推",
+            y_bias=self.SCENE_EXIT_WINDOW_GENTLE_FORWARD_Y_BIAS,
+            dura=self.SCENE_EXIT_WINDOW_GENTLE_FORWARD_DURA,
+            wait=self.SCENE_EXIT_WINDOW_GENTLE_FORWARD_WAIT,
+        ):
+            return True
+        if w.get_info("跳跃"):
+            print("[SceneExit] 窗户轻推后出现跳跃，停止前进并点击跳跃+前推翻出")
+            self.stop_auto_forward(w)
+            w.click("跳跃")
+            w.tap_single(
+                "摇杆",
+                y_bias=self.SCENE_EXIT_WINDOW_GENTLE_FORWARD_Y_BIAS,
+                dura=self.SCENE_EXIT_WINDOW_GENTLE_FORWARD_DURA,
+                wait=self.SCENE_EXIT_WINDOW_GENTLE_FORWARD_WAIT,
+            )
+            self._refresh_frame_and_handle_jump(w, "翻窗跳跃前推后")
+            if self._is_out_of_house(w):
+                return True
+        if self._get_house_scene(w) == self.HOUSE_NEAR_WALL:
+            print("[SceneExit] 靠窗轻推撞墙，后拉后重新定位窗户")
+            self.stop_auto_forward(w)
+            w.tap_single(
+                "摇杆",
+                y_bias=self.SCENE_EXIT_WALL_BACKOFF_Y_BIAS,
+                dura=self.SCENE_EXIT_WALL_BACKOFF_DURA,
+                wait=self.SCENE_EXIT_WALL_BACKOFF_WAIT,
+            )
+            self._refresh_frame_and_handle_jump(w, "翻窗撞墙后拉后")
+        return self._is_out_of_house(w)
+
+    def _emergency_exit_by_auto_forward_clockwise(self, w: "FrameWorker", reason: str) -> bool:
+        print(
+            f"[SceneExit] 启动最终应急出房：{reason}；自动前进并持续顺时针每次转"
+            f"{self.SCENE_EXIT_EMERGENCY_TURN_DEGREES}度，出现跳跃立即跳跃前推"
+        )
+        for step in range(self.SCENE_EXIT_EMERGENCY_MAX_STEPS):
+            if self._should_abort(w):
+                self.stop_auto_forward(w)
+                return False
+            if not self.auto_forward:
+                w.click("自动前进")
+                self.auto_forward = True
+            self._turn(w, self.SCENE_EXIT_EMERGENCY_TURN_DEGREES)
+            time.sleep(self.SCENE_EXIT_EMERGENCY_POLL_SECONDS)
+            self._refresh_frame_and_handle_jump(w, f"最终应急顺时针第{step + 1}步")
+            if self._is_out_of_house(w):
                 self.stop_auto_forward(w)
                 return True
-
-            door = self.find_largest_door(w)
-            if door:
-                print(f"[SceneExit] 随机冲出过程中重新看到门，停止自动前进并对准门: door={door}")
+            if w.get_info("跳跃"):
+                print("[SceneExit] 应急冲出中看到跳跃，立刻停止自动前进并跳跃+前推")
                 self.stop_auto_forward(w)
-                if self._align_to_door_detection(
-                    w,
-                    door,
-                    tolerance_px=self.SCENE_EXIT_DOOR_ALIGN_TOLERANCE_PX,
-                ):
-                    return self._push_exit_door_and_check_out(w, "随机冲出后重新看到门")
-                print("[SceneExit] 随机冲出后对准门失败，继续出房扫描")
-                return False
-
-            if self._recover_exit_wall_collision(w, f"随机冲出第{step}步"):
+                w.click("跳跃")
+                w.tap_single(
+                    "摇杆",
+                    y_bias=self.SCENE_EXIT_WINDOW_GENTLE_FORWARD_Y_BIAS,
+                    dura=self.SCENE_EXIT_WINDOW_GENTLE_FORWARD_DURA,
+                    wait=self.SCENE_EXIT_WINDOW_GENTLE_FORWARD_WAIT,
+                )
+                self._refresh_frame_and_handle_jump(w, "最终应急跳跃前推后")
                 if self._is_out_of_house(w):
-                    self.stop_auto_forward(w)
                     return True
-                if not self.auto_forward:
-                    print("[SceneExit] 撞墙恢复后继续自动前进随机冲出")
-                    self._set_search_frame_decision(
-                        w,
-                        "当前搜房分支：随机冲出撞墙恢复后重启自动前进",
-                        self._entry_observation(
-                            w,
-                            current_loc=self._get_current_location(w),
-                            extra=f"step={step}",
-                        ),
-                        "随机冲出中撞墙恢复后自动前进已关闭，重新点击继续冲出",
-                        action="重新点击自动前进",
-                        method="click(自动前进)",
-                        result="继续随机冲出并检查门/屋外信号",
-                    )
-                    w.click("自动前进")
-                    self.auto_forward = True
-
-            turn_px = random.choice(self.SCENE_EXIT_RANDOM_VIEW_TURNS)
-            print(
-                f"[SceneExit] 随机冲出中没有看到门，随机转换视角: "
-                f"x_bias={turn_px}, dura={self.SCENE_EXIT_RANDOM_TURN_DURA}, "
-                f"wait={self.SCENE_EXIT_RANDOM_TURN_WAIT}"
-            )
-            self._set_search_frame_decision(
-                w,
-                "当前搜房分支：随机冲出中转视角",
-                self._entry_observation(
-                    w,
-                    current_loc=self._get_current_location(w),
-                    extra=(
-                        f"step={step}, x_bias={turn_px}, "
-                        f"dura={self.SCENE_EXIT_RANDOM_TURN_DURA}, wait={self.SCENE_EXIT_RANDOM_TURN_WAIT}"
-                    ),
-                ),
-                "随机冲出时仍未看到门，随机转视角寻找出口/门",
-                action="随机转视角",
-                method=(
-                    f"tap_single(视角, x_bias={turn_px}, "
-                    f"dura={self.SCENE_EXIT_RANDOM_TURN_DURA}, wait={self.SCENE_EXIT_RANDOM_TURN_WAIT})"
-                ),
-                result="下一次循环继续检查是否屋外或看到门",
-            )
-            w.tap_single(
-                "视角",
-                x_bias=turn_px,
-                dura=self.SCENE_EXIT_RANDOM_TURN_DURA,
-                wait=self.SCENE_EXIT_RANDOM_TURN_WAIT,
-            )
-            time.sleep(self.SCENE_EXIT_RANDOM_ESCAPE_POLL_SECONDS)
-
         self.stop_auto_forward(w)
-        self._refresh_frame_and_handle_jump(w, "出房随机冲出5秒结束后停下查门")
-        if self._is_out_of_house(w):
-            print("[SceneExit] 随机冲出停止后双帧确认已出房")
-            return True
-
-        door = self.find_largest_door(w)
-        if door:
-            print(f"[SceneExit] 随机冲出5秒未出房，停下后看到门，继续对准门: door={door}")
-            if self._align_to_door_detection(
-                w,
-                door,
-                tolerance_px=self.SCENE_EXIT_DOOR_ALIGN_TOLERANCE_PX,
-            ):
-                return self._push_exit_door_and_check_out(w, "随机冲出停下后看到门")
-
-        print("[SceneExit] 随机冲出5秒后停下仍没看到门，进入下一轮90度找门")
-        return False
+        print("[SceneExit] 最终应急本轮未出房，下一帧继续同一应急策略")
+        return self._is_out_of_house(w)
 
     def _recover_exit_wall_collision(self, w: "FrameWorker", reason: str) -> bool:
         scene = self._get_house_scene(w)

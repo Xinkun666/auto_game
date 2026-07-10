@@ -2030,10 +2030,24 @@ class FrameWorker(threading.Thread):
     def _queue_visual_frame(self):
         if self.frame is None or not self.viz_proc or self.viz_queue.full():
             return False
+        stage_resolver = getattr(self, "stage_resolver", None)
+        processor = getattr(stage_resolver, "processor", None)
+        screen_width = getattr(processor, "screen_w", None)
+        screen_height = getattr(processor, "screen_h", None)
+        screen_size = None
+        try:
+            if int(screen_width) > 0 and int(screen_height) > 0:
+                screen_size = {
+                    "width": int(screen_width),
+                    "height": int(screen_height),
+                }
+        except (TypeError, ValueError):
+            pass
         frame_meta = {
             "group_name": self.current_group,
             "runtime_logs": self._get_frame_runtime_logs(),
             "frame_decision": self._build_frame_decision(),
+            "screen_size": screen_size,
         }
         self.viz_queue.put((self.frame.copy(), self.current_stage, self.stage_info, self.frame_index, frame_meta))
         self.frame_index += 1

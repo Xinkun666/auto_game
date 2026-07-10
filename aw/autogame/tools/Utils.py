@@ -512,7 +512,16 @@ def _build_frame_summary(stage, info_keys, code_branch, next_action):
     return f"当前帧处于{stage_text}，{seen_text}；判断：{observation_text}；代码分支：{branch_text}；决策：{action_text}"
 
 
-def build_frame_log_payload(stage, info, index, runtime_logs=None, group_name=None, frame_name=None):
+def build_frame_log_payload(
+    stage,
+    info,
+    index,
+    runtime_logs=None,
+    group_name=None,
+    frame_name=None,
+    frame_size=None,
+    screen_size=None,
+):
     safe_info = sanitize_frame_info_for_json(info)
     info_keys = _non_empty_info_keys(safe_info)
     runtime_logs = runtime_logs if isinstance(runtime_logs, dict) else {}
@@ -531,14 +540,22 @@ def build_frame_log_payload(stage, info, index, runtime_logs=None, group_name=No
     )
     frame_name = frame_name or f"frame_{int(index):05d}.jpg"
 
-    return {
+    frame_payload = {
+        "index": index,
+        "image": frame_name,
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if isinstance(frame_size, dict):
+        frame_width = frame_size.get("width")
+        frame_height = frame_size.get("height")
+        if frame_width and frame_height:
+            frame_payload["width"] = int(frame_width)
+            frame_payload["height"] = int(frame_height)
+
+    payload = {
         "schema_version": 2,
         "index": index,
-        "frame": {
-            "index": index,
-            "image": frame_name,
-            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        },
+        "frame": frame_payload,
         "stage": {
             "name": stage or "",
             "group": group_name or "",
@@ -561,6 +578,15 @@ def build_frame_log_payload(stage, info, index, runtime_logs=None, group_name=No
         "semantic_log": semantic_log,
         "frame_summary": _build_frame_summary(stage, info_keys, code_branch, next_action),
     }
+    if isinstance(screen_size, dict):
+        screen_width = screen_size.get("width")
+        screen_height = screen_size.get("height")
+        if screen_width and screen_height:
+            payload["screen"] = {
+                "width": int(screen_width),
+                "height": int(screen_height),
+            }
+    return payload
 
 
 def _build_archive_dir(
@@ -1540,6 +1566,8 @@ def visualizer_process(queue, visual=True):
                 runtime_logs=runtime_logs,
                 group_name=frame_meta.get("group_name"),
                 frame_name=frame_name,
+                frame_size={"width": orig_w, "height": orig_h},
+                screen_size=frame_meta.get("screen_size"),
             )
             with open(f"{base_filename}.json", "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=4)

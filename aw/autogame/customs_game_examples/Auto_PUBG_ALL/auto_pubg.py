@@ -783,6 +783,9 @@ def on_stage(w: "FrameWorker"):
         if click_popup_info_if_visible(w, "关闭活动2"):
             return
 
+        if click_popup_info_if_visible(w, "关闭记忆"):
+            return
+
         if confirm_lobby_after_popups(w):
             if final_shutdown_pending:
                 w.frame_log("当前观察到大厅已稳定且任务准备结束，所以停止本轮自动化")

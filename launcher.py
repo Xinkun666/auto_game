@@ -2344,6 +2344,8 @@ class LauncherWindow(QWidget):
         self.preview_points_button.setCheckable(True)
         self.preview_points_button.setChecked(False)
         self.preview_points_button.setProperty("toggleButton", True)
+        self.preview_fullscreen_button = QPushButton("放大预览")
+        self.preview_fullscreen_button.setToolTip("让实时预览覆盖整个启动器界面；按 Esc 可退出")
 
         self.theme_combo = QComboBox()
         self.theme_combo.setObjectName("themeCombo")
@@ -3016,6 +3018,7 @@ class LauncherWindow(QWidget):
         action_layout.addWidget(self.keep_process_on_manual_stop_button)
         action_layout.addWidget(self.preview_overlay_button)
         action_layout.addWidget(self.preview_points_button)
+        action_layout.addWidget(self.preview_fullscreen_button)
         action_layout.addStretch(1)
         action_layout.addWidget(self.stream_verify_button)
         main_layout.addWidget(action_bar, 0)
@@ -3068,11 +3071,45 @@ class LauncherWindow(QWidget):
 
         main_layout.addWidget(content_splitter, 1)
         self.page_stack.addWidget(self.launcher_page)
+        self.preview_fullscreen_page = self._build_preview_fullscreen_page()
+        self.page_stack.addWidget(self.preview_fullscreen_page)
         self.label_tool_page = self._build_label_tool_page()
         self.page_stack.addWidget(self.label_tool_page)
         self.history_page = self._build_history_page()
         self.page_stack.addWidget(self.history_page)
         self._update_header_badges()
+
+    def _build_preview_fullscreen_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setSpacing(10)
+
+        toolbar = QWidget()
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar_layout.setSpacing(8)
+        title = QLabel("实时预览（放大）")
+        title.setObjectName("launcherTitle")
+        self.preview_fullscreen_exit_button = QPushButton("退出放大（Esc）")
+        toolbar_layout.addWidget(title)
+        toolbar_layout.addStretch(1)
+        toolbar_layout.addWidget(self.preview_fullscreen_exit_button)
+        layout.addWidget(toolbar, 0)
+
+        self.preview_fullscreen_image_label = QLabel("启动后将在这里实时显示可视化帧")
+        self.preview_fullscreen_image_label.setObjectName("previewSurface")
+        self.preview_fullscreen_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_fullscreen_image_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        layout.addWidget(self.preview_fullscreen_image_label, 1)
+
+        self.preview_fullscreen_escape_shortcut = QShortcut(QKeySequence("Escape"), page)
+        self.preview_fullscreen_escape_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.preview_fullscreen_escape_shortcut.activated.connect(self._exit_preview_fullscreen)
+        return page
 
     def _build_label_tool_page(self) -> QWidget:
         page = QWidget()
@@ -3257,6 +3294,8 @@ class LauncherWindow(QWidget):
         self.generate_preview_video_button.toggled.connect(self._toggle_generate_preview_video)
         self.preview_overlay_button.toggled.connect(self._toggle_preview_overlay)
         self.preview_points_button.toggled.connect(self._toggle_preview_points)
+        self.preview_fullscreen_button.clicked.connect(self._toggle_preview_fullscreen)
+        self.preview_fullscreen_exit_button.clicked.connect(self._exit_preview_fullscreen)
         self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
         for filter_name, button in self.output_filter_buttons.items():
             button.clicked.connect(lambda checked=False, name=filter_name: self._set_output_log_filter(name))
@@ -3367,6 +3406,21 @@ class LauncherWindow(QWidget):
     def _toggle_preview_points(self, checked: bool):
         self.preview_points_button.setText("隐藏控点" if checked else "显示控点")
         LOGGER.info("preview points toggled: %s", checked)
+        self._refresh_preview_pixmap()
+
+    def _toggle_preview_fullscreen(self):
+        if self.page_stack.currentWidget() is self.preview_fullscreen_page:
+            self._exit_preview_fullscreen()
+            return
+        LOGGER.info("open fullscreen preview")
+        self.page_stack.setCurrentWidget(self.preview_fullscreen_page)
+        self._refresh_preview_pixmap()
+
+    def _exit_preview_fullscreen(self):
+        if self.page_stack.currentWidget() is not self.preview_fullscreen_page:
+            return
+        LOGGER.info("close fullscreen preview")
+        self.page_stack.setCurrentWidget(self.launcher_page)
         self._refresh_preview_pixmap()
 
     def _on_theme_changed(self):
@@ -4056,23 +4110,35 @@ class LauncherWindow(QWidget):
             )
             return False
         self._adjust_preview_splitter_sizes()
+        preview_targets = [self.preview_image_label]
+        if hasattr(self, "preview_fullscreen_image_label"):
+            preview_targets.append(self.preview_fullscreen_image_label)
+        rendered = False
+        for target in preview_targets:
+            rendered = self._render_preview_pixmap_for_label(display_pixmap, target) or rendered
+        return rendered
+
+    def _render_preview_pixmap_for_label(self, display_pixmap: QPixmap, target: QLabel) -> bool:
         scaled = display_pixmap.scaled(
-            self.preview_image_label.size(),
+            target.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
         if scaled.isNull():
             LOGGER.warning(
-                "render preview fail: scaled pixmap is null latest_frame=%s label_size=%s",
+                "render preview fail: scaled pixmap is null latest_frame=%s label=%s label_size=%s",
                 self.latest_preview_file,
-                self.preview_image_label.size(),
+                target.objectName(),
+                target.size(),
             )
             return False
-        self.preview_image_label.setPixmap(scaled)
+        target.setText("")
+        target.setPixmap(scaled)
         LOGGER.debug(
-            "render preview success: latest_frame=%s label_size=%s scaled_size=%s",
+            "render preview success: latest_frame=%s label=%s label_size=%s scaled_size=%s",
             self.latest_preview_file,
-            self.preview_image_label.size(),
+            target.objectName(),
+            target.size(),
             scaled.size(),
         )
         return True

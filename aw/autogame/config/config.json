@@ -6,7 +6,7 @@
     "stream_diagnostics_interval": 1.0,
     "hoscrcpy_scale": 2,
     "hoscrcpy_frame_rate": 5,
-    "hoscrcpy_bit_rate": 2,
+    "hoscrcpy_bit_rate": 1,
     "hoscrcpy_decoder": "gstreamer",
     "hoscrcpy_first_frame_timeout": 15,
     "hoscrcpy_device_port": 5000,

@@ -1041,7 +1041,7 @@ class HOSScrcpyStreamClient:
         self.port = _resolve_int_option("AUTOGAME_HOSCRCPY_PORT", config, "hoscrcpy_port", 8710)
         self.scale = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_SCALE", config, "hoscrcpy_scale", 2))
         self.frame_rate = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_FRAME_RATE", config, "hoscrcpy_frame_rate", 5))
-        self.bit_rate = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_BIT_RATE", config, "hoscrcpy_bit_rate", 2))
+        self.bit_rate = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_BIT_RATE", config, "hoscrcpy_bit_rate", 1))
         self.device_port = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_DEVICE_PORT", config, "hoscrcpy_device_port", 5000))
         self.encoder_type = _resolve_str_option("AUTOGAME_HOSCRCPY_ENCODER_TYPE", config, "hoscrcpy_encoder_type", "0") or "0"
         self.max_reconnect_attempts = max(0, _resolve_int_option(

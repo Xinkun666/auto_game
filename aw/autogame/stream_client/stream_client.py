@@ -120,9 +120,34 @@ class FrameBuffer:
 
         self.condition = threading.Condition()
         self._last_read_id = 0
+        self._paused = False
+
+    def pause(self):
+        """Temporarily discard incoming frames while keeping the stream connected."""
+        with self.condition:
+            if self._paused:
+                return False
+            self._paused = True
+            self.condition.notify_all()
+            return True
+
+    def resume(self):
+        """Allow the next incoming frame to wake frame consumers again."""
+        with self.condition:
+            if not self._paused:
+                return False
+            self._paused = False
+            self.condition.notify_all()
+            return True
+
+    def is_paused(self):
+        with self.condition:
+            return self._paused
 
     def push(self, frame):
         with self.condition:
+            if self._paused:
+                return False
             try:
                 # 统一在缓冲区内保存独立 numpy 帧，避免 PIL/buffer 在多线程间共享
                 self.frames[self.write_idx] = np.array(frame, copy=True)
@@ -131,6 +156,7 @@ class FrameBuffer:
             self.write_idx = (self.write_idx + 1) % self.size
             self.count += 1
             self.condition.notify_all()
+            return True
 
     def get_latest(self, timeout=5.0, must_new=False):
         """
@@ -146,7 +172,7 @@ class FrameBuffer:
 
             start_wait_time = time.time()
             # 只有当 count 增加（即 push 被调用）并超过 _last_read_id 时，才跳出循环
-            while self.count <= self._last_read_id:
+            while self._paused or self.count <= self._last_read_id:
                 remaining = timeout - (time.time() - start_wait_time)
                 if remaining <= 0:
                     return None
@@ -1316,6 +1342,9 @@ class HOSScrcpyStreamClient:
         self._callback_data_count += 1
         self._last_data_bytes = len(data)
         self._last_data_at = time.monotonic()
+        is_paused = getattr(self.buffer, "is_paused", None)
+        if callable(is_paused) and is_paused():
+            return
         if self._callback_data_count == 1:
             print("[HOS] First H264 buffer received: bytes=%s" % self._last_data_bytes, flush=True)
         if self.decoder is None:

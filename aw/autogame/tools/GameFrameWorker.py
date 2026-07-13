@@ -2814,6 +2814,30 @@ class FrameWorker(threading.Thread):
             self._queue_visual_frame()
         return True
 
+    def pause_stream(self):
+        """暂停向自动化脚本提供新帧，不停止正在运行的用例。"""
+        pause = getattr(self.buffer, "pause", None)
+        if not callable(pause):
+            print("[FrameWorker] 当前帧缓冲区不支持暂停抓帧。")
+            return False
+        if not pause():
+            print("[FrameWorker] 抓帧已处于暂停状态。")
+            return False
+        print("[FrameWorker] 已暂停抓帧；自动化用例保持运行，等待 w.continue_stream()。")
+        return True
+
+    def continue_stream(self):
+        """恢复抓帧；下一张新帧会让自动化脚本继续执行。"""
+        resume = getattr(self.buffer, "resume", None)
+        if not callable(resume):
+            print("[FrameWorker] 当前帧缓冲区不支持恢复抓帧。")
+            return False
+        if not resume():
+            print("[FrameWorker] 抓帧当前并未暂停。")
+            return False
+        print("[FrameWorker] 已恢复抓帧；自动化用例将在下一张新帧到达后继续。")
+        return True
+
     def refresh_frame(self, settle: bool = True):
         self._flush_current_frame_log()
         if settle:

@@ -774,6 +774,9 @@ def on_stage(w: "FrameWorker"):
         if click_popup_info_if_visible(w, "回归"):
             return
 
+        if click_popup_info_if_visible(w, "确定获得"):
+            return
+
         if click_popup_info_if_visible(w, "关闭记忆"):
             return
 

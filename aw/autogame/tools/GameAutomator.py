@@ -54,7 +54,12 @@ class GameAutomator:
         if self.screen_mode == "0":
             self.client.start_backend(lowh=0, highh=10000, skip=20, width=self.W, height=self.H)
         self.client.set_save_frame(True)
-        self.processor = FrameWorker(global_buffer, driver=self.driver, logger=self.logger)
+        self.processor = FrameWorker(
+            global_buffer,
+            driver=self.driver,
+            logger=self.logger,
+            stream_client=self.client,
+        )
         self.is_cleaned_up = False
 
         atexit.register(self.cleanup)

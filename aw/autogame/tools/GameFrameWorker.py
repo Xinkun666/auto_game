@@ -1903,7 +1903,15 @@ class FrameWorker(threading.Thread):
     STREAM_RECOVERY_WAIT_POLL_SECONDS = 5.0
     STREAM_RECOVERY_WAIT_LOG_INTERVAL_SECONDS = 15.0
 
-    def __init__(self, buffer, driver=None, logger=None, controller_backend=None, controller_options=None):
+    def __init__(
+        self,
+        buffer,
+        driver=None,
+        logger=None,
+        controller_backend=None,
+        controller_options=None,
+        stream_client=None,
+    ):
         super().__init__()
         self.frame_index = 0
         self.viz_queue = mp.Queue(maxsize=5)
@@ -1934,6 +1942,7 @@ class FrameWorker(threading.Thread):
         self.frame_log_context_beginner = self._load_frame_log_hook(project_case, "begin_frame_log_context")
 
         self.buffer = buffer
+        self.stream_client = stream_client
         self.driver = driver
         self.logger = logger
         self.running = False
@@ -2815,27 +2824,37 @@ class FrameWorker(threading.Thread):
         return True
 
     def pause_stream(self):
-        """暂停向自动化脚本提供新帧，不停止正在运行的用例。"""
+        """停止 HOS 设备侧抓帧，不停止正在运行的用例。"""
         pause = getattr(self.buffer, "pause", None)
-        if not callable(pause):
-            print("[FrameWorker] 当前帧缓冲区不支持暂停抓帧。")
+        pause_capture = getattr(getattr(self, "stream_client", None), "pause_capture", None)
+        if not callable(pause) or not callable(pause_capture):
+            print("[FrameWorker] 当前流不支持 HOS 设备侧暂停抓帧。")
             return False
         if not pause():
             print("[FrameWorker] 抓帧已处于暂停状态。")
             return False
-        print("[FrameWorker] 已暂停抓帧；自动化用例保持运行，等待 w.continue_stream()。")
+        if not pause_capture():
+            self.buffer.resume()
+            print("[FrameWorker] HOS 停止抓帧失败，已恢复自动化帧缓冲。")
+            return False
+        print("[FrameWorker] HOS 已停止设备侧抓帧；自动化用例保持运行，等待 w.continue_stream()。")
         return True
 
     def continue_stream(self):
-        """恢复抓帧；下一张新帧会让自动化脚本继续执行。"""
+        """重新启动 HOS 设备侧抓帧，并在新帧到达后继续用例。"""
         resume = getattr(self.buffer, "resume", None)
-        if not callable(resume):
-            print("[FrameWorker] 当前帧缓冲区不支持恢复抓帧。")
+        continue_capture = getattr(getattr(self, "stream_client", None), "continue_capture", None)
+        if not callable(resume) or not callable(continue_capture):
+            print("[FrameWorker] 当前流不支持 HOS 设备侧恢复抓帧。")
             return False
-        if not resume():
+        if not getattr(self.buffer, "is_paused", lambda: False)():
             print("[FrameWorker] 抓帧当前并未暂停。")
             return False
-        print("[FrameWorker] 已恢复抓帧；自动化用例将在下一张新帧到达后继续。")
+        if not continue_capture():
+            print("[FrameWorker] HOS 重新启动抓帧失败，自动化继续等待。")
+            return False
+        resume()
+        print("[FrameWorker] HOS 已重新启动抓帧；自动化用例将在下一张新帧到达后继续。")
         return True
 
     def refresh_frame(self, settle: bool = True):

@@ -1783,6 +1783,20 @@ class AutoStudioWindow(QMainWindow):
         return True
 
     @staticmethod
+    def _create_scene_in_pool_and_stage(
+        project: Optional[ProjectData],
+        stage: Optional[StageData],
+        name: str,
+    ) -> Optional[SceneData]:
+        """Create one pool-owned scene, then reference that same object from a stage."""
+        if not project or not stage or not str(name or "").strip():
+            return None
+        new_scene = SceneData(id=str(random.randint(1000, 9999)), name=str(name).strip())
+        AutoStudioWindow._add_scene_to_project_pool(project, new_scene)
+        AutoStudioWindow._add_scene_reference_to_stage(stage, new_scene)
+        return new_scene
+
+    @staticmethod
     def _global_scene_group(project: Optional[ProjectData]) -> Optional[SceneGroupData]:
         if not project:
             return None
@@ -3884,10 +3898,9 @@ class AutoStudioWindow(QMainWindow):
         name = self.prompt_unique_name("新建场景", "场景名称:",
                                        existing_names=[s.name for s in stage.scenes])
         if name:
-            new_scene = SceneData(id=str(random.randint(1000, 9999)), name=name)
-            if self.project:
-                self._add_scene_to_project_pool(self.project, new_scene)
-            self._add_scene_reference_to_stage(stage, new_scene)
+            new_scene = self._create_scene_in_pool_and_stage(self.project, stage, name)
+            if new_scene is None:
+                return
             self.current_scene = new_scene
             self.last_expand_stage_id = stage.id
             self.last_expand_scene_id = new_scene.id

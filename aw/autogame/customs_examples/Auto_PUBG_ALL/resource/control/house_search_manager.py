@@ -4598,9 +4598,15 @@ class HouseSearchManager:
         tolerance_px=80,
         phase_label="DoorAlign",
         return_state: bool = False,
+        return_last_offset: bool = False,
     ):
+        last_offset_real = None
+
         def finish(state: str):
-            return state if return_state else state == "aligned"
+            result = state if return_state else state == "aligned"
+            if return_last_offset:
+                return result, last_offset_real
+            return result
 
         strict_after_backoff = self._consume_entry_door_strict_align_after_backoff()
         frame_logger = getattr(w, "frame_log", None)
@@ -4612,6 +4618,8 @@ class HouseSearchManager:
                         f"对准门：{phase_label} 当前帧没有重新识别到门，停止本轮对准，等待重新获取门目标"
                     )
                 return finish("lost")
+
+            last_offset_real = offset_real
 
             if strict_after_backoff:
                 center_threshold = self._get_strict_door_align_center_threshold(tolerance_px)
@@ -5854,15 +5862,14 @@ class HouseSceneSearchManager(HouseSearchManager):
     SCENE_EXIT_SCAN_TURN_DEGREES = 60
     SCENE_EXIT_DOOR_ALIGN_TOLERANCE_PX = 120
     SCENE_EXIT_DOOR_FORWARD_Y_BIAS = -520
-    SCENE_EXIT_DOOR_FORWARD_DURA = 900
-    SCENE_EXIT_DOOR_FORWARD_WAIT = 1100
-    SCENE_EXIT_DOOR_LOST_FORWARD_Y_BIAS = -320
-    SCENE_EXIT_DOOR_LOST_FORWARD_DURA = 350
-    SCENE_EXIT_DOOR_LOST_FORWARD_WAIT = 520
+    SCENE_EXIT_DOOR_FORWARD_DURA = 5000
+    SCENE_EXIT_DOOR_FORWARD_WAIT = 5200
     SCENE_EXIT_DOOR_LOST_SIDE_X_BIAS = 260
-    SCENE_EXIT_DOOR_LOST_SIDE_Y_BIAS = -320
-    SCENE_EXIT_DOOR_LOST_SIDE_DURA = 350
-    SCENE_EXIT_DOOR_LOST_SIDE_WAIT = 520
+    SCENE_EXIT_DOOR_LOST_SIDE_Y_BIAS = -520
+    SCENE_EXIT_DOOR_LOST_FIRST_SIDE_DURA = 2000
+    SCENE_EXIT_DOOR_LOST_FIRST_SIDE_WAIT = 2200
+    SCENE_EXIT_DOOR_LOST_SECOND_SIDE_DURA = 4000
+    SCENE_EXIT_DOOR_LOST_SECOND_SIDE_WAIT = 4200
     SCENE_EXIT_WINDOW_SCAN_TURN_COUNT = 6
     SCENE_EXIT_WINDOW_APPROACH_MAX_STEPS = 3
     SCENE_EXIT_WINDOW_ALIGN_MAX_STEP_DEGREES = 20
@@ -8769,18 +8776,26 @@ class HouseSceneSearchManager(HouseSearchManager):
             method=f"_align_to_door_detection(tolerance_px={self.SCENE_EXIT_DOOR_ALIGN_TOLERANCE_PX})",
             result="对准成功后大幅前推检查是否出房",
         )
-        align_state = self._align_to_door_detection(
+        align_state, last_door_offset = self._align_to_door_detection(
             w,
             door,
             tolerance_px=self.SCENE_EXIT_DOOR_ALIGN_TOLERANCE_PX,
             phase_label="SceneExitDoor",
             return_state=True,
+            return_last_offset=True,
         )
         if align_state == "aligned":
             result = self._push_exit_door_and_check_out(w, f"{phase_label}门已对准")
         elif align_state == "lost":
-            print(f"[SceneExit] {phase_label}对准门时目标丢失，不放弃，改走直推/左前/右前门口恢复")
-            result = self._recover_lost_exit_door_and_check_out(w, phase_label)
+            print(
+                f"[SceneExit] {phase_label}对准门时目标丢失，"
+                f"保留丢失前门中心偏移={last_door_offset}，按该侧门口恢复"
+            )
+            result = self._recover_lost_exit_door_and_check_out(
+                w,
+                phase_label,
+                last_door_offset,
+            )
         else:
             print(f"[SceneExit] {phase_label}门未进入容差，保留当前位置继续扫描找门")
             result = False
@@ -8820,71 +8835,73 @@ class HouseSceneSearchManager(HouseSearchManager):
         self._refresh_frame_and_handle_jump(w, f"{label}后复核")
         return self._is_out_of_house(w)
 
-    def _recover_lost_exit_door_and_check_out(self, w: "FrameWorker", phase_label: str) -> bool:
+    def _recover_lost_exit_door_and_check_out(
+        self,
+        w: "FrameWorker",
+        phase_label: str,
+        last_door_offset: Optional[float],
+    ) -> bool:
         if self._tap_exit_motion_and_check_out(
             w,
             f"{phase_label}门丢失后直推",
-            y_bias=self.SCENE_EXIT_DOOR_LOST_FORWARD_Y_BIAS,
-            dura=self.SCENE_EXIT_DOOR_LOST_FORWARD_DURA,
-            wait=self.SCENE_EXIT_DOOR_LOST_FORWARD_WAIT,
+            y_bias=self.SCENE_EXIT_DOOR_FORWARD_Y_BIAS,
+            dura=self.SCENE_EXIT_DOOR_FORWARD_DURA,
+            wait=self.SCENE_EXIT_DOOR_FORWARD_WAIT,
         ):
             return True
-        if self._get_house_scene(w) != self.HOUSE_NEAR_WALL:
+        scene_after_forward = self._get_house_scene(w)
+        if scene_after_forward != self.HOUSE_NEAR_WALL:
+            print(
+                f"[SceneExit] 门丢失后直推未出房，house_scene={scene_after_forward}；"
+                "不是 near_wall，不做后拉，回到找门/找窗扫描"
+            )
             return False
 
-        for side, x_bias in (("左", -self.SCENE_EXIT_DOOR_LOST_SIDE_X_BIAS), ("右", self.SCENE_EXIT_DOOR_LOST_SIDE_X_BIAS)):
+        first_side = "右" if last_door_offset is None or last_door_offset >= 0 else "左"
+        second_side = "左" if first_side == "右" else "右"
+        print(
+            f"[SceneExit] 门丢失后直推仍贴墙；丢失前门在{first_side}侧，"
+            f"先{first_side}前推2秒，再{second_side}前推4秒"
+        )
+        for index, side in enumerate((first_side, second_side)):
+            x_bias = self.SCENE_EXIT_DOOR_LOST_SIDE_X_BIAS if side == "右" else -self.SCENE_EXIT_DOOR_LOST_SIDE_X_BIAS
+            dura = (
+                self.SCENE_EXIT_DOOR_LOST_FIRST_SIDE_DURA
+                if index == 0
+                else self.SCENE_EXIT_DOOR_LOST_SECOND_SIDE_DURA
+            )
+            wait = (
+                self.SCENE_EXIT_DOOR_LOST_FIRST_SIDE_WAIT
+                if index == 0
+                else self.SCENE_EXIT_DOOR_LOST_SECOND_SIDE_WAIT
+            )
             if self._tap_exit_motion_and_check_out(
                 w,
-                f"门丢失直推贴墙后向{side}前推",
+                f"门丢失直推贴墙后向{side}前推 {index + 1}/2",
                 x_bias=x_bias,
                 y_bias=self.SCENE_EXIT_DOOR_LOST_SIDE_Y_BIAS,
-                dura=self.SCENE_EXIT_DOOR_LOST_SIDE_DURA,
-                wait=self.SCENE_EXIT_DOOR_LOST_SIDE_WAIT,
+                dura=dura,
+                wait=wait,
             ):
                 return True
 
-        print("[SceneExit] 门丢失后直推、左前、右前均未出房，后拉后重新找门")
-        self.stop_auto_forward(w)
-        w.tap_single(
-            "摇杆",
-            y_bias=self.SCENE_EXIT_WALL_BACKOFF_Y_BIAS,
-            dura=self.SCENE_EXIT_WALL_BACKOFF_DURA,
-            wait=self.SCENE_EXIT_WALL_BACKOFF_WAIT,
-        )
-        self._refresh_frame_and_handle_jump(w, "门丢失恢复后拉后")
+        if self._get_house_scene(w) != self.HOUSE_NEAR_WALL:
+            return False
+
+        print("[SceneExit] 门丢失后直推及左右前推均未出房且仍贴墙，后拉掉头后重新找门/窗")
+        self._recover_exit_wall_collision(w, "门丢失左右前推后")
         return self._is_out_of_house(w)
 
     def _push_exit_door_and_check_out(self, w: "FrameWorker", reason: str) -> bool:
-        if w.get_info("开门"):
-            print(f"[SceneExit] {reason}，检测到开门按钮，先点击开门")
-            self._set_search_frame_decision(
-                w,
-                "当前搜房分支：出房门口检测到开门",
-                self._entry_observation(
-                    w,
-                    current_loc=self._get_current_location(w),
-                    extra=reason,
-                ),
-                "出房门口看到开门按钮，先点击开门再前推",
-                action="点击开门",
-                method="click(开门)",
-                result="开门后大幅前推出房",
-            )
-            w.click("开门")
-            time.sleep(self.OPEN_DOOR_SETTLE_SECONDS)
-            self._refresh_frame_and_handle_jump(w, "出房开门后刷新")
-        elif w.get_info("关门"):
-            print(f"[SceneExit] {reason}，检测到关门按钮，门已打开，直接大幅前推")
-
         print(
-            f"[SceneExit] {reason}，对准门后大幅前推: "
+            f"[SceneExit] {reason}，门已大致对准，不处理开门/关门按钮，直接前推5秒: "
             f"y_bias={self.SCENE_EXIT_DOOR_FORWARD_Y_BIAS}, "
             f"dura={self.SCENE_EXIT_DOOR_FORWARD_DURA}, "
             f"wait={self.SCENE_EXIT_DOOR_FORWARD_WAIT}"
         )
         self._set_search_frame_decision(
             w,
-            "当前搜房分支：对准出房门后大幅前推",
+            "当前搜房分支：对准出房门后直推5秒",
             self._entry_observation(
                 w,
                 current_loc=self._get_current_location(w),
@@ -8893,8 +8910,8 @@ class HouseSceneSearchManager(HouseSearchManager):
                     f"dura={self.SCENE_EXIT_DOOR_FORWARD_DURA}, wait={self.SCENE_EXIT_DOOR_FORWARD_WAIT}"
                 ),
             ),
-            "门已对准，执行大幅前推，通过门后用双帧确认是否出房",
-            action="大幅前推出房",
+            "门已大致对准，跳过开门/关门按钮，直接前推5秒后用双帧确认是否出房",
+            action="直推5秒出房",
             method=(
                 f"tap_single(摇杆, y_bias={self.SCENE_EXIT_DOOR_FORWARD_Y_BIAS}, "
                 f"dura={self.SCENE_EXIT_DOOR_FORWARD_DURA}, wait={self.SCENE_EXIT_DOOR_FORWARD_WAIT})"

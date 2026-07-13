@@ -5720,7 +5720,7 @@ class HouseSceneSearchManager(HouseSearchManager):
     SCENE_EXIT_DOOR_LOST_SIDE_DURA = 350
     SCENE_EXIT_DOOR_LOST_SIDE_WAIT = 520
     SCENE_EXIT_WINDOW_SCAN_TURN_COUNT = 6
-    SCENE_EXIT_WINDOW_ALIGN_MAX_STEPS = 6
+    SCENE_EXIT_WINDOW_APPROACH_MAX_STEPS = 3
     SCENE_EXIT_WINDOW_ALIGN_MAX_STEP_DEGREES = 20
     SCENE_EXIT_WINDOW_GENTLE_FORWARD_Y_BIAS = -200
     SCENE_EXIT_WINDOW_GENTLE_FORWARD_DURA = 150
@@ -6764,9 +6764,11 @@ class HouseSceneSearchManager(HouseSearchManager):
             approach_loc = self._location_tuple(self.active_entry.get("approach_location"))
         if not callback(w, target_loc, reason, self.R_CITY_ENTRY_RUNNING_ROUTE_DISTANCE, approach_loc):
             return False
-        self.current_house_id = None
-        self.current_r_city_target = None
-        self.active_entry = None
+        print(
+            f"[RCitySearch] 跑图接管后继续锁定入门点 {target_loc}，"
+            f"安全接入点={approach_loc}；黑区脱离/A*完成后只能回到该入门点，"
+            "进入精推范围或该入口确认失败前不重新选点"
+        )
         self.r_city_route_target = None
         self.r_city_route_path = []
         self.r_city_route_index = 0
@@ -8764,26 +8766,13 @@ class HouseSceneSearchManager(HouseSearchManager):
             return self._is_out_of_house(w)
         return False
 
-    @staticmethod
-    def _target_area(target) -> float:
-        try:
-            return max(0.0, float(target[2]) - float(target[0])) * max(0.0, float(target[3]) - float(target[1]))
-        except (TypeError, ValueError, IndexError):
-            return 0.0
-
-    @staticmethod
-    def _target_side(angle: Optional[float]) -> int:
-        if angle is None or abs(angle) < 1.0:
-            return 0
-        return 1 if angle > 0 else -1
-
     def _exit_house_by_window_scan_strategy(self, w: "FrameWorker") -> bool:
         for turn_index in range(self.SCENE_EXIT_WINDOW_SCAN_TURN_COUNT + 1):
             if self._should_abort(w):
                 return False
-            window = self._find_largest_forward_target(w, self.EXIT_WINDOW_CLASS_IDS)
+            window = self._find_center_nearest_forward_target(w, self.EXIT_WINDOW_CLASS_IDS)
             if window:
-                if self._exit_via_locked_window(w, window):
+                if self._exit_via_center_nearest_window(w, window):
                     return True
                 emergency_result = self._record_exit_target_attempt_failure(
                     w,
@@ -8804,29 +8793,10 @@ class HouseSceneSearchManager(HouseSearchManager):
                 return True
         return False
 
-    def _window_after_locked_adjust(self, w: "FrameWorker", locked_area: float, locked_side: int):
-        candidate = self._find_largest_forward_target(w, self.EXIT_WINDOW_CLASS_IDS)
-        if not candidate:
-            return None
-        candidate_area = self._target_area(candidate)
-        candidate_side = self._target_side(self._target_relative_angle(candidate))
-        if locked_side and candidate_side and candidate_side != locked_side:
-            print("[SceneExit] 原最大窗户丢失后出现反方向窗户，判定为其他窗户，不切换目标")
-            return None
-        if candidate_area < locked_area:
-            print(
-                f"[SceneExit] 原最大窗户丢失后候选窗面积={candidate_area:.1f} "
-                f"小于锁定面积={locked_area:.1f}，不切换目标"
-            )
-            return None
-        return candidate
-
-    def _exit_via_locked_window(self, w: "FrameWorker", window) -> bool:
-        locked_area = self._target_area(window)
-        locked_side = self._target_side(self._target_relative_angle(window))
+    def _exit_via_center_nearest_window(self, w: "FrameWorker", window) -> bool:
         target = window
-        align_state = "lost"
-        for step in range(self.SCENE_EXIT_WINDOW_ALIGN_MAX_STEPS):
+        align_state = "approached"
+        for step in range(self.SCENE_EXIT_WINDOW_APPROACH_MAX_STEPS):
             angle = self._target_relative_angle(target)
             if angle is None:
                 break
@@ -8838,25 +8808,27 @@ class HouseSceneSearchManager(HouseSearchManager):
                 min(self.SCENE_EXIT_WINDOW_ALIGN_MAX_STEP_DEGREES, angle),
             )
             print(
-                f"[SceneExit] 锁定最大窗户，调整 {step + 1}/{self.SCENE_EXIT_WINDOW_ALIGN_MAX_STEPS}: "
-                f"turn={turn_angle:.1f}，锁定面积={locked_area:.1f}"
+                f"[SceneExit] 选择画面中心最近的窗户，靠近 {step + 1}/"
+                f"{self.SCENE_EXIT_WINDOW_APPROACH_MAX_STEPS}: turn={turn_angle:.1f}"
             )
             self._turn(w, turn_angle)
-            self._refresh_frame_and_handle_jump(w, "窗户调整后重新识别")
-            refreshed = self._window_after_locked_adjust(w, locked_area, locked_side)
+            self._refresh_frame_and_handle_jump(w, "窗户靠近后重新识别")
+            refreshed = self._find_center_nearest_forward_target(w, self.EXIT_WINDOW_CLASS_IDS)
             if refreshed is None:
+                align_state = "lost"
                 break
             target = refreshed
-        else:
-            align_state = "aligned"
 
         print(
-            f"[SceneExit] 最大窗户{('已对准' if align_state == 'aligned' else '调整中丢失')}，"
-            "仍执行一次轻微前推并检查跳跃"
+            f"[SceneExit] 画面中心最近窗户{('已对准' if align_state == 'aligned' else '最多靠近3次后停止调整')}，"
+            "执行一次轻微前推并检查跳跃"
         )
         return self._push_exit_window_once(w, align_state)
 
     def _push_exit_window_once(self, w: "FrameWorker", align_state: str) -> bool:
+        if w.get_info("跳跃"):
+            print("[SceneExit] 靠窗轻推前已出现跳跃，点击跳跃+前推翻出")
+            return self._jump_forward_exit_window(w, 0)
         if self._tap_exit_motion_and_check_out(
             w,
             f"窗户{align_state}后轻微前推",
@@ -9320,6 +9292,26 @@ class HouseSceneSearchManager(HouseSearchManager):
         if not candidates:
             return None
         return max(candidates, key=lambda item: item[0])[1]
+
+    def _find_center_nearest_forward_target(self, w: "FrameWorker", class_ids: set):
+        frame_w, frame_h = self._get_frame_size()
+        center_x = frame_w / 2.0
+        center_y = frame_h / 2.0
+        candidates = []
+        for obj in self._get_forward_scene(w):
+            try:
+                if len(obj) < 6 or int(obj[5]) not in class_ids:
+                    continue
+                target_x = (float(obj[0]) + float(obj[2])) / 2.0
+                target_y = (float(obj[1]) + float(obj[3])) / 2.0
+                center_distance = (target_x - center_x) ** 2 + (target_y - center_y) ** 2
+            except (TypeError, ValueError):
+                continue
+            candidates.append((center_distance, obj))
+
+        if not candidates:
+            return None
+        return min(candidates, key=lambda item: item[0])[1]
 
     def _target_relative_angle(self, target) -> Optional[float]:
         try:

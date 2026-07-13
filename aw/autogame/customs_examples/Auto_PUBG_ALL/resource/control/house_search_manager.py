@@ -6016,6 +6016,11 @@ class HouseSceneSearchManager(HouseSearchManager):
             current_loc = stable_loc
             self.initial_target_pending = False
 
+        nearest_entry_loc = self._maintain_nearest_r_city_entry_reference(current_loc)
+        if nearest_entry_loc is None:
+            self._finish_r_city_searching(w, "R城没有可用入门点，无法维持最近入门点参考")
+            return
+
         if self.status == self.STATUS_ROUTE_TO_R_CITY:
             self._handle_route_to_r_city(w, current_loc, current_direction)
             return
@@ -6118,11 +6123,12 @@ class HouseSceneSearchManager(HouseSearchManager):
             self.forbidden_escape_region_anchor = None
 
         if not force_precise_entry_nav and not self._is_walkable(current_loc):
-            if self._same_forbidden_region(current_loc, target_loc):
+            forbidden_compare_entry = nearest_entry_loc
+            if self._same_forbidden_region(current_loc, forbidden_compare_entry):
                 self._set_frame_decision(
                     w,
                     (
-                        f"当前位置 {current_loc} 不可通行，但和最近入门点 {target_loc} "
+                        f"当前位置 {current_loc} 不可通行，但和持续维护的最近入门点 {forbidden_compare_entry} "
                         f"在同一个不可通行区域，距离={dist:.2f}"
                     ),
                     "不先绕安全点，继续执行Nav直冲最近入门点",
@@ -6131,7 +6137,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                     result="目标仍是到达该入门点 <= 1.5",
                 )
                 print(
-                    f"[RCitySearch] 当前落点 {current_loc} 与入门点 {target_loc} 在同一不可通行区域，"
+                    f"[RCitySearch] 当前落点 {current_loc} 与最近入门点 {forbidden_compare_entry} 在同一不可通行区域，"
                     f"距离 {dist:.2f}，直接按入门点方向继续冲，不走最近安全点绕路"
                 )
             elif self._is_reentered_forbidden_escape_region(current_loc):
@@ -6156,7 +6162,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 self._set_frame_decision(
                     w,
                     (
-                        f"当前位置 {current_loc} 不可通行，且和最近入门点 {target_loc} "
+                        f"当前位置 {current_loc} 不可通行，且和最近入门点 {forbidden_compare_entry} "
                         f"不是同一不可通行区域，距离={dist:.2f}"
                     ),
                     "先脱离当前不可通行区域，再规划路线继续前往最近入门点",
@@ -6165,10 +6171,15 @@ class HouseSceneSearchManager(HouseSearchManager):
                     result="脱离当前黑区后再回到入门点导航",
                 )
                 print(
-                    f"[RCitySearch] 当前落点 {current_loc} 不可通行，且与入门点 {target_loc} "
+                    f"[RCitySearch] 当前落点 {current_loc} 不可通行，且与最近入门点 {forbidden_compare_entry} "
                     f"不是同一不可通行区域，先快速脱离当前黑区"
                 )
-                self._handle_forbidden_escape(w, current_loc, current_direction, target_loc=target_loc)
+                self._handle_forbidden_escape(
+                    w,
+                    current_loc,
+                    current_direction,
+                    target_loc=forbidden_compare_entry,
+                )
                 return
 
         route_waypoint = None
@@ -6571,6 +6582,8 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_completed_targets = set()
         self.r_city_completed_entry_keys = set()
         self.r_city_failed_counts = {}
+        self.r_city_nearest_entry_location = None
+        self.r_city_nearest_entry_id = None
         self.current_r_city_target = None
         self.r_city_route_target = None
         self.r_city_route_path = []
@@ -7662,6 +7675,43 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         target = min(candidates, key=lambda item: get_distance(loc, item["location"]))
         self._lock_r_city_target(target)
+
+    def _maintain_nearest_r_city_entry_reference(self, current_loc):
+        """Refresh the nearest available entry used for forbidden-region checks.
+
+        This is intentionally separate from ``active_entry``: a route already in
+        progress can finish coherently, while every black-region decision still
+        compares the player with the entry that is nearest at this exact position.
+        """
+        loc = self._location_tuple(current_loc)
+        if loc is None:
+            return getattr(self, "r_city_nearest_entry_location", None)
+
+        candidates = [
+            item for item in self.r_city_targets
+            if self._is_r_city_target_available(item)
+        ]
+        if not candidates:
+            self.r_city_nearest_entry_location = None
+            self.r_city_nearest_entry_id = None
+            return None
+
+        nearest = min(candidates, key=lambda item: get_distance(loc, item["location"]))
+        nearest_loc = self._location_tuple(nearest.get("location"))
+        if nearest_loc is None:
+            self.r_city_nearest_entry_location = None
+            self.r_city_nearest_entry_id = None
+            return None
+
+        previous_id = getattr(self, "r_city_nearest_entry_id", None)
+        self.r_city_nearest_entry_location = nearest_loc
+        self.r_city_nearest_entry_id = nearest.get("id")
+        if previous_id != self.r_city_nearest_entry_id:
+            print(
+                f"[RCitySearch] 更新最近入门点参考：id={self.r_city_nearest_entry_id}, "
+                f"location={nearest_loc}；不可通行区域将与该点比较"
+            )
+        return nearest_loc
 
     def _active_entry_nearest_route_point(self, current_loc):
         loc = self._location_tuple(current_loc)

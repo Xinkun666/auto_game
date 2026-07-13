@@ -2451,6 +2451,7 @@ class LauncherWindow(QWidget):
         self.hos_frame_rate_combo = QComboBox()
         self.hos_frame_rate_combo.setToolTip("选择后立即写入 config.json 的 hoscrcpy_frame_rate，下次验证流时生效")
         self.hos_frame_rate_combo.setFixedWidth(76)
+        self.hos_frame_rate_combo.setFixedHeight(24)
         for frame_rate in HOSCRCPY_FRAME_RATE_OPTIONS:
             self.hos_frame_rate_combo.addItem(str(frame_rate), frame_rate)
         try:

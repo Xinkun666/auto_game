@@ -2451,7 +2451,11 @@ class LauncherWindow(QWidget):
         self.hos_frame_rate_combo = QComboBox()
         self.hos_frame_rate_combo.setToolTip("选择后立即写入 config.json 的 hoscrcpy_frame_rate，下次验证流时生效")
         self.hos_frame_rate_combo.setFixedWidth(76)
-        self.hos_frame_rate_combo.setFixedHeight(self.stream_verify_button.sizeHint().height())
+        # 与操作栏按钮的样式后高度保持一致，避免未抛光的默认 sizeHint 把下拉框撑高。
+        self.hos_frame_rate_combo.setFixedHeight(32)
+        self.hos_frame_rate_combo.setStyleSheet(
+            "QComboBox { min-height: 0px; padding: 3px 8px; }"
+        )
         for frame_rate in HOSCRCPY_FRAME_RATE_OPTIONS:
             self.hos_frame_rate_combo.addItem(str(frame_rate), frame_rate)
         try:

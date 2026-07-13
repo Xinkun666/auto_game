@@ -2823,8 +2823,16 @@ class FrameWorker(threading.Thread):
             self._queue_visual_frame()
         return True
 
-    def pause_stream(self, duration_seconds=None):
-        """停止 HOS 抓帧；指定秒数时自动建流并刷新为恢复后的新画面。"""
+    def pause_stream(self, duration_seconds):
+        """停止 HOS 抓帧，等待指定秒数后自动建流并刷新为新画面。"""
+        try:
+            duration_seconds = float(duration_seconds)
+        except (TypeError, ValueError):
+            print("[FrameWorker] 暂停时长必须是秒数，例如 w.pause_stream(10)。")
+            return False
+        if duration_seconds <= 0:
+            print("[FrameWorker] 暂停时长必须大于 0。")
+            return False
         pause = getattr(self.buffer, "pause", None)
         pause_capture = getattr(getattr(self, "stream_client", None), "pause_capture", None)
         if not callable(pause) or not callable(pause_capture):
@@ -2837,30 +2845,17 @@ class FrameWorker(threading.Thread):
             self.buffer.resume()
             print("[FrameWorker] HOS 停止抓帧失败，已恢复自动化帧缓冲。")
             return False
-        if duration_seconds is None:
-            print("[FrameWorker] HOS 已停止设备侧抓帧；自动化用例保持运行，等待 w.continue_stream()。")
-            return True
-        try:
-            duration_seconds = float(duration_seconds)
-        except (TypeError, ValueError):
-            print("[FrameWorker] 暂停时长必须是秒数，例如 w.pause_stream(10)。")
-            self.continue_stream()
-            return False
-        if duration_seconds < 0:
-            print("[FrameWorker] 暂停时长不能小于 0。")
-            self.continue_stream()
-            return False
         print("[FrameWorker] HOS 已停止设备侧抓帧；%.3fs 后自动重新建流。" % duration_seconds)
         time.sleep(duration_seconds)
         if not getattr(self, "running", True):
             print("[FrameWorker] 用例已结束，取消恢复 HOS 抓帧。")
             return False
-        if not self.continue_stream():
+        if not self._resume_stream_capture():
             return False
         return self.refresh_frame()
 
-    def continue_stream(self):
-        """重新启动 HOS 设备侧抓帧，并在新帧到达后继续用例。"""
+    def _resume_stream_capture(self):
+        """仅供 pause_stream() 内部使用：重新启动 HOS 设备侧抓帧。"""
         resume = getattr(self.buffer, "resume", None)
         continue_capture = getattr(getattr(self, "stream_client", None), "continue_capture", None)
         if not callable(resume) or not callable(continue_capture):

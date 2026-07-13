@@ -212,10 +212,10 @@ class HouseSearchManager:
     ENTRY_CONFIRM_FORWARD_DURA = 650
     ENTRY_CONFIRM_FORWARD_WAIT = 850
     ENTRY_CONFIRM_SIDE_X_BIAS = 260
-    ALIGN_MAX_BIAS = 460
+    ALIGN_MAX_BIAS = 800
     ALIGN_MIN_DURA = 180
-    ALIGN_MAX_DURA = 650
-    ALIGN_WAIT = 220
+    ALIGN_MAX_DURA = 1000
+    ALIGN_WAIT = 30
 
     def __init__(self):
         self.map_tool = MapNavigator()

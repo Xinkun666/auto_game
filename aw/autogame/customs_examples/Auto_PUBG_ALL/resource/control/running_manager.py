@@ -351,6 +351,19 @@ class RunningManager:
     UNSTUCK_ESCALATED_SIDE_X_BIAS = 540
     UNSTUCK_REPLAN_ATTEMPT_LIMIT = 3
     UNSTUCK_JUMP_CONTROLS = ("跳跃", "翻越")
+    OUTDOOR_NEAR_WALL_ENTRY_EXEMPT_DISTANCE = 3.0
+    OUTDOOR_NEAR_WALL_RECOVERY_MAX_CYCLES = 2
+    OUTDOOR_NEAR_WALL_BACK_Y_BIAS = 300
+    OUTDOOR_NEAR_WALL_BACK_DURA = 360
+    OUTDOOR_NEAR_WALL_BACK_WAIT = 600
+    OUTDOOR_NEAR_WALL_LEFT_VIEW_X_BIAS = -800
+    OUTDOOR_NEAR_WALL_LEFT_VIEW_DURA = 420
+    OUTDOOR_NEAR_WALL_LEFT_VIEW_WAIT = 30
+    OUTDOOR_NEAR_WALL_FORWARD_Y_BIAS = -360
+    OUTDOOR_NEAR_WALL_FORWARD_DURA = 2000
+    OUTDOOR_NEAR_WALL_FORWARD_WAIT = 2000
+    OUTDOOR_NEAR_WALL_CLEAR_FORWARD_DURA = 1000
+    OUTDOOR_NEAR_WALL_CLEAR_FORWARD_WAIT = 1000
     WAYPOINT_PROJECTION_PASS_RATIO = 1.0
     WAYPOINT_PROJECTION_CORRIDOR = 12.0
     # 单帧位置跳变超过这个距离时，认为定位异常，需要重规划
@@ -877,6 +890,9 @@ class RunningManager:
 
         w.frame_log("跑图检查：先判断当前位置是否在不可通行区域或黑区，命中时优先脱离")
         if self._handle_forbidden_escape(w, location, direction):
+            return
+
+        if self._handle_outdoor_near_wall(w, location, direction):
             return
 
         self._click_jump_if_available(w, location, direction)
@@ -2385,6 +2401,140 @@ class RunningManager:
             return int(value)
         except (TypeError, ValueError):
             return None
+
+    def _is_close_entry_forced_route(self, location: Tuple[int, int]) -> bool:
+        if (
+            not self._has_forced_route()
+            or self.forced_route_finish_stage != "搜房阶段"
+            or self.forced_route_target is None
+        ):
+            return False
+        return get_distance(location, self.forced_route_target) <= self.OUTDOOR_NEAR_WALL_ENTRY_EXEMPT_DISTANCE
+
+    def _jump_forward_from_outdoor_near_wall(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+        reason: str,
+    ) -> bool:
+        if not w.get_info("跳跃"):
+            return False
+        print(f"[Running] {reason}发现跳跃键，优先跳跃+前推")
+        self._log_running_state("室外near_wall", location, direction, "点击跳跃并前推")
+        self.stop_auto_forward(w)
+        w.click("跳跃")
+        w.tap_single(
+            "摇杆",
+            y_bias=self.OUTDOOR_NEAR_WALL_FORWARD_Y_BIAS,
+            dura=self.UNSTUCK_STEP_DURA,
+            wait=self.UNSTUCK_STEP_WAIT,
+        )
+        w.refresh_frame()
+        return True
+
+    def _restore_outdoor_near_wall_view(self, w: "FrameWorker", original_direction: Optional[float]):
+        if original_direction is None:
+            return
+        for _ in range(3):
+            current_direction = self._get_scalar(w.get_info("direction"))
+            if current_direction is None:
+                return
+            if self._align_to_direction(w, current_direction, original_direction, threshold=8):
+                return
+
+    def _handle_outdoor_near_wall(
+        self,
+        w: "FrameWorker",
+        location: Tuple[int, int],
+        direction: Optional[float],
+    ) -> bool:
+        if self._get_house_scene(w) != HouseExitManager.HOUSE_NEAR_WALL:
+            return False
+        if self._is_close_entry_forced_route(location):
+            return False
+
+        if self._jump_forward_from_outdoor_near_wall(w, location, direction, "室外near_wall"):
+            return True
+
+        original_direction = direction if direction is not None else self._get_scalar(w.get_info("direction"))
+        for cycle in range(self.OUTDOOR_NEAR_WALL_RECOVERY_MAX_CYCLES):
+            print(
+                f"[Running] 室外near_wall恢复 {cycle + 1}/{self.OUTDOOR_NEAR_WALL_RECOVERY_MAX_CYCLES}: "
+                "后拉 -> 左滑视野 -> 前推约2秒 -> 回正"
+            )
+            self.stop_auto_forward(w)
+            w.tap_single(
+                "摇杆",
+                y_bias=self.OUTDOOR_NEAR_WALL_BACK_Y_BIAS,
+                dura=self.OUTDOOR_NEAR_WALL_BACK_DURA,
+                wait=self.OUTDOOR_NEAR_WALL_BACK_WAIT,
+            )
+            w.refresh_frame()
+            if self._jump_forward_from_outdoor_near_wall(w, location, original_direction, "near_wall后拉后"):
+                return True
+
+            w.tap_single(
+                "视角",
+                x_bias=self.OUTDOOR_NEAR_WALL_LEFT_VIEW_X_BIAS,
+                dura=self.OUTDOOR_NEAR_WALL_LEFT_VIEW_DURA,
+                wait=self.OUTDOOR_NEAR_WALL_LEFT_VIEW_WAIT,
+            )
+            w.refresh_frame()
+            if self._jump_forward_from_outdoor_near_wall(w, location, original_direction, "near_wall左滑后"):
+                return True
+
+            w.tap_single(
+                "摇杆",
+                y_bias=self.OUTDOOR_NEAR_WALL_FORWARD_Y_BIAS,
+                dura=self.OUTDOOR_NEAR_WALL_FORWARD_DURA,
+                wait=self.OUTDOOR_NEAR_WALL_FORWARD_WAIT,
+            )
+            w.refresh_frame()
+            if self._jump_forward_from_outdoor_near_wall(w, location, original_direction, "near_wall左绕前推后"):
+                return True
+
+            self._restore_outdoor_near_wall_view(w, original_direction)
+            w.refresh_frame()
+            if self._jump_forward_from_outdoor_near_wall(w, location, original_direction, "near_wall回正后"):
+                return True
+
+            if self._get_house_scene(w) != HouseExitManager.HOUSE_NEAR_WALL:
+                target = self.forced_route_target if self._has_forced_route() else (self.road_list[0] if self.road_list else None)
+                current_location = self._get_location(w) or location
+                current_direction = self._get_scalar(w.get_info("direction"))
+                if target is not None and current_direction is not None:
+                    if not self._align_to_point(
+                        w,
+                        current_location,
+                        current_direction,
+                        target,
+                        threshold=8,
+                        max_steps=3,
+                    ):
+                        self.locations = [current_location]
+                        self.history_locations = [current_location]
+                        self.stuck = False
+                        self.trapped = False
+                        return True
+                w.tap_single(
+                    "摇杆",
+                    y_bias=self.OUTDOOR_NEAR_WALL_FORWARD_Y_BIAS,
+                    dura=self.OUTDOOR_NEAR_WALL_CLEAR_FORWARD_DURA,
+                    wait=self.OUTDOOR_NEAR_WALL_CLEAR_FORWARD_WAIT,
+                )
+                w.refresh_frame()
+                self.locations = [self._get_location(w) or current_location]
+                self.history_locations = [self._get_location(w) or current_location]
+                self.stuck = False
+                self.trapped = False
+                return True
+
+        self.locations = [self._get_location(w) or location]
+        self.history_locations = [self._get_location(w) or location]
+        self.stuck = False
+        self.trapped = False
+        return True
 
     def _confirm_indoor_after_rear_view(
         self,

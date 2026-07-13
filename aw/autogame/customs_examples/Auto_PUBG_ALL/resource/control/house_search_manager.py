@@ -216,6 +216,19 @@ class HouseSearchManager:
     ALIGN_MIN_DURA = 180
     ALIGN_MAX_DURA = 1000
     ALIGN_WAIT = 30
+    OUTDOOR_NEAR_WALL_ENTRY_EXEMPT_DISTANCE = 3.0
+    OUTDOOR_NEAR_WALL_RECOVERY_MAX_CYCLES = 2
+    OUTDOOR_NEAR_WALL_BACK_Y_BIAS = 300
+    OUTDOOR_NEAR_WALL_BACK_DURA = 360
+    OUTDOOR_NEAR_WALL_BACK_WAIT = 600
+    OUTDOOR_NEAR_WALL_LEFT_VIEW_X_BIAS = -800
+    OUTDOOR_NEAR_WALL_LEFT_VIEW_DURA = 420
+    OUTDOOR_NEAR_WALL_LEFT_VIEW_WAIT = 30
+    OUTDOOR_NEAR_WALL_FORWARD_Y_BIAS = -360
+    OUTDOOR_NEAR_WALL_FORWARD_DURA = 2000
+    OUTDOOR_NEAR_WALL_FORWARD_WAIT = 2000
+    OUTDOOR_NEAR_WALL_CLEAR_FORWARD_DURA = 1000
+    OUTDOOR_NEAR_WALL_CLEAR_FORWARD_WAIT = 1000
 
     def __init__(self):
         self.map_tool = MapNavigator()
@@ -2046,10 +2059,28 @@ class HouseSearchManager:
     def _backoff_entry_near_wall_if_needed(self, w: 'FrameWorker', phase_label: str, reason: str) -> bool:
         return self._handle_entry_near_wall_if_needed(w, phase_label, reason) is not None
 
-    def _handle_nav_near_entry_scene_if_needed(self, w: 'FrameWorker', phase_label: str, reason: str):
+    def _handle_nav_near_entry_scene_if_needed(
+        self,
+        w: 'FrameWorker',
+        phase_label: str,
+        reason: str,
+        current_loc=None,
+        target_loc=None,
+    ):
         scene = self._get_house_scene(w)
         if scene not in {self.HOUSE_NEAR_WALL, self.HOUSE_NEAR_DOOR}:
             return None
+
+        if scene == self.HOUSE_NEAR_WALL:
+            recovery_result = self._recover_outdoor_near_wall(
+                w,
+                current_loc,
+                target_loc,
+                phase_label,
+                reason,
+            )
+            if recovery_result is not None:
+                return recovery_result
 
         scene_label = "near_wall" if scene == self.HOUSE_NEAR_WALL else "near_door"
         self._set_search_frame_decision(
@@ -2098,6 +2129,109 @@ class HouseSearchManager:
                 print(f"[{phase_label}] 跳障后已在 indoor，直接启动当前房搜房")
                 return "indoor"
 
+        return "adjusting"
+
+    def _recover_outdoor_near_wall(self, w: 'FrameWorker', current_loc, target_loc, phase_label: str, reason: str):
+        """Recover from an outdoor wall hit without disturbing indoor or close-entry handling."""
+        if self._get_house_scene(w) != self.HOUSE_NEAR_WALL:
+            return None
+
+        target = self._normalize_location_value(target_loc)
+        current = self._normalize_location_value(current_loc) or self._get_current_location(w)
+        if target is None or current is None:
+            return None
+
+        distance = get_distance(current, target)
+        if distance <= self.OUTDOOR_NEAR_WALL_ENTRY_EXEMPT_DISTANCE:
+            return None
+
+        if w.get_info('跳跃'):
+            print(f"[{phase_label}] {reason}室外 near_wall 且可跳跃，优先跳跃+前推")
+            self.handle_jump_logic(w, f"{phase_label} 室外 near_wall")
+            self.history_locations = []
+            return "adjusting"
+
+        original_direction = w.get_info('direction')
+        for cycle in range(self.OUTDOOR_NEAR_WALL_RECOVERY_MAX_CYCLES):
+            cycle_label = f"{cycle + 1}/{self.OUTDOOR_NEAR_WALL_RECOVERY_MAX_CYCLES}"
+            print(
+                f"[{phase_label}] {reason}室外 near_wall 恢复 {cycle_label}: "
+                "后拉 -> 左滑视野 -> 前推约2秒 -> 回正"
+            )
+            self.stop_auto_forward(w)
+            w.tap_single(
+                '摇杆',
+                y_bias=self.OUTDOOR_NEAR_WALL_BACK_Y_BIAS,
+                dura=self.OUTDOOR_NEAR_WALL_BACK_DURA,
+                wait=self.OUTDOOR_NEAR_WALL_BACK_WAIT,
+            )
+            self._refresh_frame_and_handle_jump(w)
+            if self._get_house_scene(w) == self.HOUSE_INDOOR:
+                return "indoor"
+            if w.get_info('跳跃'):
+                self.handle_jump_logic(w, f"{phase_label} 室外 near_wall 后拉后")
+                self.history_locations = []
+                return "adjusting"
+
+            w.tap_single(
+                '视角',
+                x_bias=self.OUTDOOR_NEAR_WALL_LEFT_VIEW_X_BIAS,
+                dura=self.OUTDOOR_NEAR_WALL_LEFT_VIEW_DURA,
+                wait=self.OUTDOOR_NEAR_WALL_LEFT_VIEW_WAIT,
+            )
+            self._refresh_frame_and_handle_jump(w)
+            if w.get_info('跳跃'):
+                self.handle_jump_logic(w, f"{phase_label} 室外 near_wall 左滑后")
+                self.history_locations = []
+                return "adjusting"
+
+            w.tap_single(
+                '摇杆',
+                y_bias=self.OUTDOOR_NEAR_WALL_FORWARD_Y_BIAS,
+                dura=self.OUTDOOR_NEAR_WALL_FORWARD_DURA,
+                wait=self.OUTDOOR_NEAR_WALL_FORWARD_WAIT,
+            )
+            self._refresh_frame_and_handle_jump(w)
+            if w.get_info('跳跃'):
+                self.handle_jump_logic(w, f"{phase_label} 室外 near_wall 左绕前推后")
+                self.history_locations = []
+                return "adjusting"
+
+            current_direction = w.get_info('direction')
+            if original_direction is not None and current_direction is not None:
+                self.align_direction_blocking(
+                    w,
+                    current_direction,
+                    original_direction,
+                    threshold=8,
+                    max_steps=3,
+                )
+                self._refresh_frame_and_handle_jump(w)
+
+            if self._get_house_scene(w) == self.HOUSE_INDOOR:
+                return "indoor"
+            if w.get_info('跳跃'):
+                self.handle_jump_logic(w, f"{phase_label} 室外 near_wall 回正后")
+                self.history_locations = []
+                return "adjusting"
+
+            if self._get_house_scene(w) != self.HOUSE_NEAR_WALL:
+                refreshed_loc = self._get_current_location(w)
+                if refreshed_loc is not None:
+                    if not self.align_direction(w, target, threshold=10, max_steps=3):
+                        self.history_locations = []
+                        return "adjusting"
+                w.tap_single(
+                    '摇杆',
+                    y_bias=self.OUTDOOR_NEAR_WALL_FORWARD_Y_BIAS,
+                    dura=self.OUTDOOR_NEAR_WALL_CLEAR_FORWARD_DURA,
+                    wait=self.OUTDOOR_NEAR_WALL_CLEAR_FORWARD_WAIT,
+                )
+                self._refresh_frame_and_handle_jump(w)
+                self.history_locations = []
+                return "recovered"
+
+        self.history_locations = []
         return "adjusting"
 
     def _push_centered_entry_door_without_button(self, w: 'FrameWorker', phase_label='Nav', initial_door=None) -> str:
@@ -3882,6 +4016,16 @@ class HouseSearchManager:
                 f"入口导航后拉避让只在 near_wall 触发，交给通用脱困"
             )
             return False
+
+        outdoor_near_wall_result = self._recover_outdoor_near_wall(
+            w,
+            current_loc,
+            target_loc,
+            "Nav卡住恢复",
+            "位置卡住时",
+        )
+        if outdoor_near_wall_result is not None:
+            return True
 
         attempt = self._next_route_stuck_attempt(current_loc)
 
@@ -6177,7 +6321,13 @@ class HouseSceneSearchManager(HouseSearchManager):
                 method="_move_precisely_to_entry_point() or _handle_near_entry_point()",
                 result="到达 <= 1.5 后执行原有入门点逻辑",
             )
-            nav_scene_result = self._handle_nav_near_entry_scene_if_needed(w, "Nav精推段", "R城导航中")
+            nav_scene_result = self._handle_nav_near_entry_scene_if_needed(
+                w,
+                "Nav精推段",
+                "R城导航中",
+                current_loc=current_loc,
+                target_loc=target_loc,
+            )
             if nav_scene_result == "indoor":
                 self._set_frame_decision(
                     w,

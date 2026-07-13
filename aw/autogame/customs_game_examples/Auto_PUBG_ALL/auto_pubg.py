@@ -774,6 +774,9 @@ def on_stage(w: "FrameWorker"):
         if click_popup_info_if_visible(w, "回归"):
             return
 
+        if click_popup_info_if_visible(w, "关闭记忆"):
+            return
+
         if click_popup_info_if_visible(w, "关闭活动"):
             return
 
@@ -781,9 +784,6 @@ def on_stage(w: "FrameWorker"):
             return
 
         if click_popup_info_if_visible(w, "关闭活动2"):
-            return
-
-        if click_popup_info_if_visible(w, "关闭记忆"):
             return
 
         if confirm_lobby_after_popups(w):

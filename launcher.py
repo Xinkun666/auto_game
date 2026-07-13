@@ -107,6 +107,8 @@ APP_DIR = APP_PATHS.app_dir
 INTERNAL_DIR = APP_PATHS.internal_dir
 ROOT_DIR = APP_PATHS.root_dir
 AUTOGAME_CONFIG_FILE = ROOT_DIR / "aw" / "autogame" / "config" / "config.json"
+HOSCRCPY_FRAME_RATE_OPTIONS = (15, 30, 60, 120)
+DEFAULT_HOSCRCPY_FRAME_RATE = HOSCRCPY_FRAME_RATE_OPTIONS[0]
 TESTCASES_DIR = APP_DIR / "testcases"
 CUSTOMS_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_examples"
 CUSTOMS_GAME_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_game_examples"
@@ -493,6 +495,51 @@ def write_screen_mode_config(screen_mode: str, config_path: Path = AUTOGAME_CONF
             raise ValueError(f"config must be a json object: {config_path}")
 
     config["screen_mode"] = screen_mode
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
+    tmp_path.write_text(
+        json.dumps(config, ensure_ascii=False, indent=4),
+        encoding="utf-8",
+    )
+    tmp_path.replace(config_path)
+
+
+def read_hoscrcpy_frame_rate_config(config_path: Path = AUTOGAME_CONFIG_FILE) -> int:
+    config_path = Path(config_path)
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise ValueError(f"config must be a json object: {config_path}")
+
+    try:
+        frame_rate = int(config.get("hoscrcpy_frame_rate"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("hoscrcpy_frame_rate must be an integer") from exc
+    if frame_rate not in HOSCRCPY_FRAME_RATE_OPTIONS:
+        allowed = ", ".join(str(value) for value in HOSCRCPY_FRAME_RATE_OPTIONS)
+        raise ValueError(f"hoscrcpy_frame_rate must be one of: {allowed}")
+    return frame_rate
+
+
+def write_hoscrcpy_frame_rate_config(
+    frame_rate: int,
+    config_path: Path = AUTOGAME_CONFIG_FILE,
+) -> None:
+    config_path = Path(config_path)
+    try:
+        frame_rate = int(frame_rate)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("hoscrcpy_frame_rate must be an integer") from exc
+    if frame_rate not in HOSCRCPY_FRAME_RATE_OPTIONS:
+        allowed = ", ".join(str(value) for value in HOSCRCPY_FRAME_RATE_OPTIONS)
+        raise ValueError(f"hoscrcpy_frame_rate must be one of: {allowed}")
+
+    config = {}
+    if config_path.exists():
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        if not isinstance(config, dict):
+            raise ValueError(f"config must be a json object: {config_path}")
+
+    config["hoscrcpy_frame_rate"] = frame_rate
     config_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
     tmp_path.write_text(
@@ -2400,6 +2447,27 @@ class LauncherWindow(QWidget):
         self.start_button.setProperty("primaryButton", True)
         self.stream_verify_button = QPushButton("验证流")
         self.stream_verify_button.setToolTip("按 config.json 的 screen_mode 启动对应抓流验证，并在预览区域显示实时画面")
+        self.hos_frame_rate_label = QLabel("帧率")
+        self.hos_frame_rate_combo = QComboBox()
+        self.hos_frame_rate_combo.setToolTip("选择后立即写入 config.json 的 hoscrcpy_frame_rate，下次验证流时生效")
+        self.hos_frame_rate_combo.setFixedWidth(76)
+        for frame_rate in HOSCRCPY_FRAME_RATE_OPTIONS:
+            self.hos_frame_rate_combo.addItem(str(frame_rate), frame_rate)
+        try:
+            configured_frame_rate = read_hoscrcpy_frame_rate_config()
+        except Exception as exc:
+            configured_frame_rate = DEFAULT_HOSCRCPY_FRAME_RATE
+            LOGGER.warning(
+                "invalid hoscrcpy_frame_rate in %s; reset to %s: %s",
+                AUTOGAME_CONFIG_FILE,
+                configured_frame_rate,
+                exc,
+            )
+            write_hoscrcpy_frame_rate_config(configured_frame_rate)
+        self.hos_frame_rate_combo.setCurrentIndex(
+            self.hos_frame_rate_combo.findData(configured_frame_rate)
+        )
+        self.current_hos_frame_rate = configured_frame_rate
         self.stop_button = QPushButton("停止")
         self.stop_button.setProperty("dangerButton", True)
         self.stop_button.setEnabled(False)
@@ -3099,6 +3167,8 @@ class LauncherWindow(QWidget):
         action_layout.addWidget(self.preview_fullscreen_button)
         action_layout.addStretch(1)
         action_layout.addWidget(self.stream_verify_button)
+        action_layout.addWidget(self.hos_frame_rate_label)
+        action_layout.addWidget(self.hos_frame_rate_combo)
         main_layout.addWidget(action_bar, 0)
 
         status_strip = QWidget()
@@ -3359,6 +3429,7 @@ class LauncherWindow(QWidget):
         self.project_combo.currentTextChanged.connect(self._on_project_changed)
         self.start_button.clicked.connect(self._start_run)
         self.stream_verify_button.clicked.connect(self._toggle_stream_verification)
+        self.hos_frame_rate_combo.currentIndexChanged.connect(self._on_hos_frame_rate_changed)
         self.stop_button.clicked.connect(self._stop_run)
         self.open_history_button.clicked.connect(self._show_history_page)
         self.history_refresh_button.clicked.connect(self._refresh_history_outputs)
@@ -4081,6 +4152,7 @@ class LauncherWindow(QWidget):
         self.refresh_button.setEnabled(enabled)
         self.open_history_button.setEnabled(enabled)
         self.stream_verify_button.setEnabled(enabled or self.stream_verify_active)
+        self.hos_frame_rate_combo.setEnabled(enabled and not self.stream_verify_active)
         self.project_combo.setEnabled(enabled)
         self.target_combo.setEnabled(enabled)
         self.run_count_spin.setEnabled(enabled)
@@ -5556,6 +5628,28 @@ class LauncherWindow(QWidget):
             return
         self._start_stream_verification()
 
+    def _on_hos_frame_rate_changed(self, _index: int):
+        frame_rate = self.hos_frame_rate_combo.currentData()
+        try:
+            frame_rate = int(frame_rate)
+            write_hoscrcpy_frame_rate_config(frame_rate)
+        except Exception as exc:
+            log_exception("write hoscrcpy frame rate config failed")
+            self.hos_frame_rate_combo.blockSignals(True)
+            self.hos_frame_rate_combo.setCurrentIndex(
+                self.hos_frame_rate_combo.findData(self.current_hos_frame_rate)
+            )
+            self.hos_frame_rate_combo.blockSignals(False)
+            message = f"帧率配置写入失败：{exc}"
+            self._log_message(f"[Launcher] {message}\n", level=logging.ERROR)
+            QMessageBox.warning(self, "帧率", message)
+            return
+
+        self.current_hos_frame_rate = frame_rate
+        message = f"HOS 验证流帧率已设为 {frame_rate}，已同步 config.json。"
+        self._set_status(message)
+        self._log_message(f"[Launcher] {message}\n")
+
     def _start_stream_verification(self):
         if self.batch_active or self.process is not None:
             QMessageBox.information(self, "运行中", "当前已有任务在运行，请先停止。")
@@ -5585,6 +5679,7 @@ class LauncherWindow(QWidget):
 
         self.stream_verify_button.setText("验证中...")
         self.stream_verify_button.setEnabled(True)
+        self.hos_frame_rate_combo.setEnabled(False)
         self.start_button.setEnabled(False)
         self.stream_verify_timer.start()
         self._set_status(f"正在验证视频流，screen_mode={screen_mode}。")
@@ -5717,6 +5812,7 @@ class LauncherWindow(QWidget):
 
         self.stream_verify_button.setText("验证流")
         self.stream_verify_button.setEnabled(not self.batch_active and self.process is None)
+        self.hos_frame_rate_combo.setEnabled(not self.batch_active and self.process is None)
         self.start_button.setEnabled(not self.batch_active and self.process is None)
         if message:
             self._set_status(message)

@@ -3603,7 +3603,14 @@ class AutoStudioWindow(QMainWindow):
                 self.action_layout.addWidget(btn_ctrl)
                 self.action_layout.addWidget(btn_sp_area)
                 btn_copy_resolution = QPushButton("复制控件到不同分辨率")
-                btn_copy_resolution.clicked.connect(lambda: self.copy_scene_to_different_resolution(self.current_stage, data.name, data))
+                btn_copy_resolution.clicked.connect(
+                    lambda: self.copy_scene_to_different_resolution(
+                        None,
+                        data.name,
+                        data,
+                        scene_group=self._find_scene_pool_group_for_scene(data),
+                    )
+                )
                 self.action_layout.addWidget(btn_copy_resolution)
                 btn_copy_scene = QPushButton("📋 复制场景")
                 btn_copy_scene.clicked.connect(lambda: self.copy_scene(data))
@@ -3791,7 +3798,12 @@ class AutoStudioWindow(QMainWindow):
                 menu.addAction(copy_action)
                 copy_resolution_action = QAction("复制控件到不同分辨率", self)
                 copy_resolution_action.triggered.connect(
-                    lambda: self.copy_scene_to_different_resolution(self._find_stage_for_scene(data), data.name, data)
+                    lambda: self.copy_scene_to_different_resolution(
+                        None,
+                        data.name,
+                        data,
+                        scene_group=self._find_scene_pool_group_for_scene(data),
+                    )
                 )
                 menu.addAction(copy_resolution_action)
                 menu.addSeparator()
@@ -4254,15 +4266,22 @@ class AutoStudioWindow(QMainWindow):
         stage: Optional[StageData],
         scene_name: str,
         source_scene: Optional[SceneData] = None,
+        scene_group: Optional[SceneGroupData] = None,
     ):
-        if not stage:
+        copy_from_pool = scene_group is not None
+        if not copy_from_pool and not stage:
             QMessageBox.warning(self, "提示", "请先选择一个阶段。")
             return
-        candidates = [scene for scene in stage.scenes if scene.name == scene_name]
+        candidates = (
+            [scene for scene in scene_group.scenes if scene.name == scene_name]
+            if copy_from_pool
+            else [scene for scene in stage.scenes if scene.name == scene_name]
+        )
         if not candidates:
             QMessageBox.warning(self, "提示", "未找到可复制的源场景。")
             return
         source_scene = source_scene or candidates[0]
+        scene_name = source_scene.name
         source_size = self._get_scene_image_size(source_scene)
         if source_size[0] <= 0 or source_size[1] <= 0:
             QMessageBox.warning(self, "提示", "源场景还没有有效图片，无法进行分辨率转换。")
@@ -4290,20 +4309,25 @@ class AutoStudioWindow(QMainWindow):
                 for item in source_scene.items
             ],
         )
-        if self.project:
+        if copy_from_pool:
+            scene_group.scenes.append(new_scene)
+        elif self.project:
             self._add_scene_to_project_pool(self.project, new_scene)
-        self._add_scene_reference_to_stage(stage, new_scene)
-        if self.project:
+        if not copy_from_pool:
+            self._add_scene_reference_to_stage(stage, new_scene)
             self._sync_stage_scene_resolutions_from_pool(self.project)
-        self.current_stage = stage
-        self.set_current_work_stage(stage)
+        preferred_tree = getattr(self, "scene_pool_tree", None) if copy_from_pool else None
+        self.current_stage = None if copy_from_pool else stage
+        self.set_current_work_stage(self.current_stage)
         self.current_scene = new_scene
-        self.last_expand_stage_id = stage.id
+        if not copy_from_pool:
+            self.last_expand_stage_id = stage.id
         self.last_expand_scene_id = new_scene.id
         self.update_tree_view()
-        self.select_data_in_tree(new_scene)
+        self.select_data_in_tree(new_scene, preferred_tree=preferred_tree)
+        location_label = "场景池中" if copy_from_pool else f"阶段 {stage.name} 中"
         self.status_label.setText(
-            f"已将场景 {scene_name} 的组件转换到 {new_size[0]} * {new_size[1]}，可在新图片上微调。"
+            f"已在{location_label}将场景 {scene_name} 的组件转换到 {new_size[0]} * {new_size[1]}，可在新图片上微调。"
         )
     def capture_image(self, scene_data):
         # 通过 hdc 截图并拉取到本地，再显示到工作区

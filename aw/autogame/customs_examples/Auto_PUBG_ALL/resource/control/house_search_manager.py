@@ -5865,6 +5865,10 @@ class HouseSceneSearchManager(HouseSearchManager):
     SCENE_EXIT_DOOR_FORWARD_Y_BIAS = -520
     SCENE_EXIT_DOOR_FORWARD_DURA = 5000
     SCENE_EXIT_DOOR_FORWARD_WAIT = 5200
+    SCENE_EXIT_DOOR_WALL_SIDE_X_BIAS = 260
+    SCENE_EXIT_DOOR_WALL_SIDE_Y_BIAS = -520
+    SCENE_EXIT_DOOR_WALL_SIDE_DURA = 2000
+    SCENE_EXIT_DOOR_WALL_SIDE_WAIT = 2200
     SCENE_EXIT_DOOR_LOST_SIDE_X_BIAS = 260
     SCENE_EXIT_DOOR_LOST_SIDE_Y_BIAS = -520
     SCENE_EXIT_DOOR_LOST_FIRST_SIDE_DURA = 2000
@@ -9109,8 +9113,69 @@ class HouseSceneSearchManager(HouseSearchManager):
         if self._is_out_of_house(w):
             print("[SceneExit] 对准门大幅前推后双帧确认已出房")
             return True
+        if self._try_aligned_exit_door_side_pushes_and_check_out(w, reason):
+            return True
         if self._recover_exit_wall_collision(w, "对准门大幅前推后"):
             return self._is_out_of_house(w)
+        return False
+
+    def _try_aligned_exit_door_side_pushes_and_check_out(
+        self,
+        w: "FrameWorker",
+        reason: str,
+    ) -> bool:
+        scene = self._get_house_scene(w)
+        if scene != self.HOUSE_NEAR_WALL:
+            return False
+
+        print(
+            f"[SceneExit] {reason}直推后仍贴墙，先左前推、再右前推尝试顶出："
+            f"x_bias=±{self.SCENE_EXIT_DOOR_WALL_SIDE_X_BIAS}, "
+            f"y_bias={self.SCENE_EXIT_DOOR_WALL_SIDE_Y_BIAS}, "
+            f"dura={self.SCENE_EXIT_DOOR_WALL_SIDE_DURA}, "
+            f"wait={self.SCENE_EXIT_DOOR_WALL_SIDE_WAIT}"
+        )
+        self._set_search_frame_decision(
+            w,
+            "当前搜房分支：对准出房门直推撞墙，左右前推顶出",
+            self._entry_observation(
+                w,
+                current_loc=self._get_current_location(w),
+                extra=(
+                    f"{reason}, house_scene={scene}, "
+                    f"x_bias=±{self.SCENE_EXIT_DOOR_WALL_SIDE_X_BIAS}, "
+                    f"y_bias={self.SCENE_EXIT_DOOR_WALL_SIDE_Y_BIAS}, "
+                    f"dura={self.SCENE_EXIT_DOOR_WALL_SIDE_DURA}"
+                ),
+            ),
+            "门已对准但直推撞墙，先依次左前推、右前推尝试从门框两侧顶出",
+            action="左前推后右前推顶出",
+            method=(
+                f"tap_single(摇杆, x_bias=-{self.SCENE_EXIT_DOOR_WALL_SIDE_X_BIAS}, "
+                f"y_bias={self.SCENE_EXIT_DOOR_WALL_SIDE_Y_BIAS}, "
+                f"dura={self.SCENE_EXIT_DOOR_WALL_SIDE_DURA}, wait={self.SCENE_EXIT_DOOR_WALL_SIDE_WAIT}); "
+                f"tap_single(摇杆, x_bias={self.SCENE_EXIT_DOOR_WALL_SIDE_X_BIAS}, "
+                f"y_bias={self.SCENE_EXIT_DOOR_WALL_SIDE_Y_BIAS}, "
+                f"dura={self.SCENE_EXIT_DOOR_WALL_SIDE_DURA}, wait={self.SCENE_EXIT_DOOR_WALL_SIDE_WAIT})"
+            ),
+            result="任一侧出房即结束；两侧均失败才后拉掉头继续找门",
+        )
+        for side, x_bias in (
+            ("左", -self.SCENE_EXIT_DOOR_WALL_SIDE_X_BIAS),
+            ("右", self.SCENE_EXIT_DOOR_WALL_SIDE_X_BIAS),
+        ):
+            if self._tap_exit_motion_and_check_out(
+                w,
+                f"对准门直推贴墙后向{side}前推顶出",
+                x_bias=x_bias,
+                y_bias=self.SCENE_EXIT_DOOR_WALL_SIDE_Y_BIAS,
+                dura=self.SCENE_EXIT_DOOR_WALL_SIDE_DURA,
+                wait=self.SCENE_EXIT_DOOR_WALL_SIDE_WAIT,
+            ):
+                print(f"[SceneExit] 对准门直推贴墙后向{side}前推，双帧确认已出房")
+                return True
+
+        print("[SceneExit] 对准门直推撞墙后左右前推均未出房，继续后拉掉头找门")
         return False
 
     def _exit_house_by_window_scan_strategy(self, w: "FrameWorker") -> bool:

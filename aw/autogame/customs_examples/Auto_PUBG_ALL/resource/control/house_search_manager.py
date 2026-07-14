@@ -5729,6 +5729,7 @@ class HouseSceneSearchManager(HouseSearchManager):
     R_CITY_ROUTE_ENTRY_HANDOFF_DISTANCE = 15.0
     R_CITY_ROUTE_REPLAN_STUCK_CYCLES = 2
     R_CITY_FAILED_TARGET_LIMIT = 2
+    R_CITY_NEAR_ENTRY_SCENE_RECOVERY_MAX_ATTEMPTS = 3
     ENTRY_AUTO_FORWARD_DISTANCE = 15.0
     ENTRY_COARSE_MOVE_DISTANCE = 10.0
     R_CITY_FORWARD_HOUSE_BYPASS_DISTANCE = 10.0
@@ -5940,6 +5941,75 @@ class HouseSceneSearchManager(HouseSearchManager):
     def reset(self):
         super().reset()
         self._reset_r_city_runtime()
+
+    def _handle_nav_near_entry_scene_if_needed(
+        self,
+        w: "FrameWorker",
+        phase_label: str,
+        reason: str,
+        current_loc=None,
+        target_loc=None,
+    ):
+        """Bound repeated near-door/wall recovery for one R-city entry point.
+
+        The base recovery deliberately keeps the active entry point.  In R city,
+        a persistent ``near_door``/``near_wall`` classification otherwise causes
+        a backoff on one frame and a navigation push back to the same wall on the
+        next frame forever.  Keep a few recovery attempts for transient detector
+        noise, then give this entry point up so another entrance can be tried.
+        """
+        scene = self._get_house_scene(w)
+        if scene not in self.HOUSE_NEAR_ENTRY_SCENES:
+            return super()._handle_nav_near_entry_scene_if_needed(
+                w,
+                phase_label,
+                reason,
+                current_loc=current_loc,
+                target_loc=target_loc,
+            )
+
+        attempts = getattr(self, "r_city_near_entry_scene_recovery_attempts", 0)
+        max_attempts = self.R_CITY_NEAR_ENTRY_SCENE_RECOVERY_MAX_ATTEMPTS
+        if attempts >= max_attempts:
+            scene_label = "near_wall" if scene == self.HOUSE_NEAR_WALL else "near_door"
+            failure_reason = (
+                f"同一入门点连续{scene_label}脱困{attempts}/{max_attempts}次后仍未离开门墙循环"
+            )
+            self._set_search_frame_decision(
+                w,
+                "当前进房分支：贴门墙恢复次数已达上限，切换入口",
+                self._entry_observation(
+                    w,
+                    current_loc=current_loc,
+                    target_loc=target_loc,
+                    extra=(
+                        f"house_scene={scene_label}, recoveries={attempts}/{max_attempts}, "
+                        "避免继续后拉再前推到同一门墙"
+                    ),
+                ),
+                "同一入口连续贴门/贴墙恢复后仍未脱离，停止重复后拉前推，改试其他入口",
+                action="标记当前入门点失败",
+                method="_mark_current_r_city_target_failed(); status=IDLE",
+                result="下一帧重新选择可用入门点",
+            )
+            print(f"[RCitySearch] {failure_reason}，舍弃当前入门点并重新选点")
+            self._mark_current_r_city_target_failed(failure_reason)
+            self.status = "IDLE"
+            return "failed"
+
+        attempts += 1
+        self.r_city_near_entry_scene_recovery_attempts = attempts
+        print(
+            f"[RCitySearch] 当前入门点贴门墙恢复 {attempts}/{max_attempts}，"
+            "本次恢复后仍未进房才会继续尝试"
+        )
+        return super()._handle_nav_near_entry_scene_if_needed(
+            w,
+            phase_label,
+            reason,
+            current_loc=current_loc,
+            target_loc=target_loc,
+        )
 
     def searching_logic(self, w: "FrameWorker", current_loc, current_direction):
         if self._should_abort(w):
@@ -6592,6 +6662,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_entry_large_backoff_count = 0
         self.r_city_side_probe_target = None
         self.r_city_side_probe_count = 0
+        self.r_city_near_entry_scene_recovery_attempts = 0
         self.forbidden_escape_target = None
         self.forbidden_escape_region_anchor = None
         self.water_escape_side = None
@@ -7755,6 +7826,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_entry_large_backoff_count = 0
         self.r_city_side_probe_target = None
         self.r_city_side_probe_count = 0
+        self.r_city_near_entry_scene_recovery_attempts = 0
 
     def _mark_current_r_city_target_failed(self, reason: str):
         if self.current_r_city_target:

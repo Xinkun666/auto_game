@@ -841,6 +841,17 @@ def resolve_preview_payload_group_name(payload) -> str:
     return ""
 
 
+def format_preview_frame_info(payload) -> str:
+    """Render only the current frame's visual info, never runtime logs."""
+    payload = payload if isinstance(payload, dict) else {}
+    info_payload = payload.get("info")
+    if isinstance(info_payload, dict):
+        return json.dumps(info_payload, ensure_ascii=False, indent=2) if info_payload else "当前帧暂无画面识别信息。"
+    if info_payload is not None:
+        return str(info_payload)
+    return "当前帧暂无画面识别信息。"
+
+
 def resolve_preview_group_filter(stage_entry, group_name: str):
     """Match the runtime stage-group selection used by StageLogicController."""
     group_name = str(group_name or "").strip()
@@ -2311,8 +2322,8 @@ class LauncherWindow(QWidget):
         self.current_batch_start_timestamp: Optional[str] = None
         self.current_run_start_timestamp: Optional[str] = None
         self.current_run_archive_dir: Optional[Path] = None
-        self.preview_target_info_height = 90
-        self.preview_target_info_width = 360
+        self.preview_target_info_height = 64
+        self.preview_target_info_width = 300
         self._adjusting_preview_splitter = False
         self.preview_render_screen_size: Optional[tuple[int, int]] = None
         self.stream_verify_active = False
@@ -2401,7 +2412,7 @@ class LauncherWindow(QWidget):
         self.safe_temp_spin.setRange(0.0, 100.0)
         self.safe_temp_spin.setDecimals(1)
         self.safe_temp_spin.setSingleStep(0.5)
-        self.safe_temp_spin.setValue(40.0)
+        self.safe_temp_spin.setValue(26.0)
         self.safe_temp_spin.setSuffix(" °C")
         self.safe_temp_field = self._create_spin_with_presets(
             self.safe_temp_spin,
@@ -2411,7 +2422,7 @@ class LauncherWindow(QWidget):
 
         self.safe_battery_spin = QSpinBox()
         self.safe_battery_spin.setRange(0, 100)
-        self.safe_battery_spin.setValue(25)
+        self.safe_battery_spin.setValue(80)
         self.safe_battery_spin.setSuffix(" %")
         self.safe_battery_field = self._create_spin_with_presets(
             self.safe_battery_spin,
@@ -3038,24 +3049,12 @@ class LauncherWindow(QWidget):
         )
 
     def _create_spin_with_presets(self, spin, values, suffix: str = "") -> QWidget:
-        container = QWidget()
-        layout = QHBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
-        spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        spin.setMinimumWidth(96)
-        layout.addWidget(spin)
-
-        for value in values:
-            text = f"{value}{suffix}" if suffix else str(value)
-            button = QPushButton(text)
-            button.setProperty("presetButton", True)
-            button.clicked.connect(lambda checked=False, val=value, target=spin: target.setValue(val))
-            self.preset_buttons.append(button)
-            layout.addWidget(button)
-
-        layout.addStretch(1)
-        return container
+        # Values used to be rendered as a row of preset buttons after every
+        # numeric input.  They made the configuration panel unnecessarily tall
+        # and squeezed the live preview, so a numeric field now stands alone.
+        spin.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        spin.setMinimumWidth(0)
+        return spin
 
     def _build_ui(self):
         root_layout = QVBoxLayout(self)
@@ -3098,7 +3097,7 @@ class LauncherWindow(QWidget):
 
         controls_widget = QWidget()
         controls_widget.setObjectName("controlsPanel")
-        controls_widget.setFixedHeight(420)
+        controls_widget.setFixedHeight(320)
         controls_layout = QVBoxLayout(controls_widget)
         controls_layout.setContentsMargins(0, 0, 4, 0)
         controls_layout.setSpacing(10)
@@ -3128,11 +3127,11 @@ class LauncherWindow(QWidget):
         controls_layout.addLayout(launch_row)
 
         config_group = QGroupBox("配置")
-        config_group.setFixedHeight(290)
+        config_group.setFixedHeight(220)
         config_layout = QGridLayout(config_group)
         config_layout.setContentsMargins(12, 8, 12, 10)
         config_layout.setHorizontalSpacing(12)
-        config_layout.setVerticalSpacing(8)
+        config_layout.setVerticalSpacing(4)
 
         def add_config_item(row: int, column: int, label_text: str, widget: QWidget):
             label = QLabel(label_text)
@@ -4533,9 +4532,7 @@ class LauncherWindow(QWidget):
             "success" if render_success else "fail",
             latest_image,
         )
-        self.preview_info_edit.setPlainText(
-            json.dumps(payload, ensure_ascii=False, indent=2)
-        )
+        self.preview_info_edit.setPlainText(format_preview_frame_info(payload))
 
     def _validate_selection(self, issues: ValidationIssues) -> Optional[tuple[str, str]]:
         project_case = self.project_combo.currentText().strip()
@@ -5859,7 +5856,7 @@ class LauncherWindow(QWidget):
         self.preview_image_label.setText("")
         self._adjust_preview_splitter_sizes()
         self._refresh_preview_pixmap()
-        self.preview_info_edit.setPlainText(json.dumps(payload, ensure_ascii=False, indent=2))
+        self.preview_info_edit.setPlainText(format_preview_frame_info(payload))
 
     def _check_stream_verification_client_state(self):
         client = self.stream_verify_client

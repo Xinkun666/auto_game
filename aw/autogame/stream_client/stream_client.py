@@ -4,6 +4,7 @@ import time
 import threading
 import queue
 import atexit
+import gc
 from datetime import datetime
 import subprocess
 import grpc
@@ -850,13 +851,30 @@ class PyAVH264Decoder:
                 "HOScrcpy 流输出 H.264 ByteBuffer，需要安装 PyAV：python -m pip install av"
             ) from exc
         self.codec = av.CodecContext.create("h264", "r")
+        self.memory_drop_count = 0
 
     def decode(self, data):
-        frames = []
-        for packet in self.codec.parse(bytes(data)):
-            for frame in self.codec.decode(packet):
-                frames.append(frame.to_image().convert("RGB").copy())
-        return frames
+        # HOS 回调可能一次给出多个已解码帧。自动化只消费最新帧，保留旧帧不仅
+        # 增加延迟，还会让 PIL 的 to_image/convert/copy 连续分配多份整帧内存。
+        latest_frame = None
+        try:
+            for packet in self.codec.parse(bytes(data)):
+                for frame in self.codec.decode(packet):
+                    latest_frame = frame
+            if latest_frame is None:
+                return []
+            return [latest_frame.to_ndarray(format="rgb24")]
+        except MemoryError:
+            self.memory_drop_count += 1
+            latest_frame = None
+            print(
+                "[HOS] PyAV frame conversion ran out of memory; "
+                "drop current frame and keep stream alive (drops=%s)."
+                % self.memory_drop_count,
+                flush=True,
+            )
+            gc.collect()
+            return []
 
 
 class GStreamerH264Decoder:

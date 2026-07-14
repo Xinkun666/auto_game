@@ -862,16 +862,14 @@ class PyAVH264Decoder:
 class GStreamerH264Decoder:
     FEED_QUEUE_SIZE = 1
     FRAME_QUEUE_SIZE = 1
-
-    PIPELINE = (
-        'appsrc name=src is-live=true format=time do-timestamp=true block=false '
-        'max-bytes=1048576 caps="video/x-h264,stream-format=byte-stream" ! '
-        'h264parse ! queue name=q1 max-size-buffers=1 leaky=downstream ! '
-        'avdec_h264 name=decoder ! '
-        'queue name=q2 max-size-buffers=1 leaky=downstream ! '
-        'videoconvert ! video/x-raw,format=RGB ! '
-        'appsink name=sink emit-signals=true drop=true max-buffers=1 sync=false'
+    HARDWARE_DECODERS = (
+        ("nvh264dec", "NVIDIA NVDEC"),
+        ("nvv4l2decoder", "NVIDIA Jetson"),
+        ("d3d11h264dec", "Direct3D 11 硬解"),
+        ("vaapih264dec", "VAAPI 硬解"),
+        ("v4l2h264dec", "V4L2 硬解"),
     )
+    SOFTWARE_DECODER = ("avdec_h264", "FFmpeg 软解")
 
     def __init__(self, feed_queue_size=None):
         self.feed_queue_size = max(1, int(feed_queue_size or self.FEED_QUEUE_SIZE))
@@ -881,6 +879,10 @@ class GStreamerH264Decoder:
         self.appsrc = None
         self.appsink = None
         self.Gst = None
+        self.decoder_name = None
+        self.decoder_description = None
+        self._pipeline_lock = threading.RLock()
+        self._runtime_error = None
         self._closed = False
         self._feed_thread = None
 
@@ -904,6 +906,27 @@ class GStreamerH264Decoder:
         except queue.Full:
             pass
 
+    @classmethod
+    def _decoder_candidates(cls, Gst):
+        candidates = []
+        for decoder_name, description in cls.HARDWARE_DECODERS:
+            if Gst.ElementFactory.find(decoder_name):
+                candidates.append((decoder_name, description))
+        candidates.append(cls.SOFTWARE_DECODER)
+        return candidates
+
+    @staticmethod
+    def _pipeline_description(decoder_name):
+        return (
+            'appsrc name=src is-live=true format=time do-timestamp=true block=false '
+            'max-bytes=1048576 caps="video/x-h264,stream-format=byte-stream" ! '
+            'h264parse ! queue name=q1 max-size-buffers=1 leaky=downstream ! '
+            f'{decoder_name} name=decoder ! '
+            'queue name=q2 max-size-buffers=1 leaky=downstream ! '
+            'videoconvert ! video/x-raw,format=RGB ! '
+            'appsink name=sink emit-signals=true drop=true max-buffers=1 sync=false'
+        )
+
     def _init_pipeline(self):
         try:
             import gi
@@ -918,22 +941,107 @@ class GStreamerH264Decoder:
 
         Gst.init(None)
         self.Gst = Gst
-        self.pipeline = Gst.parse_launch(self.PIPELINE)
-        self.appsrc = self.pipeline.get_by_name("src")
-        self.appsink = self.pipeline.get_by_name("sink")
+        last_error = None
+        for decoder_name, description in self._decoder_candidates(Gst):
+            try:
+                self._start_pipeline(decoder_name, description)
+                self._start_feed_thread()
+                return
+            except Exception as exc:
+                last_error = exc
+                print(
+                    f"[HOS] GStreamer {description} ({decoder_name}) unavailable: {exc}",
+                    flush=True,
+                )
+        raise RuntimeError(f"GStreamer H.264 解码器均不可用: {last_error}")
 
-        decoder = self.pipeline.get_by_name("decoder")
+    def _start_pipeline(self, decoder_name, description):
+        pipeline = self.Gst.parse_launch(self._pipeline_description(decoder_name))
+        appsrc = pipeline.get_by_name("src")
+        appsink = pipeline.get_by_name("sink")
+
+        decoder = pipeline.get_by_name("decoder")
         if decoder is not None:
             try:
                 decoder.set_property("max-threads", 1)
             except Exception:
                 pass
 
-        if self.appsink is None or self.appsrc is None:
+        if appsink is None or appsrc is None:
+            pipeline.set_state(self.Gst.State.NULL)
             raise RuntimeError("GStreamer pipeline 初始化失败：缺少 appsrc/appsink")
 
-        self.appsink.connect("new-sample", self._on_new_sample)
-        self.pipeline.set_state(Gst.State.PLAYING)
+        appsink.connect("new-sample", self._on_new_sample)
+        state_result = pipeline.set_state(self.Gst.State.PLAYING)
+        if state_result == self.Gst.StateChangeReturn.FAILURE:
+            pipeline.set_state(self.Gst.State.NULL)
+            raise RuntimeError("GStreamer pipeline 启动失败")
+
+        self.pipeline = pipeline
+        self.appsrc = appsrc
+        self.appsink = appsink
+        self.decoder_name = decoder_name
+        self.decoder_description = description
+        self._runtime_error = None
+        print(
+            f"[HOS] GStreamer using {description} ({decoder_name}).",
+            flush=True,
+        )
+
+    def _release_pipeline(self):
+        pipeline = self.pipeline
+        self.pipeline = None
+        self.appsrc = None
+        self.appsink = None
+        if pipeline is not None:
+            try:
+                pipeline.set_state(self.Gst.State.NULL)
+            except Exception:
+                pass
+
+    def _fallback_to_software_decoder(self, reason):
+        if self._closed or self.decoder_name == self.SOFTWARE_DECODER[0]:
+            self._runtime_error = RuntimeError(reason)
+            return False
+
+        print(
+            f"[HOS] GStreamer {self.decoder_description} runtime failed, "
+            f"fallback to {self.SOFTWARE_DECODER[1]}: {reason}",
+            flush=True,
+        )
+        with self._pipeline_lock:
+            self._release_pipeline()
+            try:
+                self._start_pipeline(*self.SOFTWARE_DECODER)
+                return True
+            except Exception as exc:
+                self._runtime_error = RuntimeError(
+                    f"GStreamer 硬解失败且软解回退失败: {reason}; {exc}"
+                )
+                print(f"[HOS] {self._runtime_error}", flush=True)
+                return False
+
+    def _check_pipeline_error(self):
+        pipeline = self.pipeline
+        if pipeline is None or self.Gst is None:
+            return
+        bus = pipeline.get_bus()
+        if bus is None:
+            return
+        message = bus.timed_pop_filtered(
+            0,
+            self.Gst.MessageType.ERROR | self.Gst.MessageType.EOS,
+        )
+        if message is None:
+            return
+        if message.type == self.Gst.MessageType.ERROR:
+            error, debug = message.parse_error()
+            details = f"{error}" if not debug else f"{error}: {debug}"
+        else:
+            details = "decoder pipeline reached EOS"
+        self._fallback_to_software_decoder(details)
+
+    def _start_feed_thread(self):
         self._feed_thread = threading.Thread(
             target=self._feed_loop,
             name="HOSGStreamerFeed",
@@ -976,11 +1084,20 @@ class GStreamerH264Decoder:
                 continue
 
             try:
-                gst_buffer = self.Gst.Buffer.new_wrapped(data)
-                self.appsrc.emit("push-buffer", gst_buffer)
+                with self._pipeline_lock:
+                    if self.appsrc is None:
+                        continue
+                    gst_buffer = self.Gst.Buffer.new_wrapped(data)
+                    flow_result = self.appsrc.emit("push-buffer", gst_buffer)
+                    if flow_result != self.Gst.FlowReturn.OK:
+                        self._fallback_to_software_decoder(
+                            f"push-buffer returned {flow_result}"
+                        )
+                    self._check_pipeline_error()
             except Exception as exc:
                 if not self._closed:
-                    print("[HOS] GStreamer push-buffer warning: %s" % exc, flush=True)
+                    if not self._fallback_to_software_decoder(str(exc)):
+                        print("[HOS] GStreamer push-buffer warning: %s" % exc, flush=True)
             finally:
                 try:
                     self.feed_queue.task_done()
@@ -990,6 +1107,8 @@ class GStreamerH264Decoder:
     def decode(self, data):
         if self._closed:
             return []
+        if self._runtime_error is not None:
+            raise self._runtime_error
 
         self._put_latest(self.feed_queue, bytes(data))
 
@@ -1003,22 +1122,20 @@ class GStreamerH264Decoder:
 
     def close(self):
         self._closed = True
-        if self.appsrc is not None:
-            try:
-                self.appsrc.emit("end-of-stream")
-            except Exception:
-                pass
+        with self._pipeline_lock:
+            if self.appsrc is not None:
+                try:
+                    self.appsrc.emit("end-of-stream")
+                except Exception:
+                    pass
         if (
             self._feed_thread
             and self._feed_thread.is_alive()
             and threading.current_thread() is not self._feed_thread
         ):
             self._feed_thread.join(timeout=0.2)
-        if self.pipeline is not None and self.Gst is not None:
-            try:
-                self.pipeline.set_state(self.Gst.State.NULL)
-            except Exception:
-                pass
+        with self._pipeline_lock:
+            self._release_pipeline()
 
 
 class HOSScrcpyStreamClient:

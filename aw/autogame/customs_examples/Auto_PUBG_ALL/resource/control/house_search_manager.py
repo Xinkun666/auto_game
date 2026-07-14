@@ -135,7 +135,7 @@ class HouseSearchManager:
     ROUTE_STUCK_HOUSE_BYPASS_FORWARD_DURA = 650
     ROUTE_STUCK_HOUSE_BYPASS_FORWARD_WAIT = 1000
     HOUSE_SEARCH_TIMEOUT_SECONDS = 60
-    ENTRY_NEAR_MICRO_ADJUST_DISTANCE = 1.5
+    ENTRY_NEAR_MICRO_ADJUST_DISTANCE = 2.5
     ENTRY_NEAR_MICRO_DONE_DISTANCE = 0.25
     ENTRY_NEAR_MICRO_MAX_ATTEMPTS = 8
     ENTRY_NEAR_MICRO_X_BIAS = 120
@@ -2659,7 +2659,7 @@ class HouseSearchManager:
         current_dir = w.get_info('direction')
         self._set_search_frame_decision(
             w,
-            "当前进房分支：入门点 <= 1.5，先对齐入门方向",
+            "当前进房分支：入门点 <= 2.5，先对齐入门方向",
             self._entry_observation(
                 w,
                 target_loc=self.active_entry.get('location') if self.active_entry else None,
@@ -2850,7 +2850,7 @@ class HouseSearchManager:
         self.stop_auto_forward(w)
         self._set_search_frame_decision(
             w,
-            "当前进房分支：入门点 <= 1.5，先对齐入门方向",
+            "当前进房分支：入门点 <= 2.5，先对齐入门方向",
             self._entry_observation(
                 w,
                 current_loc=current_loc,
@@ -3321,7 +3321,7 @@ class HouseSearchManager:
                 "距离进入分段推进范围，用角度校准和自适应摇杆靠近入门点",
                 action="精准推进入门点",
                 method="align_direction(); tap_single(摇杆, y_bias=...)",
-                result="到达 <= 1.5 后进入近距进门建模",
+                result="到达 <= 2.5 后进入近距进门建模",
             )
             nav_scene_result = self._handle_nav_near_entry_scene_if_needed(w, "Nav精推段", "导航中")
             if nav_scene_result == "indoor":
@@ -6204,7 +6204,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                     "不先绕安全点，继续执行Nav直冲最近入门点",
                     action="继续朝最近入门点推进",
                     method="same_forbidden_region=True，保留当前导航状态",
-                    result="目标仍是到达该入门点 <= 1.5",
+                    result="目标仍是到达该入门点 <= 2.5",
                 )
                 print(
                     f"[RCitySearch] 当前落点 {current_loc} 与最近入门点 {forbidden_compare_entry} 在同一不可通行区域，"
@@ -6380,7 +6380,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 self._set_frame_decision(
                     w,
                     f"距离入门点 {target_loc} 已进入分段导航范围，dist={dist:.2f}",
-                    "停止自动前进并切换Nav精推段，用摇杆精准推进到入门点 <= 1.5",
+                    "停止自动前进并切换Nav精推段，用摇杆精准推进到入门点 <= 2.5",
                     action="切换Nav精推段",
                     method="stop_auto_forward(); 进入Nav精推段",
                     result="下一帧开始精细导航",
@@ -6403,11 +6403,11 @@ class HouseSceneSearchManager(HouseSearchManager):
                 ),
                 (
                     f"已进入入门点{self.ENTRY_AUTO_FORWARD_DISTANCE:g}距离内，不再判断当前位置是否可通行；"
-                    "使用摇杆精准推进到入门点 <= 1.5，再执行入门点角度/进门建模流程"
+                    "使用摇杆精准推进到入门点 <= 2.5，再执行入门点角度/进门建模流程"
                 ),
                 action="精准推进入门点",
                 method="_move_precisely_to_entry_point() or _handle_near_entry_point()",
-                result="到达 <= 1.5 后执行原有入门点逻辑",
+                result="到达 <= 2.5 后执行原有入门点逻辑",
             )
             nav_scene_result = self._handle_nav_near_entry_scene_if_needed(
                 w,
@@ -6441,7 +6441,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             if dist <= self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
                 self._set_frame_decision(
                     w,
-                    f"已到达入门点 <= 1.5，当前位置={current_loc}，目标={target_loc}，dist={dist:.2f}",
+                    f"已到达入门点 <= 2.5，当前位置={current_loc}，目标={target_loc}，dist={dist:.2f}",
                     "不做慢速原地磨角度，直接进入原有入门点近距建模流程调整角度/找门/进门",
                     action="执行入门点近距建模流程",
                     method="_handle_near_entry_point()",

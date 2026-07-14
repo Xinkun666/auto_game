@@ -5729,7 +5729,7 @@ class HouseSceneSearchManager(HouseSearchManager):
     R_CITY_ROUTE_ENTRY_HANDOFF_DISTANCE = 15.0
     R_CITY_ROUTE_REPLAN_STUCK_CYCLES = 2
     R_CITY_FAILED_TARGET_LIMIT = 2
-    R_CITY_NEAR_ENTRY_SCENE_RECOVERY_MAX_ATTEMPTS = 3
+    R_CITY_NEAR_ENTRY_LOOK_DEGREES = 30
     ENTRY_AUTO_FORWARD_DISTANCE = 15.0
     ENTRY_COARSE_MOVE_DISTANCE = 10.0
     R_CITY_FORWARD_HOUSE_BYPASS_DISTANCE = 10.0
@@ -5950,14 +5950,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         current_loc=None,
         target_loc=None,
     ):
-        """Bound repeated near-door/wall recovery for one R-city entry point.
-
-        The base recovery deliberately keeps the active entry point.  In R city,
-        a persistent ``near_door``/``near_wall`` classification otherwise causes
-        a backoff on one frame and a navigation push back to the same wall on the
-        next frame forever.  Keep a few recovery attempts for transient detector
-        noise, then give this entry point up so another entrance can be tried.
-        """
+        """Confirm a visible door once after near-door/wall backoff, or skip it."""
         scene = self._get_house_scene(w)
         if scene not in self.HOUSE_NEAR_ENTRY_SCENES:
             return super()._handle_nav_near_entry_scene_if_needed(
@@ -5968,48 +5961,115 @@ class HouseSceneSearchManager(HouseSearchManager):
                 target_loc=target_loc,
             )
 
-        attempts = getattr(self, "r_city_near_entry_scene_recovery_attempts", 0)
-        max_attempts = self.R_CITY_NEAR_ENTRY_SCENE_RECOVERY_MAX_ATTEMPTS
-        if attempts >= max_attempts:
-            scene_label = "near_wall" if scene == self.HOUSE_NEAR_WALL else "near_door"
-            failure_reason = (
-                f"同一入门点连续{scene_label}脱困{attempts}/{max_attempts}次后仍未离开门墙循环"
-            )
+        scene_label = "near_wall" if scene == self.HOUSE_NEAR_WALL else "near_door"
+        self._set_search_frame_decision(
+            w,
+            "当前进房分支：贴门墙后拉后确认门框",
+            self._entry_observation(
+                w,
+                current_loc=current_loc,
+                target_loc=target_loc,
+                extra=f"house_scene={scene_label}",
+            ),
+            "贴门/贴墙后先后拉扩视野，再确认门框；不把后拉后的下一帧重新当作普通导航推进",
+            action="后拉并确认门框",
+            method=(
+                f"tap_single(摇杆, y_bias={self.ENTRY_DOOR_DIRECT_BACKOFF_Y_BIAS}, "
+                f"dura={self.ENTRY_DOOR_DIRECT_BACKOFF_DURA}, "
+                f"wait={self.ENTRY_DOOR_DIRECT_BACKOFF_WAIT})"
+            ),
+            result="看到门则视觉对准后前推；没门则左右各确认一次并舍弃当前入口",
+        )
+        print(
+            f"[RCitySearch] 当前入门点检测到{scene_label}，后拉后先确认门框，"
+            "不再直接回到同一入口精推"
+        )
+        self.stop_auto_forward(w)
+        w.tap_single(
+            "摇杆",
+            y_bias=self.ENTRY_DOOR_DIRECT_BACKOFF_Y_BIAS,
+            dura=self.ENTRY_DOOR_DIRECT_BACKOFF_DURA,
+            wait=self.ENTRY_DOOR_DIRECT_BACKOFF_WAIT,
+        )
+        # 这里只做视觉确认。不能走全局跳跃处理，否则“无门不前推”的
+        # 分支可能因为跳跃按钮而意外产生一次前推。
+        w.refresh_frame()
+        if self._is_indoor(w):
+            return "indoor"
+
+        door = self.find_largest_door(w)
+        if door is None:
             self._set_search_frame_decision(
                 w,
-                "当前进房分支：贴门墙恢复次数已达上限，切换入口",
+                "当前进房分支：后拉后未看到门，左看30度",
+                self._entry_observation(w, current_loc=current_loc, target_loc=target_loc),
+                "后拉后的正前方没有门，只向左确认30度，不前推",
+                action="左转30度找门",
+                method="turn_by_angle(delta_angle=-30)",
+                result="看到门则视觉对门；没门则右转30度回正后再确认",
+            )
+            self.turn_by_angle(w, -self.R_CITY_NEAR_ENTRY_LOOK_DEGREES)
+            w.refresh_frame()
+            if self._is_indoor(w):
+                return "indoor"
+            door = self.find_largest_door(w)
+
+        if door is None:
+            self._set_search_frame_decision(
+                w,
+                "当前进房分支：左看后仍未看到门，右转30度回正确认",
+                self._entry_observation(w, current_loc=current_loc, target_loc=target_loc),
+                "左侧没有门，右转30度回到初始朝向再确认；整个过程不前推",
+                action="右转30度回正找门",
+                method="turn_by_angle(delta_angle=+30)",
+                result="仍无门则舍弃当前入口，不再前推",
+            )
+            self.turn_by_angle(w, self.R_CITY_NEAR_ENTRY_LOOK_DEGREES)
+            w.refresh_frame()
+            if self._is_indoor(w):
+                return "indoor"
+            door = self.find_largest_door(w)
+
+        if door is not None:
+            self._set_search_frame_decision(
+                w,
+                "当前进房分支：后拉确认到门，视觉对准后前推",
                 self._entry_observation(
                     w,
                     current_loc=current_loc,
                     target_loc=target_loc,
-                    extra=(
-                        f"house_scene={scene_label}, recoveries={attempts}/{max_attempts}, "
-                        "避免继续后拉再前推到同一门墙"
-                    ),
+                    extra=f"door={door}",
                 ),
-                "同一入口连续贴门/贴墙恢复后仍未脱离，停止重复后拉前推，改试其他入口",
-                action="标记当前入门点失败",
-                method="_mark_current_r_city_target_failed(); status=IDLE",
-                result="下一帧重新选择可用入门点",
+                "后拉/转视角后已经看到门，先按门框中心对准，再前推确认 indoor",
+                action="视觉对准门并前推",
+                method="_push_aligned_entry_door_and_check_indoor()",
+                result="进房则搜房；对门失败则舍弃当前入口",
             )
-            print(f"[RCitySearch] {failure_reason}，舍弃当前入门点并重新选点")
-            self._mark_current_r_city_target_failed(failure_reason)
-            self.status = "IDLE"
-            return "failed"
+            result = self._push_aligned_entry_door_and_check_indoor(w, phase_label, door)
+            if result != "failed":
+                return result
+            failure_reason = "贴门墙后已确认门但视觉对门前推仍未进入室内"
+        else:
+            failure_reason = "贴门墙后正前方、左转30度和回正后均未看到门"
 
-        attempts += 1
-        self.r_city_near_entry_scene_recovery_attempts = attempts
-        print(
-            f"[RCitySearch] 当前入门点贴门墙恢复 {attempts}/{max_attempts}，"
-            "本次恢复后仍未进房才会继续尝试"
-        )
-        return super()._handle_nav_near_entry_scene_if_needed(
+        self._set_search_frame_decision(
             w,
-            phase_label,
-            reason,
-            current_loc=current_loc,
-            target_loc=target_loc,
+            "当前进房分支：贴门墙确认无门，舍弃当前入口",
+            self._entry_observation(
+                w,
+                current_loc=current_loc,
+                target_loc=target_loc,
+                extra=f"house_scene={scene_label}",
+            ),
+            "后拉和两次视野确认都没有可进入的门，继续前推只会回到同一门墙，因此换入口",
+            action="标记当前入门点失败",
+            method="_mark_current_r_city_target_failed(); status=IDLE",
+            result="下一帧重新选择可用入门点",
         )
+        print(f"[RCitySearch] {failure_reason}，舍弃当前入门点并重新选点")
+        self._mark_current_r_city_target_failed(failure_reason)
+        self.status = "IDLE"
+        return "failed"
 
     def searching_logic(self, w: "FrameWorker", current_loc, current_direction):
         if self._should_abort(w):
@@ -6662,7 +6722,6 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_entry_large_backoff_count = 0
         self.r_city_side_probe_target = None
         self.r_city_side_probe_count = 0
-        self.r_city_near_entry_scene_recovery_attempts = 0
         self.forbidden_escape_target = None
         self.forbidden_escape_region_anchor = None
         self.water_escape_side = None
@@ -7826,7 +7885,6 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_entry_large_backoff_count = 0
         self.r_city_side_probe_target = None
         self.r_city_side_probe_count = 0
-        self.r_city_near_entry_scene_recovery_attempts = 0
 
     def _mark_current_r_city_target_failed(self, reason: str):
         if self.current_r_city_target:

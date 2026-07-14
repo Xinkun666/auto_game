@@ -8,7 +8,9 @@ from PIL import Image
 class _EfficientNetClassifier(nn.Module):
     def __init__(self, num_classes=5):
         super().__init__()
-        self.backbone = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
+        # 场景分类器随后会完整加载本地 scene_best_model.pth，禁止 torchvision
+        # 在启动自动化时联网下载 ImageNet 预训练权重。
+        self.backbone = models.efficientnet_b0(weights=None)
         feature_dim = self.backbone.classifier[1].in_features
         self.backbone.classifier = nn.Identity()
 

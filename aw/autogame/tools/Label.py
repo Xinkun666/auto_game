@@ -2293,6 +2293,34 @@ class AutoStudioWindow(QMainWindow):
         return added_scenes
 
     @staticmethod
+    def _sync_new_pool_resolution_to_referencing_stages(
+        project: Optional[ProjectData],
+        scene_group: Optional[SceneGroupData],
+        source_scene: Optional[SceneData],
+        new_scene: Optional[SceneData],
+    ) -> List[StageData]:
+        """Add one new pool resolution only to stages already referencing that pool scene."""
+        if not project or not scene_group or not source_scene or not new_scene:
+            return []
+        source_versions = {
+            id(scene)
+            for scene in scene_group.scenes
+            if scene.name == source_scene.name and scene is not new_scene
+        }
+        if not source_versions:
+            return []
+
+        updated_stages = []
+        for project_stage in project.stages:
+            stage_scene_ids = {id(scene) for scene in project_stage.scenes}
+            if not source_versions.intersection(stage_scene_ids):
+                continue
+            if id(new_scene) not in stage_scene_ids:
+                project_stage.scenes.append(new_scene)
+            updated_stages.append(project_stage)
+        return updated_stages
+
+    @staticmethod
     def _stage_scene_pool_selection_entries(project: Optional[ProjectData], stage: Optional[StageData]) -> List[Dict]:
         if not project or not stage:
             return []
@@ -4311,6 +4339,12 @@ class AutoStudioWindow(QMainWindow):
         )
         if copy_from_pool:
             scene_group.scenes.append(new_scene)
+            self._sync_new_pool_resolution_to_referencing_stages(
+                self.project,
+                scene_group,
+                source_scene,
+                new_scene,
+            )
         elif self.project:
             self._add_scene_to_project_pool(self.project, new_scene)
         if not copy_from_pool:

@@ -7847,6 +7847,42 @@ class HouseSceneSearchManager(HouseSearchManager):
             )
         return nearest_loc
 
+    def get_live_r_city_entry_for_route(self, current_loc):
+        """Return the live nearest entry while the unfinished search is in running mode.
+
+        The forced running route uses this callback before every black-region,
+        direct-line, or A* decision.  Keep ``active_entry`` synchronized too,
+        so returning to the search stage enters Nav for the same live target.
+        """
+        nearest_loc = self._maintain_nearest_r_city_entry_reference(current_loc)
+        nearest_id = getattr(self, "r_city_nearest_entry_id", None)
+        if nearest_loc is None or nearest_id is None:
+            return None
+
+        target = next(
+            (
+                item for item in self.r_city_targets
+                if item.get("id") == nearest_id and self._is_r_city_target_available(item)
+            ),
+            None,
+        )
+        if target is None:
+            return None
+
+        active_id = (self.active_entry or {}).get("r_city_target_id")
+        if active_id != target.get("id"):
+            self._lock_r_city_target(target)
+            print(
+                f"[RCitySearch] 跑图接管期间同步动态最近入门点："
+                f"id={target['id']}，location={target['location']}"
+            )
+
+        return {
+            "id": target["id"],
+            "location": target["location"],
+            "approach_location": target["approach_location"],
+        }
+
     def _active_entry_nearest_route_point(self, current_loc):
         loc = self._location_tuple(current_loc)
         if loc is None or not self.active_entry:

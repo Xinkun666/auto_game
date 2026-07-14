@@ -608,6 +608,8 @@ class RunningManager:
         self.forced_route_finish_stage: Optional[str] = None
         self.forced_route_reason: Optional[str] = None
         self.forced_route_arrival_distance = self.DEFAULT_FORCED_ROUTE_ARRIVAL_DISTANCE
+        self.forced_route_target_resolver: Optional[Callable[[Tuple[int, int]], Optional[dict]]] = None
+        self.forced_route_path_active = False
         self.unstuck_reference_loc: Optional[Tuple[int, int]] = None
         self.unstuck_area_attempts = 0
         self.unstuck_failed_sides: Set[str] = set()
@@ -688,12 +690,15 @@ class RunningManager:
         reason: str,
         arrival_distance: float = DEFAULT_FORCED_ROUTE_ARRIVAL_DISTANCE,
         approach_target: Optional[Tuple[int, int]] = None,
+        target_resolver: Optional[Callable[[Tuple[int, int]], Optional[dict]]] = None,
     ):
         self.forced_route_target = tuple(map(int, target))
         self.forced_route_approach_target = tuple(map(int, approach_target)) if approach_target else None
         self.forced_route_finish_stage = finish_stage
         self.forced_route_reason = reason
         self.forced_route_arrival_distance = max(0.0, float(arrival_distance))
+        self.forced_route_target_resolver = target_resolver
+        self.forced_route_path_active = False
         self.drive_required = False
         self.finding_car = False
         self.car_search_timer.reset()
@@ -743,6 +748,67 @@ class RunningManager:
         self.forced_route_finish_stage = None
         self.forced_route_reason = None
         self.forced_route_arrival_distance = self.DEFAULT_FORCED_ROUTE_ARRIVAL_DISTANCE
+        self.forced_route_target_resolver = None
+        self.forced_route_path_active = False
+
+    def _refresh_forced_route_target(self, location: Tuple[int, int]) -> bool:
+        """Keep an entry-route target tied to the live nearest entry point."""
+        resolver = getattr(self, "forced_route_target_resolver", None)
+        if not self._has_forced_route() or not callable(resolver):
+            return False
+        try:
+            target_data = resolver(tuple(map(int, location)))
+        except Exception as exc:
+            print(f"[Running] 获取动态最近入门点失败，保留当前路线目标: {exc}")
+            return False
+        if not isinstance(target_data, dict):
+            return False
+
+        raw_target = target_data.get("location")
+        if not isinstance(raw_target, (list, tuple)) or len(raw_target) < 2:
+            return False
+        try:
+            target = (int(raw_target[0]), int(raw_target[1]))
+        except (TypeError, ValueError):
+            return False
+
+        raw_approach = target_data.get("approach_location")
+        approach_target = None
+        if isinstance(raw_approach, (list, tuple)) and len(raw_approach) >= 2:
+            try:
+                approach_target = (int(raw_approach[0]), int(raw_approach[1]))
+            except (TypeError, ValueError):
+                approach_target = None
+
+        if (
+            target == self.forced_route_target
+            and approach_target == self.forced_route_approach_target
+        ):
+            return False
+
+        previous_target = self.forced_route_target
+        self.forced_route_target = target
+        self.forced_route_approach_target = approach_target
+        self.forced_route_path_active = False
+        self.loading_road = False
+        self.road_list = []
+        self.current_segment_start = None
+        self.locations = [location]
+        self.history_locations = [location]
+        self.stuck = False
+        self.trapped = False
+        print(
+            f"[Running] 搜房未完成，动态最近入门点更新: "
+            f"{previous_target} -> {target}，已清空旧路线并按新入口重新判断黑区/直冲/A*"
+        )
+        return True
+
+    def _is_following_forced_route_path(self) -> bool:
+        return bool(
+            self._has_forced_route()
+            and getattr(self, "forced_route_path_active", False)
+            and getattr(self, "road_list", [])
+        )
 
     def _should_direct_nav_for_near_forced_route_in_forbidden(
         self,
@@ -846,6 +912,8 @@ class RunningManager:
             )
         self._update_circle_angle(w.get_info("white_angle"))
         forced_route_active = self._has_forced_route()
+        if forced_route_active:
+            self._refresh_forced_route_target(location)
         if not forced_route_active:
             w.frame_log("跑图决策：当前没有强制路线，所以先根据阶段时间和找车状态刷新是否继续找车")
             self._refresh_finding_car_policy(w, location, direction)
@@ -1505,6 +1573,20 @@ class RunningManager:
         if self.map_tool.is_walkable(location):
             return False
 
+        if self._is_following_forced_route_path():
+            print(
+                "[Running] 正在执行到最近入门点的已规划A*路线，"
+                "中途命中黑区不重新脱离，继续沿当前路径推进"
+            )
+            self._log_running_state(
+                "已规划路线中途经过黑区",
+                location,
+                direction,
+                "保留当前A*路线，不触发新的黑区脱离",
+                self.forced_route_target,
+            )
+            return False
+
         if self._should_direct_nav_for_near_forced_route_in_forbidden(location):
             target = self.forced_route_target
             dist_to_target = get_distance(location, target)
@@ -1653,6 +1735,7 @@ class RunningManager:
             self.loading_road = False
             self.road_list = []
             self.current_segment_start = None
+            self.forced_route_path_active = False
             self.current_running_route_kind = None
             w.change_stage(finish_stage)
             return True
@@ -1816,6 +1899,7 @@ class RunningManager:
         print(f"[Running] 正在加载临时跑图路线: {location} -> {route_target} (entry={target})")
         self._log_running_state("临时路线规划", location, None, self.forced_route_reason or "前往目标", route_target)
         self.road_list = self._plan_path(location, route_target)
+        self.forced_route_path_active = bool(self.road_list)
         if not self.road_list:
             print("[Running] 临时路线A*为空，退回真实入门点单点兜底")
             self.road_list = [target]

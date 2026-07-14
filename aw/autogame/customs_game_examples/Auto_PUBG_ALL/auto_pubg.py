@@ -419,6 +419,7 @@ def route_to_r_city_entry_point(
         reason=reason,
         arrival_distance=arrival_distance,
         approach_target=approach_location,
+        target_resolver=searching_house_manager.get_live_r_city_entry_for_route,
     )
     running_manager.set_view_mode(RunningManager.VIEW_MODE_FIRST)
     searching_view_synced = True

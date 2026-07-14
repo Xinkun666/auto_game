@@ -4787,9 +4787,30 @@ class AutoStudioWindow(QMainWindow):
                             child.setExpanded(True)
                     walk_pool(child)
             walk_pool(self.scene_pool_tree.invisibleRootItem())
+    def _sync_item_visibility_in_trees(self, item_data: ItemData):
+        """Update an item's status cells without rebuilding either tree."""
+        visible_text = "显示" if item_data.visible else "隐藏"
+
+        def update_tree(tree):
+            if tree is None:
+                return
+
+            def walk(parent):
+                for index in range(parent.childCount()):
+                    child = parent.child(index)
+                    if child.data(0, Qt.ItemDataRole.UserRole) is item_data:
+                        child.setText(1, visible_text)
+                        child.setToolTip(1, visible_text)
+                    walk(child)
+
+            walk(tree.invisibleRootItem())
+
+        update_tree(getattr(self, "tree", None))
+        update_tree(getattr(self, "scene_pool_tree", None))
+
     def toggle_visibility(self, item_data):
         item_data.visible = not item_data.visible
-        self.update_tree_view()
+        self._sync_item_visibility_in_trees(item_data)
         self.canvas.redraw_overlays(self.current_scene)
     def get_project_root_dir(self):
         script_dir = os.path.dirname(os.path.abspath(__file__))

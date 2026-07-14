@@ -1343,7 +1343,6 @@ class AutoStudioWindow(QMainWindow):
                     continue
                 default_group.scenes.append(scene)
                 existing_ids.add(id(scene))
-        AutoStudioWindow._prefix_duplicate_stage_scene_names(project)
         return default_group
 
     @staticmethod
@@ -1353,49 +1352,8 @@ class AutoStudioWindow(QMainWindow):
         return scene_name
 
     @staticmethod
-    def _stage_scene_prefixed_name(stage: StageData, scene_name: str) -> str:
-        base_name = AutoStudioWindow._stage_scene_base_name(stage, scene_name)
-        return f"{stage.name}_{base_name}"
-
-    @staticmethod
     def _stage_scene_display_name(stage: Optional[StageData], scene_name: str) -> str:
         return AutoStudioWindow._stage_scene_base_name(stage, scene_name)
-
-    @staticmethod
-    def _rename_stage_group_scene_refs(stage: Optional[StageData], old_scene_name: str, new_scene_name: str) -> None:
-        if not stage or not old_scene_name or not new_scene_name or old_scene_name == new_scene_name:
-            return
-        for group in stage.groups:
-            group.items = [
-                GroupItemRef(new_scene_name, ref.item_type, ref.item_name)
-                if ref.scene_name == old_scene_name
-                else ref
-                for ref in group.items
-            ]
-
-    @staticmethod
-    def _prefix_duplicate_stage_scene_names(project: Optional[ProjectData]) -> int:
-        if not project:
-            return 0
-        occurrences_by_base_name = {}
-        for stage in project.stages:
-            for scene in stage.scenes:
-                base_name = AutoStudioWindow._stage_scene_base_name(stage, scene.name)
-                occurrences_by_base_name.setdefault(base_name, []).append((stage, scene))
-        renamed_count = 0
-        for base_name, occurrences in occurrences_by_base_name.items():
-            stage_names = {stage.name for stage, _scene in occurrences}
-            scene_ids = {id(scene) for _stage, scene in occurrences}
-            if len(stage_names) <= 1 or len(scene_ids) <= 1:
-                continue
-            for stage, scene in occurrences:
-                prefixed_name = AutoStudioWindow._stage_scene_prefixed_name(stage, base_name)
-                AutoStudioWindow._rename_stage_group_scene_refs(stage, base_name, prefixed_name)
-                if scene.name == prefixed_name:
-                    continue
-                scene.name = prefixed_name
-                renamed_count += 1
-        return renamed_count
 
     @staticmethod
     def _rect_signature(rect: Optional[RectData]):
@@ -4354,11 +4312,16 @@ class AutoStudioWindow(QMainWindow):
         self.current_stage = None if copy_from_pool else stage
         self.set_current_work_stage(self.current_stage)
         self.current_scene = new_scene
-        if not copy_from_pool:
+        if copy_from_pool:
+            self.last_expand_stage_id = None
+        else:
             self.last_expand_stage_id = stage.id
         self.last_expand_scene_id = new_scene.id
         self.update_tree_view()
         self.select_data_in_tree(new_scene, preferred_tree=preferred_tree)
+        tree_tabs = self.__dict__.get("tree_tabs") if copy_from_pool else None
+        if tree_tabs is not None:
+            tree_tabs.setCurrentWidget(self.scene_pool_tree)
         location_label = "场景池中" if copy_from_pool else f"阶段 {stage.name} 中"
         self.status_label.setText(
             f"已在{location_label}将场景 {scene_name} 的组件转换到 {new_size[0]} * {new_size[1]}，可在新图片上微调。"

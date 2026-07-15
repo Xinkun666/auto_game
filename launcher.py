@@ -844,11 +844,30 @@ def resolve_preview_payload_group_name(payload) -> str:
 def format_preview_frame_info(payload) -> str:
     """Render only the current frame's visual info, never runtime logs."""
     payload = payload if isinstance(payload, dict) else {}
+    stage_name = resolve_preview_payload_stage_name(payload)
     info_payload = payload.get("info")
     if isinstance(info_payload, dict):
-        return json.dumps(info_payload, ensure_ascii=False, indent=2) if info_payload else "当前帧暂无画面识别信息。"
+        display_info = {}
+        if stage_name:
+            display_info["stage"] = stage_name
+        display_info.update(info_payload)
+        if stage_name:
+            display_info["stage"] = stage_name
+        return (
+            json.dumps(display_info, ensure_ascii=False, indent=2)
+            if display_info
+            else "当前帧暂无画面识别信息。"
+        )
     if info_payload is not None:
+        if stage_name:
+            return json.dumps(
+                {"stage": stage_name, "info": info_payload},
+                ensure_ascii=False,
+                indent=2,
+            )
         return str(info_payload)
+    if stage_name:
+        return json.dumps({"stage": stage_name}, ensure_ascii=False, indent=2)
     return "当前帧暂无画面识别信息。"
 
 

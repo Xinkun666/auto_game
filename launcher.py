@@ -841,6 +841,28 @@ def resolve_preview_payload_group_name(payload) -> str:
     return ""
 
 
+PREVIEW_INFO_VALUE_MAX_LENGTH = 50
+
+
+def _truncate_preview_info_value(value, max_length: int = PREVIEW_INFO_VALUE_MAX_LENGTH):
+    """Keep a single preview info value compact without changing source data."""
+    if isinstance(value, str):
+        display_text = value
+    elif isinstance(value, (list, tuple, dict)):
+        display_text = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+    else:
+        display_text = str(value)
+
+    if len(display_text) <= max_length:
+        return value
+    return f"{display_text[: max_length - 3]}..."
+
+
 def format_preview_frame_info(payload) -> str:
     """Render only the current frame's visual info, never runtime logs."""
     payload = payload if isinstance(payload, dict) else {}
@@ -850,7 +872,12 @@ def format_preview_frame_info(payload) -> str:
         display_info = {}
         if stage_name:
             display_info["stage"] = stage_name
-        display_info.update(info_payload)
+        display_info.update(
+            {
+                key: _truncate_preview_info_value(value)
+                for key, value in info_payload.items()
+            }
+        )
         if stage_name:
             display_info["stage"] = stage_name
         return (

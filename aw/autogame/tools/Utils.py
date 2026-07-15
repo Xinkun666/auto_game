@@ -903,6 +903,13 @@ def _parse_screen_resolution(screen_info: str):
     if not screen_info:
         return None
 
+    display_info_match = re.search(
+        r'\[DISPLAY INFO]\s*\r?\nWidth:\s*(\d+)\s*\r?\nHeight:\s*(\d+)',
+        screen_info,
+    )
+    if display_info_match:
+        return int(display_info_match.group(1)), int(display_info_match.group(2))
+
     patterns = (
         r'activeMode:\s*(\d+)\s*x\s*(\d+)',
         r'render\s+resolution\s*=\s*(\d+)\s*x\s*(\d+)',
@@ -920,8 +927,12 @@ _AUTO_ROTATION = object()
 
 
 def get_resolution(r = True, rotation=_AUTO_ROTATION):
-    resolution_mode = run_shell('hdc shell hidumper -s RenderService -a screen', r)
+    resolution_mode = run_shell('hdc shell hidumper -s DisplayManagerService -a -a', r)
     resolution = _parse_screen_resolution(resolution_mode)
+    if resolution is None:
+        # 旧版系统仍可能只提供 RenderService 输出，保留回退以兼容原有设备。
+        resolution_mode = run_shell('hdc shell hidumper -s RenderService -a screen', r)
+        resolution = _parse_screen_resolution(resolution_mode)
     if resolution:
         width, height = resolution
         if rotation is _AUTO_ROTATION:
@@ -934,7 +945,7 @@ def get_resolution(r = True, rotation=_AUTO_ROTATION):
 
     print('未能获取分辨率信息!')
     if resolution_mode:
-        print(f"[Resolution] RenderService 输出片段: {resolution_mode[:500]}")
+        print(f"[Resolution] 显示服务输出片段: {resolution_mode[:500]}")
     return None, None
 
 

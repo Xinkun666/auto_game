@@ -5,7 +5,6 @@ import threading
 import queue
 import atexit
 import gc
-import traceback
 from datetime import datetime
 import subprocess
 import grpc
@@ -17,7 +16,6 @@ from aw.autogame.tools.Utils import (
     resolve_process_save_frames_dir,
     resolve_tmp_frames_dir,
 )
-from threading import Timer
 # 假设这些是你的本地 proto 生成文件
 PROTO_IMPORT_ERROR = None
 try:
@@ -1147,6 +1145,9 @@ class HOSScrcpyStreamClient:
         self.main_thread = None
         self._stop_event = threading.Event()
         self._stream_error_event = threading.Event()
+        self._capture_state_lock = threading.RLock()
+        self._capture_paused = False
+        self._active_callback = None
         self.rotation_mode = rotation_mode
         self.decoder = decoder
         self.device_factory = device_factory
@@ -1261,6 +1262,9 @@ class HOSScrcpyStreamClient:
                     self.device = self._create_device()
                     self._diagnostic_stage = "creating_callback"
                     callback = self._create_callback()
+                    with self._capture_state_lock:
+                        self._active_callback = callback
+                        self._capture_paused = False
                     print(
                         "[HOS] Starting HOScrcpy stream: sn=%s ip=%s port=%s scale=%s fps=%s bitrate=%s"
                         % (self.sn, self.ip, self.port, self.scale, self.frame_rate, self.bit_rate),
@@ -1273,6 +1277,9 @@ class HOSScrcpyStreamClient:
                         self._reconnect_attempt = 0
                     self._diagnostic_stage = "capture_started_waiting_frames"
                     while self.running and not self._stop_event.is_set():
+                        if self.is_capture_paused():
+                            self._stop_event.wait(0.2)
+                            continue
                         if self._last_error is not None or self._stream_error_event.is_set():
                             break
                         self._stop_event.wait(0.2)
@@ -1315,6 +1322,9 @@ class HOSScrcpyStreamClient:
             self.running = False
             self._stop_event.set()
             self._stream_error_event.set()
+            with self._capture_state_lock:
+                self._capture_paused = False
+                self._active_callback = None
             self._stop_device()
             self._close_decoder()
             try:
@@ -1330,6 +1340,9 @@ class HOSScrcpyStreamClient:
         self.running = False
         self._stop_event.set()
         self._stream_error_event.set()
+        with self._capture_state_lock:
+            self._capture_paused = False
+            self._active_callback = None
         self._stop_device()
         self._close_decoder()
         try:
@@ -1450,6 +1463,8 @@ class HOSScrcpyStreamClient:
     def _handle_stream_bytes(self, data):
         if not data:
             return
+        if self.is_capture_paused():
+            return
         self._callback_data_count += 1
         self._last_data_bytes = len(data)
         self._last_data_at = time.monotonic()
@@ -1477,6 +1492,9 @@ class HOSScrcpyStreamClient:
 
     def _handle_stream_exception(self, err):
         if not self.running:
+            return
+        if self.is_capture_paused():
+            print("[HOS] Ignore stream close caused by intentional pause: %s" % err, flush=True)
             return
         self._last_error = err
         self._diagnostic_stage = "stream_error"
@@ -1514,6 +1532,7 @@ class HOSScrcpyStreamClient:
             "last_error": str(self._last_error) if self._last_error is not None else "",
             "reconnect_attempt": self._reconnect_attempt,
             "max_reconnect_attempts": self.max_reconnect_attempts,
+            "capture_paused": self.is_capture_paused(),
             "elapsed_seconds": elapsed,
         }
         if device_inner is not None:
@@ -1614,17 +1633,56 @@ class HOSScrcpyStreamClient:
         except Exception as exc:
             print("[HOS] Write disconnect signal failed: %s" % exc, flush=True)
 
+    def is_capture_paused(self):
+        with self._capture_state_lock:
+            return bool(self._capture_paused)
+
     def pause(self):
-        if self.device is not None:
+        """Intentionally stop device-side capture without triggering reconnect."""
+        with self._capture_state_lock:
+            if self._capture_paused:
+                return True
+            if not self.running or self.device is None:
+                print("[HOS] Pause skipped: stream is not ready.", flush=True)
+                return False
+
+            self._capture_paused = True
+            self._last_error = None
+            self._stream_error_event.clear()
             try:
                 self.device.stop_capture_screen()
             except Exception as exc:
-                print("[HOS] Stop capture warning: %s" % exc)
+                self._capture_paused = False
+                print("[HOS] Pause capture failed: %s" % exc, flush=True)
+                return False
+
+            self._diagnostic_stage = "capture_paused"
+            print("[HOS] Device-side capture paused.", flush=True)
+            return True
 
     def resume(self):
-        if self.device is not None:
-            callback = self._create_callback()
-            self.device.start_capture_screen(callback)
+        """Resume capture with the callback used by the active stream run."""
+        with self._capture_state_lock:
+            if not self._capture_paused:
+                return True
+            callback = self._active_callback
+            if not self.running or self.device is None or callback is None:
+                print("[HOS] Resume skipped: stream is not ready.", flush=True)
+                return False
+
+            self._last_error = None
+            self._stream_error_event.clear()
+            try:
+                self._diagnostic_stage = "restarting_capture"
+                self.device.start_capture_screen(callback)
+            except Exception as exc:
+                print("[HOS] Resume capture failed: %s" % exc, flush=True)
+                return False
+
+            self._capture_paused = False
+            self._diagnostic_stage = "capture_started_waiting_frames"
+            print("[HOS] Device-side capture resumed.", flush=True)
+            return True
 
 class HDCSnapshotClient:
     def __init__(self, buffer, save_frame=False):
@@ -1805,28 +1863,5 @@ if __name__ == "__main__":
     # # 注意：run 是阻塞的，实际使用时通常在 Thread 中运行或作为主循环
     # client.run()
 
-    # client = StreamClient(global_buffer)
-    # client.set_save_frame(True)
-    # client.run(lowh=0, highh=10000, skip=10, width=384, height=762)
-
-
     client = HOSScrcpyStreamClient(global_buffer)
-
-    def delayed_task():
-        print(f"定时任务已触发。")
-        client.pause()
-        timer2 = Timer(30, delayed_task2, args=[])
-        timer2.start()
-
-
-    def delayed_task2():
-        print(f"定时任务已触发。")
-        client.resume()
-        timer1 = Timer(30, delayed_task, args=[])
-        timer1.start()
-
-
-    timer = Timer(20, delayed_task, args=[])
-    timer.start()
-
     client.run()

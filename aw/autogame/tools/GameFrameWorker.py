@@ -1959,6 +1959,7 @@ class FrameWorker(threading.Thread):
         self.failure_reason = None
         self.failure_details = {}
         self.paused = False
+        self._pause_wait_event = threading.Event()
         self._failure_lock = threading.Lock()
         self.last_control_action_time = time.monotonic()
         self.post_control_refresh_settle_seconds = self._resolve_post_control_refresh_settle_seconds()
@@ -2653,6 +2654,8 @@ class FrameWorker(threading.Thread):
             return True
         if getattr(self, "_stream_recovery_waiting", False):
             return False
+        if getattr(self, "paused", False):
+            return False
         now = time.monotonic() if now is None else float(now)
         idle_seconds = now - self.last_control_action_time
         max_idle_seconds = max(
@@ -2707,7 +2710,11 @@ class FrameWorker(threading.Thread):
         print("GameFrameWorker 引擎已启动")
         while self.running:
             if self.paused:
-                time.sleep(0.1)
+                pause_wait_event = getattr(self, "_pause_wait_event", None)
+                if pause_wait_event is not None:
+                    pause_wait_event.wait(0.1)
+                else:
+                    time.sleep(0.1)
                 continue
             frame = self._get_latest_frame_for_logic(purpose="主循环")
             if frame is None:
@@ -2744,6 +2751,7 @@ class FrameWorker(threading.Thread):
         self.failure_reason = None
         self.failure_details = {}
         self.paused = False
+        self._pause_wait_event.clear()
         self.last_control_action_time = time.monotonic()
         self._post_control_refresh_ready_at = 0.0
         self._stream_recovery_waiting = False
@@ -2769,6 +2777,9 @@ class FrameWorker(threading.Thread):
         self.running = False
         self.finished = True
         self._watchdog_stop_event.set()
+        pause_wait_event = getattr(self, "_pause_wait_event", None)
+        if pause_wait_event is not None:
+            pause_wait_event.set()
         self._flush_current_frame_log()
 
         if self._watchdog_thread and threading.current_thread() is not self._watchdog_thread:
@@ -2854,34 +2865,73 @@ class FrameWorker(threading.Thread):
 
     def pause_stream(self, paused_seconds=0):
         """暂停 HOS 抓流；指定时长时会在结束前 30 秒自动恢复。"""
-        logging.info("暂停抓流")
+        try:
+            paused_seconds = float(paused_seconds)
+        except (TypeError, ValueError):
+            print("[FrameWorker] 暂停时长必须是秒数。")
+            return False
+
+        if self.paused:
+            print("[FrameWorker] 抓流已经处于暂停状态。")
+            return False
+
         pause = getattr(self.stream_client, "pause", None)
         if not callable(pause):
             print("[FrameWorker] 当前流不支持暂停抓流。")
             return False
 
-        pause()
+        logging.info("暂停抓流")
         self.paused = True
+        pause_wait_event = getattr(self, "_pause_wait_event", None)
+        if pause_wait_event is None:
+            pause_wait_event = threading.Event()
+            self._pause_wait_event = pause_wait_event
+        pause_wait_event.clear()
         try:
-            paused_seconds = float(paused_seconds)
-        except (TypeError, ValueError):
-            paused_seconds = 0.0
+            pause_result = pause()
+        except Exception as exc:
+            pause_result = False
+            print(f"[FrameWorker] 暂停抓流失败：{exc}")
+        if pause_result is False:
+            self.paused = False
+            pause_wait_event.set()
+            return False
+
         if paused_seconds <= 0:
             return True
 
-        time.sleep(max(paused_seconds - 30.0, 0.0))
+        wait_seconds = max(paused_seconds - 30.0, 0.0)
+        if wait_seconds > 0:
+            pause_wait_event.wait(wait_seconds)
+        if not self.running:
+            return False
+        if not self.paused:
+            return True
         return self.resume_stream()
 
     def resume_stream(self):
         """恢复 HOS 抓流和自动化主循环。"""
         logging.info("恢复抓流")
+        if not self.paused:
+            return True
         resume = getattr(self.stream_client, "resume", None)
         if not callable(resume):
             print("[FrameWorker] 当前流不支持恢复抓流。")
             return False
 
-        resume()
+        try:
+            resume_result = resume()
+        except Exception as exc:
+            print(f"[FrameWorker] 恢复抓流失败：{exc}")
+            return False
+        if resume_result is False:
+            return False
+
         self.paused = False
+        self.last_control_action_time = time.monotonic()
+        pause_wait_event = getattr(self, "_pause_wait_event", None)
+        if pause_wait_event is not None:
+            pause_wait_event.set()
         return True
 
     def refresh_frame(self, settle: bool = True):

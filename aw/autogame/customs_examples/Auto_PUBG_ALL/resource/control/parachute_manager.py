@@ -42,6 +42,7 @@ class ParachuteManager:
         self.jump_confirm_locations: List[Tuple[int, int]] = []
         self.route_confirm_distances: List[float] = []
         self.route_confirm_locations: List[Tuple[int, int]] = []
+        self.jump_button_clicked = False
 
     def reset(self):
         """重置跳伞管理器的内部状态"""
@@ -54,6 +55,7 @@ class ParachuteManager:
         self.jump_confirm_locations = []
         self.route_confirm_distances = []
         self.route_confirm_locations = []
+        self.jump_button_clicked = False
         print("[Parachute] 状态已重置!")
 
     def configure(
@@ -119,7 +121,8 @@ class ParachuteManager:
             time.sleep(1)
 
         # 2. 尝试激活监控状态 (当看到跳伞按钮且未激活时)
-        if not self.is_active and w.get_info('离开'):
+        jump_icon = w.get_info('离开')
+        if not self.is_active and jump_icon:
             w.frame_log("当前观察到离开按钮且跳伞监控未激活，所以开始记录航线到目标点的距离变化")
             self._set_frame_decision(
                 w,
@@ -131,7 +134,12 @@ class ParachuteManager:
             )
             self._activate_monitoring()
 
-        # 3. 如果未激活监控，则无需后续操作
+        # 3. 已经看到过跳伞图标，但本模块尚未点击跳伞时图标消失，
+        #    说明没有完成一次正确的跳伞，直接退出当前局重新开始。
+        if self.is_active and not self.jump_button_clicked and not jump_icon:
+            return self._restart_match_for_missing_jump_icon(w)
+
+        # 4. 如果未激活监控，则无需后续操作
         if not self.is_active:
             w.frame_log("当前还没有进入可跳伞监控状态，所以本帧不做跳伞动作")
             return
@@ -173,12 +181,12 @@ class ParachuteManager:
             result="未确认前不执行跳伞",
         )
 
-        # 4. 距离趋势检查 (判断是否飞过了/飞远了)
+        # 5. 距离趋势检查 (判断是否飞过了/飞远了)
         if self._check_flight_path(current_dist, location, w):
             return self._restart_match_for_bad_route(w)
 
 
-        # 5. 判定是否到达跳伞点：用前后各一帧确认，避免单帧误判导致误跳伞
+        # 6. 判定是否到达跳伞点：用前后各一帧确认，避免单帧误判导致误跳伞
         if self._confirm_jump_window(current_dist, location, w):
             return self._perform_jump_sequence(w)
 
@@ -548,6 +556,20 @@ class ParachuteManager:
         w.change_stage("结束阶段")
         return {"bad_route_restart": True}
 
+    def _restart_match_for_missing_jump_icon(self, w: 'FrameWorker'):
+        print("[Parachute] 自动化尚未点击跳伞，但跳伞图标已经消失，退出当前局并重开下一把")
+        self._set_frame_decision(
+            w,
+            "已经进入跳伞监控，但自动化尚未点击跳伞时离开图标消失",
+            "判定本局未完成正确跳伞，退出当前局并重开下一把",
+            action="切换结束阶段",
+            method="w.change_stage(结束阶段)",
+            result="结束阶段执行设置->返回大厅->确定退出比赛后重新开始游戏",
+        )
+        self.reset()
+        w.change_stage("结束阶段")
+        return {"missing_jump_icon_restart": True}
+
 
     def _perform_jump_sequence(self, w: 'FrameWorker'):
         """
@@ -563,6 +585,7 @@ class ParachuteManager:
             method="w.click(跳伞) + 视角/摇杆滑行序列",
             result=f"完成滑行后切换到 {self.landing_stage}",
         )
+        self.jump_button_clicked = True
         w.click('跳伞')
 
         # 视角向下 (俯冲)

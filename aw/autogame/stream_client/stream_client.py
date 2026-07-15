@@ -5,6 +5,7 @@ import threading
 import queue
 import atexit
 import gc
+import traceback
 from datetime import datetime
 import subprocess
 import grpc
@@ -16,7 +17,7 @@ from aw.autogame.tools.Utils import (
     resolve_process_save_frames_dir,
     resolve_tmp_frames_dir,
 )
-
+from threading import Timer
 # 假设这些是你的本地 proto 生成文件
 PROTO_IMPORT_ERROR = None
 try:
@@ -1613,6 +1614,17 @@ class HOSScrcpyStreamClient:
         except Exception as exc:
             print("[HOS] Write disconnect signal failed: %s" % exc, flush=True)
 
+    def pause(self):
+        if self.device is not None:
+            try:
+                self.device.stop_capture_screen()
+            except Exception as exc:
+                print("[HOS] Stop capture warning: %s" % exc)
+
+    def resume(self):
+        if self.device is not None:
+            callback = self._create_callback()
+            self.device.start_capture_screen(callback)
 
 class HDCSnapshotClient:
     def __init__(self, buffer, save_frame=False):
@@ -1793,6 +1805,28 @@ if __name__ == "__main__":
     # # 注意：run 是阻塞的，实际使用时通常在 Thread 中运行或作为主循环
     # client.run()
 
-    client = StreamClient(global_buffer)
-    client.set_save_frame(True)
-    client.run(lowh=0, highh=10000, skip=10, width=384, height=762)
+    # client = StreamClient(global_buffer)
+    # client.set_save_frame(True)
+    # client.run(lowh=0, highh=10000, skip=10, width=384, height=762)
+
+
+    client = HOSScrcpyStreamClient(global_buffer)
+
+    def delayed_task():
+        print(f"定时任务已触发。")
+        client.pause()
+        timer2 = Timer(30, delayed_task2, args=[])
+        timer2.start()
+
+
+    def delayed_task2():
+        print(f"定时任务已触发。")
+        client.resume()
+        timer1 = Timer(30, delayed_task, args=[])
+        timer1.start()
+
+
+    timer = Timer(20, delayed_task, args=[])
+    timer.start()
+
+    client.run()

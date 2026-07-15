@@ -2823,54 +2823,6 @@ class FrameWorker(threading.Thread):
             self._queue_visual_frame()
         return True
 
-    def pause_stream(self, duration_seconds):
-        """停止 HOS 抓帧，等待指定秒数后自动建流并刷新为新画面。"""
-        try:
-            duration_seconds = float(duration_seconds)
-        except (TypeError, ValueError):
-            print("[FrameWorker] 暂停时长必须是秒数，例如 w.pause_stream(10)。")
-            return False
-        if duration_seconds <= 0:
-            print("[FrameWorker] 暂停时长必须大于 0。")
-            return False
-        pause = getattr(self.buffer, "pause", None)
-        pause_capture = getattr(getattr(self, "stream_client", None), "pause_capture", None)
-        if not callable(pause) or not callable(pause_capture):
-            print("[FrameWorker] 当前流不支持 HOS 设备侧暂停抓帧。")
-            return False
-        if not pause():
-            print("[FrameWorker] 抓帧已处于暂停状态。")
-            return False
-        if not pause_capture():
-            self.buffer.resume()
-            print("[FrameWorker] HOS 停止抓帧失败，已恢复自动化帧缓冲。")
-            return False
-        print("[FrameWorker] HOS 已停止设备侧抓帧；%.3fs 后自动重新建流。" % duration_seconds)
-        time.sleep(duration_seconds)
-        if not getattr(self, "running", True):
-            print("[FrameWorker] 用例已结束，取消恢复 HOS 抓帧。")
-            return False
-        if not self._resume_stream_capture():
-            return False
-        return self.refresh_frame()
-
-    def _resume_stream_capture(self):
-        """仅供 pause_stream() 内部使用：重新启动 HOS 设备侧抓帧。"""
-        resume = getattr(self.buffer, "resume", None)
-        continue_capture = getattr(getattr(self, "stream_client", None), "continue_capture", None)
-        if not callable(resume) or not callable(continue_capture):
-            print("[FrameWorker] 当前流不支持 HOS 设备侧恢复抓帧。")
-            return False
-        if not getattr(self.buffer, "is_paused", lambda: False)():
-            print("[FrameWorker] 抓帧当前并未暂停。")
-            return False
-        if not continue_capture():
-            print("[FrameWorker] HOS 重新启动抓帧失败，自动化继续等待。")
-            return False
-        resume()
-        print("[FrameWorker] HOS 已重新启动抓帧；自动化用例将在下一张新帧到达后继续。")
-        return True
-
     def refresh_frame(self, settle: bool = True):
         self._flush_current_frame_log()
         if settle:

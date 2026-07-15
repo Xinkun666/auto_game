@@ -1,0 +1,15 @@
+# EfficientSAM3 TinyViT inference-only additions for the existing auto_game env.
+#
+# Prerequisite: launch auto_game with Python 3.12.
+# Install without upgrading already-satisfied packages:
+#   python -m pip install --upgrade-strategy only-if-needed -r requirements_sam3.txt
+#
+# Intentionally omitted because the server environment already provides them:
+# torch, torchvision, numpy, opencv-python, Pillow, huggingface-hub and psutil.
+# Keeping them out avoids replacing the existing Torch/CUDA and core CV stack.
+
+timm==1.0.17
+ftfy==6.1.1
+regex
+iopath==0.1.10
+einops==0.8.1

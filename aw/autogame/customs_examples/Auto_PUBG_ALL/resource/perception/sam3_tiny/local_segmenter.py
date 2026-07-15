@@ -27,6 +27,7 @@ DEFAULT_CHECKPOINT_PATH = (
     / "efficientsam3_tinyvit.pt"
 )
 DEFAULT_BPE_PATH = RUNTIME_DIR / "assets" / "bpe_simple_vocab_16e6.txt.gz"
+MINIMUM_PYTHON_VERSION = (3, 10)
 
 
 def _read_float_env(name: str, default: float) -> float:
@@ -131,11 +132,11 @@ class LocalSam3Segmenter:
         return "cpu"
 
     def _load_local_runtime(self) -> Tuple[Any, str]:
-        if sys.version_info < (3, 12):
+        if sys.version_info < MINIMUM_PYTHON_VERSION:
             raise RuntimeError(
-                "Auto_PUBG_ALL 的本地 SAM3 需要 Python 3.12；"
+                "Auto_PUBG_ALL 的本地 SAM3 需要 Python 3.10 或更高版本；"
                 f"当前解释器为 {sys.version_info.major}.{sys.version_info.minor}。"
-                "请用同一个 Python 3.12 环境启动 launcher.py。"
+                "请用同一个 Python 3.10+ 环境启动 launcher.py。"
             )
         if not self.checkpoint_path.is_file():
             raise FileNotFoundError(

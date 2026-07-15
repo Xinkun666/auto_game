@@ -1,4 +1,4 @@
-# Install into the same Python 3.12 environment that starts launcher.py.
+# Install into the same Python 3.10+ environment that starts launcher.py.
 torch==2.8.0
 torchvision==0.23.0
 numpy>=1.26.4,<2.0

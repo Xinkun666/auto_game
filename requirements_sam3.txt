@@ -1,6 +1,6 @@
 # EfficientSAM3 TinyViT inference-only additions for the existing auto_game env.
 #
-# Prerequisite: launch auto_game with Python 3.12.
+# Prerequisite: launch auto_game with Python 3.10 or newer (server: 3.10.20).
 # Install without upgrading already-satisfied packages:
 #   python -m pip install --upgrade-strategy only-if-needed -r requirements_sam3.txt
 #

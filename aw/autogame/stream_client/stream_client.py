@@ -133,6 +133,15 @@ class FrameBuffer:
             self.condition.notify_all()
             return True
 
+    def clear(self):
+        """清空已缓存的帧，并让下一次读取等待新帧。"""
+        with self.condition:
+            self.frames = [None] * self.size
+            self.write_idx = 0
+            self.count = 0
+            self._last_read_id = 0
+            self.condition.notify_all()
+
     def get_latest(self, timeout=5.0, must_new=False):
         """
         获取最新帧。
@@ -1655,6 +1664,13 @@ class HOSScrcpyStreamClient:
                 self._capture_paused = False
                 print("[HOS] Pause capture failed: %s" % exc, flush=True)
                 return False
+
+            clear_buffer = getattr(self.buffer, "clear", None)
+            if callable(clear_buffer):
+                try:
+                    clear_buffer()
+                except Exception as exc:
+                    print("[HOS] Clear paused frame buffer warning: %s" % exc, flush=True)
 
             self._diagnostic_stage = "capture_paused"
             print("[HOS] Device-side capture paused.", flush=True)

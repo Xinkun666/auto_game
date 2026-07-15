@@ -77,6 +77,7 @@ def required_runtime_assets() -> list[ReleaseAsset]:
     return [
         _asset("restart.bat", ".", "restart.bat"),
         _asset("testcases/pubg/pubg_full_flow"),
+        _asset("aw/autogame/common"),
         _asset("aw/autogame/tools"),
         _asset("aw/autogame/config"),
         _asset("aw/autogame/stream_client"),

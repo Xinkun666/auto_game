@@ -15,6 +15,7 @@ from typing import Dict, Tuple
 
 import numpy as np
 
+from aw.autogame.common.SPController.SPArea import SPControllerBase
 from aw.autogame.tools.Utils import *
 from aw.autogame.tools.Utils import _parse_display_rotation
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
@@ -2003,6 +2004,7 @@ class FrameWorker(threading.Thread):
         self.move_press = self._wrap_control_action("move_press", self.controller.move_press)
         self.move_to = self._wrap_control_action("move_to", self.controller.move_to)
         self.move_up = self._wrap_control_action("move_up", self.controller.move_up)
+        self.sp_controller = SPControllerBase(self)
 
     def _load_frame_log_hook(self, project_case, hook_name):
         module_path = f"aw.autogame.customs_examples.{project_case}.resource.support.structured_log"

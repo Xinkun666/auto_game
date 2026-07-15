@@ -1,6 +1,7 @@
 import os
 import gc
 import json
+import logging
 import math
 import re
 import time
@@ -21,6 +22,11 @@ from aw.autogame.tools.GameSceneHandler import DEFAULT_GROUP_NAME, StageLogicCon
 from aw.autogame.tools.ProcessUtils import hdc_command_args, hidden_subprocess_kwargs
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s",
+    level=logging.INFO,
+)
 
 
 def _is_timed_special_info(value):
@@ -1898,6 +1904,7 @@ class Controller:
 
 class FrameWorker(threading.Thread):
     LAUNCHER_INACTIVITY_TIMEOUT_SECONDS = 5 * 60
+    POWER_COLLECTION_DURATION_MINUTES = 0.0
     WATCHDOG_CHECK_INTERVAL_SECONDS = 1.0
     POST_CONTROL_REFRESH_SETTLE_SECONDS = 0.5
     STREAM_RECOVERY_WAIT_POLL_SECONDS = 5.0
@@ -1951,6 +1958,7 @@ class FrameWorker(threading.Thread):
         self.failure_code = None
         self.failure_reason = None
         self.failure_details = {}
+        self.paused = False
         self._failure_lock = threading.Lock()
         self.last_control_action_time = time.monotonic()
         self.post_control_refresh_settle_seconds = self._resolve_post_control_refresh_settle_seconds()
@@ -1961,6 +1969,7 @@ class FrameWorker(threading.Thread):
         self._stream_recovery_waiting = False
         self.launcher_watchdog_enabled = self._is_launcher_mode()
         self.launcher_inactivity_timeout_seconds = self._resolve_launcher_inactivity_timeout_seconds()
+        self.launcher_power_collection_duration_seconds = self._resolve_launcher_power_collection_duration_seconds()
         self._watchdog_stop_event = threading.Event()
         self._watchdog_thread = None
         self.stage_resolver = StageLogicController()
@@ -2073,6 +2082,16 @@ class FrameWorker(threading.Thread):
             minutes = float(raw_value)
         except ValueError:
             return float(self.LAUNCHER_INACTIVITY_TIMEOUT_SECONDS)
+        return max(0.0, minutes * 60.0)
+
+    def _resolve_launcher_power_collection_duration_seconds(self):
+        raw_value = os.environ.get("POWER_COLLECTION_DURATION_MINUTES", "").strip()
+        if not raw_value:
+            return float(self.POWER_COLLECTION_DURATION_MINUTES)
+        try:
+            minutes = float(raw_value)
+        except ValueError:
+            return float(self.POWER_COLLECTION_DURATION_MINUTES)
         return max(0.0, minutes * 60.0)
 
     def _resolve_post_control_refresh_settle_seconds(self):
@@ -2437,6 +2456,8 @@ class FrameWorker(threading.Thread):
         if not text:
             return False
 
+        logging.info(text)
+
         existing_logs = list(getattr(self, "current_frame_logs", []))
         existing_logs.append(text)
         self.current_frame_logs = existing_logs
@@ -2634,7 +2655,11 @@ class FrameWorker(threading.Thread):
             return False
         now = time.monotonic() if now is None else float(now)
         idle_seconds = now - self.last_control_action_time
-        if idle_seconds < self.launcher_inactivity_timeout_seconds:
+        max_idle_seconds = max(
+            self.launcher_inactivity_timeout_seconds,
+            self.launcher_power_collection_duration_seconds + 20.0,
+        )
+        if idle_seconds < max_idle_seconds:
             return False
         self._handle_launcher_inactivity_timeout()
         return True
@@ -2681,6 +2706,9 @@ class FrameWorker(threading.Thread):
     def loop(self):
         print("GameFrameWorker 引擎已启动")
         while self.running:
+            if self.paused:
+                time.sleep(0.1)
+                continue
             frame = self._get_latest_frame_for_logic(purpose="主循环")
             if frame is None:
                 time.sleep(0.1)
@@ -2715,6 +2743,7 @@ class FrameWorker(threading.Thread):
         self.failure_code = None
         self.failure_reason = None
         self.failure_details = {}
+        self.paused = False
         self.last_control_action_time = time.monotonic()
         self._post_control_refresh_ready_at = 0.0
         self._stream_recovery_waiting = False
@@ -2821,6 +2850,38 @@ class FrameWorker(threading.Thread):
                 self.current_group,
             )
             self._queue_visual_frame()
+        return True
+
+    def pause_stream(self, paused_seconds=0):
+        """暂停 HOS 抓流；指定时长时会在结束前 30 秒自动恢复。"""
+        logging.info("暂停抓流")
+        pause = getattr(self.stream_client, "pause", None)
+        if not callable(pause):
+            print("[FrameWorker] 当前流不支持暂停抓流。")
+            return False
+
+        pause()
+        self.paused = True
+        try:
+            paused_seconds = float(paused_seconds)
+        except (TypeError, ValueError):
+            paused_seconds = 0.0
+        if paused_seconds <= 0:
+            return True
+
+        time.sleep(max(paused_seconds - 30.0, 0.0))
+        return self.resume_stream()
+
+    def resume_stream(self):
+        """恢复 HOS 抓流和自动化主循环。"""
+        logging.info("恢复抓流")
+        resume = getattr(self.stream_client, "resume", None)
+        if not callable(resume):
+            print("[FrameWorker] 当前流不支持恢复抓流。")
+            return False
+
+        resume()
+        self.paused = False
         return True
 
     def refresh_frame(self, settle: bool = True):

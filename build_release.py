@@ -76,12 +76,12 @@ def _asset(source: str, pyinstaller_dest: Optional[str] = None, runtime_dest: Op
 def required_runtime_assets() -> list[ReleaseAsset]:
     return [
         _asset("restart.bat", ".", "restart.bat"),
-        _asset("testcases"),
+        _asset("testcases/pubg/pubg_full_flow"),
         _asset("aw/autogame/tools"),
         _asset("aw/autogame/config"),
         _asset("aw/autogame/stream_client"),
-        _asset("aw/autogame/customs_examples"),
-        _asset("aw/autogame/customs_game_examples"),
+        _asset("aw/autogame/customs_examples/Auto_PUBG_ALL"),
+        _asset("aw/autogame/customs_game_examples/Auto_PUBG_ALL"),
     ]
 
 

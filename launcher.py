@@ -4184,6 +4184,7 @@ class LauncherWindow(QWidget):
         self.safe_battery_spin.setEnabled(enabled)
         self.safe_time_spin.setEnabled(enabled)
         self.inactivity_timeout_spin.setEnabled(enabled)
+        self.power_collection_duration_spin.setEnabled(enabled)
         self.generate_preview_video_button.setEnabled(enabled)
         for button in self.preset_buttons:
             button.setEnabled(enabled)

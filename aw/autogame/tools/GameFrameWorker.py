@@ -2088,11 +2088,11 @@ class FrameWorker(threading.Thread):
     def _resolve_launcher_power_collection_duration_seconds(self):
         raw_value = os.environ.get("POWER_COLLECTION_DURATION_MINUTES", "").strip()
         if not raw_value:
-            return float(self.POWER_COLLECTION_DURATION_MINUTES)
+            return max(0.0, float(self.POWER_COLLECTION_DURATION_MINUTES) * 60.0)
         try:
             minutes = float(raw_value)
         except ValueError:
-            return float(self.POWER_COLLECTION_DURATION_MINUTES)
+            return max(0.0, float(self.POWER_COLLECTION_DURATION_MINUTES) * 60.0)
         return max(0.0, minutes * 60.0)
 
     def _resolve_post_control_refresh_settle_seconds(self):

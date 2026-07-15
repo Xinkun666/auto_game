@@ -11,3 +11,6 @@ aw/autogame/customs_examples/Auto_PUBG_ALL/resource/navigation/adaptive_motion_t
 aw/autogame/customs_examples/Auto_PUBG_ALL/resource/navigation/adaptive_motion_table.json.tmp
 aw/autogame/customs_examples/Auto_PUBG_ALL/resource/control/driving_turn_calibration.json
 aw/autogame/customs_examples/Auto_PUBG_ALL/resource/control/driving_turn_calibration.json.tmp
+
+# Auto_PUBG_ALL local SAM3 weights are deployed separately on the server.
+aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/sam3_tiny/*.pt

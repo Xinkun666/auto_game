@@ -1,0 +1,16 @@
+# Install into the same Python 3.12 environment that starts launcher.py.
+torch==2.8.0
+torchvision==0.23.0
+numpy>=1.26.4,<2.0
+opencv-python>=4.10
+Pillow>=11.0
+timm>=1.0.17
+ftfy==6.1.1
+regex
+iopath>=0.1.10
+huggingface-hub
+einops>=0.7
+psutil>=5.9
+pycocotools>=2.0.10
+scipy>=1.10
+typing_extensions

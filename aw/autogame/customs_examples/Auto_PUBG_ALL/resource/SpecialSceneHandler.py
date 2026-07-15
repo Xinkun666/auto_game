@@ -5,6 +5,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.yolo_detecto
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.angle_tracker import AngleTracker
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.speed_classifier import SpeedClassifier
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.scene_predictor import GameSceneClassifier
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.sam3_tiny import segment_sam3
 
 from aw.autogame.tools.Utils import *
 
@@ -115,3 +116,9 @@ def speed(img):
 
 def house_scene(img):
     return scene_cls.predict(img)
+
+
+@special_timing
+def sam3(img):
+    """在 Label 标注的 SAM3 特殊区域内执行本地 EfficientSAM3 推理。"""
+    return segment_sam3(img)

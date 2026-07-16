@@ -1268,7 +1268,9 @@ class HOSScrcpyStreamClient:
                 self._stream_error_event.clear()
                 try:
                     self._diagnostic_stage = "creating_device"
-                    self.device = self._create_device()
+                    device = self._create_device()
+                    with self._capture_state_lock:
+                        self.device = device
                     self._diagnostic_stage = "creating_callback"
                     callback = self._create_callback()
                     with self._capture_state_lock:
@@ -1566,6 +1568,33 @@ class HOSScrcpyStreamClient:
         except Exception as exc:
             print("[HOS] Buffer push error: %s" % exc)
 
+    def _send_touch_event(self, method_name, x, y):
+        """Send one touch event through the device owned by the active HOS stream."""
+        with self._capture_state_lock:
+            device = self.device
+            if device is None:
+                raise RuntimeError("HOS touch is unavailable: stream device is not ready")
+            if self._capture_paused:
+                raise RuntimeError("HOS touch is unavailable: capture is paused")
+
+            inner_device = getattr(device, "device", None)
+            if inner_device is not None and not bool(getattr(inner_device, "is_setup", False)):
+                raise RuntimeError("HOS touch is unavailable: device setup is incomplete")
+
+            touch_method = getattr(device, method_name, None)
+            if not callable(touch_method):
+                raise RuntimeError("HOS touch is unavailable: device has no %s" % method_name)
+            touch_method(int(x), int(y))
+
+    def touch_down(self, x, y):
+        self._send_touch_event("on_touch_down", x, y)
+
+    def touch_move(self, x, y):
+        self._send_touch_event("on_touch_move", x, y)
+
+    def touch_up(self, x, y):
+        self._send_touch_event("on_touch_up", x, y)
+
     def _enqueue_save(self, frame):
         ts_str = datetime.now().strftime("%m-%d %H-%M-%S.%f")[:-3]
         try:
@@ -1607,8 +1636,9 @@ class HOSScrcpyStreamClient:
         print("[HOS] Save worker exited.")
 
     def _stop_device(self):
-        device = self.device
-        self.device = None
+        with self._capture_state_lock:
+            device = self.device
+            self.device = None
         if device is not None:
             try:
                 device.stop_capture_screen()

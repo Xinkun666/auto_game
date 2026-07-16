@@ -1589,12 +1589,12 @@ def get_touch_backend(config_path="aw/autogame/config/config.json"):
     读取触控后端配置。
 
     统一从 config.json 中读取 touch_backend。
-    可选值：sendevent / uinput
+    可选值：sendevent / uinput / hos
     未配置或配置非法时，默认使用 uinput。
     """
     config = _read_autogame_config(config_path)
     backend = str(config.get("touch_backend", "")).strip().lower()
-    if backend in {"sendevent", "uinput"}:
+    if backend in {"sendevent", "uinput", "hos"}:
         return backend
 
     return "uinput"

@@ -1336,6 +1336,156 @@ class SendEventController:
             self.move_up(second_finger_id)
 
 
+class HOSTouchController:
+    """Use the touch channel exposed by the active HOScrcpy stream."""
+
+    def __init__(self, stream_client, frame_interval_ms: int = 16,
+                 max_step_px: int = 100, trajectory: str = "linear"):
+        if stream_client is None:
+            raise RuntimeError("hos 触控后端需要当前 HOScrcpy 流客户端")
+        for method_name in ("touch_down", "touch_move", "touch_up"):
+            if not callable(getattr(stream_client, method_name, None)):
+                raise RuntimeError(f"HOScrcpy 流客户端缺少 {method_name} 接口")
+
+        self.stream_client = stream_client
+        self.frame_interval_ms = max(1, int(frame_interval_ms))
+        self.max_step_px = max(1, int(max_step_px))
+        self.trajectory = trajectory
+        self._active_pos = None
+        self._op_lock = threading.RLock()
+        self._release_scheduler = FingerReleaseScheduler(self._handle_scheduled_release)
+
+    @staticmethod
+    def _require_single_finger(finger_id):
+        finger_id = int(finger_id)
+        if finger_id != 0:
+            raise ValueError("HOS 官方触控接口不支持 finger_id，当前仅支持单指 finger_id=0")
+        return finger_id
+
+    def _wait_for_releasable_finger(self, finger_id):
+        self._require_single_finger(finger_id)
+        while True:
+            with self._op_lock:
+                if self._active_pos is None:
+                    return
+                pending = self._release_scheduler.get_jobs([finger_id])
+                if finger_id not in pending:
+                    raise RuntimeError("HOS 单指已处于按下状态，请先调用 move_up")
+                deadline, _ = pending[finger_id]
+            time.sleep(max(0.005, min(0.02, deadline - time.monotonic())))
+
+    def _handle_scheduled_release(self, finger_id, version):
+        with self._op_lock:
+            if not self._release_scheduler.is_current(finger_id, version):
+                return
+            self._move_up_locked(finger_id)
+
+    def close(self):
+        with self._op_lock:
+            self._release_scheduler.cancel_all()
+            if self._active_pos is not None:
+                try:
+                    self._move_up_locked(0)
+                except Exception as exc:
+                    print(f"[HOS Touch] 关闭时抬指失败: {exc}")
+        self._release_scheduler.close()
+
+    def click(self, x0, y0, x_bias=0, y_bias=0, finger_id: int = 0,
+              duration_ms: int = 0, trajectory=None, max_step_px=None):
+        self._wait_for_releasable_finger(finger_id)
+        self.move_press(finger_id, (int(x0 + x_bias), int(y0 + y_bias)))
+        duration_ms = max(0, int(duration_ms or 0))
+        if duration_ms:
+            time.sleep(duration_ms / 1000.0)
+        self.move_up(finger_id)
+
+    def click_down(self, x0, y0, x_bias=0, y_bias=0, dura=0, finger_id: int = 0,
+                   trajectory=None, max_step_px=None):
+        self._wait_for_releasable_finger(finger_id)
+        self.move_press(finger_id, (int(x0 + x_bias), int(y0 + y_bias)))
+        dura = max(0, int(dura or 0))
+        if dura:
+            self._release_scheduler.schedule(finger_id, dura)
+
+    def move_press(self, finger_id: int, pos):
+        finger_id = self._require_single_finger(finger_id)
+        target = (int(pos[0]), int(pos[1]))
+        with self._op_lock:
+            self._release_scheduler.cancel(finger_id)
+            if self._active_pos is None:
+                self.stream_client.touch_down(*target)
+            else:
+                self.stream_client.touch_move(*target)
+            self._active_pos = target
+
+    def move_to(self, finger_id, pos=None, duration_ms: int = 160,
+                trajectory=None, max_step_px=None):
+        finger_id = self._require_single_finger(finger_id)
+        if pos is None:
+            raise ValueError("HOS move_to 缺少目标位置")
+        target = (int(pos[0]), int(pos[1]))
+
+        with self._op_lock:
+            self._release_scheduler.cancel(finger_id)
+            if self._active_pos is None:
+                raise ValueError("HOS 单指尚未按下，不能 move_to")
+
+            start = self._active_pos
+            distance = math.hypot(target[0] - start[0], target[1] - start[1])
+            max_step = self.max_step_px if max_step_px is None else max(1, int(max_step_px))
+            duration_ms = max(0, int(duration_ms or 0))
+            distance_steps = max(1, int(math.ceil(distance / float(max_step))))
+            duration_steps = max(1, int(math.ceil(duration_ms / float(self.frame_interval_ms))))
+            step_count = max(distance_steps, duration_steps)
+            path = gen_slider_points(
+                start,
+                target,
+                step_count + 1,
+                trajectory=trajectory or self.trajectory,
+            )
+            per_step_seconds = (duration_ms / 1000.0 / step_count) if duration_ms else 0.0
+
+            for point in path[1:]:
+                self.stream_client.touch_move(*point)
+                self._active_pos = (int(point[0]), int(point[1]))
+                if per_step_seconds:
+                    time.sleep(per_step_seconds)
+
+    def move_up(self, finger_id: int, duration_ms: int = 0):
+        finger_id = self._require_single_finger(finger_id)
+        with self._op_lock:
+            self._release_scheduler.cancel(finger_id)
+            self._move_up_locked(finger_id)
+
+    def _move_up_locked(self, finger_id):
+        self._require_single_finger(finger_id)
+        if self._active_pos is None:
+            return
+        pos = self._active_pos
+        self.stream_client.touch_up(*pos)
+        self._active_pos = None
+
+    def tap_single(self, x0, y0, wait=100, dura=500, x_bias=0, y_bias=1,
+                   finger_id: int = 0, release: bool = True,
+                   trajectory=None, max_step_px=None):
+        self._wait_for_releasable_finger(finger_id)
+        self.move_press(finger_id, (int(x0), int(y0)))
+        self.move_to(
+            finger_id,
+            (int(x0 + x_bias), int(y0 + y_bias)),
+            duration_ms=dura,
+            trajectory=trajectory,
+            max_step_px=max_step_px,
+        )
+        if not release:
+            return
+        wait = max(0, int(wait or 0))
+        if wait:
+            self._release_scheduler.schedule(finger_id, wait)
+        else:
+            self.move_up(finger_id)
+
+
 class Controller:
     """操作层：负责绝对坐标换算，并根据后端发送触控指令。"""
 
@@ -1351,6 +1501,11 @@ class Controller:
 
         if self.backend == "sendevent":
             self.touch_backend = SendEventController(**self.backend_options)
+        elif self.backend == "hos":
+            self.touch_backend = HOSTouchController(
+                getattr(self.worker, "stream_client", None),
+                **self.backend_options,
+            )
         elif self.backend != "uinput":
             raise ValueError(f"不支持的触控后端: {self.backend}")
 
@@ -1365,9 +1520,9 @@ class Controller:
         )
         proc.wait()
 
-    def _require_sendevent_backend(self):
-        if self.backend != "sendevent" or self.touch_backend is None:
-            raise RuntimeError("当前控制器未启用 sendevent 后端，请在 aw/autogame/config/config.json 中将 touch_backend 设为 'sendevent'")
+    def _require_continuous_touch_backend(self):
+        if self.backend not in {"sendevent", "hos"} or self.touch_backend is None:
+            raise RuntimeError("当前控制器未启用 sendevent/hos 连续触控后端")
 
     def close(self):
         if self.touch_backend and hasattr(self.touch_backend, "close"):
@@ -1668,6 +1823,9 @@ class Controller:
                 )
                 trace["executed"] = "True"
             else:
+                if self.backend == "hos":
+                    trace["backend"] = "uinput_fallback"
+                    trace["fallback_reason"] = "HOS 官方接口未暴露 finger_id，双指操作回退 uinput"
                 cmd = (
                     f"hdc shell uinput -T -m {x1} {y1} {x1 + x1_bias} {y1 + y1_bias} "
                     f"{x2} {y2} {x2 + x2_bias} {y2 + y2_bias} -k {wait} {dura}"
@@ -1697,7 +1855,7 @@ class Controller:
             x, y = pos
             trace["start_pos"] = f"({x}, {y})"
             trace["actual_pos"] = trace["start_pos"]
-            if self.backend == "sendevent":
+            if self.backend in {"sendevent", "hos"}:
                 end_pos, _ = self._resolve_pos(btn, x_bias=x_bias, y_bias=y_bias)
                 if not end_pos:
                     return trace
@@ -1778,7 +1936,7 @@ class Controller:
             trace["actual_pos"] = f"({x}, {y})"
             trace["start_pos"] = trace["actual_pos"]
             trace["end_pos"] = trace["actual_pos"]
-            if self.backend == "sendevent":
+            if self.backend in {"sendevent", "hos"}:
                 self.touch_backend.click_down(
                     x,
                     y,
@@ -1817,7 +1975,7 @@ class Controller:
             trace["actual_pos"] = f"({x}, {y})"
             trace["start_pos"] = trace["actual_pos"]
             trace["end_pos"] = trace["actual_pos"]
-            if self.backend == "sendevent":
+            if self.backend in {"sendevent", "hos"}:
                 self.touch_backend.click(
                     x,
                     y,
@@ -1835,7 +1993,7 @@ class Controller:
         return trace
 
     def move_press(self, finger_id, pos, x_bias=0, y_bias=0):
-        self._require_sendevent_backend()
+        self._require_continuous_touch_backend()
         target, label = self._get_abs_pos(pos, x_bias=x_bias, y_bias=y_bias)
         if not target:
             raise ValueError("move_press 无法解析目标位置，请检查 pos/x_bias/y_bias")
@@ -1861,7 +2019,7 @@ class Controller:
 
     def move_to(self, finger_id, pos, x_bias=0, y_bias=0, duration_ms=160,
                 trajectory=None, max_step_px=None):
-        self._require_sendevent_backend()
+        self._require_continuous_touch_backend()
         target, label = self._get_abs_pos(pos, x_bias=x_bias, y_bias=y_bias)
         if not target:
             raise ValueError("move_to 无法解析目标位置，请检查 pos/x_bias/y_bias")
@@ -1892,7 +2050,7 @@ class Controller:
         }
 
     def move_up(self, finger_id, duration_ms=0):
-        self._require_sendevent_backend()
+        self._require_continuous_touch_backend()
         print(f"执行 move_up: finger_id={finger_id}")
         self.touch_backend.move_up(finger_id, duration_ms=duration_ms)
         return {
@@ -2143,7 +2301,7 @@ class FrameWorker(threading.Thread):
     def _estimate_async_control_remaining_seconds(self, action_name, kwargs=None, trace_result=None):
         kwargs = kwargs or {}
         backend = str(self._control_trace_value(trace_result, "backend", "") or "").strip().lower()
-        if backend != "sendevent":
+        if backend not in {"sendevent", "hos"}:
             return 0.0
 
         if action_name == "tap_single":

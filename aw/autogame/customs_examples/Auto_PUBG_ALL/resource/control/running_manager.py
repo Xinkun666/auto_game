@@ -688,7 +688,7 @@ class RunningManager:
         self._clear_forced_route()
         self.house_exit_manager.reset()
         if getattr(self, "_frame_worker", None) is not None:
-            self._frame_worker.frame_log('[Running] 状态已重置!')
+            self._frame_worker.frame_log('[Running] 状态已重置')
 
     def start_forced_route(
         self,
@@ -867,47 +867,35 @@ class RunningManager:
     def process(self, w: "FrameWorker"):
         self._frame_worker = w
         self.road_helper._frame_worker = w
-        w.frame_log("进入跑图模块：这一帧先检查终局，再读取当前位置，后面所有跑图判断都基于这帧位置和方向")
         if self._handle_terminal_state(w, "跑图模块入口"):
             return
 
         location = self._get_location(w)
         if location is None:
             w.frame_log("[Running] 位置无效，尝试小幅前探刷新坐标...")
-            w.frame_log("跑图观察：这一帧没有拿到有效小地图坐标，所以不能规划路径，只轻推摇杆让下一帧刷新坐标")
             w.tap_single("摇杆", y_bias=-250, dura=250, wait=500)
             return
 
         direction = self._get_scalar(w.get_info("direction"))
         w.frame_log(
-            f"跑图观察：当前位置={location}，方向={direction}，"
-            f"路径点数量={len(self.road_list)}，当前是否找车={self.finding_car}"
+            f"[RunningFrame] loc={location}, dir={direction}, "
+            f"route_points={len(self.road_list)}, "
+            f"next={self.road_list[0] if self.road_list else None}, "
+            f"finding_car={self.finding_car}, car_mode={self.car_search_mode}, "
+            f"forced={self.forced_route_target is not None}, auto_forward={self.auto_forward}"
         )
         self._update_circle_angle(w.get_info("white_angle"))
         forced_route_active = self._has_forced_route()
         if forced_route_active:
             self._refresh_forced_route_target(location)
         if not forced_route_active:
-            w.frame_log("跑图决策：当前没有强制路线，所以先根据阶段时间和找车状态刷新是否继续找车")
             self._refresh_finding_car_policy(w, location, direction)
 
-        w.frame_log("跑图检查：先看是否处在刚下车保护窗口，避免刚下车就误点驾驶或误切状态")
         if self._handle_recent_vehicle_exit(w, location, direction):
             return
 
         if self._is_in_vehicle(w):
             w.frame_log("[Running] 检测到已经上车，切换到开车阶段")
-            w.frame_log("跑图观察：当前帧已经出现车内/驾驶状态，所以停止跑图移动并切换到开车阶段")
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '检测到已上车',
-                    location,
-                    direction,
-                    None,
-                    None,
-                    '切换到开车阶段',
-                )
-            )
             entry_source = self.active_vehicle_entry_source or self.VEHICLE_ENTRY_UNKNOWN
             self._ensure_third_person_view(w, location, direction, "检测到已上车，切回第三人称")
             self.stop_auto_forward(w)
@@ -917,19 +905,15 @@ class RunningManager:
             return
 
         if self._ensure_first_person_view(w, location, direction):
-            w.frame_log("跑图决策：当前视角不是预期的第一人称，所以本帧先调整视角，不继续路径推进")
             return
 
         if self._is_in_water(w):
-            w.frame_log("跑图观察：当前人物在水中或水边，所以进入水区脱离逻辑")
             self._handle_water_escape(w, location, direction)
             return
 
-        w.frame_log("跑图检查：如果刚从水里出来，要先判断是否卡在岸边")
         if self._handle_recent_water_exit_stuck(w, location, direction):
             return
 
-        w.frame_log("跑图检查：先判断当前位置是否在不可通行区域或黑区，命中时优先脱离")
         if self._handle_forbidden_escape(w, location, direction):
             return
 
@@ -939,7 +923,6 @@ class RunningManager:
         self._click_jump_if_available(w, location, direction)
 
         if forced_route_active:
-            w.frame_log("跑图决策：当前存在强制路线，所以优先按强制目标推进，不走普通找车/进圈路线")
             self._process_forced_route(w, location, direction)
             return
 
@@ -951,46 +934,21 @@ class RunningManager:
 
         if self.find_car_times >= len(self.PRECISE_FACE_DIRECTIONS):
             if self.finding_car and self.car_search_mode == self.CAR_SEARCH_GARAGE:
-                w.frame_log("跑图决策：车库多角度找车都失败，所以从车库找车切换到道路找车")
                 self._switch_to_roadside_car_search("车库多角度视觉找车未成功")
                 return
             w.frame_log(f"[Running] 已连续{len(self.PRECISE_FACE_DIRECTIONS)}次未成功上车，结束当前局")
-            w.frame_log("跑图决策：连续多个角度都没有成功上车，认为找车失败，本局进入结束流程")
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '上车尝试已达上限',
-                    location,
-                    direction,
-                    None,
-                    None,
-                    '结束当前局',
-                )
-            )
             self._handle_death(w)
             return
 
         if self.correct_position_times >= 5:
             if self.finding_car and self.car_search_mode == self.CAR_SEARCH_GARAGE:
-                w.frame_log("跑图决策：车库上车点精调多次无进展，所以改走道路找车路线")
                 self._switch_to_roadside_car_search("车库上车点精调长时间无进展")
                 return
             w.frame_log("[Running] 连续5次未找到车辆交互点，结束当前局")
-            w.frame_log("跑图决策：连续多次精调仍找不到车辆交互点，所以结束当前局")
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '精调阶段长时间无进展',
-                    location,
-                    direction,
-                    None,
-                    None,
-                    '结束当前局',
-                )
-            )
             self._handle_death(w)
             return
 
         if self.precise_entering_car:
-            w.frame_log("跑图决策：已经进入精准上车流程，所以本帧继续处理靠近车辆和点击驾驶按钮")
             self._process_precise_entry(w, location, direction)
             return
 
@@ -1000,11 +958,9 @@ class RunningManager:
             and not self.garage_to_roadside_route_active
             and self._handle_roadside_vehicle_entry(w, location, direction)
         ):
-            w.frame_log("跑图决策：道路找车流程发现可上车机会，本帧交给道路车辆上车逻辑")
             return
 
         if self._handle_location_jump(location):
-            w.frame_log("跑图观察：当前位置和上一帧跳变明显，所以先重规划路径，避免沿旧路径误走")
             if not self.loading_road or not self.road_list:
                 self._load_path(location)
             if not self.road_list:
@@ -1016,54 +972,27 @@ class RunningManager:
 
         if self.trapped:
             if self._try_house_exit_when_indoor(w, location, direction, "人物困死"):
-                w.frame_log("跑图决策：人物困死且可能在屋内，所以先交给出房模块尝试脱离")
                 return
             if not self.trapped:
                 w.frame_log("[Running] 人物困死但后视角复核为室外，先按普通脱困处理")
-                w.frame_log("跑图决策：困死复核后确认不在屋内，所以按普通脱困动作恢复移动")
                 self._perform_unstuck_action(w, location)
                 return
             w.frame_log("[Running] 人物长时间在局部区域打转，结束当前局")
-            w.frame_log("跑图决策：人物长时间困在局部区域且无法出房，所以结束当前局")
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '人物困死',
-                    location,
-                    direction,
-                    None,
-                    None,
-                    '结束当前局',
-                )
-            )
             self._handle_death(w)
             return
 
         if self.stuck:
             if self._try_house_exit_when_indoor(w, location, direction, "人物卡住"):
-                w.frame_log("跑图决策：人物卡住且疑似在屋内，所以先尝试出房而不是直接乱动")
                 return
             w.frame_log("[Running] 人物卡住，执行脱困")
-            w.frame_log("跑图决策：人物卡住但不需要出房，所以执行普通脱困动作")
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '人物卡死',
-                    location,
-                    direction,
-                    None,
-                    None,
-                    '执行脱困',
-                )
-            )
             self._perform_unstuck_action(w, location)
             return
 
         if not self.loading_road or not self.road_list:
-            w.frame_log("跑图决策：当前没有可用路径，所以根据当前位置重新加载路径")
             self._load_path(location)
 
         if not self.road_list:
             w.frame_log("[Running] 当前没有可执行路径")
-            w.frame_log("跑图结果：路径加载后仍没有可执行路径，所以本帧不移动，等待下一帧重新判断")
             if self._handle_priority_car_route_finished(w, location, direction, "指定寻车路线已走完"):
                 return
             return
@@ -1072,7 +1001,6 @@ class RunningManager:
             self._advance_waypoint_by_projection(location)
         if not self.road_list:
             w.frame_log("[Running] 当前路径已按投影走完，下一帧重新规划")
-            w.frame_log("跑图决策：当前路径已按投影判断走完，所以清空路径并等下一帧重新规划")
             if self._handle_priority_car_route_finished(w, location, direction, "指定寻车路线投影判定已走完"):
                 return
             self._mark_running_route_completed_if_needed(location, "投影判定路径走完")
@@ -1081,17 +1009,17 @@ class RunningManager:
 
         target = self.road_list[0]
         dist = get_distance(location, target)
-        w.frame_log(f"[Running] Loc: {location}, Target: {target}, Dist: {dist:.2f}")
-        w.frame_log(f"跑图目标：当前路径点是 {target}，距离 {dist:.2f}，本帧围绕这个点决定移动方式")
+        w.frame_log(
+            f"[RunningNav] loc={location}, target={target}, dist={dist:.2f}, "
+            f"remaining={len(self.road_list)}"
+        )
 
-        w.frame_log("跑图检查：如果当前是车库转道路找车路线，先判断是否需要前推脱离车库")
         if self._handle_garage_to_roadside_forward_push(w, location, direction, target):
             return
 
         arrival_tolerance = self._get_current_waypoint_tolerance()
         if 0 <= dist < arrival_tolerance:
             w.frame_log(f"[Running] 到达 {target} 点附近")
-            w.frame_log("跑图决策：已经到达当前路径点容差范围内，所以消费路径点并处理下一目标")
             self._handle_waypoint_arrival(w, location, direction, target, dist)
             return
 
@@ -1100,11 +1028,9 @@ class RunningManager:
             and 0 <= dist <= self.WAYPOINT_PRECISE_APPROACH_DISTANCE
         ):
             w.frame_log(f"[Running] 距离目标点 {dist:.2f}，切换精确逼近")
-            w.frame_log("跑图决策：距离路径点很近，需要从普通导航切换到精确逼近")
             self._precise_approach_waypoint(w, location, direction, target, dist)
             return
 
-        w.frame_log("跑图决策：还没到路径点，也不需要特殊处理，所以按当前路径点计算方向并移动")
         self._move_towards_target(w, location, direction, target)
 
 
@@ -1207,16 +1133,6 @@ class RunningManager:
                 return
 
             w.frame_log("[Running] 开车阶段未完成，优先沿指定路线找车，暂不处理进圈")
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '恢复找车',
-                    location,
-                    direction,
-                    None,
-                    None,
-                    '沿指定路线继续找车',
-                )
-            )
             self.stop_auto_forward(w)
             self.finding_car = True
             self.car_search_timer.start()
@@ -1235,16 +1151,6 @@ class RunningManager:
             return
 
         w.frame_log("[Running] 开车阶段已完成，停止找车，恢复跑图/进圈")
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '停止找车',
-                location,
-                direction,
-                None,
-                None,
-                '开车完成后恢复跑图/进圈',
-            )
-        )
         self.stop_auto_forward(w)
         self.finding_car = False
         self.car_search_timer.reset()
@@ -1345,16 +1251,6 @@ class RunningManager:
             f"[Running] 本轮寻车已超过 {self.CAR_SEARCH_TIMEOUT:.0f}s 仍未上车，"
             "结束当前局并开始下一局"
         )
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '寻车超时',
-                location,
-                direction,
-                None,
-                None,
-                f'本轮寻车耗时 {elapsed:.1f}s，结束当前局',
-            )
-        )
         self._handle_death(w)
         return True
 
@@ -1382,16 +1278,6 @@ class RunningManager:
             return False
 
         w.frame_log(f"[Running] {reason}，已到达指定终点 {final_point} 仍未上车，结束当前局并重开")
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '指定寻车路线结束',
-                location,
-                direction,
-                final_point,
-                final_dist,
-                '终点未上车，结束当前局',
-            )
-        )
         self.priority_car_search_finished = True
         self.priority_car_search_active = False
         self._handle_death(w)
@@ -1515,16 +1401,6 @@ class RunningManager:
             return False
 
         w.frame_log(f"[Running] 刚下车，忽略载具交互 remaining={remaining:.2f}s")
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '下车保护期',
-                location,
-                direction,
-                None,
-                None,
-                '忽略上车/驾驶并先离开载具',
-            )
-        )
         self.stop_auto_forward(w)
         self.loading_road = False
         self.road_list = []
@@ -1555,16 +1431,6 @@ class RunningManager:
                 "[Running] 正在执行到最近入门点的已规划A*路线，"
                 "中途命中黑区不重新脱离，继续沿当前路径推进"
             )
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '已规划路线中途经过黑区',
-                    location,
-                    direction,
-                    self.forced_route_target,
-                    None,
-                    '保留当前A*路线，不触发新的黑区脱离',
-                )
-            )
             return False
 
         if self._should_direct_nav_for_near_forced_route_in_forbidden(location):
@@ -1574,31 +1440,11 @@ class RunningManager:
                 f"[Running] 当前位于不可通行区域，且与临时目标 {target} 属于同一不可通行区域，"
                 f"距离 {dist_to_target:.2f}，交给强制路线直接朝目标点推进"
             )
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '不可通行区域与临时目标同区',
-                    location,
-                    direction,
-                    target,
-                    dist_to_target,
-                    '跳过安全点脱离，直接朝临时目标行进',
-                )
-            )
             return False
 
         self._check_if_stuck(location)
         if self.stuck:
             w.frame_log("[Running] 当前位于不可通行区域且人物卡住，先执行避障脱困")
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '不可通行区域卡住',
-                    location,
-                    direction,
-                    None,
-                    None,
-                    '调用避障脱困',
-                )
-            )
             self._perform_unstuck_action(w, location)
             return True
 
@@ -1612,16 +1458,6 @@ class RunningManager:
 
         if safe_point is None:
             w.frame_log("[Running] 当前位于不可通行区域，暂未找到安全点，先尝试直线脱离")
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '人物位于不可通行区域',
-                    location,
-                    direction,
-                    None,
-                    None,
-                    '直线尝试脱离黑区',
-                )
-            )
             w.tap_single(
                 "摇杆",
                 y_bias=-300,
@@ -1633,16 +1469,6 @@ class RunningManager:
 
         dist = get_distance(location, safe_point)
         w.frame_log(f"[Running] 当前位于不可通行区域，先脱离到最近安全点 {safe_point}，距离 {dist:.2f}")
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '人物位于不可通行区域',
-                location,
-                direction,
-                safe_point,
-                dist,
-                '先脱离黑区再规划路径',
-            )
-        )
 
         if w.get_info("跳跃") and self.jump_click_cooldown.try_acquire(self.JUMP_CLICK_COOLDOWN):
             w.frame_log("[Running] 不可通行区域发现跳跃键，先跳跃并朝安全点自动前进")
@@ -1710,17 +1536,6 @@ class RunningManager:
         route_type = "寻车路径" if self.finding_car else "跑图路径"
         if getattr(self, "_frame_worker", None) is not None:
             self._frame_worker.frame_log(f'[Running] 检测到位置跳变: prev={previous_location}, current={location}, jump_dist={jump_dist:.2f}，重新规划{route_type}')
-        if getattr(self, "_frame_worker", None) is not None:
-            self._frame_worker.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '位置跳变',
-                    location,
-                    None,
-                    None,
-                    None,
-                    f'重新规划{route_type}',
-                )
-            )
         self.loading_road = False
         self.road_list = []
         self.current_segment_start = None
@@ -1766,16 +1581,6 @@ class RunningManager:
                 f"[Running] 临时路线目标 {target} 距离 {dist_to_final:.2f}，"
                 "当前位置可直接朝目标点前进，跳过安全点和A*"
             )
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '临时路线直奔目标',
-                    location,
-                    direction,
-                    target,
-                    dist_to_final,
-                    '同目标黑区或直线只穿目标黑区，直接对准真实入门点',
-                )
-            )
             self.loading_road = False
             self.road_list = []
             self.current_segment_start = None
@@ -1806,31 +1611,11 @@ class RunningManager:
 
         if self.trapped:
             w.frame_log("[Running] 临时路线人物困住，按卡住脱困处理，继续前往目标")
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '临时路线困住',
-                    location,
-                    direction,
-                    target,
-                    dist_to_final,
-                    '执行脱困',
-                )
-            )
             self._perform_unstuck_action(w, location)
             return True
 
         if self.stuck:
             w.frame_log("[Running] 临时路线人物卡住，执行脱困")
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '临时路线卡住',
-                    location,
-                    direction,
-                    target,
-                    dist_to_final,
-                    '执行脱困',
-                )
-            )
             self._perform_unstuck_action(w, location)
             return True
 
@@ -1892,7 +1677,11 @@ class RunningManager:
         self.current_segment_start = location if self.loading_road else None
         if self.loading_road:
             if getattr(self, "_frame_worker", None) is not None:
-                self._frame_worker.frame_log(f'[Running] 路径已加载: {self.road_list}')
+                self._frame_worker.frame_log(
+                    f"[Running] 路径已加载: points={len(self.road_list)}, "
+                    f"next={self.road_list[0] if self.road_list else None}, "
+                    f"end={self.road_list[-1] if self.road_list else None}"
+                )
             self._log_loaded_route_image(location, "跑图道路路径已加载")
         else:
             if getattr(self, "_frame_worker", None) is not None:
@@ -1932,17 +1721,6 @@ class RunningManager:
 
         if getattr(self, "_frame_worker", None) is not None:
             self._frame_worker.frame_log(f'[Running] 正在加载临时跑图路线: {location} -> {route_target} (entry={target})')
-        if getattr(self, "_frame_worker", None) is not None:
-            self._frame_worker.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '临时路线规划',
-                    location,
-                    None,
-                    route_target,
-                    None,
-                    self.forced_route_reason or '前往目标',
-                )
-            )
         self.road_list = self._plan_path(location, route_target)
         self.forced_route_path_active = bool(self.road_list)
         if not self.road_list:
@@ -1979,17 +1757,6 @@ class RunningManager:
     def _load_garage_find_path(self, location: Tuple[int, int]):
         if getattr(self, "_frame_worker", None) is not None:
             self._frame_worker.frame_log('[Running] 正在加载车库优先寻车路径...')
-        if getattr(self, "_frame_worker", None) is not None:
-            self._frame_worker.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '正在加载车库寻车路径',
-                    location,
-                    None,
-                    None,
-                    None,
-                    '先去车库取车',
-                )
-            )
         self.current_road_node = None
 
         if get_distance(location, self.R_CITY) > 50:
@@ -2008,17 +1775,6 @@ class RunningManager:
             return False
         if getattr(self, "_frame_worker", None) is not None:
             self._frame_worker.frame_log(f'[Running] 当前距离车库上车点 {dist_to_garage:.2f} > {self.GARAGE_SEARCH_MAX_DISTANCE:.2f}，跳过车库找车')
-        if getattr(self, "_frame_worker", None) is not None:
-            self._frame_worker.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '距离车库点过远',
-                    location,
-                    None,
-                    self.CAR_ENTRY_POINT,
-                    dist_to_garage,
-                    '跳过车库，直接切换到沿路找车',
-                )
-            )
         return True
 
     def _merge_paths(self, path1, path2):
@@ -2041,18 +1797,7 @@ class RunningManager:
             return False
 
         if getattr(self, "_frame_worker", None) is not None:
-            self._frame_worker.frame_log(f'[Running] {reason}: road_points={self.PRIORITY_CAR_SEARCH_ANCHORS}')
-        if getattr(self, "_frame_worker", None) is not None:
-            self._frame_worker.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    reason,
-                    location,
-                    None,
-                    self.PRIORITY_CAR_SEARCH_ANCHORS[-1],
-                    None,
-                    '沿指定 road_topology 路线规划道路找车',
-                )
-            )
+            self._frame_worker.frame_log(f'[Running] {reason}: anchors={len(self.PRIORITY_CAR_SEARCH_ANCHORS)}, 'f'end={self.PRIORITY_CAR_SEARCH_ANCHORS[-1]}')
 
         self._sync_priority_car_route_progress(location)
         route_points = self._get_priority_car_search_road_points()
@@ -2075,14 +1820,22 @@ class RunningManager:
             return False
 
         if getattr(self, "_frame_worker", None) is not None:
-            self._frame_worker.frame_log(f'[Running] 指定寻车路线起点 A={start_road_point}, player_to_A={start_road_dist:.2f}, remaining={remaining_points}')
+            self._frame_worker.frame_log(
+                f"[Running] 指定寻车路线起点={start_road_point}, "
+                f"player_to_start={start_road_dist:.2f}, "
+                f"remaining_points={len(remaining_points)}"
+            )
 
         self.current_road_node = None
         self.road_list = route
         self.current_running_route_kind = self.RUNNING_ROUTE_PRIORITY_CAR_SEARCH
         self.garage_to_roadside_route_active = False
         if getattr(self, "_frame_worker", None) is not None:
-            self._frame_worker.frame_log(f'[Running] 指定寻车路线已生成: {self.road_list}')
+            self._frame_worker.frame_log(
+                f"[Running] 指定寻车路线已生成: points={len(self.road_list)}, "
+                f"next={self.road_list[0] if self.road_list else None}, "
+                f"end={self.road_list[-1] if self.road_list else None}"
+            )
         return True
 
     def _is_priority_route_segment_reasonable(
@@ -2149,19 +1902,6 @@ class RunningManager:
         use_topology_nodes = self.road_helper.topology_available()
 
         prefer_center = not self._need_circle_now()
-        target_hint = self.MAP_CENTER if prefer_center else location
-        target_text = "地图中心附近道路点" if prefer_center else "下一个道路点"
-        if getattr(self, "_frame_worker", None) is not None:
-            self._frame_worker.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    reason,
-                    location,
-                    None,
-                    target_hint,
-                    None,
-                    f'规划到{target_text}',
-                )
-            )
         if prefer_center:
             node, node_dist = self.road_helper.center_biased_node(
                 location,
@@ -2247,17 +1987,6 @@ class RunningManager:
 
         if getattr(self, "_frame_worker", None) is not None:
             self._frame_worker.frame_log('[Running] 正在加载进圈路径...')
-        if getattr(self, "_frame_worker", None) is not None:
-            self._frame_worker.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '正在加载进圈路径',
-                    location,
-                    None,
-                    None,
-                    None,
-                    '优先规划到进圈点附近道路点',
-                )
-            )
         target_point = self._get_circle_target_point(location)
         if target_point is None:
             self._load_road_patrol_path(location, reason="进圈目标无效，先道路巡游")
@@ -2294,17 +2023,6 @@ class RunningManager:
 
         if getattr(self, "_frame_worker", None) is not None:
             self._frame_worker.frame_log(f'[Running] 已完成进圈路线，围绕圈目标 {anchor} 随机规划跑图路线')
-        if getattr(self, "_frame_worker", None) is not None:
-            self._frame_worker.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '圈内随机跑图',
-                    location,
-                    None,
-                    anchor,
-                    None,
-                    '围绕上次圈目标随机规划可通行路线',
-                )
-            )
         candidates = self.map_tool.get_random_visible_points(
             anchor,
             num_points=self.CIRCLE_RANDOM_ROUTE_NUM_POINTS,
@@ -2348,16 +2066,6 @@ class RunningManager:
     ):
         target = self._get_running_target(location)
         self.water_escape_target = target
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '检测到落水',
-                location,
-                direction,
-                target,
-                None,
-                '执行水中自动前进脱困',
-            )
-        )
 
         if not self._is_in_water(w):
             self._mark_water_escape_finished(w, location, direction, target)
@@ -2415,16 +2123,6 @@ class RunningManager:
         target: Optional[Tuple[int, int]],
     ):
         w.frame_log("[Running] 上浮图标已消失，已脱离水面，恢复正常跑图")
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '已脱离水面',
-                location,
-                direction,
-                target,
-                None,
-                '恢复正常跑图',
-            )
-        )
         self.water_exit_last_location = None
         self.water_exit_stuck_frames = 0
         if hasattr(self, "water_exit_clock"):
@@ -2459,16 +2157,6 @@ class RunningManager:
             return False
 
         w.frame_log("[Running] 水中自动前进连续3帧无有效位移，侧移换上岸点后重新自动前进")
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '水中自动前进卡住',
-                location,
-                direction,
-                target,
-                None,
-                '侧移换上岸点',
-            )
-        )
         self.stop_auto_forward(w)
         side_bias = 360 * self.water_exit_side_sign
         self.water_exit_side_sign *= -1
@@ -2532,16 +2220,6 @@ class RunningManager:
 
         target = self.water_escape_target or self._get_running_target(location)
         w.frame_log("[Running] 刚上岸后位置不动，疑似卡在岸边，换上岸点")
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '岸边上岸卡住',
-                location,
-                direction,
-                target,
-                None,
-                '后退并侧移更换上岸点',
-            )
-        )
         self.stop_auto_forward(w)
 
         w.tap_single(
@@ -2639,16 +2317,6 @@ class RunningManager:
         if not w.get_info("跳跃"):
             return False
         w.frame_log(f"[Running] {reason}发现跳跃键，优先跳跃+前推")
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '室外near_wall',
-                location,
-                direction,
-                None,
-                None,
-                '点击跳跃并前推',
-            )
-        )
         self.stop_auto_forward(w)
         w.click("跳跃")
         w.tap_single(
@@ -2821,16 +2489,6 @@ class RunningManager:
             return False
 
         w.frame_log(f"[Running] {reason}且后视角确认 house_scene=indoor，使用 HouseExitManager 脱困")
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                reason,
-                location,
-                direction,
-                None,
-                None,
-                '卡住后确认屋内，优先出房',
-            )
-        )
         self.stop_auto_forward(w)
         self.house_exit_manager.reset()
         for _ in range(20):
@@ -2918,16 +2576,6 @@ class RunningManager:
                 continue
 
             w.frame_log(f"[Running] 卡住时发现{control_name}键，先点击尝试翻越障碍")
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '卡住发现跳跃/翻越键',
-                    current_loc,
-                    None,
-                    None,
-                    None,
-                    f'优先点击{control_name}',
-                )
-            )
             w.click(control_name)
             w.refresh_frame()
             new_loc = self._get_location(w)
@@ -2936,16 +2584,6 @@ class RunningManager:
                 return True
 
             w.frame_log(f"[Running] {control_name}后仍未离开卡点，继续后退和侧向试探")
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '跳跃/翻越未脱困',
-                    current_loc,
-                    None,
-                    None,
-                    None,
-                    '继续后退并侧向绕行',
-                )
-            )
             return False
 
         return False
@@ -2972,16 +2610,6 @@ class RunningManager:
         )
 
         w.frame_log(f"[Running] 人物疑似撞墙/卡住，先后退，再向{side_label}侧绕行试探")
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '人物卡死',
-                current_loc,
-                None,
-                None,
-                None,
-                f'后退脱离后向{side_label}侧绕行',
-            )
-        )
         self._tap_unstuck_joystick(w, "撞墙后拉避让", 0, self.UNSTUCK_BACK_Y_BIAS)
         self._tap_unstuck_joystick(
             w,
@@ -3004,30 +2632,10 @@ class RunningManager:
             self.last_valid_location = new_loc
 
         w.frame_log(f"[Running] 向{side_label}绕行后仍未产生有效位移，记录该方向失败")
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '避障方向失败',
-                current_loc,
-                None,
-                None,
-                None,
-                f'记录{side_label}侧失败',
-            )
-        )
         self.stuck = False
         self.trapped = False
         if attempt >= self.UNSTUCK_REPLAN_ATTEMPT_LIMIT:
             w.frame_log("[Running] 同一区域连续多次脱困失败，清空当前路径等待重新规划")
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '多次避障失败',
-                    current_loc,
-                    None,
-                    None,
-                    None,
-                    '清空路径并重新规划',
-                )
-            )
             self.loading_road = False
             self.road_list = []
             self.current_segment_start = None
@@ -3087,16 +2695,6 @@ class RunningManager:
             return False
 
         w.frame_log("[Running] 发现跳跃键，点击跳跃")
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '发现跳跃键',
-                location,
-                direction,
-                None,
-                None,
-                '点击跳跃',
-            )
-        )
         w.click("跳跃")
         return True
 
@@ -3124,31 +2722,11 @@ class RunningManager:
 
         aligned = self._align_to_point(w, location, direction, target, threshold=3)
         if not aligned:
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '车库离库前推',
-                    location,
-                    direction,
-                    target,
-                    None,
-                    '先对准路边方向',
-                )
-            )
             return True
 
         w.frame_log(
             f"[Running] 已到达车库离库点，方向对准 {target}，"
             f"直接前推 {self.GARAGE_TO_ROADSIDE_FORWARD_WAIT}ms"
-        )
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '车库离库前推',
-                location,
-                direction,
-                target,
-                None,
-                f'前推 {self.GARAGE_TO_ROADSIDE_FORWARD_WAIT}ms 后开始道路找车',
-            )
         )
         w.tap_single(
             "摇杆",
@@ -3191,16 +2769,6 @@ class RunningManager:
             and len(self.road_list) <= 1
         ):
             w.frame_log("[Running] 已到达车库上车点，进入上车精调阶段")
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '已到达车库上车点',
-                    location,
-                    direction,
-                    target,
-                    dist,
-                    '进入上车精调阶段',
-                )
-            )
             self._enter_precise_entry_mode(w)
             self._process_precise_entry(w, location, direction)
             return
@@ -3372,16 +2940,6 @@ class RunningManager:
         direction: Optional[float],
     ):
         w.frame_log("[Running] 道路巡游中发现车辆，进入路边追车模式")
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '道路巡游发现车辆',
-                location,
-                direction,
-                None,
-                None,
-                '锁定车辆并尝试靠近上车',
-            )
-        )
         self.stop_auto_forward(w)
         self.active_vehicle_entry_source = self.VEHICLE_ENTRY_ROADSIDE
         self.roadside_car_pursuing = True
@@ -3423,7 +2981,6 @@ class RunningManager:
                 f"前推后丢失 {self.roadside_car_lost_after_forward_pushes}/"
                 f"{self.ROADSIDE_CAR_LOST_FORWARD_LIMIT}，保持方向继续靠近"
             )
-            w.frame_log(f'路边追车：当前帧没有识别到车辆，丢失 {self.roadside_car_lost_rounds}/{self.ROADSIDE_CAR_LOST_LIMIT}，先保持原方向靠近')
             if self.roadside_car_lost_after_forward_pushes > self.ROADSIDE_CAR_LOST_FORWARD_LIMIT:
                 self._give_up_roadside_car_pursuit("前推后连续丢失车辆，判定为误识别")
                 return True
@@ -3441,7 +2998,6 @@ class RunningManager:
                 f"[Running] 路边追车已对准车辆，前推靠近 "
                 f"{self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}"
             )
-            w.frame_log(f'路边追车：车辆已经进入中心容差，准备前推靠近 {self.roadside_car_steps}/{self.ROADSIDE_CAR_PURSUIT_STEP_LIMIT}')
 
         if aligned is None and self.roadside_car_last_forward_motion is not None:
             forward_bias_y, forward_dura, forward_wait = self._get_lost_car_half_forward_motion()
@@ -3456,7 +3012,6 @@ class RunningManager:
             f"dura={forward_dura}ms, wait={forward_wait}ms, "
             f"car_area_ratio={self.roadside_car_last_area_ratio}"
         )
-        w.frame_log(f'路边追车：前推靠近车辆 y_bias={forward_bias_y}，dura={forward_dura}ms，wait={forward_wait}ms，area={self.roadside_car_last_area_ratio}，动作后刷新画面')
         w.tap_single(
             "摇杆",
             y_bias=forward_bias_y,
@@ -3483,7 +3038,6 @@ class RunningManager:
                     f"{self.CAR_FORWARD_LOST_BACKOFF_MIN_PUSHES} 次，"
                     "不执行后拉，继续向前找车"
                 )
-                w.frame_log(f'路边追车：前推后车辆暂时消失，但只向该车前推 {self.roadside_car_forward_pushes} 次，先不后拉，继续向前找车')
                 return True
             recover_result = self._recover_car_lost_after_forward_push(
                 w,
@@ -3584,16 +3138,6 @@ class RunningManager:
         w.frame_log(f"[Running] 精调上车中，当前位置 {location}，上车点 {self.CAR_ENTRY_POINT}，距离 {dist_to_entry:.2f}")
         if self._handle_precise_invalid_direction(location, direction, dist_to_entry):
             return
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '正在精调上车',
-                location,
-                direction,
-                self.CAR_ENTRY_POINT,
-                dist_to_entry,
-                f'尝试对齐并接近上车点 angle={self._get_current_precise_face_direction()}',
-            )
-        )
 
         in_micro_adjust_zone = dist_to_entry <= self.PRECISE_ENTRY_MICRO_ADJUST_RADIUS
         if (
@@ -3609,16 +3153,6 @@ class RunningManager:
                     return
                 if self._find_largest_car(w):
                     w.frame_log("[Running] 靠近车库上车点时已识别到车辆，提前视觉对车并尝试上车")
-                    w.frame_log(
-                        "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                            '靠近车库上车点已识别到车辆',
-                            location,
-                            direction,
-                            self.CAR_ENTRY_POINT,
-                            dist_to_entry,
-                            '不再强制到达上车点，直接视觉对车并前推上车',
-                        )
-                    )
                     if self._approach_visible_car(w):
                         return
 
@@ -3654,16 +3188,6 @@ class RunningManager:
             return
 
         w.frame_log("[Running] 已对准车库，开始视觉对车并前推尝试上车")
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '已对准车库朝向',
-                location,
-                direction,
-                self.CAR_ENTRY_POINT,
-                dist_to_entry,
-                '切换第一人称后开始视觉寻车',
-            )
-        )
         if self._approach_visible_car(w):
             return
 
@@ -3681,17 +3205,6 @@ class RunningManager:
         self.precise_invalid_direction_count += 1
         if getattr(self, "_frame_worker", None) is not None:
             self._frame_worker.frame_log(f'[Running] 车库靠近/精调阶段方向值为 -1，累计 {self.precise_invalid_direction_count}/{self.PRECISE_ENTRY_INVALID_DIRECTION_LIMIT}')
-        if getattr(self, "_frame_worker", None) is not None:
-            self._frame_worker.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '车库靠近方向异常',
-                    location,
-                    direction,
-                    self.CAR_ENTRY_POINT,
-                    dist_to_entry,
-                    '累计方向 -1，暂不继续靠近车库点',
-                )
-            )
         if self.precise_invalid_direction_count >= self.PRECISE_ENTRY_INVALID_DIRECTION_LIMIT:
             self._switch_to_roadside_car_search("车库点方向多次为 -1")
         return True
@@ -3718,16 +3231,6 @@ class RunningManager:
                 self._switch_to_roadside_car_search("精调靠近车库上车点时局部打转")
                 return True
             w.frame_log("[Running] 精调上车阶段人物困死，结束当前局")
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '精调上车困死',
-                    location,
-                    direction,
-                    self.CAR_ENTRY_POINT,
-                    dist_to_entry,
-                    '结束当前局',
-                )
-            )
             self._handle_death(w)
             return True
 
@@ -3738,16 +3241,6 @@ class RunningManager:
         w.frame_log(
             f"[Running] 精调靠近上车点时卡住，执行脱困 "
             f"{self.precise_stuck_recoveries}/{self.PRECISE_ENTRY_STUCK_SWITCH_LIMIT}"
-        )
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '精调上车卡住',
-                location,
-                direction,
-                self.CAR_ENTRY_POINT,
-                dist_to_entry,
-                '执行脱困并重新逼近上车点',
-            )
         )
 
         if (
@@ -3773,16 +3266,6 @@ class RunningManager:
         w.frame_log(
             f"[Running] 靠近车库上车点距离无进展，执行脱困 "
             f"{self.precise_stuck_recoveries}/{self.PRECISE_ENTRY_STUCK_SWITCH_LIMIT}"
-        )
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '精调上车无进展',
-                location,
-                direction,
-                self.CAR_ENTRY_POINT,
-                dist_to_entry,
-                '执行脱困并重试上车点',
-            )
         )
 
         if (
@@ -3829,59 +3312,22 @@ class RunningManager:
         return False
 
     def _attempt_drive_after_move(self, w: "FrameWorker", reason: str) -> bool:
-        w.frame_log(f"[Running] {reason}，尝试点击驾驶按钮")
-        w.frame_log(f'上车检查：{reason}，先看当前帧是否出现驾驶按钮')
         location = self._get_location(w)
         direction = self._get_scalar(w.get_info("direction"))
-        if location is not None:
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '执行上车尝试',
-                    location,
-                    direction,
-                    None,
-                    None,
-                    reason,
-                )
-            )
+        w.frame_log(f"[Running] {reason}，loc={location}，direction={direction}，尝试点击驾驶按钮")
 
         drive_btn = w.get_info("驾驶")
         if not drive_btn:
-            w.frame_log(f'上车检查：{reason} 当前帧没有驾驶按钮，继续对准或靠近车辆')
             return False
 
         w.frame_log("[Running] 检测到驾驶按钮，执行上车")
-        w.frame_log(f'上车检查：{reason} 已看到驾驶按钮，立即点击上车')
-        if location is not None:
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '检测到驾驶按钮',
-                    location,
-                    direction,
-                    None,
-                    None,
-                    '点击上车',
-                )
-            )
         w.click(drive_btn)
         return self._finish_drive_entry_click(w)
 
     def _click_drive_directly_after_move(self, w: "FrameWorker", reason: str) -> bool:
-        w.frame_log(f"[Running] {reason}，不预检查按钮，直接点击驾驶")
-        w.frame_log(f'上车尝试：{reason}，直接点击驾驶按钮并刷新确认是否上车')
         location = self._get_location(w)
         direction = self._get_scalar(w.get_info("direction"))
-        if location is not None:
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '执行上车尝试',
-                    location,
-                    direction,
-                    None,
-                    None,
-                    reason,
-                )
-            )
+        w.frame_log(f"[Running] {reason}，loc={location}，direction={direction}，不预检查按钮，直接点击驾驶")
 
         w.click("驾驶")
         return self._finish_drive_entry_click(w)
@@ -3891,7 +3337,6 @@ class RunningManager:
         w.refresh_frame()
         if self._is_in_vehicle(w):
             w.frame_log("[Running] 上车成功")
-            w.frame_log('上车结果：点击驾驶后刷新到车内状态，上车成功，切换到开车阶段')
             entry_source = self.active_vehicle_entry_source or (
                 self.VEHICLE_ENTRY_GARAGE if self.precise_entering_car else self.VEHICLE_ENTRY_UNKNOWN
             )
@@ -3904,7 +3349,6 @@ class RunningManager:
             return True
 
         w.frame_log("[Running] 点击驾驶后仍未上车")
-        w.frame_log('上车结果：点击驾驶后刷新仍不是车内状态，本轮上车失败')
         return False
 
     def _handle_visual_entry_failure(self, w: "FrameWorker"):
@@ -4014,16 +3458,6 @@ class RunningManager:
     ) -> bool:
         if self.current_view_mode == self.VIEW_MODE_FIRST:
             return False
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '人称切换',
-                location,
-                direction,
-                None,
-                None,
-                '切换第一人称',
-            )
-        )
         return self._switch_view_mode(w, self.VIEW_MODE_FIRST, "当前处于跑图阶段，切换第一人称")
 
     def _ensure_third_person_view(
@@ -4035,17 +3469,6 @@ class RunningManager:
     ) -> bool:
         if self.current_view_mode == self.VIEW_MODE_THIRD:
             return False
-        if location is not None:
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '人称切换',
-                    location,
-                    direction,
-                    None,
-                    None,
-                    '切换第三人称',
-                )
-            )
         return self._switch_view_mode(w, self.VIEW_MODE_THIRD, reason)
 
     def _find_largest_car(self, w: "FrameWorker"):
@@ -4123,31 +3546,11 @@ class RunningManager:
                 f"[Running] 发现车辆且人物已在路边，当前位置 {location}, "
                 f"附近 mask 道路点 {player_road_point}, player_road_dist={player_road_dist:.2f}，开始追车"
             )
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '路边车辆确认',
-                    location,
-                    direction,
-                    player_road_point,
-                    player_road_dist,
-                    f'人物 {self.ROADSIDE_CAR_MAX_PLAYER_ROAD_DISTANCE:.2f} 距离内存在 mask 道路点，放宽车辆路边判断',
-                )
-            )
             return True
 
         w.frame_log(
             f"[Running] 发现车辆但人物不在路上，当前位置 {location}, "
             f"{self.ROADSIDE_CAR_MAX_PLAYER_ROAD_DISTANCE:.2f} 距离内无 mask 道路点，先停车不追车"
-        )
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '路边车辆过滤',
-                location,
-                direction,
-                player_road_point,
-                player_road_dist,
-                f'人物 {self.ROADSIDE_CAR_MAX_PLAYER_ROAD_DISTANCE:.2f} 距离内无 mask 道路点，暂不追车',
-            )
         )
         return False
 
@@ -4288,7 +3691,6 @@ class RunningManager:
     def _align_to_visible_car(self, w: "FrameWorker") -> Optional[bool]:
         offset_real = self._get_visible_car_center_offset(w)
         if offset_real is None:
-            w.frame_log('对准车：当前帧没有识别到车辆，无法做视觉中心对准')
             return None
 
         center_threshold = self._get_car_align_center_threshold()
@@ -4297,7 +3699,6 @@ class RunningManager:
                 f"[Running] 车辆已大致对准，offset={offset_real:.2f}px, "
                 f"threshold={center_threshold}, car_area_ratio={self.roadside_car_last_area_ratio}"
             )
-            w.frame_log(f'对准车：车辆中心已进入容差，offset={offset_real:.1f}px，threshold={center_threshold}，area={self.roadside_car_last_area_ratio}')
             return True
 
         adjust_val = int(offset_real * self.CAR_ALIGN_STEP_RATIO)
@@ -4307,7 +3708,6 @@ class RunningManager:
             f"offset={offset_real:.2f}px, threshold={center_threshold}, "
             f"car_area_ratio={self.roadside_car_last_area_ratio}"
         )
-        w.frame_log(f'对准车：车辆中心偏移 {offset_real:.1f}px，滑动视角 x_bias={adjust_val}，dura={self.CAR_ALIGN_DURA}ms，wait={self.CAR_ALIGN_WAIT}ms，动作后刷新画面')
         w.tap_single("视角", x_bias=adjust_val, dura=self.CAR_ALIGN_DURA, wait=self.CAR_ALIGN_WAIT)
         w.refresh_frame()
         return False
@@ -4340,7 +3740,6 @@ class RunningManager:
                 offset_real = self._get_visible_car_center_offset(w)
                 if offset_real is None:
                     w.frame_log("[Running] sendevent+uinput 靠车时未检测到车辆，停止新方案")
-                    w.frame_log('对准车：sendevent+uinput 靠车时没看到车辆，停止混合靠车方案')
                     return False
 
                 forward_bias_y, _, _ = self._get_dynamic_car_forward_motion()
@@ -4348,7 +3747,6 @@ class RunningManager:
                     f"[Running] sendevent 按住摇杆靠车 {step_text}: "
                     f"y_bias={forward_bias_y}, car_area_ratio={self.roadside_car_last_area_ratio}"
                 )
-                w.frame_log(f'对准车：sendevent 按住摇杆靠近车辆 {step_text}，y_bias={forward_bias_y}，area={self.roadside_car_last_area_ratio}')
 
                 if not joystick_pressed:
                     w.move_press(0, "摇杆")
@@ -4374,7 +3772,6 @@ class RunningManager:
                         f"[Running] uinput 同步调整视角靠车 {step_text}: "
                         f"x_bias={view_bias}, offset={offset_real:.2f}px, threshold={center_threshold}"
                     )
-                    w.frame_log(f'对准车：靠车过程中车辆偏移 {offset_real:.1f}px，同步滑动视角 x_bias={view_bias}，threshold={center_threshold}')
                     w.uinput_tap_single(
                         "视角",
                         x_bias=view_bias,
@@ -4386,18 +3783,15 @@ class RunningManager:
                         f"[Running] sendevent+uinput 近车已大致对准 {step_text}: "
                         f"offset={offset_real:.2f}px, threshold={center_threshold}"
                     )
-                    w.frame_log(f'对准车：靠车过程中车辆已在中心容差内 {step_text}，offset={offset_real:.1f}px，threshold={center_threshold}')
 
                 w.refresh_frame()
                 if w.get_info("驾驶"):
                     w.frame_log("[Running] sendevent+uinput 靠车检测到驾驶按钮，松开摇杆后点击上车")
-                    w.frame_log('对准车：靠车刷新后看到驾驶按钮，松开摇杆并点击上车')
                     w.move_up(0)
                     joystick_pressed = False
                     return self._attempt_drive_after_move(w, f"sendevent+uinput 靠车后点击驾驶 {step_text}")
 
             w.frame_log("[Running] sendevent+uinput 靠车达到步数上限，未检测到驾驶按钮")
-            w.frame_log('对准车：sendevent+uinput 靠车达到步数上限，仍没有看到驾驶按钮')
             return False
         except Exception as exc:
             w.frame_log(f"[Running] sendevent+uinput 靠车异常，准备回退原始方案: {exc}")
@@ -4421,12 +3815,10 @@ class RunningManager:
             pushing_visible_target = aligned is not None or visible_target_forward_pushes > 0
             if aligned is None:
                 w.frame_log("[Running] 当前画面未检测到车辆，保持朝向向前推进")
-                w.frame_log('对准车：当前画面未检测到车辆，保持朝向小步前推找驾驶按钮')
             elif not aligned:
                 continue
             else:
                 w.frame_log(f"[Running] 已对准车辆，执行前推尝试上车 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS}")
-                w.frame_log(f'对准车：车辆已对准，执行第 {step + 1}/{self.CAR_VISUAL_SEARCH_MAX_STEPS} 次前推尝试上车')
 
             forward_bias_y, forward_dura, forward_wait = self._get_dynamic_car_forward_motion()
             w.frame_log(
@@ -4434,7 +3826,6 @@ class RunningManager:
                 f"dura={forward_dura}ms, wait={forward_wait}ms, "
                 f"car_area_ratio={self.roadside_car_last_area_ratio}"
             )
-            w.frame_log(f'对准车：视觉前推 y_bias={forward_bias_y}，dura={forward_dura}ms，wait={forward_wait}ms，area={self.roadside_car_last_area_ratio}，动作后刷新画面')
             w.tap_single(
                 "摇杆",
                 y_bias=forward_bias_y,
@@ -4458,7 +3849,6 @@ class RunningManager:
                         f"但仅向该车前推 {visible_target_forward_pushes} 次，未超过 "
                         f"{self.CAR_FORWARD_LOST_BACKOFF_MIN_PUSHES} 次，不后拉，继续向前找车"
                     )
-                    w.frame_log(f'对准车：视觉前推后车辆消失，但只向该车前推 {visible_target_forward_pushes} 次，先不后拉，继续向前找车')
                     continue
                 recover_result = self._recover_car_lost_after_forward_push(
                     w,
@@ -4501,7 +3891,6 @@ class RunningManager:
             f"后拉 {self.CAR_FORWARD_LOST_BACKOFF_WAIT}ms "
             "复核驾驶按钮和车辆位置"
         )
-        w.frame_log(f'对准车：{reason}{push_text}，可能已经滑过车辆，先后拉 {self.CAR_FORWARD_LOST_BACKOFF_WAIT}ms 再复核驾驶按钮和车辆位置')
         w.tap_single(
             "摇杆",
             y_bias=self.CAR_FORWARD_LOST_BACKOFF_Y_BIAS,
@@ -4520,11 +3909,9 @@ class RunningManager:
                 self.roadside_car_last_area_ratio = area_ratio
                 self.roadside_car_peak_area_ratio = max(self.roadside_car_peak_area_ratio or 0.0, area_ratio)
             w.frame_log(f"[Running] {reason}后拉后重新发现车辆，area_ratio={area_ratio}")
-            w.frame_log(f'对准车：后拉刷新后重新看到车辆，area={area_ratio}，继续视觉对车')
             return "visible"
 
         w.frame_log(f"[Running] {reason}后拉后仍未发现车辆，继续原方向向前找车")
-        w.frame_log('对准车：后拉刷新后仍没看到车辆，放弃这次近车复核，继续原方向找车')
         return "forward"
 
     def _align_to_point(
@@ -4581,16 +3968,6 @@ class RunningManager:
 
         if direction is None:
             w.frame_log("[Running] 精确逼近时当前朝向无效，等待下一帧")
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '精确逼近朝向无效',
-                    location,
-                    None,
-                    target,
-                    dist,
-                    '等待下一帧',
-                )
-            )
             return
 
         align_threshold = 2 if dist < 5 else 5
@@ -4604,30 +3981,10 @@ class RunningManager:
             max_steps=align_max_steps,
         )
         if not aligned:
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '精确逼近调方向',
-                    location,
-                    direction,
-                    target,
-                    dist,
-                    f'先对齐目标点 threshold={align_threshold}',
-                )
-            )
             return
 
         mode = self._forward_model_mode(dist)
         y_bias, dura, wait, model_dist = self._get_distance_forward_motion(mode, dist)
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '精确逼近目标点',
-                location,
-                direction,
-                target,
-                dist,
-                f'{mode}前推 y_bias={y_bias}, dura={dura}, wait={wait}, model_dist={model_dist}',
-            )
-        )
         self._tap_distance_forward_with_learning(w, target, dist, "精确逼近目标点")
 
     def _forward_model_mode(self, dist: float) -> str:
@@ -4696,44 +4053,14 @@ class RunningManager:
 
         if direction is None:
             w.frame_log("[Running] 当前朝向无效，等待下一帧")
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '当前朝向无效',
-                    location,
-                    None,
-                    target,
-                    None,
-                    '等待下一帧',
-                )
-            )
             return
 
         target_dir = calculate_angle(location, target)
         turn_dir, pixel, diff = calculate_move_count(direction, target_dir)
         distance = get_distance(location, target)
         if diff is None:
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '目标方向计算失败',
-                    location,
-                    direction,
-                    target,
-                    distance,
-                    '等待下一帧',
-                )
-            )
             return
         if abs(diff) <= 5:
-            w.frame_log(
-                "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                    '前方路径正常',
-                    location,
-                    direction,
-                    target,
-                    distance,
-                    '保持自动前进',
-                )
-            )
             return
 
         motion_ok = execute_view_turn(
@@ -4745,16 +4072,6 @@ class RunningManager:
             wait=300,
             fallback_dura=max(400, int(pixel * 1.5)),
             log_prefix="[Correct Dire]",
-        )
-        w.frame_log(
-            "跑图内部判断：{}；当前位置={}，方向={}，目标={}，距离={}；接下来{}".format(
-                '跑图方向偏移',
-                location,
-                direction,
-                target,
-                get_distance(location, target),
-                '统一角度模型调整视角',
-            )
         )
         return motion_ok
 

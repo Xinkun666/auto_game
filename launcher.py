@@ -843,9 +843,51 @@ def resolve_preview_payload_group_name(payload) -> str:
 PREVIEW_INFO_VALUE_MAX_LENGTH = 50
 
 
+def _format_timed_preview_info(value):
+    """Put decorated special-area inference time before its result."""
+    candidate = value
+    if isinstance(candidate, str):
+        candidate_text = candidate.strip()
+        if not candidate_text.startswith(("[", "(")):
+            return None
+        try:
+            candidate = ast.literal_eval(candidate_text)
+        except (SyntaxError, ValueError):
+            return None
+
+    if not isinstance(candidate, (list, tuple)) or len(candidate) != 2:
+        return None
+    timing = candidate[1]
+    if not isinstance(timing, (list, tuple)) or len(timing) != 1:
+        return None
+    try:
+        elapsed_ms = float(timing[0])
+    except (TypeError, ValueError):
+        return None
+
+    info = candidate[0]
+    if isinstance(info, str):
+        info_text = info
+    elif isinstance(info, (list, tuple, dict)):
+        info_text = json.dumps(
+            info,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+    else:
+        info_text = str(info)
+
+    timing_text = f"{elapsed_ms:.3f}".rstrip("0").rstrip(".")
+    return f"[{timing_text} ms], {info_text}"
+
+
 def _truncate_preview_info_value(value, max_length: int = PREVIEW_INFO_VALUE_MAX_LENGTH):
     """Keep a single preview info value compact without changing source data."""
-    if isinstance(value, str):
+    timed_display = _format_timed_preview_info(value)
+    if timed_display is not None:
+        display_text = timed_display
+    elif isinstance(value, str):
         display_text = value
     elif isinstance(value, (list, tuple, dict)):
         display_text = json.dumps(
@@ -858,7 +900,7 @@ def _truncate_preview_info_value(value, max_length: int = PREVIEW_INFO_VALUE_MAX
         display_text = str(value)
 
     if len(display_text) <= max_length:
-        return value
+        return display_text if timed_display is not None else value
     return f"{display_text[: max_length - 3]}..."
 
 

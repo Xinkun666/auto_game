@@ -6,6 +6,8 @@ import socket
 import secrets
 import time
 import random
+
+from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
 from aw.autogame.stream_client.hos_sdk.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -67,10 +69,12 @@ def exec_cmd(command, timeout=5 * 60, error_print=True, join_result=False, redir
     else:
         if redirect:
             proc = subprocess.Popen(cmd, stdout=fileno,
-                                    stderr=fileno, shell=False)
+                                    stderr=fileno, shell=False,
+                                    **hidden_subprocess_kwargs())
         else:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE, shell=False)
+                                    stderr=subprocess.PIPE, shell=False,
+                                    **hidden_subprocess_kwargs())
     try:
         (out, err) = proc.communicate(timeout=timeout)
         err = get_decode(err).strip()

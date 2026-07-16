@@ -11,8 +11,6 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_navigati
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import *
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_manager import HouseExitManager
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import TimeoutTracker
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import autogame_print as print
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import log_step
 from aw.autogame.tools.Utils import *
 
 if TYPE_CHECKING:
@@ -68,6 +66,11 @@ class HouseSearchManager:
     HOUSE_NEAR_WALL = 4
     HOUSE_CLASS_IDS = {8}
     WINDOW_CLASS_IDS = {2}
+
+    def _frame_log(self, message: str):
+        worker = getattr(self, "_frame_worker", None)
+        if worker is not None:
+            worker.frame_log(message)
     STONE_WALL_CLASS_IDS = {9}
     HOUSE_ENTRY_CLASS_IDS = {0, 2, 4}
     DOOR_CLASS_IDS = {0, 4}
@@ -327,7 +330,7 @@ class HouseSearchManager:
             if any(self._is_excluded_entry(entry) for entry in entries):
                 excluded.add(house_id)
         if excluded:
-            print(
+            self._frame_log(
                 f"[Searching] 已过滤指定进门点 {sorted(self.EXCLUDED_ENTRY_LOCATIONS)} "
                 f"对应房屋 {sorted(excluded)}"
             )
@@ -338,7 +341,7 @@ class HouseSearchManager:
 
     def _mark_current_entry_failed(self, reason: str):
         entry_loc = self._entry_location_tuple(self.active_entry) if self.active_entry else None
-        print(
+        self._frame_log(
             f"[EntryPoint] {reason}，临时舍弃当前入门点 "
             f"house={self.current_house_id}, entry={entry_loc}；同一房子的其他入门点继续保留"
         )
@@ -399,7 +402,7 @@ class HouseSearchManager:
         self._jump_forward_guard = False
         self._jump_forward_wait_until_hidden = False
 
-    def _set_frame_decision(
+    def _log_frame_state(
         self,
         w: 'FrameWorker',
         observation: str,
@@ -415,24 +418,6 @@ class HouseSearchManager:
             frame_logger(
                 f"搜房日志：目标是{target}；本帧观察到{observation}；接下来{action_text}"
             )
-        log_step(
-            f"当前搜房帧日志：{observation}",
-            target=target,
-            action=action or decision,
-            method=method,
-            result=result or decision,
-        )
-        setter = getattr(w, "set_frame_decision", None)
-        if not callable(setter):
-            return
-        setter(
-            observation=observation,
-            target=target,
-            decision=decision,
-            action=action or decision,
-            method=method,
-            result=result,
-        )
 
     @staticmethod
     def _format_control_method(action_name: str, control_point=None, **params) -> str:
@@ -494,7 +479,7 @@ class HouseSearchManager:
             parts.append(extra)
         return "，".join(parts)
 
-    def _set_search_frame_decision(
+    def _log_search_frame_state(
         self,
         w: 'FrameWorker',
         branch: str,
@@ -505,7 +490,7 @@ class HouseSearchManager:
         result: str = "",
     ):
         target = branch if branch.startswith("当前") else f"当前搜房分支：{branch}"
-        self._set_frame_decision(
+        self._log_frame_state(
             w,
             observation,
             decision,
@@ -516,6 +501,7 @@ class HouseSearchManager:
         )
 
     def process(self, w: 'FrameWorker'):
+        self._frame_worker = w
         w.frame_log("进入搜房模块：这一帧先确认是否需要中止，再处理落地视角、位置、目标房屋、进门/搜房/出房分支")
         if self._should_abort(w):
             return
@@ -535,10 +521,10 @@ class HouseSearchManager:
         )
         if location_raw is None:
             self.location_missing_frames += 1
-            print('位置值是None，等待位置刷新...')
+            w.frame_log('位置值是None，等待位置刷新...')
             w.frame_log("搜房观察：当前位置为空，所以轻推摇杆前探并刷新画面，下一帧重新读取坐标")
             self._reset_stuck_history_for_frame_wait("搜房阶段当前位置缺失")
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 f"搜房阶段当前位置缺失，连续缺失 {self.location_missing_frames} 帧",
                 "当前位置无效时先小幅前推刷新小地图坐标，本帧不进入搜房决策，下一帧重新读取 location/direction",
@@ -554,10 +540,10 @@ class HouseSearchManager:
 
         if location is None:
             self.location_missing_frames += 1
-            print('位置值无效，等待位置刷新...')
+            w.frame_log('位置值无效，等待位置刷新...')
             w.frame_log(f"搜房观察：当前位置值无效 raw={location_raw}，所以轻推摇杆前探并刷新坐标")
             self._reset_stuck_history_for_frame_wait("搜房阶段位置值无效")
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 f"搜房阶段位置值无效，原始位置={location_raw}",
                 "坐标格式无效时先小幅前推刷新小地图坐标，本帧不进入搜房决策，下一帧重新读取 location/direction",
@@ -577,10 +563,10 @@ class HouseSearchManager:
             x_bias = self.VALID_FRAME_DIRECTION_RECOVERY_X_BIAS
             if self.direction_missing_frames % 2 == 0:
                 x_bias = -x_bias
-            print("方向值无效，轻微滑动视角刷新方向...")
+            w.frame_log("方向值无效，轻微滑动视角刷新方向...")
             w.frame_log(f"搜房观察：当前位置有效但方向值无效 direction={direction}，轻滑视角后下一帧重读")
             self._reset_stuck_history_for_frame_wait("搜房阶段方向值无效")
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 f"搜房阶段方向值无效，当前位置={location}，direction={direction}",
                 "方向无效时不进入搜房决策，先左右轻滑视角刷新方向读数，下一帧重新读取 location/direction",
@@ -598,7 +584,7 @@ class HouseSearchManager:
             return
 
         self.direction_missing_frames = 0
-        self._set_frame_decision(
+        self._log_frame_state(
             w,
             f"搜房阶段：status={self.status}，当前位置={location}，当前方位={direction}",
             "根据当前位置、方位、入门点和房屋场景选择搜房/进门/出房动作",
@@ -612,10 +598,10 @@ class HouseSearchManager:
         first_loc = self._remember_valid_location(w.get_info('location'))
         if first_loc is None:
             self.location_missing_frames += 1
-            print('落地首帧位置值无效，先刷新等待位置稳定...')
+            w.frame_log('落地首帧位置值无效，先刷新等待位置稳定...')
             w.frame_log("搜房观察：落地首帧当前位置为空，所以先刷新画面；连续缺失时轻推摇杆刷新小地图坐标")
             self._reset_stuck_history_for_frame_wait("落地首帧坐标缺失")
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 f"搜房阶段落地首帧当前位置缺失，连续缺失 {self.location_missing_frames} 帧",
                 "先刷新画面等待坐标恢复，连续缺失时轻推摇杆刷新小地图坐标",
@@ -629,7 +615,7 @@ class HouseSearchManager:
             return None
 
         self.location_missing_frames = 0
-        self._set_frame_decision(
+        self._log_frame_state(
             w,
             f"搜房阶段落地首帧读取当前位置={first_loc}",
             "先轻推摇杆并刷新第二帧，用前后坐标差确认小地图坐标是否稳定，再切第一人称",
@@ -641,7 +627,7 @@ class HouseSearchManager:
             ),
             result="坐标稳定后点击人称并继续入门点判断",
         )
-        print(f"[Searching] 落地首帧当前位置={first_loc}，轻推摇杆后刷新第二帧确认坐标稳定")
+        w.frame_log(f"[Searching] 落地首帧当前位置={first_loc}，轻推摇杆后刷新第二帧确认坐标稳定")
         w.tap_single(
             '摇杆',
             y_bias=self.LANDING_LOCATION_PROBE_Y_BIAS,
@@ -652,9 +638,9 @@ class HouseSearchManager:
 
         second_loc = self._remember_valid_location(w.get_info('location'))
         if second_loc is None:
-            print("[Searching] 落地前推后第二帧位置仍无效，等待下一帧重新确认")
+            w.frame_log("[Searching] 落地前推后第二帧位置仍无效，等待下一帧重新确认")
             self._reset_stuck_history_for_frame_wait("落地前推后第二帧位置无效")
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 f"落地前推后第二帧位置无效，首帧位置={first_loc}",
                 "第二帧仍没有有效小地图坐标，暂不切第一人称，也不选择入门点",
@@ -666,13 +652,13 @@ class HouseSearchManager:
 
         location_delta = get_distance(first_loc, second_loc)
         if location_delta > self.LANDING_LOCATION_STABLE_MAX_JUMP_DISTANCE:
-            print(
+            w.frame_log(
                 f"[Searching] 落地前推后坐标跳变 {location_delta:.2f} > "
                 f"{self.LANDING_LOCATION_STABLE_MAX_JUMP_DISTANCE:.1f}，暂不切人称或选入门点"
             )
             self.initial_location_samples = [second_loc]
             self._reset_stuck_history_for_frame_wait("落地前推后坐标跳变过大")
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 (
                     f"落地前推后坐标跳变过大：first={first_loc}, second={second_loc}, "
@@ -687,7 +673,7 @@ class HouseSearchManager:
 
         self.initial_location_samples = [second_loc]
         self.landing_location_confirmed = True
-        self._set_frame_decision(
+        self._log_frame_state(
             w,
             (
                 f"落地前推后坐标稳定：first={first_loc}, second={second_loc}, "
@@ -709,7 +695,7 @@ class HouseSearchManager:
         try:
             return bool(callback(w))
         except Exception as exc:
-            print(f"[Searching] 中断检查失败: {exc}")
+            w.frame_log(f"[Searching] 中断检查失败: {exc}")
             return False
 
     def _can_finish_searching(self, w: 'FrameWorker'):
@@ -719,11 +705,11 @@ class HouseSearchManager:
         try:
             return bool(callback(w))
         except Exception as exc:
-            print(f"[Searching] 结束条件检查失败: {exc}")
+            w.frame_log(f"[Searching] 结束条件检查失败: {exc}")
             return False
 
     def _finish_searching_phase(self, w: 'FrameWorker', reason: str):
-        self._set_frame_decision(
+        self._log_frame_state(
             w,
             f"搜房阶段准备结束：{reason}",
             "切换到跑图阶段，后续继续自动前进/路线推进",
@@ -736,7 +722,7 @@ class HouseSearchManager:
             try:
                 return bool(callback(w, reason))
             except Exception as exc:
-                print(f"[Searching] 搜房结束回调失败: {exc}")
+                w.frame_log(f"[Searching] 搜房结束回调失败: {exc}")
 
         w.change_stage('跑图阶段')
         return True
@@ -744,7 +730,7 @@ class HouseSearchManager:
     def _continue_searching_until_timer(self, w: 'FrameWorker', reason: str):
         self.stop_auto_forward(w)
         if self._can_finish_searching(w):
-            print(f"[Searching] {reason}，搜房计时已满，切换到跑图阶段")
+            w.frame_log(f"[Searching] {reason}，搜房计时已满，切换到跑图阶段")
             self.searching_number = 0
             self.current_house_id = None
             self.active_entry = None
@@ -757,7 +743,7 @@ class HouseSearchManager:
             self._reset_entry_near_micro_adjust()
             return self._finish_searching_phase(w, reason)
 
-        print(f"[Searching] {reason}，但搜房未满10分钟，重置本轮目标继续搜房")
+        w.frame_log(f"[Searching] {reason}，但搜房未满10分钟，重置本轮目标继续搜房")
         self.searching_number = 0
         self.completed_houses.clear()
         self.temp_skip_houses.clear()
@@ -802,17 +788,10 @@ class HouseSearchManager:
         current_dir = w.get_info("direction")
         house_scene = self._get_house_scene(w)
         forward_scene = self._get_forward_scene(w)
-        log_step(
-            f"当前搜房帧日志：刷新帧后场景快照：reason={reason or '未标注'}，"
-            f"status={getattr(self, 'status', 'UNKNOWN')}，house={getattr(self, 'current_house_id', None)}，"
-            f"raw_location={raw_location}，当前位置={current_loc}，location_source={location_source}，"
-            f"current_dir={current_dir}，"
-            f"house_scene={house_scene}/{self._house_scene_label(house_scene)}，"
-            f"forward_scene_count={len(forward_scene)}，auto_forward={self.auto_forward}",
-            target="当前搜房分支：刷新帧后场景快照",
-            action="读取刷新后的场景信息",
-            method="w.refresh_frame(); get_info(location/direction/house_scene/forward_scene)",
-            result="后续门口微调、搜房、出房分支基于这次刷新后的识别结果继续判断",
+        w.frame_log(
+            f"搜房刷新：{reason or '常规刷新'}；raw_location={raw_location}，"
+            f"当前位置={current_loc}，location_source={location_source}，"
+            f"方向={current_dir}，house_scene={house_scene}，forward_scene={forward_scene}"
         )
         jump_reason = reason or f"{getattr(self, 'status', 'UNKNOWN')} 刷新后全局检查"
         self._handle_global_jump_forward_if_visible(w, jump_reason)
@@ -825,13 +804,13 @@ class HouseSearchManager:
             return False
         if not w.get_info('跳跃'):
             if getattr(self, "_jump_forward_wait_until_hidden", False):
-                print("[Jump] 跳跃按钮已消失，允许下一次出现时重新触发")
+                w.frame_log("[Jump] 跳跃按钮已消失，允许下一次出现时重新触发")
             self._jump_forward_wait_until_hidden = False
             return False
         if getattr(self, "_jump_forward_wait_until_hidden", False):
             return False
 
-        print(f"[Jump] 搜房全局抢占：{reason} 检测到跳跃按钮，只点击一次跳跃并轻微前推")
+        w.frame_log(f"[Jump] 搜房全局抢占：{reason} 检测到跳跃按钮，只点击一次跳跃并轻微前推")
         return self.handle_jump_logic(w, reason)
 
     def _normalize_location_value(self, value):
@@ -858,7 +837,7 @@ class HouseSearchManager:
 
     def _reset_stuck_history_for_frame_wait(self, reason: str = ""):
         if getattr(self, "history_locations", None):
-            print(f"[Stuck] {reason or '等待刷新帧'}，清空卡住窗口，避免把等待帧误判为卡死")
+            self._frame_log(f"[Stuck] {reason or '等待刷新帧'}，清空卡住窗口，避免把等待帧误判为卡死")
         self.history_locations = []
 
     def _reset_entry_near_micro_adjust(self):
@@ -869,7 +848,7 @@ class HouseSearchManager:
             time.monotonic() + self.HOUSE_BYPASS_UNSTUCK_PAUSE_SECONDS
         )
         self.history_locations = []
-        print(f"[NavBypass] {phase_label} 绕房调整视角/前推期间暂停通用避障")
+        self._frame_log(f"[NavBypass] {phase_label} 绕房调整视角/前推期间暂停通用避障")
 
     def _is_house_bypass_unstuck_paused(self) -> bool:
         pause_until = getattr(self, "house_bypass_unstuck_pause_until", 0.0)
@@ -908,7 +887,7 @@ class HouseSearchManager:
 
         self.stop_auto_forward(w)
         self.indoor_stuck_frames = 0
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：已在屋内，开始搜索物资",
             self._entry_observation(
@@ -921,7 +900,7 @@ class HouseSearchManager:
             method="start_searching()",
             result="搜完后出房并回到下一目标选择",
         )
-        print(f"[Searching] {reason}")
+        w.frame_log(f"[Searching] {reason}")
 
         if not self.start_searching(w):
             return False
@@ -931,7 +910,7 @@ class HouseSearchManager:
         if self.current_house_id is not None:
             self.completed_houses.add(self.current_house_id)
         self.searching_number += 1
-        print(f"[Searching] 房屋 {self.current_house_id} 完成，累计已搜 {self.searching_number} 个")
+        w.frame_log(f"[Searching] 房屋 {self.current_house_id} 完成，累计已搜 {self.searching_number} 个")
 
         self._refresh_frame_and_handle_jump(w)
         exit_direction = w.get_info('direction')
@@ -946,7 +925,7 @@ class HouseSearchManager:
     def _exit_current_indoor_house(self, w: 'FrameWorker', reason: str) -> bool:
         self.stop_auto_forward(w)
         self._clear_house_search_timer()
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：屋内兜底出房",
             self._entry_observation(
@@ -959,7 +938,7 @@ class HouseSearchManager:
             method="_exit_house()",
             result="出房后继续寻找下一个进门点",
         )
-        print(f"[Searching] {reason}，执行快速出房")
+        w.frame_log(f"[Searching] {reason}，执行快速出房")
 
         result = self._exit_house(w)
         if result is None:
@@ -974,9 +953,9 @@ class HouseSearchManager:
         self._reset_route_stuck_bypass()
 
         if result:
-            print("[Searching] 快速出房完成，继续寻找下一个进门点")
+            w.frame_log("[Searching] 快速出房完成，继续寻找下一个进门点")
             return True
-        print("[Searching] 快速出房暂未确认成功，下一轮继续兜底")
+        w.frame_log("[Searching] 快速出房暂未确认成功，下一轮继续兜底")
         return False
 
     def _handle_indoor_during_entry_route(self, w: 'FrameWorker', current_loc, reason: str) -> bool:
@@ -988,7 +967,7 @@ class HouseSearchManager:
             return False
 
         self.stop_auto_forward(w)
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：进门途中检测到 indoor",
             self._entry_observation(
@@ -1007,7 +986,7 @@ class HouseSearchManager:
 
         if matched:
             matched_house_id, matched_entry, matched_dist = matched
-            print(
+            w.frame_log(
                 f"[Searching] {reason}，当前位置匹配到房屋 {matched_house_id}，"
                 f"nearest_entry_dist={matched_dist:.2f}"
             )
@@ -1020,7 +999,7 @@ class HouseSearchManager:
             self.current_house_id = matched_house_id
             self.active_entry = matched_entry
         else:
-            print(f"[Searching] {reason}，当前位置未匹配到房屋列表，搜完后不写入完成房屋")
+            w.frame_log(f"[Searching] {reason}，当前位置未匹配到房屋列表，搜完后不写入完成房屋")
             self.current_house_id = None
             self.active_entry = None
 
@@ -1037,7 +1016,7 @@ class HouseSearchManager:
 
     def _house_search_timed_out(self):
         if self.house_search_timer.should_report_expired():
-            print(f"[搜房] 入屋搜房已超过{self.HOUSE_SEARCH_TIMEOUT_SECONDS}s，停止搜房并执行出房策略")
+            self._frame_log(f"[搜房] 入屋搜房已超过{self.HOUSE_SEARCH_TIMEOUT_SECONDS}s，停止搜房并执行出房策略")
         return self.house_search_timer.expired()
 
     def _should_stop_house_search(self, w: 'FrameWorker'):
@@ -1049,19 +1028,19 @@ class HouseSearchManager:
         self._refresh_frame_and_handle_jump(w)
 
         if self._get_house_scene(w) != 0:
-            print("[搜房] 超时时已不在屋内，视为出房完成")
+            w.frame_log("[搜房] 超时时已不在屋内，视为出房完成")
             return True
 
-        print("[搜房] 超时兜底：启动 HouseExitManager 直接出房")
+        w.frame_log("[搜房] 超时兜底：启动 HouseExitManager 直接出房")
         self.house_exit_manager.reset()
         for _ in range(30):
             if self._should_abort(w):
                 return False
             if self.house_exit_manager.process(w):
-                print("[搜房] 超时兜底出房成功")
+                w.frame_log("[搜房] 超时兜底出房成功")
                 return True
 
-        print("[搜房] HouseExitManager 未出房，回退到原出房策略")
+        w.frame_log("[搜房] HouseExitManager 未出房，回退到原出房策略")
         self._exit_house(w)
         return not self._should_abort(w) and self._get_house_scene(w) != 0
 
@@ -1226,12 +1205,12 @@ class HouseSearchManager:
         left_score = self._house_side_block_score(scene, frame_w * 0.16, frame_w * 0.46, frame_h)
         right_score = self._house_side_block_score(scene, frame_w * 0.54, frame_w * 0.84, frame_h)
         side = "right" if right_score <= left_score else "left"
-        print(f"[Unstuck] 房体绕行空隙判断：left={left_score:.2f}, right={right_score:.2f}，选择{side}")
+        w.frame_log(f"[Unstuck] 房体绕行空隙判断：left={left_score:.2f}, right={right_score:.2f}，选择{side}")
         return side
 
     def _bypass_front_house_block(self, w: 'FrameWorker', current_loc, safe_get_loc):
-        print("[Unstuck] 室外卡住，先后退确认前方是否为房体阻挡")
-        self._set_search_frame_decision(
+        w.frame_log("[Unstuck] 室外卡住，先后退确认前方是否为房体阻挡")
+        self._log_search_frame_state(
             w,
             "当前搜房分支：前方房体卡住，先后退确认",
             self._entry_observation(
@@ -1248,7 +1227,7 @@ class HouseSearchManager:
         self._refresh_frame_and_handle_jump(w)
 
         if not self._front_house_blocking(w):
-            print("[Unstuck] 后退后前方未确认房体，交给通用避障")
+            w.frame_log("[Unstuck] 后退后前方未确认房体，交给通用避障")
             return False
 
         if self._try_lock_visible_door_after_block(w):
@@ -1262,13 +1241,13 @@ class HouseSearchManager:
             if self._should_abort(w):
                 return False
             bias = 300 if side == "right" else -300
-            print(f"[Unstuck] 前方房体挡路，尝试向{side}侧滑绕房")
+            w.frame_log(f"[Unstuck] 前方房体挡路，尝试向{side}侧滑绕房")
             side_base_loc = safe_get_loc() or back_loc
 
             for _ in range(self.HOUSE_BYPASS_SIDE_STEPS):
                 if self._should_abort(w):
                     return False
-                self._set_search_frame_decision(
+                self._log_search_frame_state(
                     w,
                     "当前搜房分支：前方房体挡路侧滑绕房",
                     self._entry_observation(
@@ -1290,13 +1269,13 @@ class HouseSearchManager:
 
             side_loc = safe_get_loc()
             if not side_loc or not side_base_loc or get_distance(side_base_loc, side_loc) <= 0.5:
-                print(f"[Unstuck] {side}侧滑位移不足，尝试另一侧")
+                w.frame_log(f"[Unstuck] {side}侧滑位移不足，尝试另一侧")
                 continue
 
             for _ in range(self.HOUSE_BYPASS_FORWARD_STEPS):
                 if self._should_abort(w):
                     return False
-                self._set_search_frame_decision(
+                self._log_search_frame_state(
                     w,
                     "当前搜房分支：绕房侧滑后前推",
                     self._entry_observation(
@@ -1313,10 +1292,10 @@ class HouseSearchManager:
                 self._refresh_frame_and_handle_jump(w)
                 forward_loc = safe_get_loc()
                 if forward_loc and get_distance(current_loc, forward_loc) > self.stuck_threshold:
-                    print("[Unstuck] 绕房通过成功")
+                    w.frame_log("[Unstuck] 绕房通过成功")
                     return True
                 if self._front_house_blocking(w):
-                    self._set_search_frame_decision(
+                    self._log_search_frame_state(
                         w,
                         "当前搜房分支：绕房前推后仍挡，侧向补位",
                         self._entry_observation(
@@ -1332,9 +1311,9 @@ class HouseSearchManager:
                     w.tap_single('摇杆', x_bias=bias, dura=350, wait=500)
                     self._refresh_frame_and_handle_jump(w)
 
-            print(f"[Unstuck] {side}侧仍未绕开，尝试另一侧")
+            w.frame_log(f"[Unstuck] {side}侧仍未绕开，尝试另一侧")
 
-        print("[Unstuck] 房体绕行未成功，回退到通用避障")
+        w.frame_log("[Unstuck] 房体绕行未成功，回退到通用避障")
         return False
 
     def _is_searching_stage_frame(self, w: 'FrameWorker') -> bool:
@@ -1373,8 +1352,8 @@ class HouseSearchManager:
             )
             if direction is None:
                 x_bias = 300 if side == "right" else -300
-                print(f"[NavBypass] {phase_label} 缺少方向角，直接向{side}拨视角")
-                self._set_search_frame_decision(
+                w.frame_log(f"[NavBypass] {phase_label} 缺少方向角，直接向{side}拨视角")
+                self._log_search_frame_state(
                     w,
                     "当前搜房分支：绕房缺少方向角，直接拨视角",
                     self._entry_observation(
@@ -1392,7 +1371,7 @@ class HouseSearchManager:
                 target_direction = (float(direction) + (step if side == "right" else -step)) % 360
                 if target_direction == 0:
                     target_direction = 360
-                print(
+                w.frame_log(
                     f"[NavBypass] {phase_label} 前方仍有房体，向{side}转{step}度避让"
                 )
                 self.align_direction_blocking(
@@ -1413,7 +1392,7 @@ class HouseSearchManager:
         self._pause_unstuck_for_house_bypass(phase_label)
         self.stop_auto_forward(w)
         side = self._choose_house_bypass_side(w)
-        print(
+        w.frame_log(
             f"[NavBypass] {phase_label} 前方检测到房体/门窗，"
             f"固定向{side}侧转向绕行，最大{self.HOUSE_OBSTACLE_MAX_TURN_DEGREES}度"
         )
@@ -1422,8 +1401,8 @@ class HouseSearchManager:
         if self._should_abort(w):
             return True
 
-        print(f"[NavBypass] {phase_label} 绕行视角已处理，前推3秒后继续导航")
-        self._set_search_frame_decision(
+        w.frame_log(f"[NavBypass] {phase_label} 绕行视角已处理，前推3秒后继续导航")
+        self._log_search_frame_state(
             w,
             "当前搜房分支：绕房视角处理后前推",
             self._entry_observation(
@@ -1470,8 +1449,8 @@ class HouseSearchManager:
                 if door_center_x < left_bound
                 else self.VISIBLE_DOOR_CENTER_SIDE_BIAS
             )
-            print("[NavBypass] 非目标房门不在中间1/3，横向调整人物位置")
-            self._set_search_frame_decision(
+            w.frame_log("[NavBypass] 非目标房门不在中间1/3，横向调整人物位置")
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：非目标房门横向居中",
                 self._entry_observation(
@@ -1507,22 +1486,22 @@ class HouseSearchManager:
         if door is None:
             return False
 
-        print(f"[NavBypass] {phase_label} 前方不是当前目标但看到门，尝试顺路进房")
+        w.frame_log(f"[NavBypass] {phase_label} 前方不是当前目标但看到门，尝试顺路进房")
         self.stop_auto_forward(w)
         door = self._center_visible_door_by_lateral_move(w, door)
         if door is None:
-            print("[NavBypass] 横向调整后门目标丢失，改走绕房策略")
+            w.frame_log("[NavBypass] 横向调整后门目标丢失，改走绕房策略")
             return False
 
         if not self._align_to_door_detection(w, door):
-            print("[NavBypass] 门视角对齐失败，改走绕房策略")
+            w.frame_log("[NavBypass] 门视角对齐失败，改走绕房策略")
             return False
 
         for _ in range(3):
             if self._should_abort(w):
                 return True
             if w.get_info('开门'):
-                self._set_search_frame_decision(
+                self._log_search_frame_state(
                     w,
                     "当前搜房分支：顺路进房检测到开门",
                     self._entry_observation(
@@ -1537,7 +1516,7 @@ class HouseSearchManager:
                 )
                 w.click('开门')
                 time.sleep(1)
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：顺路进房前推",
                 self._entry_observation(
@@ -1572,16 +1551,16 @@ class HouseSearchManager:
                     "前方非目标房门顺路进房",
                 )
 
-        print("[NavBypass] 顺路进房未确认 indoor，改走绕房策略")
+        w.frame_log("[NavBypass] 顺路进房未确认 indoor，改走绕房策略")
         return False
 
     def _handle_front_stone_wall_on_search_route(self, w: 'FrameWorker', current_loc, phase_label='NAV') -> bool:
         self.stop_auto_forward(w)
-        print(
+        w.frame_log(
             f"[NavBypass] {phase_label} 前方发现 stone_wall，"
             f"先短前推 y_bias={self.STONE_WALL_FORWARD_Y_BIAS}, wait={self.STONE_WALL_FORWARD_WAIT}"
         )
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：前方石墙短前推",
             self._entry_observation(
@@ -1619,10 +1598,10 @@ class HouseSearchManager:
         if w.get_info('跳跃'):
             jump_handled = self.handle_jump_logic(w, f"{phase_label} stone_wall 前推后出现跳跃按钮")
         else:
-            print(f"[NavBypass] {phase_label} stone_wall 前推后未识别到跳跃按钮，仍尝试跳跃前推")
+            w.frame_log(f"[NavBypass] {phase_label} stone_wall 前推后未识别到跳跃按钮，仍尝试跳跃前推")
 
         if not jump_handled:
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：石墙未识别跳跃，仍前推尝试",
                 self._entry_observation(
@@ -1661,7 +1640,7 @@ class HouseSearchManager:
         return True
 
     def _maybe_bypass_front_house_on_route(self, w: 'FrameWorker', current_loc, target_loc, dist, phase_label='NAV'):
-        print(
+        w.frame_log(
             f"[NavBypass] {phase_label} 主动绕房已取消；"
             f"移动中只在卡住且 house_scene=near_wall 时执行后拉避让"
         )
@@ -1672,7 +1651,7 @@ class HouseSearchManager:
         if door is None:
             return False
 
-        print("[Unstuck] 后退后前方是房子且定位到门，直接锁门进入交互流程")
+        w.frame_log("[Unstuck] 后退后前方是房子且定位到门，直接锁门进入交互流程")
         self.stop_auto_forward(w)
         self._align_to_door_detection(w, door)
         self._refresh_frame_and_handle_jump(w)
@@ -1778,7 +1757,7 @@ class HouseSearchManager:
         door_area_ratio = self._get_detection_area_ratio(w, door)
         self.entry_door_last_area_ratio = door_area_ratio
         offset_real = (center_x - (frame_w / 2.0)) * (float(screen_w) / float(frame_w))
-        print(
+        w.frame_log(
             f"[DoorAlign] 检测到门，视觉中心偏移 {offset_real:.2f}px, "
             f"door_area_ratio={door_area_ratio}"
         )
@@ -1854,11 +1833,11 @@ class HouseSearchManager:
         else:
             return False
 
-        print(
+        w.frame_log(
             f"[{phase_label}] 入门点附近最大门中心在画面{self._side_label(side)}侧边缘 "
             f"(ratio={ratio:.2f})，不转视角，改用摇杆横移对齐门"
         )
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前进房分支：门在画面边缘，横移对齐",
             self._entry_observation(
@@ -1903,7 +1882,7 @@ class HouseSearchManager:
             tolerance_px=self.ENTRY_DOOR_FINAL_VIEW_TOLERANCE_PX,
             phase_label=phase_label,
         ):
-            print(f"[{phase_label}] 视觉中心闭环对门失败，继续原进门流程")
+            w.frame_log(f"[{phase_label}] 视觉中心闭环对门失败，继续原进门流程")
             return None
 
         wall_result = self._handle_entry_near_wall_if_needed(w, phase_label, "门框视觉对齐后")
@@ -1912,10 +1891,10 @@ class HouseSearchManager:
 
         door = self.find_largest_door(w)
         if door is None:
-            print(f"[{phase_label}] 视觉对门后门目标丢失，继续原进门流程")
+            w.frame_log(f"[{phase_label}] 视觉对门后门目标丢失，继续原进门流程")
             return None
 
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前进房分支：车式视觉闭环对准门",
             self._entry_observation(
@@ -1927,11 +1906,11 @@ class HouseSearchManager:
             method="_align_to_door_detection()",
             result="门居中后进入自动开门/直推",
         )
-        print(f"[{phase_label}] 门已按视觉中心闭环对准，准备自动开门直推")
+        w.frame_log(f"[{phase_label}] 门已按视觉中心闭环对准，准备自动开门直推")
         return door
 
     def _backoff_after_centered_entry_push_failure(self, w: 'FrameWorker', phase_label: str, failures: int, reason: str):
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前进房分支：对门直推失败后拉",
             self._entry_observation(
@@ -1947,7 +1926,7 @@ class HouseSearchManager:
             ),
             result="后拉后下一轮重新找门/对门",
         )
-        print(
+        w.frame_log(
             f"[{phase_label}] {reason}，后拉记为进门失败 "
             f"{failures}/{self.ENTRY_DOOR_DIRECT_MAX_FAILURES}"
         )
@@ -1964,7 +1943,7 @@ class HouseSearchManager:
         if self._get_house_scene(w) != self.HOUSE_NEAR_WALL:
             return None
 
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前进房分支：near_wall贴墙脱离",
             self._entry_observation(
@@ -1986,7 +1965,7 @@ class HouseSearchManager:
             ),
             result="脱离后复核是否已进房或回到屋外/门口",
         )
-        print(
+        w.frame_log(
             f"[{phase_label}] {reason}检测到 near_wall，"
             f"先右移一点再后拉脱离墙面: "
             f"x_bias={self.ENTRY_NEAR_WALL_SIDE_ESCAPE_X_BIAS}, "
@@ -2013,13 +1992,13 @@ class HouseSearchManager:
         self.history_locations = []
 
         if self._get_house_scene(w) == self.HOUSE_INDOOR:
-            print(f"[{phase_label}] near_wall 后拉后仍在 indoor，直接启动搜房策略")
+            w.frame_log(f"[{phase_label}] near_wall 后拉后仍在 indoor，直接启动搜房策略")
             return "indoor"
 
         self._mark_entry_door_strict_align_after_backoff()
         scene_after_backoff = self._get_house_scene(w)
         if scene_after_backoff in {self.HOUSE_OUTDOOR, self.HOUSE_ROOFTOP, self.HOUSE_NEAR_DOOR}:
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前进房分支：near_wall后拉后横向回补",
                 self._entry_observation(
@@ -2038,7 +2017,7 @@ class HouseSearchManager:
                 ),
                 result="下一帧继续朝同一个入门点进门",
             )
-            print(
+            w.frame_log(
                 f"[{phase_label}] near_wall 后拉后已到屋外/门口 house_scene={scene_after_backoff}，"
                 f"向左轻推抵消刚才右移后继续进门"
             )
@@ -2053,7 +2032,7 @@ class HouseSearchManager:
             self.history_locations = []
             return "retry"
 
-        print(f"[{phase_label}] near_wall 后拉后 house_scene={scene_after_backoff}，等待下一轮继续调整")
+        w.frame_log(f"[{phase_label}] near_wall 后拉后 house_scene={scene_after_backoff}，等待下一轮继续调整")
         return "adjusting"
 
     def _backoff_entry_near_wall_if_needed(self, w: 'FrameWorker', phase_label: str, reason: str) -> bool:
@@ -2083,7 +2062,7 @@ class HouseSearchManager:
                 return recovery_result
 
         scene_label = "near_wall" if scene == self.HOUSE_NEAR_WALL else "near_door"
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             f"当前搜房分支：导航中检测到{scene_label}，先后拉",
             self._entry_observation(
@@ -2099,7 +2078,7 @@ class HouseSearchManager:
             ),
             result="脱离后仍保持同一个入门点目标",
         )
-        print(
+        w.frame_log(
             f"[{phase_label}] {reason}检测到 {scene_label}，先后拉脱离门墙，"
             f"保持当前入门点目标不变: "
             f"y_bias={self.ENTRY_DOOR_DIRECT_BACKOFF_Y_BIAS}, "
@@ -2118,15 +2097,15 @@ class HouseSearchManager:
 
         scene_after_backoff = self._get_house_scene(w)
         if scene_after_backoff == self.HOUSE_INDOOR:
-            print(f"[{phase_label}] {scene_label} 后拉后已在 indoor，直接启动当前房搜房")
+            w.frame_log(f"[{phase_label}] {scene_label} 后拉后已在 indoor，直接启动当前房搜房")
             return "indoor"
 
         self._mark_entry_door_strict_align_after_backoff()
         if w.get_info('跳跃'):
-            print(f"[{phase_label}] {scene_label} 后拉后仍有跳跃按钮，尝试跳过房体/石墙障碍")
+            w.frame_log(f"[{phase_label}] {scene_label} 后拉后仍有跳跃按钮，尝试跳过房体/石墙障碍")
             self.handle_jump_logic(w, f"{phase_label} {scene_label} 后拉后跳障")
             if self._get_house_scene(w) == self.HOUSE_INDOOR:
-                print(f"[{phase_label}] 跳障后已在 indoor，直接启动当前房搜房")
+                w.frame_log(f"[{phase_label}] 跳障后已在 indoor，直接启动当前房搜房")
                 return "indoor"
 
         return "adjusting"
@@ -2146,7 +2125,7 @@ class HouseSearchManager:
             return None
 
         if w.get_info('跳跃'):
-            print(f"[{phase_label}] {reason}室外 near_wall 且可跳跃，优先跳跃+前推")
+            w.frame_log(f"[{phase_label}] {reason}室外 near_wall 且可跳跃，优先跳跃+前推")
             self.handle_jump_logic(w, f"{phase_label} 室外 near_wall")
             self.history_locations = []
             return "adjusting"
@@ -2154,7 +2133,7 @@ class HouseSearchManager:
         original_direction = w.get_info('direction')
         for cycle in range(self.OUTDOOR_NEAR_WALL_RECOVERY_MAX_CYCLES):
             cycle_label = f"{cycle + 1}/{self.OUTDOOR_NEAR_WALL_RECOVERY_MAX_CYCLES}"
-            print(
+            w.frame_log(
                 f"[{phase_label}] {reason}室外 near_wall 恢复 {cycle_label}: "
                 "后拉 -> 左滑视野 -> 前推约2秒 -> 回正"
             )
@@ -2249,7 +2228,7 @@ class HouseSearchManager:
                 self._refresh_frame_and_handle_jump(w)
                 scene = self._get_house_scene(w)
                 if scene == self.HOUSE_INDOOR:
-                    print(f"[{phase_label}] 直推前已是 indoor，启动搜房策略")
+                    w.frame_log(f"[{phase_label}] 直推前已是 indoor，启动搜房策略")
                     return "indoor"
                 if scene == self.HOUSE_NEAR_WALL:
                     wall_result = self._handle_entry_near_wall_if_needed(w, phase_label, "直推前")
@@ -2270,7 +2249,7 @@ class HouseSearchManager:
                             )
                             break
                         realign_attempts += 1
-                        print(
+                        w.frame_log(
                             f"[{phase_label}] 前推后仍能定位到门，继续调整视角对齐 "
                             f"{realign_attempts}/{self.ENTRY_DOOR_DIRECT_REALIGN_MAX_ATTEMPTS}"
                         )
@@ -2283,7 +2262,7 @@ class HouseSearchManager:
                     if aligned_door is None:
                         if not direct_started:
                             return "not_ready"
-                        print(
+                        w.frame_log(
                             f"[{phase_label}] 重新对齐过程中门目标丢失，"
                             f"不记失败，沿当前方向继续前推"
                         )
@@ -2291,7 +2270,7 @@ class HouseSearchManager:
                     else:
                         door = aligned_door
                 elif not direct_started and door is None:
-                    print(f"[{phase_label}] 门未进入视野，继续原进门流程")
+                    w.frame_log(f"[{phase_label}] 门未进入视野，继续原进门流程")
                     return "not_ready"
                 else:
                     if pushes_this_failure >= self.ENTRY_DOOR_DIRECT_PUSHES_PER_FAILURE:
@@ -2303,15 +2282,15 @@ class HouseSearchManager:
                             f"连续直推 {self.ENTRY_DOOR_DIRECT_PUSHES_PER_FAILURE} 次仍未进房且未再看到门",
                         )
                         break
-                    print(f"[{phase_label}] 本次前推前未识别到门，沿当前进门方向继续直推")
+                    w.frame_log(f"[{phase_label}] 本次前推前未识别到门，沿当前进门方向继续直推")
 
-                print(
+                w.frame_log(
                     f"[{phase_label}] 自动开门策略直推进门: "
                     f"y_bias={self.ENTRY_DOOR_DIRECT_FORWARD_Y_BIAS}, "
                     f"dura={self.ENTRY_DOOR_DIRECT_FORWARD_DURA}, "
                     f"wait={self.ENTRY_DOOR_DIRECT_FORWARD_WAIT}"
                 )
-                self._set_search_frame_decision(
+                self._log_search_frame_state(
                     w,
                     "当前进房分支：自动开门策略直推进门",
                     self._entry_observation(
@@ -2343,7 +2322,7 @@ class HouseSearchManager:
 
                 scene = self._get_house_scene(w)
                 if scene == self.HOUSE_INDOOR:
-                    print(f"[{phase_label}] 自动开门直推后 house_scene=indoor，启动搜房策略")
+                    w.frame_log(f"[{phase_label}] 自动开门直推后 house_scene=indoor，启动搜房策略")
                     return "indoor"
 
                 if scene == self.HOUSE_NEAR_WALL:
@@ -2355,7 +2334,7 @@ class HouseSearchManager:
                 visible_after_push = self.find_largest_door(w)
                 if visible_after_push is not None:
                     door = visible_after_push
-                    print(
+                    w.frame_log(
                         f"[{phase_label}] 直推后仍能定位到门，"
                         f"下一轮继续调整视角后再前推"
                     )
@@ -2371,16 +2350,16 @@ class HouseSearchManager:
                     )
                     break
 
-                print(
+                w.frame_log(
                     f"[{phase_label}] 直推后暂未进房 house_scene={scene}，"
                     f"本轮已推 {pushes_this_failure}/{self.ENTRY_DOOR_DIRECT_PUSHES_PER_FAILURE}"
                 )
 
-        print(f"[{phase_label}] 自动开门直推累计失败 {failures} 次，判定当前进门点失败")
+        w.frame_log(f"[{phase_label}] 自动开门直推累计失败 {failures} 次，判定当前进门点失败")
         return "failed"
 
     def _scan_entry_door_after_micro_adjust(self, w: 'FrameWorker', phase_label='Nav'):
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前进房分支：入门点微调完成后正前方找门",
             self._entry_observation(w, extra="入门点距离已微调到近似0，开始检查正前方门框"),
@@ -2389,19 +2368,19 @@ class HouseSearchManager:
             method="find_largest_door()",
             result="找到门则对准前推；没门则进入回正方向大前推兜底",
         )
-        print(f"[{phase_label}] 入门点距离已微调到 0/近似0，开始看正前方有没有门")
+        w.frame_log(f"[{phase_label}] 入门点距离已微调到 0/近似0，开始看正前方有没有门")
         door = self.find_largest_door(w)
         if door is not None:
-            print(f"[{phase_label}] 正前方看到了门，进入对准门流程: door={door}")
+            w.frame_log(f"[{phase_label}] 正前方看到了门，进入对准门流程: door={door}")
             return door
 
-        print(
+        w.frame_log(
             f"[{phase_label}] 入门点距离已为0但正前方没看到门，先后拉扩视野: "
             f"y_bias={self.ENTRY_DOOR_MISSING_BACKOFF_Y_BIAS}, "
             f"dura={self.ENTRY_DOOR_MISSING_BACKOFF_DURA}, "
             f"wait={self.ENTRY_DOOR_MISSING_BACKOFF_WAIT}"
         )
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前进房分支：正前方没看到门，后拉扩视野",
             self._entry_observation(w, extra="入门点已到但正前方没有门目标"),
@@ -2422,11 +2401,11 @@ class HouseSearchManager:
         )
         self._refresh_frame_and_handle_jump(w)
         if self._is_indoor(w):
-            print(f"[{phase_label}] 后拉扩视野后 house_scene=indoor，直接启动搜房")
+            w.frame_log(f"[{phase_label}] 后拉扩视野后 house_scene=indoor，直接启动搜房")
             return "indoor"
         door = self.find_largest_door(w)
         if door is not None:
-            print(f"[{phase_label}] 后拉扩视野后看到门，进入对准门流程: door={door}")
+            w.frame_log(f"[{phase_label}] 后拉扩视野后看到门，进入对准门流程: door={door}")
             self._mark_entry_door_strict_align_after_backoff()
             return door
 
@@ -2435,10 +2414,10 @@ class HouseSearchManager:
     def _push_missing_entry_door_after_strict_align(self, w: 'FrameWorker', phase_label='Nav'):
         ideal_angle = self.active_entry.get('direction') if self.active_entry else None
         if ideal_angle is None:
-            print(f"[{phase_label}] 后拉扩视野后仍没看到门，但缺少入门方向，舍弃当前入门点")
+            w.frame_log(f"[{phase_label}] 后拉扩视野后仍没看到门，但缺少入门方向，舍弃当前入门点")
             return None
 
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前进房分支：后拉扩视野后仍没看到门，严格回正入门方向",
             self._entry_observation(
@@ -2454,18 +2433,18 @@ class HouseSearchManager:
             method="_align_near_entry_direction(threshold=5)",
             result="方向对齐后执行大前推确认是否已经进门",
         )
-        print(f"[{phase_label}] 后拉扩视野后仍没看到门，严格回正入门方向 ideal_angle={ideal_angle}")
+        w.frame_log(f"[{phase_label}] 后拉扩视野后仍没看到门，严格回正入门方向 ideal_angle={ideal_angle}")
         if not self._align_near_entry_direction(w, ideal_angle):
-            print(f"[{phase_label}] 入门方向仍未严格对齐，等待下一帧继续校准")
+            w.frame_log(f"[{phase_label}] 入门方向仍未严格对齐，等待下一帧继续校准")
             return "adjusting"
 
-        print(
+        w.frame_log(
             f"[{phase_label}] 入门方向已严格回正但仍没门，执行大前推确认进门: "
             f"y_bias={self.ENTRY_DOOR_MISSING_STRICT_FORWARD_Y_BIAS}, "
             f"dura={self.ENTRY_DOOR_MISSING_STRICT_FORWARD_DURA}, "
             f"wait={self.ENTRY_DOOR_MISSING_STRICT_FORWARD_WAIT}"
         )
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前进房分支：入门方向已严格回正但仍没门，执行大前推确认进门",
             self._entry_observation(
@@ -2490,12 +2469,12 @@ class HouseSearchManager:
         )
         self._refresh_frame_and_handle_jump(w)
         if self._is_indoor(w):
-            print(f"[{phase_label}] 大前推后 house_scene=indoor，确认已经进门")
+            w.frame_log(f"[{phase_label}] 大前推后 house_scene=indoor，确认已经进门")
             return "indoor"
 
         scene = self._get_house_scene(w)
         if scene == self.HOUSE_NEAR_WALL:
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前进房分支：大前推后撞墙，稍微后拉复核是否已进门",
                 self._entry_observation(
@@ -2512,7 +2491,7 @@ class HouseSearchManager:
                 ),
                 result="后拉后如 indoor 则搜房，否则舍弃当前入门点",
             )
-            print(
+            w.frame_log(
                 f"[{phase_label}] 大前推后撞墙，稍微后拉复核是否已进门: "
                 f"y_bias={self.ENTRY_DOOR_MISSING_WALL_BACKOFF_Y_BIAS}, "
                 f"dura={self.ENTRY_DOOR_MISSING_WALL_BACKOFF_DURA}, "
@@ -2526,10 +2505,10 @@ class HouseSearchManager:
             )
             self._refresh_frame_and_handle_jump(w)
             if self._is_indoor(w):
-                print(f"[{phase_label}] 撞墙后拉复核 house_scene=indoor，确认已经进门")
+                w.frame_log(f"[{phase_label}] 撞墙后拉复核 house_scene=indoor，确认已经进门")
                 return "indoor"
 
-        print(f"[{phase_label}] 大前推/撞墙后拉后仍未进房，舍弃当前入门点")
+        w.frame_log(f"[{phase_label}] 大前推/撞墙后拉后仍未进房，舍弃当前入门点")
         return None
 
     def _push_aligned_entry_door_and_check_indoor(self, w: 'FrameWorker', phase_label='Nav', initial_door=None) -> str:
@@ -2539,7 +2518,7 @@ class HouseSearchManager:
                 return "aborted"
 
             if door is None:
-                print(f"[{phase_label}] 前推前门目标丢失，重新正前方看门；没门就回正入门方向大前推确认")
+                w.frame_log(f"[{phase_label}] 前推前门目标丢失，重新正前方看门；没门就回正入门方向大前推确认")
                 door = self._scan_entry_door_after_micro_adjust(w, phase_label)
                 if door == "indoor":
                     return "indoor"
@@ -2548,7 +2527,7 @@ class HouseSearchManager:
                 if door is None:
                     return "failed"
 
-            print(
+            w.frame_log(
                 f"[{phase_label}] 第 {attempt + 1}/{self.ENTRY_DOOR_ALIGNED_PUSH_MAX_ATTEMPTS} 次对准门: "
                 f"door={door}"
             )
@@ -2560,18 +2539,18 @@ class HouseSearchManager:
                 door,
                 tolerance_px=self.ENTRY_DOOR_FINAL_VIEW_TOLERANCE_PX,
             ):
-                print(f"[{phase_label}] 对准门失败，重新获取门目标后继续")
+                w.frame_log(f"[{phase_label}] 对准门失败，重新获取门目标后继续")
                 self._refresh_frame_and_handle_jump(w)
                 door = self.find_largest_door(w)
                 continue
 
-            print(
+            w.frame_log(
                 f"[{phase_label}] 门已对准，开始前推: "
                 f"y_bias={self.ENTRY_DOOR_DIRECT_FORWARD_Y_BIAS}, "
                 f"dura={self.ENTRY_DOOR_DIRECT_FORWARD_DURA}, "
                 f"wait={self.ENTRY_DOOR_DIRECT_FORWARD_WAIT}"
             )
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前进房分支：门已对准，前推进屋",
                 self._entry_observation(
@@ -2600,32 +2579,32 @@ class HouseSearchManager:
 
             scene = self._get_house_scene(w)
             if scene == self.HOUSE_INDOOR:
-                print(f"[{phase_label}] 前推后 house_scene=indoor，启动搜房")
+                w.frame_log(f"[{phase_label}] 前推后 house_scene=indoor，启动搜房")
                 return "indoor"
 
             if w.get_info('跳跃'):
-                print(
+                w.frame_log(
                     f"[{phase_label}] 前推后检测到跳跃按钮，判断前方有石墙/障碍，"
                     f"按一次跳跃并轻微前推"
                 )
                 self.handle_jump_logic(w, f"{phase_label} 前推后出现跳跃按钮")
                 scene = self._get_house_scene(w)
                 if scene == self.HOUSE_INDOOR:
-                    print(f"[{phase_label}] 跳跃翻障后 house_scene=indoor，启动搜房")
+                    w.frame_log(f"[{phase_label}] 跳跃翻障后 house_scene=indoor，启动搜房")
                     return "indoor"
 
-                print(f"[{phase_label}] 跳跃翻障后还未进屋，重新定位门并对准后前推")
+                w.frame_log(f"[{phase_label}] 跳跃翻障后还未进屋，重新定位门并对准后前推")
                 door = self.find_largest_door(w)
                 continue
 
             door = self.find_largest_door(w)
             if door is not None:
-                print(f"[{phase_label}] 前推后仍能看到门，继续重新对准后前推")
+                w.frame_log(f"[{phase_label}] 前推后仍能看到门，继续重新对准后前推")
                 continue
 
-            print(f"[{phase_label}] 前推后未进屋且未再看到门，当前 house_scene={scene}，准备重试/失败")
+            w.frame_log(f"[{phase_label}] 前推后未进屋且未再看到门，当前 house_scene={scene}，准备重试/失败")
 
-        print(f"[{phase_label}] 多次对门前推后仍未进入室内，判定当前入门点失败")
+        w.frame_log(f"[{phase_label}] 多次对门前推后仍未进入室内，判定当前入门点失败")
         return "failed"
 
     def _align_entry_door_after_arrival(self, w: 'FrameWorker', phase_label='Nav') -> str:
@@ -2657,7 +2636,7 @@ class HouseSearchManager:
             return True
 
         current_dir = w.get_info('direction')
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前进房分支：入门点 <= 2.5，先对齐入门方向",
             self._entry_observation(
@@ -2679,7 +2658,7 @@ class HouseSearchManager:
             ),
             result="未对齐则下一帧继续调角；对齐后找门或近距微调",
         )
-        print(
+        w.frame_log(
             f"[{phase_label}] 当前已在入门点附近，入门方向应为 {ideal_angle}，"
             f"开始把视角对齐到入门方向"
         )
@@ -2711,7 +2690,7 @@ class HouseSearchManager:
     ) -> str:
         door = self.find_largest_door(w)
         if door is None:
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前进房分支：方向已对齐但未看到门，执行近距微调",
                 self._entry_observation(
@@ -2725,17 +2704,17 @@ class HouseSearchManager:
                 method="_micro_adjust_near_entry_point()",
                 result="下一步会输出具体摇杆 x_bias/y_bias/dura/wait",
             )
-            print(
+            w.frame_log(
                 f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
                 "方向已对齐但还没看到门，继续慢速微调到入门点"
             )
             return "not_visible"
 
-        print(
+        w.frame_log(
             f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
             f"方向已对齐且已看到门，跳过微调到0，直接对准门前推: door={door}"
         )
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前进房分支：方向已对齐且看到门，直接对门前推",
             self._entry_observation(
@@ -2769,7 +2748,7 @@ class HouseSearchManager:
             return False
 
         if dist_val <= self.ENTRY_NEAR_MICRO_DONE_DISTANCE:
-            print(
+            w.frame_log(
                 f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist_val:.2f}，"
                 f"已经足够贴近，不再左右微调摇杆"
             )
@@ -2779,13 +2758,13 @@ class HouseSearchManager:
         current_dir = w.get_info('direction')
         target_angle = calculate_angle(refreshed_loc, target_loc)
         if current_dir is None or target_angle is None:
-            print(f"[{phase_label}] 近门左右位置修正缺少方向/坐标，跳过")
+            w.frame_log(f"[{phase_label}] 近门左右位置修正缺少方向/坐标，跳过")
             return False
 
         try:
             relative = (float(target_angle) - float(current_dir) + 540) % 360 - 180
         except (TypeError, ValueError):
-            print(f"[{phase_label}] 近门左右位置修正角度无效，跳过")
+            w.frame_log(f"[{phase_label}] 近门左右位置修正角度无效，跳过")
             return False
 
         abs_relative = abs(relative)
@@ -2793,7 +2772,7 @@ class HouseSearchManager:
             abs_relative <= self.ENTRY_NEAR_LATERAL_CORRECT_MIN_RELATIVE_DEGREES
             or abs_relative >= self.ENTRY_NEAR_LATERAL_CORRECT_MAX_RELATIVE_DEGREES
         ):
-            print(
+            w.frame_log(
                 f"[{phase_label}] 近门位置偏差主要在前后方向，"
                 f"不做前后修正 relative={relative:.1f}"
             )
@@ -2805,7 +2784,7 @@ class HouseSearchManager:
             if relative > 0
             else -self.ENTRY_NEAR_LATERAL_CORRECT_X_BIAS
         )
-        print(
+        w.frame_log(
             f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist_val:.2f}，"
             f"入门点在人物{side}侧 relative={relative:.1f}，"
             f"已对准入门方向，轻推摇杆向{side}微调："
@@ -2813,7 +2792,7 @@ class HouseSearchManager:
             f"wait={self.ENTRY_NEAR_LATERAL_CORRECT_WAIT}, "
             f"target_angle={target_angle:.1f}, current_dir={float(current_dir):.1f}"
         )
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前进房分支：近门横向微调",
             self._entry_observation(
@@ -2848,7 +2827,7 @@ class HouseSearchManager:
 
     def _handle_near_entry_point(self, w: 'FrameWorker', current_loc, target_loc, dist: float, phase_label='Nav') -> str:
         self.stop_auto_forward(w)
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前进房分支：入门点 <= 2.5，先对齐入门方向",
             self._entry_observation(
@@ -2866,14 +2845,14 @@ class HouseSearchManager:
             method="stop_auto_forward(); _align_entry_direction_at_near_point()",
             result="下一步输出具体调角、找门或摇杆微调参数",
         )
-        print(
+        w.frame_log(
             f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist:.2f} "
             f"<= {self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:g}，已经到达入门点附近，"
             f"停止自动前进，准备对齐入门方向并微调位置"
         )
 
         if not self._align_entry_direction_at_near_point(w, phase_label):
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前进房分支：入门方向未对齐，继续调整视角",
                 self._entry_observation(
@@ -2888,7 +2867,7 @@ class HouseSearchManager:
                 method="_align_entry_direction_at_near_point()",
                 result="下一帧继续校准入门方向",
             )
-            print(f"[{phase_label}] 进门点方向尚未对准，等待下一轮继续对准")
+            w.frame_log(f"[{phase_label}] 进门点方向尚未对准，等待下一轮继续对准")
             return "aligning"
 
         visible_door_result = self._try_visible_entry_door_before_micro_adjust(
@@ -2914,7 +2893,7 @@ class HouseSearchManager:
                 return "indoor"
             if wall_result is not None:
                 return "adjusting"
-            print(f"[{phase_label}] 入门点微调动作已执行，等待下一帧重新计算距离")
+            w.frame_log(f"[{phase_label}] 入门点微调动作已执行，等待下一帧重新计算距离")
             return "adjusting"
         if micro_result == "failed":
             self._mark_current_entry_failed("入门点近距离微调多次后仍无法到达入门点")
@@ -2934,14 +2913,14 @@ class HouseSearchManager:
         try:
             dist_val = float(dist)
         except (TypeError, ValueError):
-            print(f"[{phase_label}] 入门点微调距离无效: dist={dist}，跳过微调")
+            w.frame_log(f"[{phase_label}] 入门点微调距离无效: dist={dist}，跳过微调")
             return "failed"
 
         if dist_val > self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
             self._reset_entry_near_micro_adjust()
             return "outside"
         if dist_val <= self.ENTRY_NEAR_MICRO_DONE_DISTANCE:
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前进房分支：入门点距离归零，开始看门",
                 self._entry_observation(
@@ -2956,13 +2935,13 @@ class HouseSearchManager:
                 method="_scan_entry_door_after_micro_adjust()",
                 result="找到门则对准前推，找不到则扩视野",
             )
-            print(
+            w.frame_log(
                 f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist_val:.2f} "
                 f"<= {self.ENTRY_NEAR_MICRO_DONE_DISTANCE:g}，按 0 处理，停止微调并开始看门"
             )
             return "ready"
         if self.entry_near_micro_adjust_attempts >= self.ENTRY_NEAR_MICRO_MAX_ATTEMPTS:
-            print(
+            w.frame_log(
                 f"[{phase_label}] 入门点近距离很慢微调已达上限 "
                 f"{self.entry_near_micro_adjust_attempts}/{self.ENTRY_NEAR_MICRO_MAX_ATTEMPTS}，"
                 f"当前距离入门点 {target_loc} 仍为 {dist_val:.2f}，不能提前找门，舍弃当前入门点"
@@ -2975,7 +2954,7 @@ class HouseSearchManager:
         target_angle = calculate_angle(refreshed_loc, target_loc)
         move_params = self._entry_near_micro_move_params(current_dir, target_angle)
         if move_params is None:
-            print(
+            w.frame_log(
                 f"[{phase_label}] 入门点微调缺少有效方向/坐标: "
                 f"current_loc={refreshed_loc}, target_loc={target_loc}, "
                 f"current_dir={current_dir}, target_angle={target_angle}"
@@ -3013,7 +2992,7 @@ class HouseSearchManager:
             if direction == "back":
                 used_y_bias = abs(int(used_y_bias))
 
-        print(
+        w.frame_log(
             f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist_val:.2f}，"
             f"人物朝向已按入门方向 {ideal_angle} 对齐，"
             f"当前位置={refreshed_loc}，"
@@ -3023,7 +3002,7 @@ class HouseSearchManager:
             f"x_bias={used_x_bias}, y_bias={used_y_bias}, "
             f"dura={used_dura}, wait={used_wait})"
         )
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前进房分支：入门点微调摇杆",
             self._entry_observation(
@@ -3056,18 +3035,6 @@ class HouseSearchManager:
         self._refresh_frame_and_handle_jump(w)
         after_loc = self._get_current_location(w) or refreshed_loc
         after_dist = get_distance(after_loc, target_loc) if after_loc is not None else None
-        log_step(
-            f"近门微调计算完成：before_loc={refreshed_loc}, after_loc={after_loc}, "
-            f"target_loc={target_loc}, before_dist={before_dist}, after_dist={after_dist}, "
-            f"direction={direction}, relative={relative:.1f}",
-            target="当前进房分支：入门点微调反馈",
-            action="记录本次轻推摇杆后的距离变化",
-            method=(
-                f"update_adaptive_motion(direction={direction}, x_bias={used_x_bias}, "
-                f"y_bias={used_y_bias}, dura={used_dura}, wait={used_wait})"
-            ),
-            result="用前后距离反馈更新自适应移动模型，下一帧继续判断是否到达入门点",
-        )
         if direction in ("left", "right"):
             update_adaptive_side_motion(
                 direction,
@@ -3105,13 +3072,13 @@ class HouseSearchManager:
         if house_scene == 0 and not self._is_entry_approach_status():
             self.indoor_stuck_frames += 1
             if self.indoor_stuck_frames > 30:
-                print('[Searching] 检测到长时间困在屋内 (house_scene=0)，启动兜底出房策略')
+                w.frame_log('[Searching] 检测到长时间困在屋内 (house_scene=0)，启动兜底出房策略')
                 self.house_exit_manager.reset()
                 for _ in range(20):
                     if self._should_abort(w):
                         return
                     if self.house_exit_manager.process(w):
-                        print('[Searching] 兜底出房成功，切换到跑图阶段')
+                        w.frame_log('[Searching] 兜底出房成功，切换到跑图阶段')
                         self.indoor_stuck_frames = 0
                         self.searching_number = 0
                         self.completed_houses.add(self.current_house_id)
@@ -3119,7 +3086,7 @@ class HouseSearchManager:
                         self.status = "IDLE"
                         self._continue_searching_until_timer(w, '兜底出房成功')
                         return
-                print('[Searching] 兜底出房失败，强制重置状态切跑图')
+                w.frame_log('[Searching] 兜底出房失败，强制重置状态切跑图')
                 self.indoor_stuck_frames = 0
                 self.searching_number = 0
                 self.current_house_id = None
@@ -3135,7 +3102,7 @@ class HouseSearchManager:
                 stable_loc = self._get_stable_initial_location(current_loc)
                 if stable_loc is None:
                     self._reset_stuck_history_for_frame_wait("等待落地位置稳定")
-                    self._set_search_frame_decision(
+                    self._log_search_frame_state(
                         w,
                         "当前搜房分支：等待落地位置稳定",
                         self._entry_observation(
@@ -3164,7 +3131,7 @@ class HouseSearchManager:
                 return
             self.status = "FAST_NAV"
             target_dist = get_distance(current_loc, self.active_entry['location'])
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：锁定最近入门点",
                 self._entry_observation(
@@ -3179,7 +3146,7 @@ class HouseSearchManager:
                 method="select_nearest_entry/select_smart_target; 进入Nav快推段",
                 result="后续帧保持同一入门点目标直到到达或失败",
             )
-            print(
+            w.frame_log(
                 f"[Searching] 锁定目标: {self.current_house_id} | "
                 f"入口={self.active_entry['location']} | 距离={target_dist:.2f}"
             )
@@ -3190,7 +3157,7 @@ class HouseSearchManager:
 
         # --- 快速导航：远距也使用角度校准 + 摇杆推进 ---
         if self.status == "FAST_NAV":
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：Nav快推段",
                 self._entry_observation(
@@ -3217,8 +3184,8 @@ class HouseSearchManager:
 
             # 卡顿检测逻辑
             if self.update_and_check_stuck(current_loc):
-                print("[Nav] 检测到人物卡死，启动避障程序...")
-                self._set_search_frame_decision(
+                w.frame_log("[Nav] 检测到人物卡死，启动避障程序...")
+                self._log_search_frame_state(
                     w,
                     "当前搜房分支：Nav快推段检测到卡住，执行避障",
                     self._entry_observation(
@@ -3240,8 +3207,8 @@ class HouseSearchManager:
                 return
 
             if dist <= self.ENTRY_AUTO_FORWARD_DISTANCE:
-                print(f"[Nav] 进入摇杆分段导航范围 (距离 {dist:.2f})")
-                self._set_search_frame_decision(
+                w.frame_log(f"[Nav] 进入摇杆分段导航范围 (距离 {dist:.2f})")
+                self._log_search_frame_state(
                     w,
                     "当前搜房分支：Nav快推段切换Nav精推段",
                     self._entry_observation(
@@ -3263,7 +3230,7 @@ class HouseSearchManager:
             self.stop_auto_forward(w)
             aligned = self.align_direction(w, target_loc, threshold=10, max_steps=1)
             if not aligned:
-                self._set_search_frame_decision(
+                self._log_search_frame_state(
                     w,
                     "当前搜房分支：Nav快推段角度调整中",
                     self._entry_observation(
@@ -3283,7 +3250,7 @@ class HouseSearchManager:
             before_dist = dist
             mode = self._entry_forward_mode(dist)
             y_bias, dura, wait = self._get_entry_move_params(dist)
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：Nav快推段摇杆推进",
                 self._entry_observation(
@@ -3308,7 +3275,7 @@ class HouseSearchManager:
 
         # --- 分段摇杆逼近 ---
         elif self.status == "PRECISE_NAV":
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：Nav精推段",
                 self._entry_observation(
@@ -3339,7 +3306,7 @@ class HouseSearchManager:
                     self.handle_jump_logic(w)
                     return
 
-                print(f"[Nav] 当前距离入门点 {target_loc} 为 {dist:.2f}，近门处理结果={near_result}")
+                w.frame_log(f"[Nav] 当前距离入门点 {target_loc} 为 {dist:.2f}，近门处理结果={near_result}")
                 if near_result == "indoor":
                     self._complete_current_house_search(w, "自动开门直推进房成功")
                     return
@@ -3357,11 +3324,11 @@ class HouseSearchManager:
             self._reset_entry_near_micro_adjust()
 
             if dist <= self.ENTRY_ARRIVAL_DISTANCE:
-                print(
+                w.frame_log(
                     f"[Nav] 当前距离入门点 {target_loc} 为 {dist:.2f} "
                     f"<= {self.ENTRY_ARRIVAL_DISTANCE:g}，已经完全到达入门点，开始找门并对准"
                 )
-                self._set_search_frame_decision(
+                self._log_search_frame_state(
                     w,
                     "当前进房分支：已到达入门点，开始找门",
                     self._entry_observation(
@@ -3395,7 +3362,7 @@ class HouseSearchManager:
             aligned = self.align_direction(w, target_loc, threshold=10, max_steps=1)
             if not aligned:
                 self.history_locations = []
-                self._set_search_frame_decision(
+                self._log_search_frame_state(
                     w,
                     "当前搜房分支：Nav精推段角度调整中",
                     self._entry_observation(
@@ -3413,8 +3380,8 @@ class HouseSearchManager:
                 return
 
             if self.update_and_check_stuck(current_loc):
-                print("[Nav] (Precise) 检测到人物卡死，启动避障程序...")
-                self._set_search_frame_decision(
+                w.frame_log("[Nav] (Precise) 检测到人物卡死，启动避障程序...")
+                self._log_search_frame_state(
                     w,
                     "当前搜房分支：Nav精推段检测到卡住，执行避障",
                     self._entry_observation(
@@ -3438,12 +3405,12 @@ class HouseSearchManager:
             before_dist = dist
             mode = self._entry_forward_mode(dist)
             y_bias, dura, wait = self._get_entry_move_params(dist)
-            print(
+            w.frame_log(
                 f"[Nav] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
                 f"需要{self._entry_forward_mode_label(mode)}靠近入门点："
                 f"y_bias={y_bias}, dura={dura}, wait={wait}"
             )
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：Nav精推段摇杆小步推进",
                 self._entry_observation(
@@ -3467,9 +3434,9 @@ class HouseSearchManager:
 
         # --- 进门点扫描 ---
         elif self.status == "SCANNING":
-            print("[Scan] 到达点位，开始门检测...")
+            w.frame_log("[Scan] 到达点位，开始门检测...")
             ideal_angle = self.active_entry['direction']
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前进房分支：SCANNING门扫描",
                 self._entry_observation(
@@ -3494,8 +3461,8 @@ class HouseSearchManager:
             found_door = False
             for offset in scan_offsets:
                 target_angle = (ideal_angle + offset) % 360
-                print(f"[Scan] 尝试角度: {target_angle} (偏移 {offset})")
-                self._set_search_frame_decision(
+                w.frame_log(f"[Scan] 尝试角度: {target_angle} (偏移 {offset})")
+                self._log_search_frame_state(
                     w,
                     "当前进房分支：SCANNING偏角找门",
                     self._entry_observation(
@@ -3518,11 +3485,11 @@ class HouseSearchManager:
                     self.status = "VISUAL_APPROACH"
                     break
                 else:
-                    print(f"[Data] 角度 {target_angle} 未发现门，保存样本")
+                    w.frame_log(f"[Data] 角度 {target_angle} 未发现门，保存样本")
                     self.save_dataset_image(w.frame, f"no_door_offset_{offset}")
 
             if not found_door:
-                print("[Scan] All angles scanned, door not found. Discarding current point.")
+                w.frame_log("[Scan] All angles scanned, door not found. Discarding current point.")
                 self.completed_houses.add(self.current_house_id)
                 self.handle_failed_entry_logic(ideal_angle)
                 self.status = "IDLE"
@@ -3534,7 +3501,7 @@ class HouseSearchManager:
                     return
                 door = self.find_largest_door(w)
                 if not door:
-                    print("[Visual] 丢失目标，回到扫描")
+                    w.frame_log("[Visual] 丢失目标，回到扫描")
                     self.status = "SCANNING"
                     return
 
@@ -3544,7 +3511,7 @@ class HouseSearchManager:
                     tolerance_px=self.ENTRY_DOOR_ALIGN_CENTER_THRESHOLD,
                     phase_label="VisualApproach",
                 ):
-                    self._set_search_frame_decision(
+                    self._log_search_frame_state(
                         w,
                         "当前进房分支：VISUAL_APPROACH门已对齐",
                         self._entry_observation(
@@ -3559,18 +3526,18 @@ class HouseSearchManager:
                         method="status=INTERACT",
                         result="下一步找开门/关门按钮或继续前推靠近门",
                     )
-                    print("[Visual] 对齐完成，尝试交互")
+                    w.frame_log("[Visual] 对齐完成，尝试交互")
                     self.status = "INTERACT"
                     break
             else:
-                print("[Visual] 多次视觉对齐失败，舍弃当前进门点")
+                w.frame_log("[Visual] 多次视觉对齐失败，舍弃当前进门点")
                 self.handle_failed_entry_logic(self.active_entry['direction'])
                 self.status = "IDLE"
                 return
 
         # --- 交互逻辑 ---
         elif self.status == "INTERACT":
-            print(f"[Interact] 尝试在 {self.current_house_id} 寻找交互按钮...")
+            w.frame_log(f"[Interact] 尝试在 {self.current_house_id} 寻找交互按钮...")
             success = False
             for i in range(10):
                 if self._should_abort(w):
@@ -3580,8 +3547,8 @@ class HouseSearchManager:
                 # --- [修改 2] 交互前移时加入跳跃检测 ---
                 # 原因：门前可能有台阶或门槛，不跳跃无法靠近
                 if w.get_info('跳跃'):
-                    print("[Interact] 门前检测到障碍，尝试跳跃")
-                    self._set_search_frame_decision(
+                    w.frame_log("[Interact] 门前检测到障碍，尝试跳跃")
+                    self._log_search_frame_state(
                         w,
                         "当前进房分支：INTERACT门前检测到跳跃",
                         self._entry_observation(
@@ -3602,7 +3569,7 @@ class HouseSearchManager:
                 # -----------------------------------
 
                 if w.get_info('开门'):
-                    self._set_search_frame_decision(
+                    self._log_search_frame_state(
                         w,
                         "当前进房分支：INTERACT检测到开门按钮",
                         self._entry_observation(
@@ -3622,18 +3589,18 @@ class HouseSearchManager:
                     success = True
                     break
                 if w.get_info('关门'):
-                    print("[Interact] 检测到关门按钮，表示门已打开，不点击关门，直接准备入户")
+                    w.frame_log("[Interact] 检测到关门按钮，表示门已打开，不点击关门，直接准备入户")
                     success = True
                     break
                 if not self._advance_towards_entry_door(w):
-                    print("[Interact] 门目标丢失且兜底恢复失败")
+                    w.frame_log("[Interact] 门目标丢失且兜底恢复失败")
                     break
 
             if success:
-                print("[Interact] 交互成功，准备入户")
+                w.frame_log("[Interact] 交互成功，准备入户")
                 self.status = "FINAL_ENTRY"
             else:
-                print(f"[Interact] 警告：交互失败，舍弃进门点")
+                w.frame_log(f"[Interact] 警告：交互失败，舍弃进门点")
                 if self.active_entry:
                     self.handle_failed_entry_logic(self.active_entry['direction'])
                 else:
@@ -3645,8 +3612,8 @@ class HouseSearchManager:
         elif self.status == "FINAL_ENTRY":
             if self.active_entry:
                 ideal_angle = self.active_entry['direction']
-                print(f"[Entry] 调整至进门角度: {ideal_angle}")
-                self._set_search_frame_decision(
+                w.frame_log(f"[Entry] 调整至进门角度: {ideal_angle}")
+                self._log_search_frame_state(
                     w,
                     "当前进房分支：FINAL_ENTRY调整进门角度",
                     self._entry_observation(
@@ -3662,9 +3629,9 @@ class HouseSearchManager:
                     result="对齐后连续前推确认 house_scene=indoor",
                 )
                 self.align_direction_blocking(w, w.get_info('direction'), ideal_angle)
-            print("[Entry] 进门并确认 house_scene")
+            w.frame_log("[Entry] 进门并确认 house_scene")
             if not self._push_until_entered_house(w):
-                print("[Entry] 多次推进后仍未进入房屋，舍弃当前进门点")
+                w.frame_log("[Entry] 多次推进后仍未进入房屋，舍弃当前进门点")
                 if self.active_entry:
                     self.handle_failed_entry_logic(self.active_entry['direction'])
                 else:
@@ -3680,7 +3647,7 @@ class HouseSearchManager:
                 return
             self.completed_houses.add(self.current_house_id)
             self.searching_number += 1
-            print(f"[Finish] 房屋 {self.current_house_id} 完成，累计已搜 {self.searching_number} 个")
+            w.frame_log(f"[Finish] 房屋 {self.current_house_id} 完成，累计已搜 {self.searching_number} 个")
             self._refresh_frame_and_handle_jump(w)
             exit_direction = w.get_info('direction')
             self.prepare_next_target_logic(exit_direction)
@@ -3710,14 +3677,14 @@ class HouseSearchManager:
         if getattr(self, "landing_location_confirmed", False):
             self.landing_location_confirmed = False
             self.initial_location_samples = [loc]
-            print(f"[Searching] 落地位置已通过前推两帧确认: {loc}")
+            self._frame_log(f"[Searching] 落地位置已通过前推两帧确认: {loc}")
             return loc
 
         if self.initial_location_samples:
             prev = self.initial_location_samples[-1]
             jump_dist = get_distance(prev, loc)
             if jump_dist >= self.INITIAL_LOCATION_JUMP_RESET_DISTANCE:
-                print(
+                self._frame_log(
                     f"[Searching] 落地坐标跳变 {jump_dist:.2f}，"
                     f"丢弃旧样本 prev={prev}, current={loc}"
                 )
@@ -3729,7 +3696,7 @@ class HouseSearchManager:
             self.initial_location_samples.pop(0)
 
         if len(self.initial_location_samples) < self.INITIAL_LOCATION_MIN_SAMPLES:
-            print(
+            self._frame_log(
                 f"[Searching] 等待落地位置稳定 "
                 f"{len(self.initial_location_samples)}/{self.INITIAL_LOCATION_MIN_SAMPLES}: {loc}"
             )
@@ -3739,14 +3706,14 @@ class HouseSearchManager:
         y_coords = [item[1] for item in self.initial_location_samples]
         spread = math.sqrt((max(x_coords) - min(x_coords)) ** 2 + (max(y_coords) - min(y_coords)) ** 2)
         if spread <= self.INITIAL_LOCATION_STABLE_DISTANCE:
-            print(f"[Searching] 落地位置已稳定: {loc}, spread={spread:.2f}")
+            self._frame_log(f"[Searching] 落地位置已稳定: {loc}, spread={spread:.2f}")
             return loc
 
         if len(self.initial_location_samples) >= self.INITIAL_LOCATION_MAX_SAMPLES:
-            print(f"[Searching] 落地位置仍有波动，使用最新坐标: {loc}, spread={spread:.2f}")
+            self._frame_log(f"[Searching] 落地位置仍有波动，使用最新坐标: {loc}, spread={spread:.2f}")
             return loc
 
-        print(f"[Searching] 落地位置仍在刷新: latest={loc}, spread={spread:.2f}")
+        self._frame_log(f"[Searching] 落地位置仍在刷新: latest={loc}, spread={spread:.2f}")
         return None
 
     def _entry_forward_mode(self, dist: float) -> str:
@@ -3786,7 +3753,7 @@ class HouseSearchManager:
 
     def _push_until_entered_house(self, w: 'FrameWorker') -> bool:
         if self._get_house_scene(w) == 0:
-            print("[Entry] 已检测到 house_scene=0，确认已进屋")
+            w.frame_log("[Entry] 已检测到 house_scene=0，确认已进屋")
             return True
 
         ideal_angle = self.active_entry['direction'] if self.active_entry else None
@@ -3799,13 +3766,13 @@ class HouseSearchManager:
 
             if attempt == 0:
                 x_bias = 0
-                print(f"[Entry] 正前推进确认入屋 {attempt + 1}/{self.ENTRY_CONFIRM_MAX_ATTEMPTS}")
+                w.frame_log(f"[Entry] 正前推进确认入屋 {attempt + 1}/{self.ENTRY_CONFIRM_MAX_ATTEMPTS}")
             else:
                 x_bias = self.ENTRY_CONFIRM_SIDE_X_BIAS if attempt % 2 == 1 else -self.ENTRY_CONFIRM_SIDE_X_BIAS
                 side = "右前方" if x_bias > 0 else "左前方"
-                print(f"[Entry] house_scene 仍非 0，向{side}推进确认入屋 {attempt + 1}/{self.ENTRY_CONFIRM_MAX_ATTEMPTS}")
+                w.frame_log(f"[Entry] house_scene 仍非 0，向{side}推进确认入屋 {attempt + 1}/{self.ENTRY_CONFIRM_MAX_ATTEMPTS}")
 
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前进房分支：推进确认已进屋",
                 self._entry_observation(
@@ -3837,7 +3804,7 @@ class HouseSearchManager:
 
             house_scene = self._get_house_scene(w)
             if house_scene == 0:
-                print("[Entry] 推进后 house_scene=0，确认已进屋")
+                w.frame_log("[Entry] 推进后 house_scene=0，确认已进屋")
                 return True
 
         return False
@@ -3846,8 +3813,8 @@ class HouseSearchManager:
         return self.status in {"FAST_NAV", "PRECISE_NAV", "SCANNING", "VISUAL_APPROACH", "INTERACT", "FINAL_ENTRY"}
 
     def _backoff_and_recheck_house_scene(self, w: 'FrameWorker'):
-        print("[Unstuck] house_scene=indoor，可能是贴墙误判，先后退复核室内/室外")
-        self._set_search_frame_decision(
+        w.frame_log("[Unstuck] house_scene=indoor，可能是贴墙误判，先后退复核室内/室外")
+        self._log_search_frame_state(
             w,
             "当前搜房分支：indoor疑似误判，后退复核",
             self._entry_observation(
@@ -3932,11 +3899,11 @@ class HouseSearchManager:
 
         mode = self._entry_forward_mode(dist)
         y_bias, dura, wait = self._get_entry_move_params(dist)
-        print(
+        w.frame_log(
             f"[Unstuck] 绕障后恢复朝进门点推进: "
             f"dist={dist:.2f}, y_bias={y_bias}, dura={dura}, wait={wait}"
         )
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：绕障后恢复朝入门点推进",
             self._entry_observation(
@@ -3966,7 +3933,7 @@ class HouseSearchManager:
 
         if current_dir is None or target_angle is None:
             fallback_side = self._choose_house_bypass_side(w)
-            print(
+            w.frame_log(
                 f"[Unstuck] 缺少当前方向或目标坐标，无法按目的地角度选边，"
                 f"回退使用房体空隙选择 side={fallback_side}"
             )
@@ -3977,7 +3944,7 @@ class HouseSearchManager:
             target_angle_float = float(target_angle)
         except (TypeError, ValueError):
             fallback_side = self._choose_house_bypass_side(w)
-            print(
+            w.frame_log(
                 f"[Unstuck] 当前方向/目标角度无效，回退使用房体空隙选择 side={fallback_side}: "
                 f"current_dir={current_dir}, target_angle={target_angle}"
             )
@@ -3986,7 +3953,7 @@ class HouseSearchManager:
         relative = (target_angle_float - current_dir_float + 540) % 360 - 180
         if abs(relative) <= 5:
             side = self._choose_house_bypass_side(w)
-            print(
+            w.frame_log(
                 f"[Unstuck] 目的地基本在正前方 relative={relative:.1f}°，"
                 f"按房体空隙选择 side={side}"
             )
@@ -3994,7 +3961,7 @@ class HouseSearchManager:
 
         side = "right" if relative > 0 else "left"
         side_label = "右" if side == "right" else "左"
-        print(
+        w.frame_log(
             f"[Unstuck] 结合目的地和当前方向选择绕房方向："
             f"current_dir={current_dir_float:.1f}, target_angle={target_angle_float:.1f}, "
             f"relative={relative:.1f}°，目的地在{side_label}侧，选择 side={side}"
@@ -4011,7 +3978,7 @@ class HouseSearchManager:
         self.stop_auto_forward(w)
         scene_before = self._get_house_scene(w)
         if scene_before != self.HOUSE_NEAR_WALL:
-            print(
+            w.frame_log(
                 f"[Unstuck] 检测到卡住但 house_scene={scene_before}，"
                 f"入口导航后拉避让只在 near_wall 触发，交给通用脱困"
             )
@@ -4030,11 +3997,11 @@ class HouseSearchManager:
         attempt = self._next_route_stuck_attempt(current_loc)
 
         backoff_y_bias, backoff_dura, backoff_wait = self._route_stuck_backoff_motion(attempt)
-        print(
+        w.frame_log(
             f"[Unstuck] 卡住且 house_scene=near_wall，只执行后拉避让，不再绕房: "
             f"attempt={attempt}, y_bias={backoff_y_bias}, dura={backoff_dura}, wait={backoff_wait}"
         )
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：卡住且near_wall，只后拉避让",
             self._entry_observation(
@@ -4064,7 +4031,7 @@ class HouseSearchManager:
         loc_after_back = self._get_current_location(w)
         if loc_after_back is not None:
             current_loc = loc_after_back
-        print(f"[Unstuck] near_wall 后拉避让完成，从 {current_loc} 重新规划/继续入门点导航")
+        w.frame_log(f"[Unstuck] near_wall 后拉避让完成，从 {current_loc} 重新规划/继续入门点导航")
         self._mark_entry_door_strict_align_after_backoff()
         self.history_locations = []
         return True
@@ -4095,7 +4062,7 @@ class HouseSearchManager:
         y_bias: int,
         wait: int,
     ):
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             branch,
             self._entry_observation(
@@ -4125,7 +4092,7 @@ class HouseSearchManager:
         side_label = "左" if side == "left" else "右"
         side_bias = -self.UNSTUCK_SIDE_X_BIAS if side == "left" else self.UNSTUCK_SIDE_X_BIAS
         branch = "当前搜房分支：U型避障左U尝试" if side == "left" else "当前搜房分支：U型避障右U尝试"
-        print(f"[Unstuck] U型避障{side_label}U：后拉 -> {side_label}滑 -> 前冲")
+        w.frame_log(f"[Unstuck] U型避障{side_label}U：后拉 -> {side_label}滑 -> 前冲")
 
         self._tap_unstuck_joystick(
             w,
@@ -4163,8 +4130,8 @@ class HouseSearchManager:
 
         loc_after = self._get_current_location(w)
         review = self._unstuck_point_review_text(current_loc, loc_after)
-        print(f"[Unstuck] {side_label}U后卡点复核: {review}")
-        self._set_search_frame_decision(
+        w.frame_log(f"[Unstuck] {side_label}U后卡点复核: {review}")
+        self._log_search_frame_state(
             w,
             f"当前搜房分支：U型避障{side_label}U卡点复核",
             self._entry_observation(w, current_loc=loc_after, target_loc=target_loc, extra=review),
@@ -4176,8 +4143,8 @@ class HouseSearchManager:
         return not self._same_unstuck_point(current_loc, loc_after)
 
     def _execute_large_area_unstuck(self, w: 'FrameWorker', current_loc, target_loc) -> bool:
-        print("[Unstuck] 左右U型仍卡住，启动大范围避障")
-        self._set_search_frame_decision(
+        w.frame_log("[Unstuck] 左右U型仍卡住，启动大范围避障")
+        self._log_search_frame_state(
             w,
             "当前搜房分支：大范围避障启动",
             self._entry_observation(
@@ -4241,7 +4208,7 @@ class HouseSearchManager:
         )
         loc_after = self._get_current_location(w)
         review = self._unstuck_point_review_text(current_loc, loc_after)
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：大范围避障卡点复核",
             self._entry_observation(w, current_loc=loc_after, target_loc=target_loc, extra=review),
@@ -4262,7 +4229,7 @@ class HouseSearchManager:
         if self._get_house_scene(w) == 0:
             house_scene_after_backoff = self._backoff_and_recheck_house_scene(w)
             if house_scene_after_backoff != 0:
-                print("[Unstuck] 后退复核后已不判定为室内，按室外卡住绕障")
+                w.frame_log("[Unstuck] 后退复核后已不判定为室内，按室外卡住绕障")
                 return self._recover_route_stuck_by_side_forward(
                     w,
                     _safe_get_loc() or current_loc,
@@ -4279,7 +4246,7 @@ class HouseSearchManager:
         if self._recover_route_stuck_by_side_forward(w, current_loc, target_loc):
             return True
 
-        print("[Unstuck] 进入U型避障：先左U，仍在同一卡点再右U，仍卡住则大范围避障")
+        w.frame_log("[Unstuck] 进入U型避障：先左U，仍在同一卡点再右U，仍卡住则大范围避障")
         if self._should_abort(w):
             return False
         if self._execute_u_unstuck_attempt(w, current_loc, target_loc, side="left"):
@@ -4287,17 +4254,17 @@ class HouseSearchManager:
 
         if self._should_abort(w):
             return False
-        print("[Unstuck] 左U后仍在同一卡点，改为右U")
+        w.frame_log("[Unstuck] 左U后仍在同一卡点，改为右U")
         if self._execute_u_unstuck_attempt(w, current_loc, target_loc, side="right"):
             return True
 
         if self._should_abort(w):
             return False
-        print("[Unstuck] 右U后仍在同一卡点，启动大范围避障")
+        w.frame_log("[Unstuck] 右U后仍在同一卡点，启动大范围避障")
         if self._execute_large_area_unstuck(w, current_loc, target_loc):
             return True
 
-        print("[Unstuck] 大范围避障后仍在同一卡点，放弃当前进门点")
+        w.frame_log("[Unstuck] 大范围避障后仍在同一卡点，放弃当前进门点")
         return False
 
     def handle_jump_logic(self, w: 'FrameWorker', reason: str = "检测到障碍") -> bool:
@@ -4309,10 +4276,10 @@ class HouseSearchManager:
         if getattr(self, "_jump_forward_wait_until_hidden", False):
             return False
 
-        print(
+        w.frame_log(
             f"[Jump] {reason}，点击跳跃一次，等待 {self.JUMP_FORWARD_SETTLE_SECONDS:.1f}s 后轻微前推"
         )
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：检测到跳跃按钮，跳跃前推",
             self._entry_observation(
@@ -4354,8 +4321,8 @@ class HouseSearchManager:
         if not w.get_info('跳跃'):
             return False
 
-        print(f"[Jump] {phase_label} 检测到跳跃按钮，立即跳跃并前推")
-        self._set_search_frame_decision(
+        w.frame_log(f"[Jump] {phase_label} 检测到跳跃按钮，立即跳跃并前推")
+        self._log_search_frame_state(
             w,
             "当前搜房分支：靠近房屋检测到跳跃",
             self._entry_observation(
@@ -4436,7 +4403,7 @@ class HouseSearchManager:
         self._reset_route_stuck_bypass()
 
     def handle_failed_entry_logic(self, failed_entry_angle):
-        print(f"[Smart] 进门失败，临时跳过 {self.current_house_id}")
+        self._frame_log(f"[Smart] 进门失败，临时跳过 {self.current_house_id}")
         self.temp_skip_houses.add(self.current_house_id)
         self.current_house_id = None
         self.avoid_angle_ref = failed_entry_angle
@@ -4458,9 +4425,9 @@ class HouseSearchManager:
             path = f"temp/no_door/{timestamp}_{suffix}.jpg"
             os.makedirs(os.path.dirname(path), exist_ok=True)
             cv2.imwrite(path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-            print(f"[Data] 已保存图片: {path}")
+            self._frame_log(f"[Data] 已保存图片: {path}")
         except Exception as e:
-            print(f"[Data] 保存图片失败: {e}")
+            self._frame_log(f"[Data] 保存图片失败: {e}")
 
     def stop_auto_forward(self, w):
         if self.auto_forward:
@@ -4477,7 +4444,7 @@ class HouseSearchManager:
         wait=None,
         min_dura=None,
     ):
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：阻塞式角度对齐",
             self._entry_observation(
@@ -4516,19 +4483,19 @@ class HouseSearchManager:
         cur_loc = self._normalize_location_value(location_raw)
         cur_dir = w.get_info('direction')
         if cur_loc is None or cur_dir is None:
-            print(
+            w.frame_log(
                 f"[NavAlign] 无法计算目标角：raw_location={location_raw}，"
                 f"current_loc={cur_loc}，current_dir={cur_dir}"
             )
             return False
         target_angle = calculate_angle(cur_loc, tar_loc)
         if target_angle is None:
-            print(
+            w.frame_log(
                 f"[NavAlign] 目标角计算失败：raw_location={location_raw}，"
                 f"current_loc={cur_loc}，target_loc={tar_loc}"
             )
             return False
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：导航角度对齐",
             self._entry_observation(
@@ -4582,7 +4549,7 @@ class HouseSearchManager:
         return max(doors, key=lambda x: (x[2] - x[0]) * (x[3] - x[1]))
 
     def _refresh_door_after_view_adjust(self, w, phase_label="DoorAlign"):
-        print(
+        w.frame_log(
             f"[{phase_label}] 视角/位置调整后等待最新帧再继续判断: "
             f"settle={self.ENTRY_DOOR_VIEW_ADJUST_REFRESH_SETTLE_SECONDS:.1f}s"
         )
@@ -4626,7 +4593,7 @@ class HouseSearchManager:
             else:
                 center_threshold = self._get_door_align_center_threshold(tolerance_px)
             if abs(offset_real) <= center_threshold:
-                print(
+                w.frame_log(
                     f"[{phase_label}] 门已大致对准，offset={offset_real:.2f}px, "
                     f"threshold={center_threshold}, door_area_ratio={door_area_ratio}, "
                     f"strict_after_backoff={strict_after_backoff}"
@@ -4643,7 +4610,7 @@ class HouseSearchManager:
                 -self.ENTRY_DOOR_ALIGN_MAX_BIAS,
                 min(self.ENTRY_DOOR_ALIGN_MAX_BIAS, adjust_val),
             )
-            print(
+            w.frame_log(
                 f"[{phase_label}] 门中心偏移 {offset_real:.1f}px，"
                 f"第 {step + 1}/{self.ENTRY_DOOR_FINAL_ALIGN_MAX_STEPS} 次调整视角后等待最新帧: "
                 f"x_bias={adjust_val}, dura={self.ENTRY_DOOR_ALIGN_DURA}, "
@@ -4655,7 +4622,7 @@ class HouseSearchManager:
                     f"对准门：{phase_label} 门中心偏移 {offset_real:.1f}px，"
                     f"滑动视角 x_bias={adjust_val}，然后等待最新帧重新找门"
                 )
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前进房分支：门中心偏移，微调视角",
                 self._entry_observation(
@@ -4699,9 +4666,9 @@ class HouseSearchManager:
     def _advance_towards_entry_door(self, w):
         door = self.find_largest_door(w)
         if door is not None:
-            print("[Interact] 前推前重新定位门并修正视角")
+            w.frame_log("[Interact] 前推前重新定位门并修正视角")
             self._align_to_door_detection(w, door)
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前进房分支：INTERACT靠近门",
                 self._entry_observation(
@@ -4718,8 +4685,8 @@ class HouseSearchManager:
             self._refresh_frame_and_handle_jump(w)
             return True
 
-        print("[Interact] 前推时门目标丢失，先给一次前推试错")
-        self._set_search_frame_decision(
+        w.frame_log("[Interact] 前推时门目标丢失，先给一次前推试错")
+        self._log_search_frame_state(
             w,
             "当前进房分支：INTERACT门目标丢失，前推试错",
             self._entry_observation(
@@ -4737,8 +4704,8 @@ class HouseSearchManager:
         if w.get_info('开门') or w.get_info('关门') or self.find_largest_door(w):
             return True
 
-        print("[Interact] 试错后仍无门/交互按钮，后退重找门")
-        self._set_search_frame_decision(
+        w.frame_log("[Interact] 试错后仍无门/交互按钮，后退重找门")
+        self._log_search_frame_state(
             w,
             "当前进房分支：INTERACT后退重找门",
             self._entry_observation(
@@ -4771,7 +4738,7 @@ class HouseSearchManager:
         self.sub_rooms_entered = 0
         self.visited_sub_doors.clear()
 
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：入口房间搜集物资",
             self._entry_observation(
@@ -4784,7 +4751,7 @@ class HouseSearchManager:
             method="collect_supplies_in_room()",
             result="入口房间搜完后记录入口门并扫描子房间",
         )
-        print("[搜房]入口房间搜集物资。。。")
+        w.frame_log("[搜房]入口房间搜集物资。。。")
         self.collect_supplies_in_room(w)
         if self._house_search_timed_out():
             return self._force_exit_after_search_timeout(w)
@@ -4795,7 +4762,7 @@ class HouseSearchManager:
         self.house_entry_yaw = self.global_yaw
         a_door_abs_yaw = (self.house_entry_yaw + 180) % 360
         self.visited_sub_doors.append((a_door_abs_yaw, 999))
-        print("[搜房] 已记录入口A门方向，防止误入")
+        w.frame_log("[搜房] 已记录入口A门方向，防止误入")
 
         door_info = self._find_open_door_in_view(w)
         if not door_info: door_info = self._scan_for_open_door(w, 360)
@@ -4848,7 +4815,7 @@ class HouseSearchManager:
         approached = self._robust_pass_through_door(w, rel_angle, [0], rush_time=0.0)
         if approached:
             if w.get_info('开门'):
-                self._set_search_frame_decision(
+                self._log_search_frame_state(
                     w,
                     "当前搜房分支：出房/进门检测到开门按钮",
                     self._entry_observation(
@@ -4864,7 +4831,7 @@ class HouseSearchManager:
                 w.click('开门')
                 time.sleep(1)
             time.sleep(0.5)
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：开门后前推通过",
                 self._entry_observation(
@@ -4885,16 +4852,16 @@ class HouseSearchManager:
 
     def _exit_house(self, w):
 
-        print("\n>>> 准备退出房屋")
+        w.frame_log("\n>>> 准备退出房屋")
         trusted_exit_route = False
 
         # 策略1：入口房间关闭门
-        print("[出口] 策略1：在入口房间寻找关闭的门")
+        w.frame_log("[出口] 策略1：在入口房间寻找关闭的门")
         closed = self._find_closed_door_in_view(w)
         if not closed: closed = self._scan_for_closed_door(w, 360)
         if closed:
             rel_ang, _ = closed
-            print(f"[出口] 发现入口房间关闭门，推开离开！")
+            w.frame_log(f"[出口] 发现入口房间关闭门，推开离开！")
             if self._enter_closed_door(w, rel_ang, rush_time=1.2):
                 self._refresh_frame_and_handle_jump(w)
                 if self._get_house_scene(w) != 0:
@@ -4902,7 +4869,7 @@ class HouseSearchManager:
                     return
 
         # 策略2：进子房间找关闭门
-        print("[出口] 策略2：入口无关闭门，进入子房间寻找")
+        w.frame_log("[出口] 策略2：入口无关闭门，进入子房间寻找")
         if self._should_abort(w):
             return
         open_door = self._find_open_door_in_view(w)
@@ -4910,7 +4877,7 @@ class HouseSearchManager:
 
         if open_door:
             rel_ang, bh = open_door
-            print(f"[出口] 进子房间找关闭门")
+            w.frame_log(f"[出口] 进子房间找关闭门")
             self._pass_through_open_door(w, rel_ang, rush_time=0.8)
             self.room_yaw = 0.0
 
@@ -4919,7 +4886,7 @@ class HouseSearchManager:
 
             if closed_in_sub:
                 c_rel_ang, _ = closed_in_sub
-                print(f"[出口] 发现子房间关闭门，推开离开！")
+                w.frame_log(f"[出口] 发现子房间关闭门，推开离开！")
                 if self._enter_closed_door(w, c_rel_ang, rush_time=1.2):
                     self._refresh_frame_and_handle_jump(w)
                     if self._get_house_scene(w) != 0:
@@ -4927,24 +4894,24 @@ class HouseSearchManager:
                         return
 
             # 子房间没找到出口，退回入口房间
-            print("[出口] 子房间无关闭门，扇区快搜退回入口房间")
+            w.frame_log("[出口] 子房间无关闭门，扇区快搜退回入口房间")
             exit_door = self._find_open_door_in_view(w, ignore_visited=True)
             if not exit_door: exit_door = self._scan_for_open_door(w, 360, ignore_visited=True)
             if exit_door: self._pass_through_open_door(w, exit_door[0], rush_time=0.8)
 
         # 策略3：从入口A门原路返回
-        print("[出口] 从入口A门原路返回")
+        w.frame_log("[出口] 从入口A门原路返回")
         if self._should_abort(w):
             return
         a_door = self._find_open_door_in_view(w, ignore_visited=True)
         if not a_door: a_door = self._scan_for_open_door(w, 360, ignore_visited=True)
 
         if a_door:
-            print("[出口] 发现A门，穿过离开！")
+            w.frame_log("[出口] 发现A门，穿过离开！")
             self._pass_through_open_door(w, a_door[0], rush_time=1.2)
             trusted_exit_route = True
         else:
-            print("[出口] 极端情况：找不到A门，执行无门窗逃逸")
+            w.frame_log("[出口] 极端情况：找不到A门，执行无门窗逃逸")
             self.house_exit_manager.reset()
             if self.house_exit_manager._escape_after_failed_exit_scan(w):
                 return
@@ -4952,17 +4919,17 @@ class HouseSearchManager:
         # 策略4：所有策略均失败，启动HouseExitManager兜底
         self._refresh_frame_and_handle_jump(w)
         if self._get_house_scene(w) == 0:
-            print("[出口] 策略3后仍在屋内，启动HouseExitManager兜底出房")
+            w.frame_log("[出口] 策略3后仍在屋内，启动HouseExitManager兜底出房")
             self.house_exit_manager.reset()
             for _ in range(30):
                 if self._should_abort(w):
                     return
                 if self.house_exit_manager.process(w):
-                    print("[出口] 兜底出房成功")
+                    w.frame_log("[出口] 兜底出房成功")
                     return
-            print("[出口] 兜底出房也失败，强制前进冲出")
+            w.frame_log("[出口] 兜底出房也失败，强制前进冲出")
             for _ in range(5):
-                self._set_search_frame_decision(
+                self._log_search_frame_state(
                     w,
                     "当前搜房分支：兜底出房失败，强制前进冲出",
                     self._entry_observation(
@@ -4982,7 +4949,7 @@ class HouseSearchManager:
                 self.house_exit_manager.reset()
                 self.house_exit_manager.process(w)
         elif not trusted_exit_route:
-            print("[出口] 未经过明确门窗动作但已到屋外，执行二次确认")
+            w.frame_log("[出口] 未经过明确门窗动作但已到屋外，执行二次确认")
             self.house_exit_manager.reset()
             self.house_exit_manager.process(w)
 
@@ -5004,7 +4971,7 @@ class HouseSearchManager:
                 return False
             doors = self.new_targets_of_class(w, target_classes)
             if not doors:
-                print("  [搜房] 警告：未检测到门，尝试盲冲补救")
+                w.frame_log("  [搜房] 警告：未检测到门，尝试盲冲补救")
                 break
 
             best = max(doors, key=lambda x: x[1])
@@ -5017,7 +4984,7 @@ class HouseSearchManager:
 
             # 贴脸判定
             if bh > frame_h * 0.6:
-                print(f"  [搜房] 已贴脸门框(高度比:{bh / frame_h:.2f})，准备盲冲穿过！")
+                w.frame_log(f"  [搜房] 已贴脸门框(高度比:{bh / frame_h:.2f})，准备盲冲穿过！")
                 break
 
             if abs(offset_px) > 5:
@@ -5026,7 +4993,7 @@ class HouseSearchManager:
                 continue
 
             # 轨迹笔直，允许前进
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：鲁棒穿门靠近门框",
                 self._entry_observation(
@@ -5046,10 +5013,10 @@ class HouseSearchManager:
             self._refresh_frame_and_handle_jump(w)
             time.sleep(0.2)
 
-        print(f"  [鲁棒穿门] 执行盲冲，时间: {rush_time}s")
+        w.frame_log(f"  [鲁棒穿门] 执行盲冲，时间: {rush_time}s")
         move_ms = max(0, int(float(rush_time) * 1000))
         if move_ms > 0:
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：鲁棒穿门盲冲",
                 self._entry_observation(
@@ -5072,7 +5039,7 @@ class HouseSearchManager:
 
     def _enter_sub_room_and_collect(self, w, rel_angle, box_h):
         """子房间完整交互流程：记录特征 -> 鲁棒穿门 -> 战术搜物资 -> 扇区回搜退门"""
-        print("\n[子房间] 进入...")
+        w.frame_log("\n[子房间] 进入...")
         if self._should_stop_house_search(w):
             return False
         # 1. 记录进门绝对特征并去重
@@ -5083,7 +5050,7 @@ class HouseSearchManager:
         enter_yaw = self.global_yaw
 
         # 3. 穿门进入
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：进入子房间",
             self._entry_observation(
@@ -5097,7 +5064,7 @@ class HouseSearchManager:
             result="进入后执行子房间物资搜索",
         )
         if not self._pass_through_open_door(w, rel_angle, rush_time=1.0):
-            print("[错误] 进入失败")
+            w.frame_log("[错误] 进入失败")
             return False
 
         self.room_yaw = 0.0  # 重置局部坐标系
@@ -5107,20 +5074,20 @@ class HouseSearchManager:
             return False
 
         # 5. 扇区快搜退出门
-        print("[子房间] 搜集完毕，扇区快搜退出门...")
+        w.frame_log("[子房间] 搜集完毕，扇区快搜退出门...")
         target_exit_yaw = (enter_yaw + 180) % 360  # 计算进门背后的朝向
         # ignore_visited必须为True！因为进来的门已被标记，不忽略会看不到它
         exit_door = self._sector_scan_for_open_door(w, target_exit_yaw, sector_angle=120, ignore_visited=True)
 
         # 扇区兜底：如果扇区没找到，进行360全图扫描
         if not exit_door:
-            print("[子房间] 未找到，360度兜底扫描...")
+            w.frame_log("[子房间] 未找到，360度兜底扫描...")
             exit_door = self._scan_for_open_door(w, 360, ignore_visited=True)
 
         if exit_door:
             rel_exit, _ = exit_door
-            print(f"[子房间] 发现退出门，退出...")
-            self._set_search_frame_decision(
+            w.frame_log(f"[子房间] 发现退出门，退出...")
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：子房间发现退出门",
                 self._entry_observation(
@@ -5145,12 +5112,12 @@ class HouseSearchManager:
                     self.visited_sub_doors.append((back_abs, best[1]))
             return True
 
-        print("[错误] 找不到退出门")
+        w.frame_log("[错误] 找不到退出门")
         return False
 
     def _sector_scan_for_open_door(self, w, center_yaw, sector_angle=120, ignore_visited=True):
 
-        print(f"  [搜房] 中心朝向:{center_yaw:.0f}°, 扫描范围:{sector_angle}°")
+        w.frame_log(f"  [搜房] 中心朝向:{center_yaw:.0f}°, 扫描范围:{sector_angle}°")
         if self._should_stop_house_search(w):
             return None
 
@@ -5259,8 +5226,8 @@ class HouseSearchManager:
                 return False
 
             # 执行对准和拾取
-            print(f"  发现物资（绝对{abs_ang:.1f}° 框高{box_h}px），开始拾取{best[:4]}")
-            self._set_search_frame_decision(
+            w.frame_log(f"  发现物资（绝对{abs_ang:.1f}° 框高{box_h}px），开始拾取{best[:4]}")
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：发现物资，准备拾取",
                 self._entry_observation(
@@ -5280,7 +5247,7 @@ class HouseSearchManager:
             return False
 
         # ---------- 方向序列 ----------
-        print("======[搜资] 检查初始方向 (0°)，在刚进入房屋的视角下检查是否有物资，有则搜集======")
+        w.frame_log("======[搜资] 检查初始方向 (0°)，在刚进入房屋的视角下检查是否有物资，有则搜集======")
         for _ in range(self.PICKUP_MAX_PER_DIRECTION):
             if self._should_stop_house_search(w) or not pickup_one_in_current_view(w):
                 break
@@ -5288,8 +5255,8 @@ class HouseSearchManager:
         if self._should_stop_house_search(w):
             return len(collected)
 
-        print("======[搜资] 左转45°检查是否有物资，有则收集======")
-        self._set_search_frame_decision(
+        w.frame_log("======[搜资] 左转45°检查是否有物资，有则收集======")
+        self._log_search_frame_state(
             w,
             "当前搜房分支：入口房间左转45度搜物资",
             self._entry_observation(
@@ -5312,8 +5279,8 @@ class HouseSearchManager:
         if self._should_stop_house_search(w):
             return len(collected)
 
-        print("======[搜资] 左转45°后回正，右转45度检查是否有物资，有则收集======")
-        self._set_search_frame_decision(
+        w.frame_log("======[搜资] 左转45°后回正，右转45度检查是否有物资，有则收集======")
+        self._log_search_frame_state(
             w,
             "当前搜房分支：入口房间右转45度搜物资",
             self._entry_observation(
@@ -5337,9 +5304,9 @@ class HouseSearchManager:
                 break
             time.sleep(0.2)
 
-        print(f"[搜资] 结束，共拾取 {len(collected)} 个物资")
+        w.frame_log(f"[搜资] 结束，共拾取 {len(collected)} 个物资")
         self.turn_by_angle(w, -45, 300)
-        print("========回正方向==============")
+        w.frame_log("========回正方向==============")
         return len(collected)
 
     def approach_and_pickup(self, w, initial_bbox, target_class, rel_ang):
@@ -5351,7 +5318,7 @@ class HouseSearchManager:
             return False
 
         if abs(rel_ang) > 2:
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：物资拾取前调整视角",
                 self._entry_observation(
@@ -5374,10 +5341,10 @@ class HouseSearchManager:
             scene = self._get_forward_scene(w)
             pick_menu = [obj for obj in scene if int(obj[5]) in [3]]
 
-            print("当前是否有物资提示信息{}".format(pick_menu))
+            w.frame_log("当前是否有物资提示信息{}".format(pick_menu))
             if pick_menu:
-                print("检查到附近有物资")
-                self._set_search_frame_decision(
+                w.frame_log("检查到附近有物资")
+                self._log_search_frame_state(
                     w,
                     "当前搜房分支：附近出现物资提示",
                     self._entry_observation(
@@ -5394,8 +5361,8 @@ class HouseSearchManager:
                 self._refresh_frame_and_handle_jump(w)
                 return True
 
-            print("======识别到物资后，视角对准，往前靠近{}步，最大移动距离30步======".format(i + 1))
-            self._set_search_frame_decision(
+            w.frame_log("======识别到物资后，视角对准，往前靠近{}步，最大移动距离30步======".format(i + 1))
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：靠近物资",
                 self._entry_observation(
@@ -5414,7 +5381,7 @@ class HouseSearchManager:
             i += 1
 
             time.sleep(1)
-        print("当前已移动完成30步或者已经进入自动拾取范围")
+        w.frame_log("当前已移动完成30步或者已经进入自动拾取范围")
         return False
 
     def pixel_to_angle(self, cx):
@@ -5435,7 +5402,7 @@ class HouseSearchManager:
         if before_dir is None:
             return
         target_dir = (float(before_dir) + delta_angle) % 360.0
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：按角度转动视角",
             self._entry_observation(
@@ -5497,23 +5464,23 @@ class HouseSearchManager:
         从 initial_bbox 开始，视觉对准 + 小步靠近 + 拾取。
         返回是否成功拾取。
         """
-        print("出子房间的门之前的角度{}".format(rel_ang))
+        w.frame_log("出子房间的门之前的角度{}".format(rel_ang))
         last_door = []
         # 调整角度
         if abs(rel_ang) > 2:
 
             if rel_ang > 0:
-                print("向右滑动调整视角，角度有偏差，添加5度的偏差")
+                w.frame_log("向右滑动调整视角，角度有偏差，添加5度的偏差")
                 rel_ang += 5
             else:
-                print("角度微微调整")
+                w.frame_log("角度微微调整")
                 rel_ang += 6
-            print("出子房间的门的进行调整的角度{}".format(rel_ang))
+            w.frame_log("出子房间的门的进行调整的角度{}".format(rel_ang))
             if abs(rel_ang) > 45:
 
                 count = int(abs(rel_ang) / 45)
                 count_ang = abs(rel_ang) % 45
-                print("角度大于45度，拆分成多次来旋转，拆分成{}次，是否有多余的{}".format(count, count_ang))
+                w.frame_log("角度大于45度，拆分成多次来旋转，拆分成{}次，是否有多余的{}".format(count, count_ang))
                 for i in range(count):
                     if rel_ang > 0:
                         self.turn_by_angle(w, 45, 200)
@@ -5529,7 +5496,7 @@ class HouseSearchManager:
         for i in range(30):
             if self._should_abort(w):
                 return False
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：靠近子房间门",
                 self._entry_observation(
@@ -5556,16 +5523,16 @@ class HouseSearchManager:
                 inf_w, inf_h = get_wh()
                 frame_w = max(inf_w, inf_h)
                 center = frame_w / 2
-                print("向门靠近并移动的过程中门的信息{}，门的中心点位置{},屏幕的中心点位置{}".format(open_door1, (
+                w.frame_log("向门靠近并移动的过程中门的信息{}，门的中心点位置{},屏幕的中心点位置{}".format(open_door1, (
                         open_door1[0][2] - open_door1[0][0]) / 2, center))
                 # 移动靠近的过程中y1会逐渐减小，小于等于10 的时候，人物靠近门，这个时候暂停移动
 
             else:
                 # 检测不到当前视角中的门的时候，当前已经靠近门边，直接往前走，可能会出现擦着墙边过的情况
-                print("当前已经靠近房间的门,微调角度处理。。。。")
+                w.frame_log("当前已经靠近房间的门,微调角度处理。。。。")
                 door = last_door
                 if door:
-                    self._set_search_frame_decision(
+                    self._log_search_frame_state(
                         w,
                         "当前搜房分支：靠近门后车式视觉微调视角",
                         self._entry_observation(
@@ -5588,7 +5555,7 @@ class HouseSearchManager:
                     time.sleep(5)
 
                 if w.get_info('开门'):
-                    self._set_search_frame_decision(
+                    self._log_search_frame_state(
                         w,
                         "当前搜房分支：靠近门后检测到开门",
                         self._entry_observation(
@@ -5603,8 +5570,8 @@ class HouseSearchManager:
                     )
                     w.click('开门')
                     time.sleep(1)
-                print("靠近门后，微调结束，直走进入房间。。。")
-                self._set_search_frame_decision(
+                w.frame_log("靠近门后，微调结束，直走进入房间。。。")
+                self._log_search_frame_state(
                     w,
                     "当前搜房分支：靠近门后直走进房",
                     self._entry_observation(
@@ -5621,10 +5588,10 @@ class HouseSearchManager:
                 self._refresh_frame_and_handle_jump(w)
                 w.tap_single('摇杆', y_bias=-400, dura=300)
                 self._refresh_frame_and_handle_jump(w)
-                print("靠近门后往前移动俩步结束，不在往前移动")
+                w.frame_log("靠近门后往前移动俩步结束，不在往前移动")
                 return True
         time.sleep(1)
-        print("当前已移动完成30步")
+        w.frame_log("当前已移动完成30步")
         return False
 
     def _collect_in_direction(self, w, avoid_door_abs=None):
@@ -5632,8 +5599,8 @@ class HouseSearchManager:
         if self._should_stop_house_search(w):
             return
         supplies = self.new_targets_of_class(w, target_class=[1])
-        print("子房间查找物资的信息{}".format(supplies))
-        print("子房间查找物资的信息{}".format(supplies))
+        w.frame_log("子房间查找物资的信息{}".format(supplies))
+        w.frame_log("子房间查找物资的信息{}".format(supplies))
 
         if supplies:
 
@@ -5642,19 +5609,19 @@ class HouseSearchManager:
             rel_ang = best[0]
             abs_ang = (self.room_yaw + rel_ang) % 360
 
-            print(f"  发现物资（绝对{abs_ang:.1f}° 框高{best[1]}px），开始拾取{best[:4]}")
+            w.frame_log(f"  发现物资（绝对{abs_ang:.1f}° 框高{best[1]}px），开始拾取{best[:4]}")
             success = self.approach_and_pickup(w, best[:4], [0, 1], rel_ang)
             if success:
                 collected.append((abs_ang, best[1]))
         else:
-            print("当前子房间内未找到物资信息,继续下一次视角中获取物资...")
+            w.frame_log("当前子房间内未找到物资信息,继续下一次视角中获取物资...")
             time.sleep(1)
 
         if len(collected) == 2:
-            print("当前物资已拾满")
+            w.frame_log("当前物资已拾满")
 
     def _search_supplies(self, w, avoid_door_abs=None):
-        print("[物资] 方向扫描...")
+        w.frame_log("[物资] 方向扫描...")
         if self._should_stop_house_search(w):
             return
         self._collect_in_direction(w, avoid_door_abs)  # 正前
@@ -5679,7 +5646,7 @@ class HouseSearchManager:
         self._turn(w, -45)  # 回正
 
     def _visual_align(self, w, target_angle, target_class=None):
-        print("开始调整。。。{}".format(target_angle))
+        w.frame_log("开始调整。。。{}".format(target_angle))
         for _ in range(6):
             if self._should_stop_house_search(w):
                 return
@@ -5690,7 +5657,7 @@ class HouseSearchManager:
             time.sleep(0.15)
             targets = self.new_targets_of_class(w, target_class=target_class)
             if not targets:
-                print("  [对准] 目标丢失")
+                w.frame_log("  [对准] 目标丢失")
                 return
             best = max(targets, key=lambda x: x[1])
             target_angle = best[0]
@@ -5966,7 +5933,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             )
 
         scene_label = "near_wall" if scene == self.HOUSE_NEAR_WALL else "near_door"
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前进房分支：贴门墙后拉后确认门框",
             self._entry_observation(
@@ -5984,7 +5951,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             ),
             result="看到门则视觉对准后前推；没门则左右各确认一次并舍弃当前入口",
         )
-        print(
+        w.frame_log(
             f"[RCitySearch] 当前入门点检测到{scene_label}，后拉后先确认门框，"
             "不再直接回到同一入口精推"
         )
@@ -6003,7 +5970,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         door = self.find_largest_door(w)
         if door is None:
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前进房分支：后拉后未看到门，左看30度",
                 self._entry_observation(w, current_loc=current_loc, target_loc=target_loc),
@@ -6019,7 +5986,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             door = self.find_largest_door(w)
 
         if door is None:
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前进房分支：左看后仍未看到门，右转30度回正确认",
                 self._entry_observation(w, current_loc=current_loc, target_loc=target_loc),
@@ -6035,7 +6002,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             door = self.find_largest_door(w)
 
         if door is not None:
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前进房分支：后拉确认到门，视觉对准后前推",
                 self._entry_observation(
@@ -6056,7 +6023,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         else:
             failure_reason = "贴门墙后正前方、左转30度和回正后均未看到门"
 
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前进房分支：贴门墙确认无门，舍弃当前入口",
             self._entry_observation(
@@ -6070,7 +6037,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             method="_mark_current_r_city_target_failed(); status=IDLE",
             result="下一帧重新选择可用入门点",
         )
-        print(f"[RCitySearch] {failure_reason}，舍弃当前入门点并重新选点")
+        w.frame_log(f"[RCitySearch] {failure_reason}，舍弃当前入门点并重新选点")
         self._mark_current_r_city_target_failed(failure_reason)
         self.status = "IDLE"
         return "failed"
@@ -6080,7 +6047,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             return
 
         house_scene = self._get_house_scene(w)
-        self._set_frame_decision(
+        self._log_frame_state(
             w,
             (
                 f"R城搜房：status={self.status}，house_scene={house_scene}，"
@@ -6092,7 +6059,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             result="后续分支会根据当前帧覆盖为更具体决策",
         )
         if self._finish_callback_configured() and self._can_finish_searching(w):
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 f"R城搜房计时已满，当前位置={current_loc}，house_scene={house_scene}",
                 "结束当前搜房阶段，切到跑图阶段继续路线推进",
@@ -6104,7 +6071,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             return
 
         if self._is_in_water(w):
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 f"R城搜房检测到上浮/落水，当前位置={current_loc}，当前方位={current_direction}",
                 "优先脱离水域或交给跑图阶段恢复路线，再回到R城入门点",
@@ -6118,7 +6085,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             return
 
         if house_scene == self.HOUSE_INDOOR:
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 f"R城导航过程中已进入房内，house_scene={house_scene}，当前位置={current_loc}",
                 "不再被门/墙干扰导航，直接把当前房作为已进入房屋处理并执行搜房",
@@ -6136,7 +6103,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             stable_loc = self._get_stable_initial_location(current_loc)
             if stable_loc is None:
                 self._reset_stuck_history_for_frame_wait("R城等待落地初始位置稳定")
-                self._set_frame_decision(
+                self._log_frame_state(
                     w,
                     f"R城落地初始位置还不稳定，当前采样位置={current_loc}",
                     "先停止自动前进并刷新画面，等初始坐标稳定后再锁定最近入门点",
@@ -6160,11 +6127,11 @@ class HouseSceneSearchManager(HouseSearchManager):
             return
 
         if self.current_house_id is None:
-            print("[RCitySearch] 落地后直接从入门点列表选择最近目标，不再前往R城中转点")
+            w.frame_log("[RCitySearch] 落地后直接从入门点列表选择最近目标，不再前往R城中转点")
             self._select_next_r_city_house(current_loc, current_direction)
 
             if not self.current_house_id:
-                self._set_frame_decision(
+                self._log_frame_state(
                     w,
                     f"R城没有可用入门点目标，当前位置={current_loc}",
                     "结束R城搜房，避免在无目标状态继续乱跑",
@@ -6180,7 +6147,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             route_context = ""
             if route_name is not None and route_loc is not None and route_dist is not None:
                 route_context = f"，最近接入参考={route_name}{route_loc}，参考距离={route_dist:.2f}"
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 (
                     f"R城落地后锁定最近入门点 {self.active_entry['location']}，"
@@ -6197,7 +6164,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                     f"真实入门点{self.R_CITY_ENTRY_RUNNING_ROUTE_DISTANCE:g}距离内进入Nav精推段"
                 ),
             )
-            print(
+            w.frame_log(
                 f"[RCitySearch] 落地后锁定最近入门点 {self.active_entry['location']}，"
                 f"房屋={self.current_house_id}，入门方向={self.active_entry['direction']}，"
                 f"真实入门点距离={target_dist:.2f}"
@@ -6208,7 +6175,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 and target_dist is not None
                 and target_dist > self.R_CITY_ENTRY_RUNNING_ROUTE_DISTANCE
             ):
-                self._set_frame_decision(
+                self._log_frame_state(
                     w,
                     (
                         f"真实入门点 {target_loc} 距离={target_dist:.2f} > "
@@ -6259,7 +6226,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         if not force_precise_entry_nav and not self._is_walkable(current_loc):
             forbidden_compare_entry = nearest_entry_loc
             if self._same_forbidden_region(current_loc, forbidden_compare_entry):
-                self._set_frame_decision(
+                self._log_frame_state(
                     w,
                     (
                         f"当前位置 {current_loc} 不可通行，但和持续维护的最近入门点 {forbidden_compare_entry} "
@@ -6270,14 +6237,14 @@ class HouseSceneSearchManager(HouseSearchManager):
                     method="same_forbidden_region=True，保留当前导航状态",
                     result="目标仍是到达该入门点 <= 2.5",
                 )
-                print(
+                w.frame_log(
                     f"[RCitySearch] 当前落点 {current_loc} 与最近入门点 {forbidden_compare_entry} 在同一不可通行区域，"
                     f"距离 {dist:.2f}，直接按入门点方向继续冲，不走最近安全点绕路"
                 )
             elif self._is_reentered_forbidden_escape_region(current_loc):
                 route_target = self.r_city_route_target or {}
                 route_target_loc = route_target.get("approach_location") or route_target.get("location")
-                self._set_frame_decision(
+                self._log_frame_state(
                     w,
                     (
                         f"当前位置 {current_loc} 再次进入刚逃离过的不可通行连通区域，"
@@ -6288,12 +6255,12 @@ class HouseSceneSearchManager(HouseSearchManager):
                     method="same_forbidden_region(current_loc, forbidden_escape_region_anchor)",
                     result="避免在同一黑区反复脱离和重规划",
                 )
-                print(
+                w.frame_log(
                     f"[RCitySearch] 当前位置 {current_loc} 回到上次逃离的同一不可通行区域，"
                     "保留既有脱离后路线，不重复触发黑区脱离"
                 )
             else:
-                self._set_frame_decision(
+                self._log_frame_state(
                     w,
                     (
                         f"当前位置 {current_loc} 不可通行，且和最近入门点 {forbidden_compare_entry} "
@@ -6304,7 +6271,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                     method="_handle_forbidden_escape()",
                     result="脱离当前黑区后再回到入门点导航",
                 )
-                print(
+                w.frame_log(
                     f"[RCitySearch] 当前落点 {current_loc} 不可通行，且与最近入门点 {forbidden_compare_entry} "
                     f"不是同一不可通行区域，先快速脱离当前黑区"
                 )
@@ -6324,7 +6291,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             if route_waypoint is not None:
                 target_loc = route_waypoint
                 dist = get_distance(current_loc, target_loc)
-                self._set_frame_decision(
+                self._log_frame_state(
                     w,
                     (
                         f"已脱离不可通行区域，沿规划路径前往入门点，"
@@ -6356,7 +6323,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 and entry_dist is not None
                 and entry_dist > self.R_CITY_ENTRY_RUNNING_ROUTE_DISTANCE
             ):
-                self._set_frame_decision(
+                self._log_frame_state(
                     w,
                     (
                         f"Nav复核发现真实入门点 {entry_loc} 距离={entry_dist:.2f} > "
@@ -6389,7 +6356,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 return
 
         if self.status == "FAST_NAV":
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 (
                     f"Nav快推段：当前位置={current_loc}，目标入门点={target_loc}，"
@@ -6402,7 +6369,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             )
             nav_scene_result = self._handle_nav_near_entry_scene_if_needed(w, "Nav快推段", "R城导航中")
             if nav_scene_result == "indoor":
-                self._set_frame_decision(
+                self._log_frame_state(
                     w,
                     f"Nav快推段检测到已经进入房内，当前位置={current_loc}",
                     "认为已不小心进房，立即搜当前房，不再继续追入门点",
@@ -6413,7 +6380,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 self._complete_current_house_search(w, "R城导航中贴门墙后进入房屋")
                 return
             if nav_scene_result is not None:
-                self._set_frame_decision(
+                self._log_frame_state(
                     w,
                     f"Nav快推段检测到 near_wall/near_door 等贴近场景，当前位置={current_loc}",
                     "先后拉/调整视野/跳过障碍，保持目标仍是当前锁定入门点",
@@ -6424,8 +6391,8 @@ class HouseSceneSearchManager(HouseSearchManager):
                 return
 
             if self.update_and_check_stuck(current_loc):
-                print("[SceneSearch] 快速导航检测到卡住，启动避障")
-                self._set_frame_decision(
+                w.frame_log("[SceneSearch] 快速导航检测到卡住，启动避障")
+                self._log_frame_state(
                     w,
                     f"Nav快推段检测到位置卡住，当前位置={current_loc}",
                     "启动避障脱困，脱困后仍回到最近入门点导航",
@@ -6440,8 +6407,8 @@ class HouseSceneSearchManager(HouseSearchManager):
                 return
 
             if not following_route_waypoint and dist <= self.ENTRY_AUTO_FORWARD_DISTANCE:
-                print(f"[RCitySearch] 进入摇杆分段导航范围 (距离 {dist:.2f})")
-                self._set_frame_decision(
+                w.frame_log(f"[RCitySearch] 进入摇杆分段导航范围 (距离 {dist:.2f})")
+                self._log_frame_state(
                     w,
                     f"距离入门点 {target_loc} 已进入分段导航范围，dist={dist:.2f}",
                     "停止自动前进并切换Nav精推段，用摇杆精准推进到入门点 <= 2.5",
@@ -6459,7 +6426,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             return
 
         if self.status == "PRECISE_NAV":
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 (
                     f"Nav精推段：当前位置={current_loc}，目标入门点={target_loc}，"
@@ -6481,7 +6448,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 target_loc=target_loc,
             )
             if nav_scene_result == "indoor":
-                self._set_frame_decision(
+                self._log_frame_state(
                     w,
                     f"Nav精推段检测到已经进入房内，当前位置={current_loc}",
                     "认为已不小心进房，立即搜当前房",
@@ -6492,7 +6459,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 self._complete_current_house_search(w, "R城导航中贴门墙后进入房屋")
                 return
             if nav_scene_result is not None:
-                self._set_frame_decision(
+                self._log_frame_state(
                     w,
                     f"Nav精推段检测到 near_wall/near_door 等贴近场景，当前位置={current_loc}",
                     "先后拉/调整视野/跳过障碍，随后继续朝同一入门点精细推进",
@@ -6503,7 +6470,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 return
 
             if dist <= self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
-                self._set_frame_decision(
+                self._log_frame_state(
                     w,
                     f"已到达入门点 <= 2.5，当前位置={current_loc}，目标={target_loc}，dist={dist:.2f}",
                     "不做慢速原地磨角度，直接进入原有入门点近距建模流程调整角度/找门/进门",
@@ -6528,8 +6495,8 @@ class HouseSceneSearchManager(HouseSearchManager):
                 return
 
             if self.update_and_check_stuck(current_loc):
-                print("[SceneSearch] 精细导航检测到卡住，启动避障")
-                self._set_frame_decision(
+                w.frame_log("[SceneSearch] 精细导航检测到卡住，启动避障")
+                self._log_frame_state(
                     w,
                     f"Nav精推段检测到位置卡住，当前位置={current_loc}",
                     "角度/位置读取无法完成精准推进后，再判断是否真正卡住并执行避障",
@@ -6551,7 +6518,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             )
             y_bias, dura, wait = self._get_entry_move_params(dist)
             mode = self._entry_forward_mode(dist)
-            print(
+            w.frame_log(
                 f"[SceneSearch] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
                 f"未完成精准推进，补一次{self._entry_forward_mode_label(mode)}："
                 f"y_bias={y_bias}, dura={dura}, wait={wait}"
@@ -6634,7 +6601,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                         "source": "house_entry",
                     }
                 )
-        print(f"[RCitySearch] 使用 house_entries_summary 入门点生成搜房目标: {len(targets)} 个")
+        self._frame_log(f"[RCitySearch] 使用 house_entries_summary 入门点生成搜房目标: {len(targets)} 个")
         return targets
 
     @staticmethod
@@ -6752,11 +6719,11 @@ class HouseSceneSearchManager(HouseSearchManager):
         dist = get_distance(loc, target)
         if 0 <= dist <= self.r_city_pre_search_distance:
             self.r_city_pre_search_completed = True
-            print(
+            w.frame_log(
                 f"[SceneSearch] 已到达R城搜房起点 {target}，"
                 f"dist={dist:.2f} <= {self.r_city_pre_search_distance:.1f}，开始找房"
             )
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 f"已到达R城搜房起点 {target}，dist={dist:.2f}",
                 "结束前置路线，开始按入门点列表选择最近房屋",
@@ -6769,15 +6736,15 @@ class HouseSceneSearchManager(HouseSearchManager):
         callback = self.r_city_pre_search_route_callback
         if not callable(callback):
             self.r_city_pre_search_completed = True
-            print("[SceneSearch] 未配置R城搜房起点跑图回调，跳过前置点直接找房")
+            w.frame_log("[SceneSearch] 未配置R城搜房起点跑图回调，跳过前置点直接找房")
             return False
 
         reason = (
             f"R城落地后先前往搜房起点 {target}，"
             f"dist={dist:.2f} > {self.r_city_pre_search_distance:.1f}"
         )
-        print(f"[SceneSearch] {reason}")
-        self._set_frame_decision(
+        w.frame_log(f"[SceneSearch] {reason}")
+        self._log_frame_state(
             w,
             reason,
             "先用跑图路线前往搜房起点，再开始锁定最近入门点",
@@ -6814,7 +6781,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         try:
             return bool(checker(loc))
         except Exception as exc:
-            print(f"[RCitySearch] 地图可通行检查失败，按可通行处理: {exc}")
+            self._frame_log(f"[RCitySearch] 地图可通行检查失败，按可通行处理: {exc}")
             return True
 
     def _same_forbidden_region(self, current_loc, target_loc) -> bool:
@@ -6824,7 +6791,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         try:
             return bool(checker(current_loc, target_loc))
         except Exception as exc:
-            print(f"[RCitySearch] 不可通行区域连通判断失败，按不同区域处理: {exc}")
+            self._frame_log(f"[RCitySearch] 不可通行区域连通判断失败，按不同区域处理: {exc}")
             return False
 
     def _line_only_crosses_target_forbidden_region(self, current_loc, target_loc) -> bool:
@@ -6834,7 +6801,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         try:
             return bool(checker(current_loc, target_loc))
         except Exception as exc:
-            print(f"[RCitySearch] 直线穿越目标黑区判断失败，按需要A*处理: {exc}")
+            self._frame_log(f"[RCitySearch] 直线穿越目标黑区判断失败，按需要A*处理: {exc}")
             return False
 
     def _is_reentered_forbidden_escape_region(self, current_loc) -> bool:
@@ -6866,7 +6833,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         callback = self.r_city_recovery_route_callback
         if not callable(callback):
             return False
-        self._set_frame_decision(
+        self._log_frame_state(
             w,
             f"R城搜房请求跑图恢复：{reason}",
             "停止搜房内导航，交给跑图阶段脱困后再回到R城入门点",
@@ -6902,7 +6869,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         if self._is_reentered_forbidden_escape_region(current_loc):
             return False
 
-        self._set_frame_decision(
+        self._log_frame_state(
             w,
             (
                 f"远距离入门点路线前，发现当前位置 {current_loc} 不可通行，"
@@ -6939,7 +6906,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.forbidden_escape_region_anchor = None
         self.history_locations = []
         self.status = "FAST_NAV"
-        self._set_frame_decision(
+        self._log_frame_state(
             w,
             (
                 f"{phase_label}：当前位置 {start_loc} 可通行，直线到真实入门点 {target_loc} "
@@ -6950,7 +6917,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             method="line_only_crosses_target_forbidden_region(); align_direction(); click(自动前进)",
             result=f"保持搜房FAST_NAV，直到真实入门点{self.ENTRY_AUTO_FORWARD_DISTANCE:g}距离内进入Nav精推段",
         )
-        print(
+        w.frame_log(
             f"[RCitySearch] {phase_label}: start={start_loc}, entry={target_loc}, dist={dist:.2f}，"
             "直线只穿目标黑区，跳过A*直接冲入门点"
         )
@@ -6977,11 +6944,11 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         path = self._plan_path_safe(start_loc, route_target_loc)
         if not path:
-            print(
+            w.frame_log(
                 f"[RCitySearch] 真实入门点距离 {route_dist:.2f} > {self.R_CITY_ENTRY_MAP_NAV_DISTANCE:.1f}，"
                 "但 map_navigation 未能规划路径，本帧不进入Nav"
             )
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 (
                     f"真实入门点距离 {route_dist:.2f} > {self.R_CITY_ENTRY_MAP_NAV_DISTANCE:.1f}，"
@@ -7012,7 +6979,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.stop_auto_forward(w)
         self.history_locations = []
         self.r_city_route_stuck_cycles = 0
-        self._set_frame_decision(
+        self._log_frame_state(
             w,
             (
                 f"真实入门点距离 {route_dist:.2f} > {self.R_CITY_ENTRY_MAP_NAV_DISTANCE:.1f}，"
@@ -7026,7 +6993,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 "距离内后停止路线导航，并按实际位置重选最近入门点"
             ),
         )
-        print(
+        w.frame_log(
             f"[RCitySearch] 真实入门点距离 {route_dist:.2f} > {self.R_CITY_ENTRY_MAP_NAV_DISTANCE:.1f}，"
             f"用map_navigation前往最近入门点附近: start={start_loc}, entry={target_loc}, "
             f"approach={route_target_loc}, "
@@ -7037,7 +7004,7 @@ class HouseSceneSearchManager(HouseSearchManager):
     def _request_r_city_entry_route(self, w: "FrameWorker", target_loc, dist: float) -> bool:
         callback = self.r_city_entry_route_callback
         if not callable(callback):
-            print(
+            w.frame_log(
                 f"[RCitySearch] 真实入门点 {target_loc} 距离 {dist:.2f} > "
                 f"{self.R_CITY_ENTRY_RUNNING_ROUTE_DISTANCE:.1f}，但未配置跑图回调，继续由搜房模块前往"
             )
@@ -7047,8 +7014,8 @@ class HouseSceneSearchManager(HouseSearchManager):
             f"落地后真实入门点 {target_loc} 距离 {dist:.2f} > "
             f"{self.R_CITY_ENTRY_RUNNING_ROUTE_DISTANCE:.1f}，先计入跑图时间前往入门点附近"
         )
-        print(f"[RCitySearch] {reason}")
-        self._set_frame_decision(
+        w.frame_log(f"[RCitySearch] {reason}")
+        self._log_frame_state(
             w,
             reason,
             "用跑图导航先靠近真实入门点；回到搜房后再按人物实际位置动态重选最近入门点",
@@ -7068,7 +7035,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             approach_loc = self._location_tuple(self.active_entry.get("approach_location"))
         if not callback(w, target_loc, reason, self.R_CITY_ENTRY_RUNNING_ROUTE_DISTANCE, approach_loc):
             return False
-        print(
+        w.frame_log(
             f"[RCitySearch] 跑图接管后继续锁定入门点 {target_loc}，"
             f"安全接入点={approach_loc}；黑区脱离/A*完成后只能回到该入门点，"
             "进入精推范围或该入口确认失败前不重新选点"
@@ -7081,7 +7048,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         return True
 
     def _defer_r_city_entry_until_nav_range(self, w: "FrameWorker", reason: str) -> None:
-        self._set_frame_decision(
+        self._log_frame_state(
             w,
             reason,
             (
@@ -7164,7 +7131,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         try:
             path = planner(start_loc, target_loc)
         except Exception as exc:
-            print(f"[RCitySearch] 规划路径失败: start={start_loc}, target={target_loc}, err={exc}")
+            self._frame_log(f"[RCitySearch] 规划路径失败: start={start_loc}, target={target_loc}, err={exc}")
             return []
         if not path:
             return []
@@ -7201,7 +7168,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.status = self.STATUS_ROUTE_TO_R_CITY
 
         distance_to_r_city, nearest = self._distance_to_r_city(current_loc)
-        self._set_frame_decision(
+        self._log_frame_state(
             w,
             (
                 f"R城路线导航：当前位置={current_loc}，当前方位={current_direction}，"
@@ -7221,7 +7188,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             if not self.r_city_route_target and nearest:
                 self.r_city_route_target = nearest
             if not self.r_city_route_target:
-                self._set_frame_decision(
+                self._log_frame_state(
                     w,
                     f"R城路线导航无法选择接入点，当前位置={current_loc}",
                     "结束R城搜房，避免无目标导航",
@@ -7237,7 +7204,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                     self.r_city_route_target["approach_location"],
                 )
                 self.r_city_route_index = 0
-            print(
+            w.frame_log(
                 f"[RCityRoute] 规划去R城: side={self.r_city_route_target['side']}, "
                 f"target={self.r_city_route_target['approach_location']}, "
                 f"path_points={len(self.r_city_route_path)}"
@@ -7256,11 +7223,11 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         if self.update_and_check_stuck(current_loc):
             self.r_city_route_stuck_cycles += 1
-            print(
+            w.frame_log(
                 f"[RCityRoute] 前往R城卡住 "
                 f"{self.r_city_route_stuck_cycles}/{self.R_CITY_ROUTE_REPLAN_STUCK_CYCLES}"
             )
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 f"R城路线导航检测到卡住，当前位置={current_loc}，目标路点={waypoint}",
                 "停止自动前进并执行避障，必要时重新规划R城路线",
@@ -7285,7 +7252,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         self.align_direction(w, waypoint)
         if not self.auto_forward:
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：R城路线导航启动自动前进",
                 self._entry_observation(
@@ -7317,7 +7284,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         if trigger_dist > self.R_CITY_ROUTE_ENTRY_HANDOFF_DISTANCE:
             return False
 
-        print(
+        w.frame_log(
             f"[RCityRoute] 已接近真实入门点 {entry_loc} dist={trigger_dist:.2f}，"
             "停止路线自动前进，并按当前位置动态重选最近入门点"
         )
@@ -7334,7 +7301,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         self._select_next_r_city_house(loc, current_direction)
         if not self.current_house_id:
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 f"R城路线已到真实入门点{self.R_CITY_ROUTE_ENTRY_HANDOFF_DISTANCE:g}距离内，但当前位置={loc} 没有可用入门点",
                 "结束R城搜房，避免路线结束后无目标乱跑",
@@ -7348,7 +7315,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         target_loc = self.active_entry["location"]
         target_dist = get_distance(loc, target_loc)
         if target_dist > self.R_CITY_ROUTE_ENTRY_HANDOFF_DISTANCE:
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 (
                     f"R城路线到达原入门点{self.R_CITY_ROUTE_ENTRY_HANDOFF_DISTANCE:g}距离内，"
@@ -7379,7 +7346,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             return True
         nav_phase = "Nav精推段"
         self.status = "PRECISE_NAV"
-        self._set_frame_decision(
+        self._log_frame_state(
             w,
             (
                 f"R城路线已到真实入门点{self.R_CITY_ROUTE_ENTRY_HANDOFF_DISTANCE:g}距离内，当前位置={loc}，"
@@ -7403,7 +7370,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             waypoint = self.r_city_route_path[self.r_city_route_index]
             if get_distance(loc, waypoint) > self.R_CITY_ROUTE_WAYPOINT_DISTANCE:
                 return waypoint
-            print(
+            self._frame_log(
                 f"[RCityRoute] 路径点 {waypoint} 已进入 {self.R_CITY_ROUTE_WAYPOINT_DISTANCE:g} 距离内，"
                 "切换下一个路径点"
             )
@@ -7431,7 +7398,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 best_dist = dist
 
         if best_index > start_index:
-            print(
+            self._frame_log(
                 f"[RCityRoute] 当前位置 {current_loc} 已投影到后续路径线段，"
                 f"route_index {start_index}->{best_index}, ratio={best_ratio:.2f}, dist={best_dist:.2f}"
             )
@@ -7488,11 +7455,11 @@ class HouseSceneSearchManager(HouseSearchManager):
         target_loc = self._location_tuple(target_loc)
         if target_loc is not None and not self._same_forbidden_region(current_loc, target_loc):
             dist = get_distance(current_loc, target_loc)
-            print(
+            w.frame_log(
                 f"[RCityRoute] 当前不可通行，入门点 {target_loc} 不在同一不可通行区域，"
                 f"距离 {dist:.2f}，先找最近可通行点脱离当前黑区"
             )
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 f"当前不可通行且与入门点不是同一区，当前位置={current_loc}，入门点={target_loc}，dist={dist:.2f}",
                 "不能直接朝入门点硬冲；先寻找最近可通行点脱离当前不可通行区域",
@@ -7510,8 +7477,8 @@ class HouseSceneSearchManager(HouseSearchManager):
             self.forbidden_escape_target = safe_target
 
         if safe_target is None:
-            print("[RCityRoute] 当前不可通行且未找到安全点，短后退后刷新")
-            self._set_frame_decision(
+            w.frame_log("[RCityRoute] 当前不可通行且未找到安全点，短后退后刷新")
+            self._log_frame_state(
                 w,
                 f"当前不可通行且未找到安全点，当前位置={current_loc}",
                 "短后退并刷新，等待下一帧重新寻找安全点",
@@ -7520,7 +7487,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 result="下一帧重新识别位置和安全点",
             )
             self.stop_auto_forward(w)
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：黑区无安全点短后退",
                 self._entry_observation(
@@ -7541,7 +7508,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         if planned_entry_path:
             self.forbidden_escape_region_anchor = self._location_tuple(current_loc)
         if target_loc is not None:
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：黑区脱离后路线已规划",
                 self._entry_observation(
@@ -7559,8 +7526,8 @@ class HouseSceneSearchManager(HouseSearchManager):
                 result="本帧先去安全点，后续帧跟随规划路点",
             )
 
-        print(f"[RCityRoute] 当前不在可通行区域，先脱离到安全点 {safe_target}")
-        self._set_frame_decision(
+        w.frame_log(f"[RCityRoute] 当前不在可通行区域，先脱离到安全点 {safe_target}")
+        self._log_frame_state(
             w,
             f"当前不可通行，当前位置={current_loc}，安全点={safe_target}",
             "对准最近安全点前推，先脱离不可通行区域",
@@ -7570,7 +7537,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         )
         self.stop_auto_forward(w)
         self.align_direction(w, safe_target)
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：黑区前往安全点",
             self._entry_observation(
@@ -7632,7 +7599,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         if should_press_float:
             self.stop_auto_forward(w)
         before_loc = self._location_tuple(current_loc)
-        self._set_frame_decision(
+        self._log_frame_state(
             w,
             f"检测到落水/水边受阻，当前位置={current_loc}，目标={target_loc}",
             "优先长按上浮，再对准导航目标点击自动前进；连续3帧无位移才执行岸边侧滑避障",
@@ -7640,13 +7607,13 @@ class HouseSceneSearchManager(HouseSearchManager):
             method="_handle_water_escape()",
             result="脱水后继续R城入门点导航",
         )
-        print(
+        w.frame_log(
             f"[RCityWater] 落水/水边受阻，先上浮并自动前进脱困 "
             f"attempt={self.water_escape_total_attempts + 1}, target={target_loc}"
         )
 
         if should_press_float:
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：水区脱困长按上浮",
                 self._entry_observation(
@@ -7664,15 +7631,15 @@ class HouseSceneSearchManager(HouseSearchManager):
             self.water_float_pressed_in_episode = True
             self._refresh_frame_and_handle_jump(w, "水区长按上浮后")
         elif float_visible:
-            print("[RCityWater] 本轮落水已长按过上浮，继续保持自动前进，不重复点击上浮")
+            w.frame_log("[RCityWater] 本轮落水已长按过上浮，继续保持自动前进，不重复点击上浮")
 
         if not self._is_in_water(w):
-            print("[RCityWater] 上浮按钮已消失，认为已离开水域，回到陆地搜房逻辑")
+            w.frame_log("[RCityWater] 上浮按钮已消失，认为已离开水域，回到陆地搜房逻辑")
             self._reset_water_escape_progress()
             return
 
         self.align_direction(w, target_loc, threshold=5, max_steps=1)
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：水区脱困启动自动前进",
             self._entry_observation(
@@ -7692,7 +7659,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         self._refresh_frame_and_handle_jump(w, "水区自动前进后")
         if not self._is_in_water(w):
-            print("[RCityWater] 自动前进后上浮按钮消失，回到陆地搜房逻辑")
+            w.frame_log("[RCityWater] 自动前进后上浮按钮消失，回到陆地搜房逻辑")
             self._reset_water_escape_progress()
             return
 
@@ -7711,9 +7678,9 @@ class HouseSceneSearchManager(HouseSearchManager):
         side_label = self._side_label(side)
         x_bias = -self.WATER_SIDE_X_BIAS if side == "left" else self.WATER_SIDE_X_BIAS
 
-        print(f"[RCityWater] 连续多帧无位移，沿{side_label}侧执行岸边避障")
+        w.frame_log(f"[RCityWater] 连续多帧无位移，沿{side_label}侧执行岸边避障")
         self.stop_auto_forward(w)
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：水区岸边侧滑避障",
             self._entry_observation(
@@ -7739,7 +7706,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             )
             self._refresh_frame_and_handle_jump(w, "水区岸边侧滑后")
             if not self._is_in_water(w):
-                print("[RCityWater] 岸边侧滑后上浮按钮消失，回到陆地搜房逻辑")
+                w.frame_log("[RCityWater] 岸边侧滑后上浮按钮消失，回到陆地搜房逻辑")
                 self._reset_water_escape_progress()
                 return
 
@@ -7778,7 +7745,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         if moved >= self.WATER_ESCAPE_STUCK_DISTANCE:
             self.water_escape_stuck_frames = 0
             self.water_escape_side_attempts = 0
-            print(
+            self._frame_log(
                 f"[RCityWater] 水中自动前进反馈: moved={moved:.2f}, "
                 f"stuck_frames=0"
             )
@@ -7786,12 +7753,12 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         self.water_escape_stuck_frames += 1
         self.water_escape_side_attempts += 1
-        print(
+        self._frame_log(
             f"[RCityWater] 水中自动前进反馈: moved={moved:.2f}, "
             f"stuck_frames={self.water_escape_stuck_frames}, side={self.water_escape_side}"
         )
         if self.water_escape_stuck_frames >= self.WATER_ESCAPE_STUCK_FRAMES:
-            print("[RCityWater] 连续3帧几乎无位移，触发岸边侧滑避障")
+            self._frame_log("[RCityWater] 连续3帧几乎无位移，触发岸边侧滑避障")
             return True
         return False
 
@@ -7841,7 +7808,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_nearest_entry_location = nearest_loc
         self.r_city_nearest_entry_id = nearest.get("id")
         if previous_id != self.r_city_nearest_entry_id:
-            print(
+            self._frame_log(
                 f"[RCitySearch] 更新最近入门点参考：id={self.r_city_nearest_entry_id}, "
                 f"location={nearest_loc}；不可通行区域将与该点比较"
             )
@@ -7872,7 +7839,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         active_id = (self.active_entry or {}).get("r_city_target_id")
         if active_id != target.get("id"):
             self._lock_r_city_target(target)
-            print(
+            self._frame_log(
                 f"[RCitySearch] 跑图接管期间同步动态最近入门点："
                 f"id={target['id']}，location={target['location']}"
             )
@@ -7936,14 +7903,14 @@ class HouseSceneSearchManager(HouseSearchManager):
                 self.temp_skip_entries.add(tuple(entry_loc))
             if approach_loc is not None:
                 self.temp_skip_entries.add(tuple(approach_loc))
-            print(
+            self._frame_log(
                 f"[RCitySearch] {reason}: 跳过当前入门点 {target_id} "
                 f"entry={entry_loc}, approach={approach_loc} "
                 f"fail={self.r_city_failed_counts[target_id]}/{self.R_CITY_FAILED_TARGET_LIMIT}；"
                 "同房其他入门点继续保留"
             )
         elif self.current_house_id:
-            print(f"[RCitySearch] {reason}: {self.current_house_id}")
+            self._frame_log(f"[RCitySearch] {reason}: {self.current_house_id}")
         self.current_house_id = None
         self.current_r_city_target = None
         self.active_entry = None
@@ -7971,12 +7938,12 @@ class HouseSceneSearchManager(HouseSearchManager):
         if not candidates:
             return
         target = min(candidates, key=lambda item: get_distance(loc, item["location"]))
-        print(f"[RCitySearch] 室内状态下匹配到R城房点 {target['id']}")
+        self._frame_log(f"[RCitySearch] 室内状态下匹配到R城房点 {target['id']}")
         self._lock_r_city_target(target)
 
     def _finish_r_city_searching(self, w: "FrameWorker", reason: str):
         self.stop_auto_forward(w)
-        print(f"[RCitySearch] {reason}，切换到跑图阶段")
+        w.frame_log(f"[RCitySearch] {reason}，切换到跑图阶段")
         self.current_house_id = None
         self.current_r_city_target = None
         self.active_entry = None
@@ -7993,14 +7960,14 @@ class HouseSceneSearchManager(HouseSearchManager):
         if not w.get_info("跳跃"):
             return True
 
-        print(f"[SceneSearch] {reason}，且检测到跳跃按钮，先按翻窗逻辑确认")
+        w.frame_log(f"[SceneSearch] {reason}，且检测到跳跃按钮，先按翻窗逻辑确认")
         self.handle_jump_logic(w)
         self._refresh_frame_and_handle_jump(w)
         if self._is_indoor(w):
-            print("[SceneSearch] 跳跃后仍为 indoor，确认已进房")
+            w.frame_log("[SceneSearch] 跳跃后仍为 indoor，确认已进房")
             return True
 
-        print(f"[SceneSearch] 跳跃后 house_scene={self._get_house_scene(w)}，暂不启动旋转搜房")
+        w.frame_log(f"[SceneSearch] 跳跃后 house_scene={self._get_house_scene(w)}，暂不启动旋转搜房")
         return False
 
     def _complete_current_house_search(self, w: "FrameWorker", reason: str) -> bool:
@@ -8009,7 +7976,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         self.stop_auto_forward(w)
         self.indoor_stuck_frames = 0
-        print(f"[SceneSearch] {reason}")
+        w.frame_log(f"[SceneSearch] {reason}")
 
         if not self.start_searching(w):
             return False
@@ -8034,7 +8001,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 if self._r_city_target_house_id(target) is not None
             }
         )
-        print(
+        w.frame_log(
             f"[RCitySearch] 房屋 {completed_house_id} 完成，"
             f"已登记 {completed_house_count}/{total_house_count} 栋，后续跳过该 house_id"
         )
@@ -8051,7 +8018,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _exit_unexpected_indoor(self, w: "FrameWorker"):
         self.stop_auto_forward(w)
-        print("[SceneSearch] 已搜完或无待搜目标时检测到 indoor，优先执行出房")
+        w.frame_log("[SceneSearch] 已搜完或无待搜目标时检测到 indoor，优先执行出房")
         if self._exit_house(w):
             self.indoor_stuck_frames = 0
             self.current_house_id = None
@@ -8060,13 +8027,13 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _recover_r_city_navigation_stuck(self, w: "FrameWorker", current_loc) -> bool:
         if self._is_indoor(w):
-            print("[RCitySearch] 推进中卡住但已在室内，转入室内搜房/出房链路")
+            w.frame_log("[RCitySearch] 推进中卡住但已在室内，转入室内搜房/出房链路")
             return self._handle_indoor_during_entry_route(
                 w,
                 current_loc,
                 "R城推进卡住时确认已进房",
             )
-        print("[RCitySearch] 推进中卡住且仍在室外，执行室外绕障")
+        w.frame_log("[RCitySearch] 推进中卡住且仍在室外，执行室外绕障")
         return self.execute_unstuck_logic(w, current_loc)
 
     def _move_precisely_to_entry_point(
@@ -8092,11 +8059,11 @@ class HouseSceneSearchManager(HouseSearchManager):
             max_steps=align_max_steps,
         )
         if not aligned:
-            print(
+            w.frame_log(
                 f"[SceneSearch] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
                 f"视角还没对准入门点，允许误差={align_threshold}，本轮不推摇杆"
             )
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 f"当前搜房分支：{phase_label}角度未对齐",
                 self._entry_observation(
@@ -8117,7 +8084,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             return True
         mode = self._entry_forward_mode(dist)
         y_bias, dura, wait = self._get_entry_move_params(dist)
-        print(
+        w.frame_log(
             f"[SceneSearch] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
             f"需要{self._entry_forward_mode_label(mode)}靠近入门点："
             f"y_bias={y_bias}, dura={dura}, wait={wait}, "
@@ -8211,7 +8178,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             if current_dist is None:
                 current_dist = previous_dist
             if current_dist <= self.ENTRY_ARRIVAL_DISTANCE:
-                print(
+                w.frame_log(
                     f"[SceneSearch] 当前距离入门点 {target_loc} 为 {current_dist:.2f} "
                     f"<= {self.ENTRY_ARRIVAL_DISTANCE:g}，已经到达入门点，停止继续前推"
                 )
@@ -8227,7 +8194,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 max_steps=self.R_CITY_PRECISE_NAV_ALIGN_MAX_STEPS,
             )
             if not aligned:
-                self._set_search_frame_decision(
+                self._log_search_frame_state(
                     w,
                     f"当前搜房分支：R城{phase_label}小步前角度未对齐",
                     self._entry_observation(
@@ -8261,14 +8228,14 @@ class HouseSceneSearchManager(HouseSearchManager):
             wait = self._precise_nav_wait_ms(current_dist, wait)
             y_bias = self.R_CITY_PRECISE_NAV_Y_BIAS
 
-            print(
+            w.frame_log(
                 f"[SceneSearch] 当前距离入门点 {target_loc} 为 {current_dist:.2f}，"
                 f"执行{self._entry_forward_mode_label(mode)}小步 {step}/{progress_max_steps}："
                 f"模型距离={distance_key}, model_y_bias={adaptive_y_bias}, "
                 f"fixed_y_bias={y_bias}, dura={dura}, model_wait={model_wait}, "
                 f"dynamic_wait={wait}, target_angle={target_angle}"
             )
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：R城入门点自适应前推",
                 self._entry_observation(
@@ -8306,7 +8273,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 return True
 
             moved = current_dist - after_dist
-            print(
+            w.frame_log(
                 f"[SceneSearch] 推进入门点 {target_loc} 后，"
                 f"距离从 {current_dist:.2f} 变为 {after_dist:.2f}，"
                 f"实际靠近={moved:.2f}，模式={self._entry_forward_mode_label(mode)}，模型距离={distance_key}"
@@ -8315,7 +8282,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 break
             previous_dist = after_dist
         else:
-            print(
+            w.frame_log(
                 f"[SceneSearch] 入门点 {target_loc} 已连续靠近 {progress_max_steps} 步，"
                 "结束本轮精推进保护；下一帧继续按最新距离/角度判断是否前推"
             )
@@ -8343,12 +8310,12 @@ class HouseSceneSearchManager(HouseSearchManager):
         if before_dist is None:
             before_dist = desired_dist
 
-        print(
+        w.frame_log(
             f"[SceneSearch] 执行{self._side_label(side)}滑微调: "
             f"bin={distance_key}, before={before_dist:.2f}, "
             f"x_bias={x_bias}, dura={dura}, wait={wait}"
         )
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：R城入门点自适应侧滑",
             self._entry_observation(
@@ -8378,7 +8345,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         )
         if after_dist is not None:
             moved = before_dist - after_dist
-            print(
+            w.frame_log(
                 f"[SceneSearch] 侧滑反馈: side={side}, bin={distance_key}, "
                 f"after={after_dist:.2f}, moved={moved:.2f}"
             )
@@ -8420,8 +8387,8 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.sub_rooms_entered = 0
         self.visited_sub_doors.clear()
 
-        print("[SceneRotate] 进入房屋，启动 house_scene 旋转搜房")
-        self._set_search_frame_decision(
+        w.frame_log("[SceneRotate] 进入房屋，启动 house_scene 旋转搜房")
+        self._log_search_frame_state(
             w,
             "当前搜房分支：进入房屋后旋转搜房",
             self._entry_observation(
@@ -8441,26 +8408,26 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         self._refresh_frame_and_handle_jump(w)
         if rotate_result == self.ROTATE_RESULT_EXITED or self._is_out_of_house(w):
-            print("[SceneRotate] 旋转搜房过程中已出房，房屋搜索完成")
+            w.frame_log("[SceneRotate] 旋转搜房过程中已出房，房屋搜索完成")
             return True
 
         if rotate_result == self.ROTATE_RESULT_FALLBACK_EXIT:
-            print("[SceneRotate] 两轮撞墙循环仍未自然出房，开始执行出房策略")
+            w.frame_log("[SceneRotate] 两轮撞墙循环仍未自然出房，开始执行出房策略")
         else:
-            print("[SceneRotate] 旋转搜房结束，开始出房")
+            w.frame_log("[SceneRotate] 旋转搜房结束，开始出房")
 
         if self._exit_house(w):
-            print("[SceneRotate] 出房策略成功，房屋搜索完成")
+            w.frame_log("[SceneRotate] 出房策略成功，房屋搜索完成")
             return True
         if self._should_abort(w):
             return False
 
         self._refresh_frame_and_handle_jump(w)
         if self._is_out_of_house(w):
-            print("[SceneRotate] 出房策略成功，房屋搜索完成")
+            w.frame_log("[SceneRotate] 出房策略成功，房屋搜索完成")
             return True
 
-        print(f"[SceneRotate] 出房策略后仍未确认出房 house_scene={self._get_house_scene(w)}")
+        w.frame_log(f"[SceneRotate] 出房策略后仍未确认出房 house_scene={self._get_house_scene(w)}")
         return False
 
     def _house_search_timed_out(self):
@@ -8468,8 +8435,8 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _rotate_search_inside_house(self, w: "FrameWorker"):
         self.stop_auto_forward(w)
-        print("[SceneRotate] 室内搜房改为固定推进转向：左上+右转一圈，随后出房")
-        self._set_search_frame_decision(
+        w.frame_log("[SceneRotate] 室内搜房改为固定推进转向：左上+右转一圈，随后出房")
+        self._log_search_frame_state(
             w,
             "当前搜房分支：室内固定推进转向搜索",
             self._entry_observation(
@@ -8513,12 +8480,12 @@ class HouseSceneSearchManager(HouseSearchManager):
                     self.HOUSE_NEAR_DOOR,
                     self.HOUSE_NEAR_WALL,
                 }:
-                    print(f"[SceneRotate] 当前 house_scene={scene}，停止室内旋转搜房")
+                    w.frame_log(f"[SceneRotate] 当前 house_scene={scene}，停止室内旋转搜房")
                     self.stop_auto_forward(w)
                     return self.ROTATE_RESULT_FINISHED
 
                 step_index += 1
-                print(
+                w.frame_log(
                     f"[SceneRotate] {phase_label}推进 {phase_step + 1}/"
                     f"{self.ROTATE_SEARCH_SWEEP_CYCLES_PER_DIRECTION}，全局步数={step_index}"
                 )
@@ -8537,7 +8504,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                         return self.ROTATE_RESULT_EXITED
                     continue
 
-                print(f"[SceneRotate] {phase_label}推进后原地转视角 {turn_px}px")
+                w.frame_log(f"[SceneRotate] {phase_label}推进后原地转视角 {turn_px}px")
                 self._turn_raw_pixels(w, turn_px)
 
                 self._refresh_frame_and_handle_jump(w)
@@ -8554,7 +8521,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                     continue
 
         self.stop_auto_forward(w)
-        print("[SceneRotate] 左上+右转一圈后仍未出房，切出房策略")
+        w.frame_log("[SceneRotate] 左上+右转一圈后仍未出房，切出房策略")
         return self.ROTATE_RESULT_FALLBACK_EXIT
 
     def _confirm_rotate_exit_or_continue(
@@ -8571,13 +8538,13 @@ class HouseSceneSearchManager(HouseSearchManager):
         if abs(turn_px) > self.ROTATE_EXIT_RECHECK_TURN_PX:
             turn_px = self.ROTATE_EXIT_RECHECK_TURN_PX if turn_px > 0 else -self.ROTATE_EXIT_RECHECK_TURN_PX
 
-        print(
+        w.frame_log(
             f"[SceneRotate] {phase_label}{checkpoint}检测到 house_scene={first_scene}，"
             f"疑似看到窗外/门外或单帧误识别，停止前推并转视角复核: "
             f"x_bias={turn_px}, dura={self.ROTATE_SEARCH_SWEEP_TURN_DURA}, "
             f"wait={self.ROTATE_SEARCH_SWEEP_TURN_WAIT}"
         )
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：疑似出房信号，转视角复核",
             self._entry_observation(
@@ -8604,14 +8571,14 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         second_scene = self._get_house_scene(w)
         if second_scene in self.HOUSE_EXIT_SCENES:
-            print(
+            w.frame_log(
                 f"[SceneRotate] {phase_label}{checkpoint}屋外信号复核仍为 house_scene={second_scene}，"
                 "确认已出房，结束旋转搜房"
             )
             self.stop_auto_forward(w)
             return True
 
-        print(
+        w.frame_log(
             f"[SceneRotate] {phase_label}{checkpoint}屋外信号复核后为 house_scene={second_scene}，"
             "复核后仍在室内/门墙附近，继续未完成的旋转搜房"
         )
@@ -8620,8 +8587,8 @@ class HouseSceneSearchManager(HouseSearchManager):
     def _ensure_rotate_auto_forward(self, w: "FrameWorker", reason: str):
         if self.auto_forward:
             return
-        print(f"[SceneRotate] {reason}")
-        self._set_search_frame_decision(
+        w.frame_log(f"[SceneRotate] {reason}")
+        self._log_search_frame_state(
             w,
             "当前搜房分支：室内旋转开启自动前进",
             self._entry_observation(
@@ -8646,11 +8613,11 @@ class HouseSceneSearchManager(HouseSearchManager):
             x_bias = self.ROTATE_SEARCH_RECOVER_X_BIAS
             label = "右"
 
-        print(
+        w.frame_log(
             f"[SceneRotate] 连续 {self.ROTATE_SEARCH_STUCK_SIMILAR_FRAMES} 帧前景相似，"
             f"判定卡住，向{label}横拉一下"
         )
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：室内旋转卡住横拉恢复",
             self._entry_observation(
@@ -8683,8 +8650,8 @@ class HouseSceneSearchManager(HouseSearchManager):
     def _move_rotate_search_step(self, w: "FrameWorker", move_mode: str):
         x_bias = self._rotate_move_x_bias(move_mode)
         label = self._move_mode_label(move_mode)
-        print(f"[SceneRotate] 向{label}滑动 {self.ROTATE_SEARCH_MOVE_DURA}ms")
-        self._set_search_frame_decision(
+        w.frame_log(f"[SceneRotate] 向{label}滑动 {self.ROTATE_SEARCH_MOVE_DURA}ms")
+        self._log_search_frame_state(
             w,
             "当前搜房分支：室内旋转滑动推进",
             self._entry_observation(
@@ -8716,11 +8683,11 @@ class HouseSceneSearchManager(HouseSearchManager):
     def _move_rotate_search_sweep_step(self, w: "FrameWorker", move_mode: str, phase_label: str):
         x_bias = self._rotate_move_x_bias(move_mode)
         label = self._move_mode_label(move_mode)
-        print(
+        w.frame_log(
             f"[SceneRotate] {phase_label}: 向{label}推进 "
             f"{self.ROTATE_SEARCH_SWEEP_MOVE_DURA}ms"
         )
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             f"当前搜房分支：室内{phase_label}向{label}推进",
             self._entry_observation(
@@ -8749,7 +8716,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self._refresh_frame_and_handle_jump(w)
 
     def _turn_raw_pixels(self, w: "FrameWorker", signed_px: int):
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：按像素转动视角",
             self._entry_observation(
@@ -8789,17 +8756,17 @@ class HouseSceneSearchManager(HouseSearchManager):
         current_mode = move_mode
         if wall_hit_count >= self.ROTATE_SEARCH_HIT_SWITCH_COUNT:
             if current_mode == "left_up":
-                print(f"[SceneRotate] 左上累计撞{label}已达{wall_hit_count}次，立即切到右上，并改为向左补转")
+                w.frame_log(f"[SceneRotate] 左上累计撞{label}已达{wall_hit_count}次，立即切到右上，并改为向左补转")
                 self._turn_until_not_near_entry(w, -1)
                 return "right_up", 0, True
 
-            print(f"[SceneRotate] 右上累计撞{label}已达{wall_hit_count}次，立即切到左上，并改为向右补转")
+            w.frame_log(f"[SceneRotate] 右上累计撞{label}已达{wall_hit_count}次，立即切到左上，并改为向右补转")
             self._turn_until_not_near_entry(w, 1)
             return "left_up", 0, True
 
         turn_sign = self._move_mode_turn_sign(current_mode)
         turn_label = "向右" if turn_sign > 0 else "向左"
-        print(f"[SceneRotate] 撞{label}后{turn_label}补转，直到不再贴墙/门")
+        w.frame_log(f"[SceneRotate] 撞{label}后{turn_label}补转，直到不再贴墙/门")
         self._turn_until_not_near_entry(w, turn_sign)
         return move_mode, wall_hit_count, False
 
@@ -8811,11 +8778,11 @@ class HouseSceneSearchManager(HouseSearchManager):
             base_index = min(attempt, len(self.ROTATE_SEARCH_WALL_TURN_SEQUENCE) - 1)
             angle = self.ROTATE_SEARCH_WALL_TURN_SEQUENCE[base_index]
             signed_angle = turn_sign * angle
-            print(
+            w.frame_log(
                 f"[SceneRotate] 撞墙补转 {attempt + 1}/"
                 f"{self.ROTATE_SEARCH_WALL_TURN_MAX_ATTEMPTS}: {signed_angle}°"
             )
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：室内撞墙补转",
                 self._entry_observation(
@@ -8835,12 +8802,12 @@ class HouseSceneSearchManager(HouseSearchManager):
             self._refresh_frame_and_handle_jump(w)
             scene = self._get_house_scene(w)
             if scene not in self.HOUSE_NEAR_ENTRY_SCENES:
-                print(f"[SceneRotate] 补转后 house_scene={scene}，继续当前滑动方向")
+                w.frame_log(f"[SceneRotate] 补转后 house_scene={scene}，继续当前滑动方向")
                 return True
 
-            print(f"[SceneRotate] 补转后仍贴墙/门 house_scene={scene}，继续缩小角度补转")
+            w.frame_log(f"[SceneRotate] 补转后仍贴墙/门 house_scene={scene}，继续缩小角度补转")
 
-        print("[SceneRotate] 多次补转后仍贴墙/门，交给下一轮移动继续尝试")
+        w.frame_log("[SceneRotate] 多次补转后仍贴墙/门，交给下一轮移动继续尝试")
         return False
 
     def _turn_with_direction_correction(self, w: "FrameWorker", signed_angle: float):
@@ -8848,7 +8815,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self._turn(w, signed_angle)
         self._refresh_frame_and_handle_jump(w)
         if before_dir is None:
-            print("[SceneRotate] 当前 direction 无效，跳过本次补角到位校验")
+            w.frame_log("[SceneRotate] 当前 direction 无效，跳过本次补角到位校验")
             return
 
         target_dir = (before_dir + float(signed_angle)) % 360.0
@@ -8856,14 +8823,14 @@ class HouseSceneSearchManager(HouseSearchManager):
             current_dir = self._direction_as_float(w.get_info("direction"))
             turn_dir, _, diff = calculate_move_count(current_dir, target_dir)
             if diff is None or turn_dir is None:
-                print("[SceneRotate] 补角后 direction 无效，无法继续校验角度")
+                w.frame_log("[SceneRotate] 补角后 direction 无效，无法继续校验角度")
                 return
             if diff <= self.ROTATE_SEARCH_TURN_CORRECT_THRESHOLD:
                 return
 
             correction = min(float(diff), self.ROTATE_SEARCH_TURN_CORRECT_MAX_DEGREES)
             signed_correction = correction if turn_dir == "right" else -correction
-            print(
+            w.frame_log(
                 f"[SceneRotate] 补角未到位，二次校正 {step + 1}/"
                 f"{self.ROTATE_SEARCH_TURN_CORRECT_MAX_STEPS}: "
                 f"current={current_dir:.1f}, target={target_dir:.1f}, "
@@ -8875,7 +8842,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         current_dir = self._direction_as_float(w.get_info("direction"))
         _, _, remaining = calculate_move_count(current_dir, target_dir)
         if remaining is not None and remaining > self.ROTATE_SEARCH_TURN_CORRECT_THRESHOLD:
-            print(
+            w.frame_log(
                 f"[SceneRotate] 二次校正后仍有角度偏差: "
                 f"current={current_dir:.1f}, target={target_dir:.1f}, remaining={remaining:.1f}"
             )
@@ -8895,8 +8862,8 @@ class HouseSceneSearchManager(HouseSearchManager):
             x_bias = -self.ROTATE_SEARCH_RECOVER_X_BIAS
             label = "左"
 
-        print(f"[SceneRotate] 两帧过于相似，判定卡住，向{label}水平脱困 {dura_ms}ms")
-        self._set_search_frame_decision(
+        w.frame_log(f"[SceneRotate] 两帧过于相似，判定卡住，向{label}水平脱困 {dura_ms}ms")
+        self._log_search_frame_state(
             w,
             "当前搜房分支：室内画面相似卡住，水平脱困",
             self._entry_observation(
@@ -8919,8 +8886,8 @@ class HouseSceneSearchManager(HouseSearchManager):
         self._refresh_frame_and_handle_jump(w)
 
     def _exit_house(self, w: "FrameWorker") -> bool:
-        print("[SceneExit] 出房开始：先按60度扫描找门；六次仍无门再找窗；三次穿门/翻窗失败后进入应急冲出")
-        self._set_search_frame_decision(
+        w.frame_log("[SceneExit] 出房开始：先按60度扫描找门；六次仍无门再找窗；三次穿门/翻窗失败后进入应急冲出")
+        self._log_search_frame_state(
             w,
             "当前搜房分支：出房开始找门",
             self._entry_observation(
@@ -8936,13 +8903,13 @@ class HouseSceneSearchManager(HouseSearchManager):
         self._exit_target_attempts = 0
         self.stop_auto_forward(w)
         if self._exit_house_by_door_scan_strategy(w):
-            print("[SceneExit] 按门扫描出房成功")
+            w.frame_log("[SceneExit] 按门扫描出房成功")
             self.stop_auto_forward(w)
             return True
 
         self.stop_auto_forward(w)
         final_scene = self._get_house_scene(w)
-        print(f"[SceneExit] 门扫描出房未成功，停止移动后最终 house_scene={final_scene}")
+        w.frame_log(f"[SceneExit] 门扫描出房未成功，停止移动后最终 house_scene={final_scene}")
         return self._is_out_of_house(w)
 
     def _exit_house_by_door_scan_strategy(self, w: "FrameWorker") -> bool:
@@ -8952,7 +8919,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         for turn_index in range(self.SCENE_EXIT_DOOR_SCAN_TURN_COUNT):
             if self._should_abort(w):
                 return False
-            print(
+            w.frame_log(
                 f"[SceneExit] 没看到门，顺时针转{self.SCENE_EXIT_SCAN_TURN_DEGREES}度找门 "
                 f"{turn_index + 1}/{self.SCENE_EXIT_DOOR_SCAN_TURN_COUNT}"
             )
@@ -8963,7 +8930,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             if self._try_exit_visible_door_from_current_frame(w, f"第{turn_index + 1}次60度转向后"):
                 return True
 
-        print("[SceneExit] 连续6次60度转向仍未找到门，切换为按60度找窗翻出")
+        w.frame_log("[SceneExit] 连续6次60度转向仍未找到门，切换为按60度找窗翻出")
         if self._exit_house_by_window_scan_strategy(w):
             return True
         return self._emergency_exit_by_auto_forward_clockwise(w, "门窗均未成功出房")
@@ -8971,7 +8938,7 @@ class HouseSceneSearchManager(HouseSearchManager):
     def _try_exit_current_visible_door(self, w: "FrameWorker", phase_label: str) -> bool:
         self._refresh_frame_and_handle_jump(w, f"出房{phase_label}查门")
         if self._is_out_of_house(w):
-            print(f"[SceneExit] {phase_label}查门前已双帧确认在屋外")
+            w.frame_log(f"[SceneExit] {phase_label}查门前已双帧确认在屋外")
             return True
 
         return self._try_exit_visible_door_from_current_frame(w, phase_label)
@@ -8979,11 +8946,11 @@ class HouseSceneSearchManager(HouseSearchManager):
     def _try_exit_visible_door_from_current_frame(self, w: "FrameWorker", phase_label: str) -> bool:
         door = self.find_largest_door(w)
         if not door:
-            print(f"[SceneExit] {phase_label}没有看到门，继续按出房扫描流程执行")
+            w.frame_log(f"[SceneExit] {phase_label}没有看到门，继续按出房扫描流程执行")
             return False
 
-        print(f"[SceneExit] {phase_label}看到门，先对准门再大幅前推: door={door}")
-        self._set_search_frame_decision(
+        w.frame_log(f"[SceneExit] {phase_label}看到门，先对准门再大幅前推: door={door}")
+        self._log_search_frame_state(
             w,
             "当前搜房分支：出房看到门，先对准",
             self._entry_observation(
@@ -9007,7 +8974,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         if align_state == "aligned":
             result = self._push_exit_door_and_check_out(w, f"{phase_label}门已对准")
         elif align_state == "lost":
-            print(
+            w.frame_log(
                 f"[SceneExit] {phase_label}对准门时目标丢失，"
                 f"保留丢失前门中心偏移={last_door_offset}，按该侧门口恢复"
             )
@@ -9017,7 +8984,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 last_door_offset,
             )
         else:
-            print(f"[SceneExit] {phase_label}门未进入容差，保留当前位置继续扫描找门")
+            w.frame_log(f"[SceneExit] {phase_label}门未进入容差，保留当前位置继续扫描找门")
             result = False
 
         if result:
@@ -9027,7 +8994,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _record_exit_target_attempt_failure(self, w: "FrameWorker", reason: str) -> Optional[bool]:
         self._exit_target_attempts = getattr(self, "_exit_target_attempts", 0) + 1
-        print(
+        w.frame_log(
             f"[SceneExit] {reason}，目标出房失败计数="
             f"{self._exit_target_attempts}/{self.SCENE_EXIT_TARGET_ATTEMPT_LIMIT}"
         )
@@ -9048,7 +9015,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         dura: int,
         wait: int,
     ) -> bool:
-        print(
+        w.frame_log(
             f"[SceneExit] {label}: x_bias={x_bias}, y_bias={y_bias}, dura={dura}, wait={wait}"
         )
         w.tap_single("摇杆", x_bias=x_bias, y_bias=y_bias, dura=dura, wait=wait)
@@ -9071,7 +9038,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             return True
         scene_after_forward = self._get_house_scene(w)
         if scene_after_forward != self.HOUSE_NEAR_WALL:
-            print(
+            w.frame_log(
                 f"[SceneExit] 门丢失后直推未出房，house_scene={scene_after_forward}；"
                 "不是 near_wall，不做后拉，回到找门/找窗扫描"
             )
@@ -9079,7 +9046,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         first_side = "右" if last_door_offset is None or last_door_offset >= 0 else "左"
         second_side = "左" if first_side == "右" else "右"
-        print(
+        w.frame_log(
             f"[SceneExit] 门丢失后直推仍贴墙；丢失前门在{first_side}侧，"
             f"先{first_side}前推2秒，再{second_side}前推4秒"
         )
@@ -9108,18 +9075,18 @@ class HouseSceneSearchManager(HouseSearchManager):
         if self._get_house_scene(w) != self.HOUSE_NEAR_WALL:
             return False
 
-        print("[SceneExit] 门丢失后直推及左右前推均未出房且仍贴墙，后拉掉头后重新找门/窗")
+        w.frame_log("[SceneExit] 门丢失后直推及左右前推均未出房且仍贴墙，后拉掉头后重新找门/窗")
         self._recover_exit_wall_collision(w, "门丢失左右前推后")
         return self._is_out_of_house(w)
 
     def _push_exit_door_and_check_out(self, w: "FrameWorker", reason: str) -> bool:
-        print(
+        w.frame_log(
             f"[SceneExit] {reason}，门已大致对准，不处理开门/关门按钮，直接前推5秒: "
             f"y_bias={self.SCENE_EXIT_DOOR_FORWARD_Y_BIAS}, "
             f"dura={self.SCENE_EXIT_DOOR_FORWARD_DURA}, "
             f"wait={self.SCENE_EXIT_DOOR_FORWARD_WAIT}"
         )
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：对准出房门后直推5秒",
             self._entry_observation(
@@ -9147,7 +9114,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self._refresh_frame_and_handle_jump(w, "出房对准门大幅前推后")
 
         if self._is_out_of_house(w):
-            print("[SceneExit] 对准门大幅前推后双帧确认已出房")
+            w.frame_log("[SceneExit] 对准门大幅前推后双帧确认已出房")
             return True
         if self._try_aligned_exit_door_side_pushes_and_check_out(w, reason):
             return True
@@ -9164,14 +9131,14 @@ class HouseSceneSearchManager(HouseSearchManager):
         if scene != self.HOUSE_NEAR_WALL:
             return False
 
-        print(
+        w.frame_log(
             f"[SceneExit] {reason}直推后仍贴墙，先左前推、再右前推尝试顶出："
             f"x_bias=±{self.SCENE_EXIT_DOOR_WALL_SIDE_X_BIAS}, "
             f"y_bias={self.SCENE_EXIT_DOOR_WALL_SIDE_Y_BIAS}, "
             f"dura={self.SCENE_EXIT_DOOR_WALL_SIDE_DURA}, "
             f"wait={self.SCENE_EXIT_DOOR_WALL_SIDE_WAIT}"
         )
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：对准出房门直推撞墙，左右前推顶出",
             self._entry_observation(
@@ -9208,10 +9175,10 @@ class HouseSceneSearchManager(HouseSearchManager):
                 dura=self.SCENE_EXIT_DOOR_WALL_SIDE_DURA,
                 wait=self.SCENE_EXIT_DOOR_WALL_SIDE_WAIT,
             ):
-                print(f"[SceneExit] 对准门直推贴墙后向{side}前推，双帧确认已出房")
+                w.frame_log(f"[SceneExit] 对准门直推贴墙后向{side}前推，双帧确认已出房")
                 return True
 
-        print("[SceneExit] 对准门直推撞墙后左右前推均未出房，继续后拉掉头找门")
+        w.frame_log("[SceneExit] 对准门直推撞墙后左右前推均未出房，继续后拉掉头找门")
         return False
 
     def _exit_house_by_window_scan_strategy(self, w: "FrameWorker") -> bool:
@@ -9231,7 +9198,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
             if turn_index >= self.SCENE_EXIT_WINDOW_SCAN_TURN_COUNT:
                 break
-            print(
+            w.frame_log(
                 f"[SceneExit] 未定位到可用窗户，顺时针转{self.SCENE_EXIT_SCAN_TURN_DEGREES}度找窗 "
                 f"{turn_index + 1}/{self.SCENE_EXIT_WINDOW_SCAN_TURN_COUNT}"
             )
@@ -9255,7 +9222,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 -self.SCENE_EXIT_WINDOW_ALIGN_MAX_STEP_DEGREES,
                 min(self.SCENE_EXIT_WINDOW_ALIGN_MAX_STEP_DEGREES, angle),
             )
-            print(
+            w.frame_log(
                 f"[SceneExit] 选择画面中心最近的窗户，靠近 {step + 1}/"
                 f"{self.SCENE_EXIT_WINDOW_APPROACH_MAX_STEPS}: turn={turn_angle:.1f}"
             )
@@ -9267,7 +9234,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 break
             target = refreshed
 
-        print(
+        w.frame_log(
             f"[SceneExit] 画面中心最近窗户{('已对准' if align_state == 'aligned' else '最多靠近3次后停止调整')}，"
             "执行一次轻微前推并检查跳跃"
         )
@@ -9275,7 +9242,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _push_exit_window_once(self, w: "FrameWorker", align_state: str) -> bool:
         if w.get_info("跳跃"):
-            print("[SceneExit] 靠窗轻推前已出现跳跃，点击跳跃+前推翻出")
+            w.frame_log("[SceneExit] 靠窗轻推前已出现跳跃，点击跳跃+前推翻出")
             return self._jump_forward_exit_window(w, 0)
         if self._tap_exit_motion_and_check_out(
             w,
@@ -9286,7 +9253,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         ):
             return True
         if w.get_info("跳跃"):
-            print("[SceneExit] 窗户轻推后出现跳跃，停止前进并点击跳跃+前推翻出")
+            w.frame_log("[SceneExit] 窗户轻推后出现跳跃，停止前进并点击跳跃+前推翻出")
             self.stop_auto_forward(w)
             w.click("跳跃")
             w.tap_single(
@@ -9299,7 +9266,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             if self._is_out_of_house(w):
                 return True
         if self._get_house_scene(w) == self.HOUSE_NEAR_WALL:
-            print("[SceneExit] 靠窗轻推撞墙，后拉后重新定位窗户")
+            w.frame_log("[SceneExit] 靠窗轻推撞墙，后拉后重新定位窗户")
             self.stop_auto_forward(w)
             w.tap_single(
                 "摇杆",
@@ -9311,7 +9278,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         return self._is_out_of_house(w)
 
     def _emergency_exit_by_auto_forward_clockwise(self, w: "FrameWorker", reason: str) -> bool:
-        print(
+        w.frame_log(
             f"[SceneExit] 启动最终应急出房：{reason}；自动前进并持续顺时针每次转"
             f"{self.SCENE_EXIT_EMERGENCY_TURN_DEGREES}度，出现跳跃立即跳跃前推"
         )
@@ -9329,7 +9296,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 self.stop_auto_forward(w)
                 return True
             if w.get_info("跳跃"):
-                print("[SceneExit] 应急冲出中看到跳跃，立刻停止自动前进并跳跃+前推")
+                w.frame_log("[SceneExit] 应急冲出中看到跳跃，立刻停止自动前进并跳跃+前推")
                 self.stop_auto_forward(w)
                 w.click("跳跃")
                 w.tap_single(
@@ -9342,7 +9309,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 if self._is_out_of_house(w):
                     return True
         self.stop_auto_forward(w)
-        print("[SceneExit] 最终应急本轮未出房，下一帧继续同一应急策略")
+        w.frame_log("[SceneExit] 最终应急本轮未出房，下一帧继续同一应急策略")
         return self._is_out_of_house(w)
 
     def _recover_exit_wall_collision(self, w: "FrameWorker", reason: str) -> bool:
@@ -9350,7 +9317,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         if scene != self.HOUSE_NEAR_WALL:
             return False
 
-        print(
+        w.frame_log(
             f"[SceneExit] {reason}检测到撞墙/贴墙 house_scene={scene}，"
             f"后拉再把视角调转180度: back_y_bias={self.SCENE_EXIT_WALL_BACKOFF_Y_BIAS}, "
             f"back_dura={self.SCENE_EXIT_WALL_BACKOFF_DURA}, "
@@ -9359,7 +9326,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             f"turn_dura={self.SCENE_EXIT_WALL_TURN_AROUND_DURA}, "
             f"turn_wait={self.SCENE_EXIT_WALL_TURN_AROUND_WAIT}"
         )
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：出房撞墙后拉并掉头",
             self._entry_observation(
@@ -9398,7 +9365,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         return True
 
     def _exit_house_by_scene_strategy(self, w: "FrameWorker") -> bool:
-        print("[SceneExit] 启动 house_scene 多路径出房策略")
+        w.frame_log("[SceneExit] 启动 house_scene 多路径出房策略")
         move_mode = "left_up"
         wall_hit_count = 0
 
@@ -9408,7 +9375,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
             self._refresh_frame_and_handle_jump(w)
             if self._is_out_of_house(w):
-                print("[SceneExit] 出房策略开始前已判定在屋外")
+                w.frame_log("[SceneExit] 出房策略开始前已判定在屋外")
                 return True
 
             window = self._find_largest_forward_target(w, self.EXIT_WINDOW_CLASS_IDS)
@@ -9420,10 +9387,10 @@ class HouseSceneSearchManager(HouseSearchManager):
                 return True
 
             label = self._move_mode_label(move_mode)
-            print(f"[SceneExit] {label}绕圈找出口 {step + 1}/{self.EXIT_SEARCH_MAX_STEPS}")
+            w.frame_log(f"[SceneExit] {label}绕圈找出口 {step + 1}/{self.EXIT_SEARCH_MAX_STEPS}")
             self._move_exit_search_step(w, move_mode)
             if self._is_out_of_house(w):
-                print(f"[SceneExit] {label}滑动时意外出房，出房成功")
+                w.frame_log(f"[SceneExit] {label}滑动时意外出房，出房成功")
                 return True
 
             button_state = self._door_button_state(w)
@@ -9437,7 +9404,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             scene = self._get_house_scene(w)
             if scene in self.HOUSE_NEAR_ENTRY_SCENES:
                 wall_hit_count += 1
-                print(
+                w.frame_log(
                     f"[SceneExit] 累计撞墙/门 {wall_hit_count}/"
                     f"{self.ROTATE_SEARCH_HIT_SWITCH_COUNT}, mode={move_mode}"
                 )
@@ -9445,22 +9412,22 @@ class HouseSceneSearchManager(HouseSearchManager):
                     move_mode = self._opposite_move_mode(move_mode)
                     wall_hit_count = 0
                     label = self._move_mode_label(move_mode)
-                    print(f"[SceneExit] 撞墙/门达到阈值，切换为{label}逆向绕圈")
+                    w.frame_log(f"[SceneExit] 撞墙/门达到阈值，切换为{label}逆向绕圈")
 
             turn_sign = self._move_mode_turn_sign(move_mode)
             turn_label = "向右" if turn_sign > 0 else "向左"
-            print(
+            w.frame_log(
                 f"[SceneExit] {self._move_mode_label(move_mode)}后{turn_label}调整视角 "
                 f"{self.EXIT_SEARCH_TURN_DEGREES}° 继续绕圈"
             )
             self._turn(w, turn_sign * self.EXIT_SEARCH_TURN_DEGREES)
             self._refresh_frame_and_handle_jump(w)
 
-        print("[SceneExit] 多路径出房策略达到步数上限，仍未确认出房")
+        w.frame_log("[SceneExit] 多路径出房策略达到步数上限，仍未确认出房")
         return self._is_out_of_house(w)
 
     def _move_exit_search_step(self, w: "FrameWorker", move_mode: str):
-        self._set_search_frame_decision(
+        self._log_search_frame_state(
             w,
             "当前搜房分支：出房绕圈找出口",
             self._entry_observation(
@@ -9491,8 +9458,8 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _exit_via_door_button(self, w: "FrameWorker", button_state: str) -> bool:
         if button_state == "open":
-            print("[SceneExit] 发现开门按钮，点击开门后尝试出门")
-            self._set_search_frame_decision(
+            w.frame_log("[SceneExit] 发现开门按钮，点击开门后尝试出门")
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：出房发现开门按钮",
                 self._entry_observation(
@@ -9509,7 +9476,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             time.sleep(self.OPEN_DOOR_SETTLE_SECONDS)
             self._refresh_frame_and_handle_jump(w)
         else:
-            print("[SceneExit] 发现关门按钮，门已打开，直接尝试出门")
+            w.frame_log("[SceneExit] 发现关门按钮，门已打开，直接尝试出门")
 
         return self._exit_open_door_by_diagonal_sweep(w)
 
@@ -9520,12 +9487,12 @@ class HouseSceneSearchManager(HouseSearchManager):
 
             self._refresh_frame_and_handle_jump(w)
             if self._is_out_of_house(w):
-                print("[SceneExit] 门口推进前已在屋外")
+                w.frame_log("[SceneExit] 门口推进前已在屋外")
                 return True
 
             if self._door_button_state(w) == "open":
-                print("[SceneExit] 门口推进前再次看到开门按钮，补点一次开门")
-                self._set_search_frame_decision(
+                w.frame_log("[SceneExit] 门口推进前再次看到开门按钮，补点一次开门")
+                self._log_search_frame_state(
                     w,
                     "当前搜房分支：门口推进前补点开门",
                     self._entry_observation(
@@ -9548,8 +9515,8 @@ class HouseSceneSearchManager(HouseSearchManager):
                 self.ENTRY_OPEN_SWEEP_MAX_DURA,
             )
             x_bias = -self.ENTRY_SWEEP_X_BIAS if side == "left" else self.ENTRY_SWEEP_X_BIAS
-            print(f"[SceneExit] 门已打开，向{self._side_label(side)}上小步尝试出门 {dura}ms")
-            self._set_search_frame_decision(
+            w.frame_log(f"[SceneExit] 门已打开，向{self._side_label(side)}上小步尝试出门 {dura}ms")
+            self._log_search_frame_state(
                 w,
                 f"当前搜房分支：门已打开，向{self._side_label(side)}上小步出门",
                 self._entry_observation(
@@ -9579,20 +9546,20 @@ class HouseSceneSearchManager(HouseSearchManager):
             self._refresh_frame_and_handle_jump(w)
 
             if self._is_out_of_house(w):
-                print("[SceneExit] 左上/右上门口推进后出房成功")
+                w.frame_log("[SceneExit] 左上/右上门口推进后出房成功")
                 return True
 
             window = self._find_largest_forward_target(w, self.EXIT_WINDOW_CLASS_IDS)
             if window and self._exit_via_window_by_scene(w, window):
                 return True
 
-        print("[SceneExit] 门口左上/右上推进到上限，未确认出房")
+        w.frame_log("[SceneExit] 门口左上/右上推进到上限，未确认出房")
         return False
 
     def _exit_via_window_by_scene(self, w: "FrameWorker", window) -> bool:
         rel_angle = self._target_relative_angle(window)
-        print(f"[SceneExit] 发现窗户，准备对齐 rel_angle={rel_angle}")
-        self._set_search_frame_decision(
+        w.frame_log(f"[SceneExit] 发现窗户，准备对齐 rel_angle={rel_angle}")
+        self._log_search_frame_state(
             w,
             "当前搜房分支：发现窗户，准备翻窗出房",
             self._entry_observation(
@@ -9622,7 +9589,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             if rel_angle is None:
                 return "lost"
             if abs(rel_angle) <= self.EXIT_WINDOW_ALIGN_TOLERANCE_DEGREES:
-                print(f"[SceneExit] 窗户已对齐 rel_angle={rel_angle:.1f}")
+                w.frame_log(f"[SceneExit] 窗户已对齐 rel_angle={rel_angle:.1f}")
                 return "aligned"
 
             turn_angle = max(
@@ -9630,11 +9597,11 @@ class HouseSceneSearchManager(HouseSearchManager):
                 min(self.EXIT_WINDOW_ALIGN_MAX_STEP_DEGREES, rel_angle),
             )
             side = "右" if turn_angle > 0 else "左"
-            print(
+            w.frame_log(
                 f"[SceneExit] 窗户在{side}侧，对齐 {step + 1}/"
                 f"{self.EXIT_WINDOW_ALIGN_MAX_STEPS}: turn={turn_angle:.1f}"
             )
-            self._set_search_frame_decision(
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：窗户对齐转视角",
                 self._entry_observation(
@@ -9655,22 +9622,22 @@ class HouseSceneSearchManager(HouseSearchManager):
 
             refreshed = self._find_largest_forward_target(w, self.EXIT_WINDOW_CLASS_IDS)
             if not refreshed:
-                print("[SceneExit] 对齐窗户时目标丢失，改为前推找跳跃按钮")
+                w.frame_log("[SceneExit] 对齐窗户时目标丢失，改为前推找跳跃按钮")
                 return "lost"
             target = refreshed
 
-        print("[SceneExit] 窗户对齐达到步数上限，按已接近窗户处理")
+        w.frame_log("[SceneExit] 窗户对齐达到步数上限，按已接近窗户处理")
         return "aligned"
 
     def _push_until_jump_and_exit_window(self, w: "FrameWorker", reason: str) -> bool:
-        print(f"[SceneExit] {reason}，最多前推 {self.EXIT_WINDOW_FORWARD_MAX_STEPS} 次找跳跃")
+        w.frame_log(f"[SceneExit] {reason}，最多前推 {self.EXIT_WINDOW_FORWARD_MAX_STEPS} 次找跳跃")
         for step in range(self.EXIT_WINDOW_FORWARD_MAX_STEPS):
             if self._should_abort(w):
                 return False
 
             self._refresh_frame_and_handle_jump(w)
             if self._is_out_of_house(w):
-                print("[SceneExit] 靠窗前推前已出房")
+                w.frame_log("[SceneExit] 靠窗前推前已出房")
                 return True
 
             if w.get_info("跳跃"):
@@ -9678,8 +9645,8 @@ class HouseSceneSearchManager(HouseSearchManager):
                     return True
                 continue
 
-            print(f"[SceneExit] 靠窗前推找跳跃 {step + 1}/{self.EXIT_WINDOW_FORWARD_MAX_STEPS}")
-            self._set_search_frame_decision(
+            w.frame_log(f"[SceneExit] 靠窗前推找跳跃 {step + 1}/{self.EXIT_WINDOW_FORWARD_MAX_STEPS}")
+            self._log_search_frame_state(
                 w,
                 "当前搜房分支：靠窗前推找跳跃",
                 self._entry_observation(
@@ -9708,21 +9675,21 @@ class HouseSceneSearchManager(HouseSearchManager):
             self._refresh_frame_and_handle_jump(w)
 
             if self._is_out_of_house(w):
-                print("[SceneExit] 靠窗前推时意外出房")
+                w.frame_log("[SceneExit] 靠窗前推时意外出房")
                 return True
 
             if w.get_info("跳跃") and self._jump_forward_exit_window(w, step + 1):
                 return True
 
-        print("[SceneExit] 靠窗前推 3 次仍未出现可用跳跃，放弃该窗户")
+        w.frame_log("[SceneExit] 靠窗前推 3 次仍未出现可用跳跃，放弃该窗户")
         return False
 
     def _jump_forward_exit_window(self, w: "FrameWorker", step: int) -> bool:
-        print(f"[SceneExit] 检测到跳跃按钮，尝试翻窗出房 step={step}")
+        w.frame_log(f"[SceneExit] 检测到跳跃按钮，尝试翻窗出房 step={step}")
         if not self.handle_jump_logic(w, f"SceneExit 翻窗出房 step={step}"):
             return False
         if self._is_out_of_house(w):
-            print("[SceneExit] 翻窗后出房成功")
+            w.frame_log("[SceneExit] 翻窗后出房成功")
             return True
         return False
 
@@ -9819,8 +9786,8 @@ class HouseSceneSearchManager(HouseSearchManager):
         return None
 
     def _click_open_door(self, w: "FrameWorker"):
-        print("[SceneEntry] 检测到开门按钮，点击开门")
-        self._set_search_frame_decision(
+        w.frame_log("[SceneEntry] 检测到开门按钮，点击开门")
+        self._log_search_frame_state(
             w,
             "当前进房分支：检测到开门按钮",
             self._entry_observation(
@@ -9848,13 +9815,13 @@ class HouseSceneSearchManager(HouseSearchManager):
         self._refresh_frame_and_handle_jump(w, "出房单帧信号复核")
         second_scene = self._get_house_scene(w)
         if second_scene in self.HOUSE_EXIT_SCENES:
-            print(
+            w.frame_log(
                 f"[SceneExit] 连续确认屋外信号 first={first_scene}, "
                 f"second={second_scene}，判定已出房"
             )
             return True
 
-        print(
+        w.frame_log(
             f"[SceneExit] 单帧屋外信号 first={first_scene} 后复核为 "
             f"{second_scene}，判定仍未出房，继续出房逻辑"
         )

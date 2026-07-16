@@ -1946,9 +1946,6 @@ class FrameWorker(threading.Thread):
         except Exception as exc:
             print(f"加载业务逻辑失败: {exc}")
             raise
-        self.frame_log_snapshotter = self._load_frame_log_hook(project_case, "get_recent_frame_log_snapshot")
-        self.frame_log_context_beginner = self._load_frame_log_hook(project_case, "begin_frame_log_context")
-
         self.buffer = buffer
         self.stream_client = stream_client
         self.driver = driver
@@ -1989,10 +1986,7 @@ class FrameWorker(threading.Thread):
         self.current_stage = None
         self.current_group = DEFAULT_GROUP_NAME
         self.frame = None
-        self.current_frame_observations = []
-        self.current_frame_actions = []
         self.current_frame_logs = []
-        self.current_frame_decision = {}
         self.current_frame_flushed = False
         self.last_gc_time = time.time()
 
@@ -2006,38 +2000,9 @@ class FrameWorker(threading.Thread):
         self.move_up = self._wrap_control_action("move_up", self.controller.move_up)
         self.sp_controller = SPControllerBase(self)
 
-    def _load_frame_log_hook(self, project_case, hook_name):
-        module_path = f"aw.autogame.customs_examples.{project_case}.resource.support.structured_log"
-        try:
-            module = importlib.import_module(module_path)
-        except Exception:
-            return None
-        hook = getattr(module, hook_name, None)
-        return hook if callable(hook) else None
-
     def _begin_frame_log_context(self):
-        self._reset_frame_decision()
+        self.current_frame_logs = []
         self.current_frame_flushed = False
-        if not callable(self.frame_log_context_beginner):
-            return
-        try:
-            self.frame_log_context_beginner(
-                frame_index=self.frame_index,
-                stage=self.current_stage,
-                group_name=self.current_group,
-            )
-        except Exception as exc:
-            print(f"[FrameWorker] 开启帧日志上下文失败: {exc}")
-
-    def _get_frame_runtime_logs(self):
-        if not callable(self.frame_log_snapshotter):
-            return {}
-        try:
-            snapshot = self.frame_log_snapshotter()
-        except Exception as exc:
-            print(f"[FrameWorker] 获取帧日志快照失败: {exc}")
-            return {}
-        return snapshot if isinstance(snapshot, dict) else {}
 
     def _queue_visual_frame(self):
         if self.frame is None or not self.viz_proc or self.viz_queue.full():
@@ -2057,8 +2022,7 @@ class FrameWorker(threading.Thread):
             pass
         frame_meta = {
             "group_name": self.current_group,
-            "runtime_logs": self._get_frame_runtime_logs(),
-            "frame_decision": self._build_frame_decision(),
+            "frame_logs": list(self.current_frame_logs),
             "screen_size": screen_size,
         }
         self.viz_queue.put((self.frame.copy(), self.current_stage, self.stage_info, self.frame_index, frame_meta))
@@ -2236,32 +2200,6 @@ class FrameWorker(threading.Thread):
         self._post_control_refresh_ready_at = 0.0
         return max(0.0, remaining)
 
-    def _reset_frame_decision(self):
-        self.current_frame_observations = []
-        self.current_frame_actions = []
-        self.current_frame_logs = []
-        self.current_frame_decision = {}
-
-    @staticmethod
-    def _frame_value_visible(value):
-        if value is None or value is False:
-            return False
-        if isinstance(value, (list, tuple, dict, set)) and not value:
-            return False
-        return True
-
-    def _record_frame_observation(self, name, value):
-        if not self._frame_value_visible(value):
-            return
-        text_name = str(name)
-        if any(item.get("name") == text_name for item in self.current_frame_observations):
-            return
-        self.current_frame_observations.append({
-            "name": text_name,
-            "value": str(value),
-            "stage": self.current_stage or "",
-        })
-
     def _describe_frame_action(self, action_name, args, kwargs):
         target = args[0] if args else kwargs.get("btn", kwargs.get("target", ""))
         if action_name == "click":
@@ -2393,11 +2331,6 @@ class FrameWorker(threading.Thread):
         duration = kwargs.get("dura", kwargs.get("duration", kwargs.get("wait", "")))
         if not duration:
             duration = control_trace.get("dura") or control_trace.get("duration_ms") or control_trace.get("wait")
-        reason = (
-            self.current_frame_decision.get("decision")
-            or self.current_frame_decision.get("observation")
-            or ""
-        )
         frame_action = {
             "name": str(action_name),
             "action": self._semantic_frame_action_name(action_name, args, kwargs),
@@ -2410,93 +2343,23 @@ class FrameWorker(threading.Thread):
             "end_pos": str(control_trace.get("end_pos") or ""),
             "params": params,
             "duration": str(duration or ""),
-            "reason": str(reason or ""),
             "control_trace": control_trace,
             "args": [str(arg) for arg in args[:3]],
             "kwargs": {str(key): str(value) for key, value in kwargs.items()},
         }
-        self.current_frame_actions.append(frame_action)
         self.frame_log(self._format_control_frame_log(frame_action))
-
-    def set_frame_decision(
-        self,
-        observation=None,
-        target=None,
-        decision=None,
-        action=None,
-        method=None,
-        result=None,
-        next_action=None,
-        frame_log=None,
-        frame_logs=None,
-    ):
-        log_items = []
-        if isinstance(frame_logs, (list, tuple)):
-            log_items.extend(str(item).strip() for item in frame_logs if str(item or "").strip())
-        if frame_log is not None:
-            text_log = str(frame_log or "").strip()
-            if text_log:
-                log_items.append(text_log)
-        if not log_items:
-            log_items = list(getattr(self, "current_frame_logs", []))
-
-        self.current_frame_decision = {
-            "observation": str(observation or ""),
-            "target": str(target or self.current_stage or ""),
-            "decision": str(decision or action or ""),
-            "action": str(action or decision or ""),
-            "method": str(method or ""),
-            "result": str(result or ""),
-            "next_action": str(next_action or action or decision or ""),
-        }
-        if log_items:
-            self.current_frame_logs = list(log_items)
-            self.current_frame_decision["frame_logs"] = list(log_items)
-            self.current_frame_decision["frame_log"] = log_items[-1]
 
     def frame_log(self, message, target=None):
         text = str(message or "").strip()
         if not text:
             return False
 
-        logging.info(text)
+        print(text)
 
         existing_logs = list(getattr(self, "current_frame_logs", []))
         existing_logs.append(text)
         self.current_frame_logs = existing_logs
-        if not isinstance(getattr(self, "current_frame_decision", None), dict):
-            self.current_frame_decision = {}
-        self.current_frame_decision["frame_logs"] = list(existing_logs)
-        self.current_frame_decision["frame_log"] = text
         return True
-
-    def _build_frame_decision(self):
-        decision = dict(self.current_frame_decision or {})
-        observations = list(self.current_frame_observations)
-        actions = list(self.current_frame_actions)
-        observed_names = [item.get("name") for item in observations if item.get("name")]
-
-        if not decision.get("target"):
-            decision["target"] = self.current_stage or ""
-        if not decision.get("observation"):
-            if observed_names:
-                decision["observation"] = "当前帧出现 " + ", ".join(observed_names)
-            else:
-                decision["observation"] = f"当前帧处于{self.current_stage or '未知阶段'}"
-        if not decision.get("action"):
-            decision["action"] = actions[-1].get("description", "") if actions else ""
-        if not decision.get("decision"):
-            decision["decision"] = decision.get("action", "")
-        if not decision.get("next_action"):
-            decision["next_action"] = decision.get("action") or decision.get("decision") or ""
-        if "method" not in decision:
-            decision["method"] = actions[-1].get("description", "") if actions else ""
-        if "result" not in decision:
-            decision["result"] = ""
-
-        decision["observed_infos"] = observations
-        decision["control_actions"] = actions
-        return decision
 
     def mark_failed(self, code, reason, **details):
         with self._failure_lock:
@@ -2822,9 +2685,7 @@ class FrameWorker(threading.Thread):
         suffix = f"__{area_name}"
         for key, value in self.stage_info.items():
             if key.endswith(suffix):
-                value = _unwrap_timed_special_info(value)
-                self._record_frame_observation(area_name, value)
-                return value
+                return _unwrap_timed_special_info(value)
         return None
 
     def change_stage(self, stage_name):

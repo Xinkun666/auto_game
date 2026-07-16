@@ -4,7 +4,6 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Set
 
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import autogame_print as print
 
 
 PHASE_RUNNING = "跑图"
@@ -93,6 +92,14 @@ class PhaseTimeManager:
         self.sp_saved = False
         self.case_loop_count = 1
         self.case_loop_index = 1
+        self.frame_logger = None
+
+    def set_frame_logger(self, frame_logger):
+        self.frame_logger = frame_logger if callable(frame_logger) else None
+
+    def _frame_log(self, message: str):
+        if self.frame_logger is not None:
+            self.frame_logger(message)
 
     def _format_phase_minutes(self, seconds: float) -> str:
         minutes = float(seconds) / 60.0
@@ -112,7 +119,10 @@ class PhaseTimeManager:
         if state.started:
             return
         state.started = True
-        print(f"[Timer] {self._phase_label(phase_name)}开始，计划 {self._format_phase_minutes(state.duration)} 分钟")
+        self._frame_log(
+            f"[Timer] {self._phase_label(phase_name)}开始，计划 "
+            f"{self._format_phase_minutes(state.duration)} 分钟"
+        )
 
     def _mark_phase_completed(self, phase_name: str) -> bool:
         state = self.phase_states[phase_name]
@@ -120,7 +130,10 @@ class PhaseTimeManager:
             return False
         state.completed = True
         state.elapsed = state.duration
-        print(f"[Timer] {self._phase_label(phase_name)}结束，已累计 {self._format_phase_minutes(state.duration)} 分钟")
+        self._frame_log(
+            f"[Timer] {self._phase_label(phase_name)}结束，已累计 "
+            f"{self._format_phase_minutes(state.duration)} 分钟"
+        )
         return True
 
     def _write_sp_state(self, event_name: str):
@@ -146,7 +159,7 @@ class PhaseTimeManager:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
             os.replace(tmp_path, signal_path)
         except Exception as exc:
-            print(f"[Timer] 写入 sp 状态失败: {exc}")
+            self._frame_log(f"[Timer] 写入 sp 状态失败: {exc}")
 
     def _phase_for_stage(self, stage_name: Optional[str]) -> Optional[str]:
         return self.stage_phase_map.get(stage_name)
@@ -155,7 +168,7 @@ class PhaseTimeManager:
         self.case_loop_count = parse_case_loop_count(count)
         if self.case_loop_index > self.case_loop_count:
             self.case_loop_index = self.case_loop_count
-        print(f"[Timer] 单次用例循环次数: {self.case_loop_count}")
+        self._frame_log(f"[Timer] 单次用例循环次数: {self.case_loop_count}")
 
     def _reset_phase_progress(self):
         for state in self.phase_states.values():
@@ -263,7 +276,10 @@ class PhaseTimeManager:
         self.round_index += 1
         self.landed = False
         self.start_game_time = None
-        print(f"[Timer] 开始第 {self.case_loop_index}/{self.case_loop_count} 次循环，第 {self.round_index} 局")
+        self._frame_log(
+            f"[Timer] 开始第 {self.case_loop_index}/{self.case_loop_count} 次循环，"
+            f"第 {self.round_index} 局"
+        )
 
     def has_next_case_loop(self) -> bool:
         return self.case_loop_index < self.case_loop_count
@@ -276,7 +292,9 @@ class PhaseTimeManager:
         self.case_loop_index += 1
         self.sp_recording = False
         self.sp_saved = False
-        print(f"[Timer] 准备进入第 {self.case_loop_index}/{self.case_loop_count} 次循环")
+        self._frame_log(
+            f"[Timer] 准备进入第 {self.case_loop_index}/{self.case_loop_count} 次循环"
+        )
         self._write_sp_state("case_loop_advanced")
         return True
 
@@ -314,18 +332,18 @@ class PhaseTimeManager:
     def mark_sp_started(self):
         self.sp_started_ever = True
         self.sp_recording = True
-        print("[Timer] sp 记录已开始")
+        self._frame_log("[Timer] sp 记录已开始")
         self._write_sp_state("sp_started")
 
     def mark_sp_stopped(self):
         if self.sp_recording:
-            print("[Timer] sp 记录已停止")
+            self._frame_log("[Timer] sp 记录已停止")
         self.sp_recording = False
         self._write_sp_state("sp_stopped")
 
     def mark_sp_saved(self):
         self.sp_saved = True
-        print("[Timer] sp 数据已保存")
+        self._frame_log("[Timer] sp 数据已保存")
         self._write_sp_state("sp_saved")
 
 
@@ -370,7 +388,7 @@ class PhaseTimeReporter:
         )
 
     def _print_remaining(self, timer: PhaseTimeManager):
-        print(f"[Timer] 阶段剩余时间 | {self._remaining_parts(timer)}")
+        timer._frame_log(f"[Timer] 阶段剩余时间 | {self._remaining_parts(timer)}")
 
     def _print_all_done(self, timer: PhaseTimeManager):
-        print(f"[Timer] 30 分钟总时长已圆满结束 | {self._remaining_parts(timer)}")
+        timer._frame_log(f"[Timer] 30 分钟总时长已圆满结束 | {self._remaining_parts(timer)}")

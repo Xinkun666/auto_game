@@ -23,7 +23,6 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.phase_time_mana
 )
 from aw.autogame.tools.GameLaunchProfile import should_use_sp_recording_for_profile
 from aw.autogame.tools.Utils import _read_autogame_config
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import autogame_print as print
 
 """
 1. w.current_stage ： 当前自动化的阶段，可以参考你标注工程导出的info.py里，对应的阶段为True，即表示当前阶段
@@ -120,12 +119,6 @@ def initialize_runtime():
     )
     house_exit_manager = HouseExitManager()
     phase_timer = PhaseTimeManager(PHASE_DURATIONS, PHASE_STAGE_MAP)
-    print(
-        "[Timer] 阶段时间配置: "
-        f"搜房={phase_timer.get_duration_minutes_label(PHASE_SEARCHING)}分钟, "
-        f"跑图={phase_timer.get_duration_minutes_label(PHASE_RUNNING)}分钟, "
-        f"开车={phase_timer.get_duration_minutes_label(PHASE_DRIVING)}分钟"
-    )
     phase_timer.configure_case_loop_count(
         parse_case_loop_count(os.environ.get("AUTOGAME_SINGLE_CASE_LOOPS"))
     )
@@ -158,7 +151,7 @@ def pause_sp_after_death(w: "FrameWorker"):
     phase_timer.mark_sp_stopped()
 
 
-def prepare_round():
+def prepare_round(w: "FrameWorker" = None):
     global searching_view_synced, rank_finish_pending
     global searching_phase_finishing, searching_to_running_notified, searching_exit_retry_count
 
@@ -188,15 +181,11 @@ def prepare_round():
     searching_house_manager.reset()
     house_exit_manager.reset()
 
-    print(
-        f"[Round] need_drive={need_drive}, "
-        f"need_searching={need_searching}, "
-        f"total_remaining={phase_timer.get_total_remaining():.2f}s, "
-        f"searching_remaining={phase_timer.get_remaining(PHASE_SEARCHING):.2f}s, "
-        f"running_remaining={phase_timer.get_remaining(PHASE_RUNNING):.2f}s, "
-        f"driving_remaining={phase_timer.get_remaining(PHASE_DRIVING):.2f}s, "
-        f"drop_target={drop_target}, landing_stage={landing_stage}"
-    )
+    if w is not None:
+        w.frame_log(
+            f"本轮配置：需要开车={need_drive}，需要搜房={need_searching}，"
+            f"落点={drop_target}，落地后进入={landing_stage}"
+        )
 
 
 def handle_sp_start(w: "FrameWorker"):
@@ -205,7 +194,7 @@ def handle_sp_start(w: "FrameWorker"):
         return
     if not phase_timer.should_start_sp():
         return
-    set_stage_decision(
+    log_stage_action(
         w,
         "当前帧达到 sp 录制启动条件",
         "点击 sp 开始录制本局片段",
@@ -227,7 +216,7 @@ def handle_sp_stop(w: "FrameWorker"):
         return
     if not phase_timer.sp_recording:
         return
-    set_stage_decision(
+    log_stage_action(
         w,
         "当前帧需要停止 sp 录制",
         "点击 sp 停止保存片段",
@@ -265,8 +254,8 @@ def handle_terminal_state(w: "FrameWorker", context: str = "阶段入口") -> bo
 
     _require_runtime()
     if _has_rank_finish_info(w):
-        print(f"[Terminal] {context} 检测到个人排名或队伍排名，进入结束阶段")
-        set_stage_decision(
+        w.frame_log(f"[Terminal] {context} 检测到个人排名或队伍排名，进入结束阶段")
+        log_stage_action(
             w,
             f"{context} 检测到个人排名或队伍排名",
             "停止当前移动/录制并进入结束阶段",
@@ -282,8 +271,8 @@ def handle_terminal_state(w: "FrameWorker", context: str = "阶段入口") -> bo
         return True
 
     if _has_death_finish_info(w):
-        print(f"[Terminal] {context} 检测到死亡界面，进入结束阶段")
-        set_stage_decision(
+        w.frame_log(f"[Terminal] {context} 检测到死亡界面，进入结束阶段")
+        log_stage_action(
             w,
             f"{context} 检测到死亡界面",
             "停止当前移动/录制并进入结束阶段",
@@ -312,7 +301,7 @@ def should_abort_searching(w: "FrameWorker"):
         return False
 
     if phase_timer.is_completed(PHASE_SEARCHING):
-        print(
+        w.frame_log(
             f"[Timer] 搜房阶段 {phase_timer.get_duration_minutes_label(PHASE_SEARCHING)} 分钟已用完，"
             "强制切换到跑图阶段"
         )
@@ -327,11 +316,11 @@ def recover_bad_landing_to_r_city(w: "FrameWorker", target, reason: str):
 
     _require_runtime()
     route_target = tuple(target or DROP_TARGET_R_CITY)
-    print(
+    w.frame_log(
         f"[Flow] 搜房落点异常，切到跑图阶段恢复到R城: "
         f"reason={reason}, target={route_target}"
     )
-    set_stage_decision(
+    log_stage_action(
         w,
         f"搜房落点异常，需要恢复到R城：{reason}",
         "切到跑图阶段，强制导航到R城恢复目标",
@@ -363,11 +352,11 @@ def route_to_r_city_search_start(
 
     _require_runtime()
     route_target = tuple(target or DROP_TARGET_R_CITY_SEARCH_START)
-    print(
+    w.frame_log(
         f"[Flow] 搜房前置跑图，先到R城搜房起点: "
         f"reason={reason}, target={route_target}, arrival={arrival_distance:.1f}"
     )
-    set_stage_decision(
+    log_stage_action(
         w,
         f"需要先前往R城搜房起点：{reason}",
         "切到跑图阶段，强制导航到搜房起点后再回来搜房",
@@ -400,11 +389,11 @@ def route_to_r_city_entry_point(
 
     _require_runtime()
     route_target = tuple(target or DROP_TARGET_R_CITY_SEARCH_START)
-    print(
+    w.frame_log(
         f"[Flow] 落地后最近入门点仍较远，先按跑图阶段冲到入门点附近: "
         f"reason={reason}, target={route_target}, arrival={arrival_distance:.1f}"
     )
-    set_stage_decision(
+    log_stage_action(
         w,
         f"最近入门点较远，先跑图到入门点附近：{reason}",
         "切到跑图阶段，强制导航到锁定入门点附近后回到搜房",
@@ -445,13 +434,13 @@ def finish_searching_and_enter_running(w: "FrameWorker", reason: str):
         return True
 
     searching_phase_finishing = True
-    print(
+    w.frame_log(
         f"[Flow] 搜房结束: {reason} | "
         f"searching_remaining={phase_timer.get_remaining(PHASE_SEARCHING):.2f}s, "
         f"running_remaining={phase_timer.get_remaining(PHASE_RUNNING):.2f}s, "
         f"driving_remaining={phase_timer.get_remaining(PHASE_DRIVING):.2f}s"
     )
-    set_stage_decision(
+    log_stage_action(
         w,
         f"搜房结束：{reason}",
         "先确认是否在屋内，必要时出房，然后切换到跑图阶段",
@@ -465,11 +454,11 @@ def finish_searching_and_enter_running(w: "FrameWorker", reason: str):
     house_scene = searching_house_manager._get_house_scene(w)
     if house_scene == searching_house_manager.HOUSE_INDOOR:
         searching_exit_retry_count += 1
-        print(
+        w.frame_log(
             f"[Flow] 搜房结束时仍在屋内，先执行搜房出房策略，再切跑图 "
             f"(retry={searching_exit_retry_count})"
         )
-        set_stage_decision(
+        log_stage_action(
             w,
             f"搜房结束时仍在屋内，house_scene={house_scene}",
             "先执行出房策略，确认出房后再切跑图",
@@ -483,7 +472,7 @@ def finish_searching_and_enter_running(w: "FrameWorker", reason: str):
             return True
         w.refresh_frame()
         if not exit_ok and searching_house_manager._get_house_scene(w) == searching_house_manager.HOUSE_INDOOR:
-            print("[Flow] 搜房结束出房未确认，暂不切跑图；下一帧继续用搜房阶段出房")
+            w.frame_log("[Flow] 搜房结束出房未确认，暂不切跑图；下一帧继续用搜房阶段出房")
             searching_phase_finishing = False
             return True
     else:
@@ -507,7 +496,7 @@ def finalize_automation(w: "FrameWorker"):
     global final_shutdown_pending
 
     _require_runtime()
-    set_stage_decision(
+    log_stage_action(
         w,
         "当前用例/所有循环已完成",
         "停止移动和录制，进入结束阶段返回大厅",
@@ -534,7 +523,7 @@ def finish_case_loop_or_finalize(w: "FrameWorker"):
         finalize_automation(w)
         return
 
-    set_stage_decision(
+    log_stage_action(
         w,
         f"第 {phase_timer.case_loop_index}/{phase_timer.case_loop_count} 次循环已完成",
         "返回大厅后继续下一次循环",
@@ -550,7 +539,7 @@ def finish_case_loop_or_finalize(w: "FrameWorker"):
         if SP_RECORDING_ENABLED
         else "返回大厅后继续下一次循环"
     )
-    print(f"[Timer] 第 {phase_timer.case_loop_index}/{phase_timer.case_loop_count} 次循环已完成，{next_loop_message}")
+    w.frame_log(f"[Timer] 第 {phase_timer.case_loop_index}/{phase_timer.case_loop_count} 次循环已完成，{next_loop_message}")
     handle_sp_stop(w)
     phase_timer.advance_case_loop()
     w.change_stage("结束阶段")
@@ -576,7 +565,7 @@ def click_popup_and_refresh(w: "FrameWorker", target):
     w.refresh_frame()
 
 
-def set_stage_decision(
+def log_stage_action(
     w: "FrameWorker",
     observation: str,
     decision: str,
@@ -585,16 +574,8 @@ def set_stage_decision(
     result: str = "等待下一帧确认执行结果",
     target: str = None,
 ):
-    setter = getattr(w, "set_frame_decision", None)
-    if not callable(setter):
-        return
-    setter(
-        observation=observation,
-        target=target or w.current_stage,
-        decision=decision,
-        action=action or decision,
-        method=method,
-        result=result,
+    w.frame_log(
+        f"当前观察到{observation}，所以{action or decision}"
     )
 
 
@@ -604,7 +585,7 @@ def click_popup_info_if_visible(w: "FrameWorker", info_name: str, click_target=N
         return False
     control_target = click_target or target
     w.frame_log(f"当前观察到{info_name}弹窗挡住流程，所以先点击{click_target or info_name}关闭它")
-    set_stage_decision(
+    log_stage_action(
         w,
         f"当前帧出现{info_name}",
         f"决策：点击{info_name}",
@@ -631,18 +612,18 @@ def confirm_lobby_after_popups(w: "FrameWorker") -> bool:
 
     if has_close_popup_info(w):
         if lobby_house_confirm_count:
-            print("[Popup] 大厅确认过程中又检测到弹窗，取消本次房子图标确认")
+            w.frame_log("[Popup] 大厅确认过程中又检测到弹窗，取消本次房子图标确认")
         reset_lobby_confirm()
         return False
 
     if not w.get_info("房子"):
         if lobby_house_confirm_count:
-            print("[Popup] 房子图标未连续稳定出现，取消本次大厅确认")
+            w.frame_log("[Popup] 房子图标未连续稳定出现，取消本次大厅确认")
         reset_lobby_confirm()
         return False
 
     lobby_house_confirm_count += 1
-    print(f"[Popup] 房子图标稳定确认 {lobby_house_confirm_count}/{LOBBY_CONFIRM_REQUIRED}")
+    w.frame_log(f"[Popup] 房子图标稳定确认 {lobby_house_confirm_count}/{LOBBY_CONFIRM_REQUIRED}")
     return lobby_house_confirm_count >= LOBBY_CONFIRM_REQUIRED
 
 
@@ -652,7 +633,7 @@ def prepare_rank_finish_for_lobby(w: "FrameWorker"):
     if not rank_finish_pending and not _has_rank_finish_info(w):
         return
 
-    print("[End] 检测到排名界面，等待2s后点击观战对手再返回大厅")
+    w.frame_log("[End] 检测到排名界面，等待2s后点击观战对手再返回大厅")
     time.sleep(RANK_FINISH_SPECTATE_WAIT_SECONDS)
     w.click("观战对手")
     w.refresh_frame()
@@ -674,17 +655,9 @@ def _current_position_text(w: "FrameWorker") -> tuple[str, str]:
     return location_text, str(direction)
 
 
-def record_manager_decision(w: "FrameWorker", target: str, decision: str, method: str):
+def log_manager_state(w: "FrameWorker", target: str, decision: str, method: str):
     location_text, direction_text = _current_position_text(w)
     w.frame_log(f"当前观察到{target}位置={location_text}、方位={direction_text}，所以交给{method}继续细分决策")
-    w.set_frame_decision(
-        observation=f"{target}：当前位置={location_text}，当前方位={direction_text}",
-        target=target,
-        decision=decision,
-        action=decision,
-        method=method,
-        result="等待 manager 根据当前帧继续执行",
-    )
 
 
 def handle_priority_stage_jump_forward(w: "FrameWorker", stage_label: str) -> bool:
@@ -692,16 +665,8 @@ def handle_priority_stage_jump_forward(w: "FrameWorker", stage_label: str) -> bo
     if not w.get_info("跳跃"):
         return False
 
-    print(f"[Jump] {stage_label} 检测到跳跃按钮，第一优先级点击跳跃并前推")
+    w.frame_log(f"[Jump] {stage_label} 检测到跳跃按钮，第一优先级点击跳跃并前推")
     w.frame_log(f"当前观察到{stage_label}出现跳跃按钮，所以先点击跳跃并轻推摇杆越过障碍")
-    w.set_frame_decision(
-        observation=f"{stage_label}当前帧出现跳跃按钮",
-        target=stage_label,
-        decision="点击跳跃并轻微前推",
-        action="点击跳跃并轻微前推",
-        method="w.click(跳跃) + w.tap_single(摇杆)",
-        result="等待下一帧确认是否越过障碍",
-    )
     searching_house_manager.stop_auto_forward(w)
     running_manager.stop_auto_forward(w)
     w.click("跳跃")
@@ -723,6 +688,7 @@ def on_stage(w: "FrameWorker"):
     global searching_view_synced, searching_to_running_notified
 
     _require_runtime()
+    phase_timer.set_frame_logger(w.frame_log)
     w.frame_log(f"当前观察到阶段={w.current_stage}，所以进入总流程 on_stage 分发")
     previous_stage = phase_timer.last_stage
     stage_events = phase_timer.sync_stage(w.current_stage)
@@ -744,7 +710,7 @@ def on_stage(w: "FrameWorker"):
             running_manager.notify_searching_exit(finding_car=_should_find_car_after_searching())
 
     if "landed" in stage_events and not phase_timer.all_done():
-        print("[Flow] 当前人物已经落地，接下来同步落地后的搜房/跑图/开车目标")
+        w.frame_log("[Flow] 当前人物已经落地，接下来同步落地后的搜房/跑图/开车目标")
         w.frame_log("当前观察到已落地事件，所以同步跑图和开车模块的本局开始时间")
         if phase_timer.start_game_time is not None:
             running_manager.set_game_time(phase_timer.start_game_time)
@@ -793,7 +759,7 @@ def on_stage(w: "FrameWorker"):
         if confirm_lobby_after_popups(w):
             if final_shutdown_pending:
                 w.frame_log("当前观察到大厅已稳定且任务准备结束，所以停止本轮自动化")
-                set_stage_decision(
+                log_stage_action(
                     w,
                     "关闭弹窗阶段已确认回到大厅，且本用例准备结束",
                     "停止当前用例循环",
@@ -804,7 +770,7 @@ def on_stage(w: "FrameWorker"):
                 finalize_after_lobby(w)
                 return
             w.frame_log("当前观察到大厅房子图标连续稳定，所以进入选择地图阶段")
-            set_stage_decision(
+            log_stage_action(
                 w,
                 "关闭弹窗阶段已连续确认房子图标，说明大厅可操作",
                 "切换到选择地图阶段",
@@ -818,7 +784,7 @@ def on_stage(w: "FrameWorker"):
 
     if w.current_stage == "选择地图阶段":
         w.frame_log("当前观察到选择地图阶段，所以打开地图选择面板并准备切到海岛")
-        set_stage_decision(
+        log_stage_action(
             w,
             "当前处于选择地图阶段",
             "依次点击地图、经典模式、切换，准备选择海岛并确认",
@@ -836,7 +802,7 @@ def on_stage(w: "FrameWorker"):
 
         if w.get_info("对号"):
             w.frame_log("当前观察到已有地图对号，所以先点击对号清理旧选择")
-            set_stage_decision(
+            log_stage_action(
                 w,
                 "当前帧出现对号，说明已有选中项需要取消或确认切换",
                 "点击对号，清理当前选中状态后再选择海岛",
@@ -847,7 +813,7 @@ def on_stage(w: "FrameWorker"):
             w.click(w.get_info("对号"))
             time.sleep(2)
 
-        set_stage_decision(
+        log_stage_action(
             w,
             "地图选择面板已打开",
             "点击海岛并处理自动匹配选项，然后确定进入开始游戏阶段",
@@ -860,7 +826,7 @@ def on_stage(w: "FrameWorker"):
         w.refresh_frame()
         if w.get_info('自动匹配'):
             w.frame_log("当前观察到自动匹配选项，所以点击它避免配置阻塞后续确认")
-            set_stage_decision(
+            log_stage_action(
                 w,
                 "当前帧出现自动匹配选项",
                 "点击自动匹配，关闭/切换该选项后继续确定地图",
@@ -877,7 +843,7 @@ def on_stage(w: "FrameWorker"):
     if w.current_stage == "开始游戏阶段":
         if w.get_info("加速礼包"):
             w.frame_log("当前观察到加速礼包弹窗，所以点击放弃后刷新继续找开始游戏")
-            set_stage_decision(
+            log_stage_action(
                 w,
                 "当前帧出现加速礼包",
                 "点击放弃，避免礼包弹窗阻塞开始游戏",
@@ -891,9 +857,9 @@ def on_stage(w: "FrameWorker"):
         if start_game and start_game_click_time is not None:
             if time.time() - start_game_click_time >= START_GAME_VERIFY_DELAY:
                 if w.get_info("开始游戏"):
-                    print("[StartGame] 开始游戏按钮仍可识别，判定上次点击未生效，准备重试")
+                    w.frame_log("[StartGame] 开始游戏按钮仍可识别，判定上次点击未生效，准备重试")
                     w.frame_log("当前观察到点击开始游戏后按钮仍存在，所以判定上次点击未生效并准备重试")
-                    set_stage_decision(
+                    log_stage_action(
                         w,
                         "点击开始游戏后仍识别到开始游戏按钮",
                         "判定上次点击未生效，重置状态准备重试",
@@ -907,7 +873,7 @@ def on_stage(w: "FrameWorker"):
         if w.get_info("房子"):
             if not start_game:
                 w.frame_log("当前观察到大厅房子图标且尚未点击开始游戏，所以点击开始游戏")
-                set_stage_decision(
+                log_stage_action(
                     w,
                     "当前帧出现房子图标，说明在大厅且可开始游戏",
                     "点击开始游戏",
@@ -920,7 +886,7 @@ def on_stage(w: "FrameWorker"):
                 start_game_click_time = time.time()
             else:
                 w.frame_log("当前观察到已点击开始游戏但仍在大厅，所以刷新画面等待进入出生岛")
-                set_stage_decision(
+                log_stage_action(
                     w,
                     "已点击开始游戏，当前帧仍在大厅房子图标界面",
                     "刷新画面等待进入出生岛",
@@ -932,7 +898,7 @@ def on_stage(w: "FrameWorker"):
 
         if w.get_info("提示"):
             w.frame_log("当前观察到提示弹窗，所以点击不提示和不需要避免阻塞匹配")
-            set_stage_decision(
+            log_stage_action(
                 w,
                 "当前帧出现提示弹窗",
                 "点击不提示和不需要，避免提示弹窗阻塞匹配",
@@ -947,7 +913,7 @@ def on_stage(w: "FrameWorker"):
 
         if w.get_info("拳头"):
             w.frame_log("当前观察到拳头按钮，所以判断已经进入出生岛并准备切到跳伞阶段")
-            set_stage_decision(
+            log_stage_action(
                 w,
                 "当前帧出现拳头，说明已经进入出生岛/游戏内",
                 "初始化本局状态并切换到跳伞阶段",
@@ -955,7 +921,7 @@ def on_stage(w: "FrameWorker"):
                 method="prepare_round(); w.change_stage(跳伞阶段)",
                 result="下一帧开始监控R城距离",
             )
-            prepare_round()
+            prepare_round(w)
             w.change_stage("跳伞阶段")
             start_game = False
             start_game_click_time = None
@@ -963,7 +929,7 @@ def on_stage(w: "FrameWorker"):
 
     if w.current_stage == "跳伞阶段":
         w.frame_log("当前观察到跳伞阶段，所以交给跳伞模块计算取消跟随、航线距离和跳伞时机")
-        record_manager_decision(
+        log_manager_state(
             w,
             "跳伞阶段",
             "根据当前坐标计算到R城距离，继续监控跳伞时机",
@@ -982,7 +948,7 @@ def on_stage(w: "FrameWorker"):
             return
 
         searching_view_synced = True
-        record_manager_decision(
+        log_manager_state(
             w,
             "搜房阶段",
             "根据当前房屋/门/入门点信息选择搜房、进门或出房动作",
@@ -1009,7 +975,7 @@ def on_stage(w: "FrameWorker"):
 
         running_manager.set_drive_required(phase_timer.need_drive())
         w.frame_log("当前观察到跑图阶段仍需推进，所以更新是否需要找车并交给跑图模块")
-        record_manager_decision(
+        log_manager_state(
             w,
             "跑图阶段",
             "继续跑图导航，保持自动前进/路线推进",
@@ -1033,7 +999,7 @@ def on_stage(w: "FrameWorker"):
             w.frame_log("当前观察到开车阶段计时已完成，所以把剩余驾驶时间置零让驾驶模块准备收尾")
             driving_manager.set_remaining_drive_time(0)
 
-        record_manager_decision(
+        log_manager_state(
             w,
             "开车阶段",
             "根据当前位置、方位、道路和车辆状态继续驾驶",
@@ -1045,7 +1011,7 @@ def on_stage(w: "FrameWorker"):
     if w.current_stage == "结束阶段":
         if final_shutdown_pending:
             w.frame_log("当前观察到结束阶段且最终停止标记已置位，所以返回大厅后进入关闭弹窗阶段确认收尾")
-            set_stage_decision(
+            log_stage_action(
                 w,
                 "结束阶段且本用例准备最终停止",
                 "停止录制/回到大厅/确认后进入关闭弹窗阶段",
@@ -1065,7 +1031,7 @@ def on_stage(w: "FrameWorker"):
             return
 
         w.frame_log("当前观察到结束阶段，所以停止录制、返回大厅并准备下一轮开始")
-        set_stage_decision(
+        log_stage_action(
             w,
             "当前处于结束阶段",
             "停止录制并返回大厅，然后进入关闭弹窗阶段处理结算/活动弹窗",

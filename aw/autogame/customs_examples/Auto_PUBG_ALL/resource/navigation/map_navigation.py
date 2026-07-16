@@ -6,7 +6,6 @@ import time
 from itertools import count
 from collections import deque
 import os
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import log_step
 from aw.autogame.tools.Utils import resolve_process_temp_logs_dir, write_image_unicode
 
 NAVIGATION_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -294,24 +293,9 @@ class MapNavigator:
         start = (int(start_pos[0]), int(start_pos[1]))
         end = (int(end_pos[0]), int(end_pos[1]))
         direct_distance = math.hypot(end[0] - start[0], end[1] - start[1])
-        log_step(
-            f"当前要规划地图路径：current_loc={start}, target_loc={end}, "
-            f"straight_distance={direct_distance:.2f}",
-            target="地图路径规划",
-            action="检查终点是否可通行，然后用 A* 生成路径",
-            method="MapNavigator.plan_path(start_pos, end_pos)",
-            result="准备开始 A* 搜索",
-        )
 
         if not self._is_walkable(*end):
             print("警告：目的地不可达（位于黑色区域）")
-            log_step(
-                f"地图路径规划失败：current_loc={start}, target_loc={end}，目标点在不可通行黑区",
-                target="地图路径规划",
-                action="放弃本次路径",
-                method="_is_walkable(target_loc)",
-                result="返回空路径，调用方需要选择安全点或回退策略",
-            )
             return []
 
         # --- 第一步：A* 算法寻找基础路径 ---
@@ -357,13 +341,6 @@ class MapNavigator:
                         heapq.heappush(open_set, (f_score[neighbor], neighbor))
 
         if not path_found:
-            log_step(
-                f"地图路径规划失败：current_loc={start}, target_loc={end}，A* 未找到可达路线",
-                target="地图路径规划",
-                action="放弃本次路径",
-                method="A* open_set 搜索结束",
-                result="返回空路径，调用方需要重新规划或回退自由巡航",
-            )
             return []  # 无法到达
 
         # 重建路径 (从终点回溯到起点)
@@ -389,14 +366,6 @@ class MapNavigator:
                 f"已经规划好路径，但路径图未生成：{route_image_error}；"
                 f"下一步使用首个路径点 {smoothed_path[0] if smoothed_path else None} 导航"
             )
-        log_step(
-            f"路径规划成功：current_loc={start}, target_loc={end}, "
-            f"raw_points={len(path)}, smooth_points={len(smoothed_path)}",
-            target="地图路径规划",
-            action="把 A* 原始路径压缩成更少的直线路径点",
-            method="_smooth_path(path)",
-            result=route_result,
-        )
         return smoothed_path
 
     def _heuristic(self, a, b):

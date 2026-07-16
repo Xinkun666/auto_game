@@ -5,8 +5,6 @@ import subprocess
 
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_path_utils import *
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import *
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import autogame_print as print
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.structured_log import log_step
 from typing import Tuple, Dict, Any, Optional, List
 from typing import TYPE_CHECKING
 
@@ -31,6 +29,7 @@ class ParachuteManager:
     SUSTAINED_ROUTE_MISS_INCREASE_FRAMES: int = 3  # 错过最近点后，连续递增多少帧才确认重开
 
     def __init__(self):
+        self._frame_worker = None
         self.is_active = False  # 是否处于监控跳伞距离的激活状态
         self.prior_dist = 0  # 历史最近距离（用于判断是否飞过了）
         self.last_dist: Optional[float] = None  # 上一帧距离（用于判断连续递增）
@@ -44,6 +43,11 @@ class ParachuteManager:
         self.route_confirm_locations: List[Tuple[int, int]] = []
         self.jump_button_clicked = False
 
+    def _frame_log(self, message: str):
+        worker = getattr(self, "_frame_worker", None)
+        if worker is not None:
+            worker.frame_log(message)
+
     def reset(self):
         """重置跳伞管理器的内部状态"""
         self.is_active = False
@@ -56,7 +60,7 @@ class ParachuteManager:
         self.route_confirm_distances = []
         self.route_confirm_locations = []
         self.jump_button_clicked = False
-        print("[Parachute] 状态已重置!")
+        self._frame_log("[Parachute] 状态已重置!")
 
     def configure(
         self,
@@ -69,9 +73,9 @@ class ParachuteManager:
         self.landing_stage = landing_stage
         if dive_duration_ms is not None:
             self.DIVE_DURATION_MS = dive_duration_ms
-        print(f"[Parachute] 配置更新: target={self.target_pos}, landing_stage={self.landing_stage}")
+        self._frame_log(f"[Parachute] 配置更新: target={self.target_pos}, landing_stage={self.landing_stage}")
 
-    def _set_frame_decision(
+    def _log_frame_state(
         self,
         w: 'FrameWorker',
         observation: str,
@@ -82,34 +86,22 @@ class ParachuteManager:
         result: str,
         target: str = "跳伞阶段",
     ):
-        log_step(
-            f"当前跳伞帧日志：{observation}",
-            target=target,
-            action=action or decision,
-            method=method,
-            result=result or decision,
+        w.frame_log(
+            f"跳伞日志：目标是{target}；本帧观察到{observation}；接下来{action or decision}"
         )
-        setter = getattr(w, "set_frame_decision", None)
-        if callable(setter):
-            setter(
-                observation=observation,
-                target=target,
-                decision=decision,
-                action=action,
-                method=method,
-                result=result,
-            )
 
     def process(self, w: 'FrameWorker'):
         """
         执行跳伞逻辑的主入口
         :return: 状态变更字典 (用于更新 FSM 状态)
         """
+        self._frame_worker = w
+
         # 1. 如果检测到还在跟随队友，优先取消跟随
         if w.get_info('取消跟随'):
-            print('[Parachute] 点击取消跟随!')
+            w.frame_log('[Parachute] 点击取消跟随!')
             w.frame_log("当前观察到仍处于跟随队友状态，所以先点击取消跟随后再继续判断航线")
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 "当前帧出现取消跟随",
                 "点击取消跟随，解除队友跟随后继续判断跳伞",
@@ -124,7 +116,7 @@ class ParachuteManager:
         jump_icon = w.get_info('离开')
         if not self.is_active and jump_icon:
             w.frame_log("当前观察到离开按钮且跳伞监控未激活，所以开始记录航线到目标点的距离变化")
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 "当前帧出现离开按钮，说明已进入可跳伞状态",
                 "激活航线距离监控",
@@ -152,9 +144,9 @@ class ParachuteManager:
 
         current_dist = get_distance(location, self.target_pos)
         if not self._is_valid_distance(current_dist):
-            print("[Parachute] 当前小地图坐标无效，暂不计算R城距离或触发跳伞")
+            w.frame_log("[Parachute] 当前小地图坐标无效，暂不计算R城距离或触发跳伞")
             w.frame_log("当前观察到小地图坐标无效，所以清空确认窗口并等待下一帧，避免误跳伞")
-            self._set_frame_decision(
+            self._log_frame_state(
                 w,
                 "当前帧小地图坐标无效",
                 "暂不跳伞，等待下一帧重新识别坐标",
@@ -170,7 +162,7 @@ class ParachuteManager:
             self.last_location = None
             return {}
 
-        self._set_frame_decision(
+        self._log_frame_state(
             w,
             f"跳伞距离计算：current_loc={tuple(location)}，target_loc={self.target_pos}，"
             f"current_dist={current_dist:.2f}，trigger_dist={self.TRIGGER_DIST}，"
@@ -195,7 +187,7 @@ class ParachuteManager:
     def _activate_monitoring(self):
         """激活跳伞监控模式"""
         self.is_active = True
-        print("[Parachute] 检测到跳伞按钮，开始监控航线距离...")
+        self._frame_log("[Parachute] 检测到跳伞按钮，开始监控航线距离...")
 
     def _is_valid_distance(self, distance) -> bool:
         return distance is not None and distance >= 0
@@ -218,18 +210,10 @@ class ParachuteManager:
             self.last_dist = current_dist
             self.last_location = tuple(location)
             self.increase_streak = 0
-            log_step(
-                f"路线确认距离初始化：current_loc={tuple(location)}，current_dist={current_dist:.2f}，"
-                f"trigger_dist={self.TRIGGER_DIST}",
-                target="当前跳伞分支：路线确认初始化",
-                action="记录第一帧最近距离",
-                method="_check_flight_path 初始化 prior_dist/last_dist",
-                result="等待后续帧判断航线是否靠近或远离目标",
-            )
             return False
         else:
             last_dist_text = f"{self.last_dist:.2f}" if self.last_dist is not None else "None"
-            print(
+            w.frame_log(
                 f"[Parachute] 当前距离：{current_dist:.2f}, "
                 f"历史最近距离：{self.prior_dist:.2f}, "
                 f"上一帧距离：{last_dist_text}, "
@@ -242,7 +226,7 @@ class ParachuteManager:
                 not self._is_valid_distance(location_step)
                 or location_step > self.JUMP_LOCATION_CONTINUITY_MAX_STEP
             ):
-                print(
+                w.frame_log(
                     f"[Parachute] 当前坐标变化不连续，重置最近点趋势: "
                     f"last_location={self.last_location}, current_location={location}, "
                     f"step={location_step}, max_step={self.JUMP_LOCATION_CONTINUITY_MAX_STEP}"
@@ -258,15 +242,6 @@ class ParachuteManager:
                 self.jump_confirm_locations = []
                 self.route_confirm_distances = [float(current_dist)]
                 self.route_confirm_locations = [tuple(location)]
-                log_step(
-                    f"路线确认距离被重置：last_location={self.last_location}，"
-                    f"current_loc={tuple(location)}，step={location_step}，"
-                    f"max_step={self.JUMP_LOCATION_CONTINUITY_MAX_STEP}",
-                    target="当前跳伞分支：坐标不连续",
-                    action="重置路线和跳伞确认窗口",
-                    method="_check_flight_path 坐标连续性过滤",
-                    result="避免坐标跳变导致误判航线或误跳伞",
-                )
                 return False
 
         # 正常情况：距离在变小，更新最近距离
@@ -291,7 +266,7 @@ class ParachuteManager:
             and self.prior_dist > self.TRIGGER_DIST
             and self.increase_streak >= self.OVERSHOOT_INCREASE_FRAMES
         ):
-            print(
+            w.frame_log(
                 f"[Parachute] 已经过R城最近点，历史最近距离 {self.prior_dist:.2f} "
                 f"> 跳伞阈值 {self.TRIGGER_DIST}，当前距离 {current_dist:.2f} "
                 f"开始变大，等待动态窗口确认是否需要重开。"
@@ -299,15 +274,6 @@ class ParachuteManager:
             w.frame_log(
                 f"当前观察到最近距离仍大于阈值且开始远离，"
                 f"所以进入航线错过候选窗口，暂不立刻重开"
-            )
-            log_step(
-                f"路线确认距离进入重开候选：current_dist={current_dist:.2f}，"
-                f"prior_dist={self.prior_dist:.2f}，last_dist={self.last_dist:.2f}，"
-                f"increase_streak={self.increase_streak}，trigger_dist={self.TRIGGER_DIST}",
-                target="当前跳伞分支：航线错过候选",
-                action="等待三帧动态窗口确认是否重开",
-                method="_confirm_bad_route_window()",
-                result="确认航线最近点仍超过阈值才结束当前局",
             )
             if self._confirm_sustained_bad_route_increase():
                 return True
@@ -335,31 +301,15 @@ class ParachuteManager:
         if not self._confirm_location_continuity(recent_locations):
             return False
 
-        print(
+        self._frame_log(
             f"[Parachute] 航线持续远离确认最近点仍超过跳伞阈值: "
             f"closest={self.prior_dist:.2f}, recent={recent_distances}, "
             f"threshold={self.TRIGGER_DIST}"
-        )
-        log_step(
-            f"路线确认距离连续递增通过重开判断：closest={self.prior_dist:.2f}，"
-            f"recent={recent_distances}，increase_streak={self.increase_streak}，"
-            f"trigger_dist={self.TRIGGER_DIST}",
-            target="当前跳伞分支：航线错过持续确认",
-            action="放弃本局落点",
-            method="_confirm_sustained_bad_route_increase 连续递增窗口",
-            result="下一步切结束阶段重开",
         )
         return True
 
     def _confirm_bad_route_window(self) -> bool:
         if len(self.route_confirm_distances) < 3:
-            log_step(
-                f"路线确认距离不足三帧：distances={self.route_confirm_distances}",
-                target="当前跳伞分支：航线确认等待",
-                action="继续观察下一帧距离",
-                method="_confirm_bad_route_window 三帧窗口",
-                result="暂不重开",
-            )
             return False
 
         prev_dist, candidate_dist, next_dist = self.route_confirm_distances
@@ -367,14 +317,14 @@ class ParachuteManager:
             return False
 
         if prev_dist < candidate_dist:
-            print(
+            self._frame_log(
                 f"[Parachute] 航线重开候选帧前一帧未靠近R城: "
                 f"prev={prev_dist:.2f}, candidate={candidate_dist:.2f}, next={next_dist:.2f}，继续观察"
             )
             return False
 
         if next_dist <= candidate_dist + self.ROUTE_MISS_CONFIRM_TOLERANCE:
-            print(
+            self._frame_log(
                 f"[Parachute] 航线重开候选帧后一帧未明显远离R城: "
                 f"prev={prev_dist:.2f}, candidate={candidate_dist:.2f}, next={next_dist:.2f}，继续观察"
             )
@@ -383,18 +333,10 @@ class ParachuteManager:
         if not self._confirm_location_continuity(self.route_confirm_locations):
             return False
 
-        print(
+        self._frame_log(
             f"[Parachute] 航线动态窗口确认最近点仍超过跳伞阈值: "
             f"prev={prev_dist:.2f}, candidate={candidate_dist:.2f}, next={next_dist:.2f}, "
             f"threshold={self.TRIGGER_DIST}"
-        )
-        log_step(
-            f"路线确认距离通过重开判断：prev={prev_dist:.2f}，candidate={candidate_dist:.2f}，"
-            f"next={next_dist:.2f}，trigger_dist={self.TRIGGER_DIST}",
-            target="当前跳伞分支：航线错过确认",
-            action="放弃本局落点",
-            method="_confirm_bad_route_window 动态窗口",
-            result="下一步切结束阶段重开",
         )
         return True
 
@@ -421,7 +363,7 @@ class ParachuteManager:
                 self._is_valid_distance(location_step)
                 and location_step <= self.JUMP_LOCATION_CONTINUITY_MAX_STEP
             ):
-                print(
+                w.frame_log(
                     f"[Parachute] 当前帧连续进入跳伞范围，立即跳伞: "
                     f"prev={self.jump_confirm_distances[0]:.2f}, "
                     f"current={current_dist:.2f}, step={location_step:.2f}, "
@@ -432,15 +374,6 @@ class ParachuteManager:
                     f"当前帧距离 {current_dist:.2f} 已进入跳伞范围，且坐标连续 step={location_step:.2f}，"
                     "所以本帧立即点击跳伞"
                 )
-                log_step(
-                    f"跳伞开伞两帧确认通过：prev={self.jump_confirm_distances[0]:.2f}，"
-                    f"current={current_dist:.2f}，locations={self.jump_confirm_locations}，"
-                    f"location_step={location_step:.2f}",
-                    target="当前跳伞分支：连续入阈值",
-                    action="立即执行跳伞和俯冲滑行",
-                    method="_confirm_jump_window 两帧连续跨入阈值",
-                    result="下一步点击跳伞并进入落地阶段",
-                )
                 return True
 
             w.frame_log(
@@ -450,21 +383,13 @@ class ParachuteManager:
 
         if len(self.jump_confirm_distances) < 3:
             if current_dist <= self.TRIGGER_DIST:
-                print(
+                w.frame_log(
                     f"[Parachute] 当前距离 {current_dist:.2f} 已到跳伞范围，"
                     "等待下一帧确认是否为连贯变化"
                 )
                 w.frame_log(
                     f"当前观察到距离 {current_dist:.2f} 已进入跳伞范围，"
                     "所以先等待三帧窗口确认，不立刻点击跳伞"
-                )
-                log_step(
-                    f"跳伞开伞确认等待：distances={self.jump_confirm_distances}，"
-                    f"locations={self.jump_confirm_locations}",
-                    target="当前跳伞分支：跳伞确认等待",
-                    action="等待下一帧补齐三帧窗口",
-                    method="_confirm_jump_window 三帧窗口",
-                    result="暂不点击跳伞",
                 )
             return False
 
@@ -477,7 +402,7 @@ class ParachuteManager:
             return False
 
         if candidate_dist > prev_dist + self.JUMP_CONFIRM_TOLERANCE:
-            print(
+            w.frame_log(
                 f"[Parachute] 跳伞候选帧不连贯: prev={prev_dist:.2f}, "
                 f"candidate={candidate_dist:.2f}, next={next_dist:.2f}，继续观察"
             )
@@ -485,7 +410,7 @@ class ParachuteManager:
             return False
 
         if next_dist > candidate_dist + self.JUMP_CONFIRM_TOLERANCE:
-            print(
+            w.frame_log(
                 f"[Parachute] 跳伞候选帧后一帧明显反跳: prev={prev_dist:.2f}, "
                 f"candidate={candidate_dist:.2f}, next={next_dist:.2f}，判定为单帧误判"
             )
@@ -496,19 +421,11 @@ class ParachuteManager:
             w.frame_log("当前观察到跳伞确认窗口里的坐标不连续，所以不点击跳伞，继续等下一帧")
             return False
 
-        print(
+        w.frame_log(
             f"[Parachute] 跳伞三帧确认通过: prev={prev_dist:.2f}, "
             f"candidate={candidate_dist:.2f}, next={next_dist:.2f}"
         )
         w.frame_log("当前观察到三帧距离和坐标连续性都通过，所以执行跳伞和俯冲滑行")
-        log_step(
-            f"跳伞开伞确认通过：prev={prev_dist:.2f}，candidate={candidate_dist:.2f}，"
-            f"next={next_dist:.2f}，locations={self.jump_confirm_locations}",
-            target="当前跳伞分支：跳伞窗口确认",
-            action="执行跳伞和俯冲滑行",
-            method="_confirm_jump_window 距离和坐标连续性确认",
-            result="下一步点击跳伞并进入落地阶段",
-        )
         return True
 
     def _confirm_location_continuity(self, locations) -> bool:
@@ -519,7 +436,7 @@ class ParachuteManager:
         prev_step = get_distance(prev_loc, candidate_loc)
         next_step = get_distance(candidate_loc, next_loc)
         if not self._is_valid_distance(prev_step) or not self._is_valid_distance(next_step):
-            print(
+            self._frame_log(
                 f"[Parachute] 跳伞确认坐标无效: "
                 f"prev={prev_loc}, candidate={candidate_loc}, next={next_loc}"
             )
@@ -529,7 +446,7 @@ class ParachuteManager:
             prev_step > self.JUMP_LOCATION_CONTINUITY_MAX_STEP
             or next_step > self.JUMP_LOCATION_CONTINUITY_MAX_STEP
         ):
-            print(
+            self._frame_log(
                 f"[Parachute] 跳伞确认坐标不连续: "
                 f"prev={prev_loc}, candidate={candidate_loc}, next={next_loc}, "
                 f"prev_step={prev_step:.2f}, next_step={next_step:.2f}, "
@@ -540,8 +457,8 @@ class ParachuteManager:
         return True
 
     def _restart_match_for_bad_route(self, w: 'FrameWorker'):
-        print("[Parachute] 航线最近点超过阈值，放弃本局落点，进入结束阶段重开下一把")
-        self._set_frame_decision(
+        w.frame_log("[Parachute] 航线最近点超过阈值，放弃本局落点，进入结束阶段重开下一把")
+        self._log_frame_state(
             w,
             (
                 f"动态窗口确认航线最近点仍超过 {self.TRIGGER_DIST}，"
@@ -557,8 +474,8 @@ class ParachuteManager:
         return {"bad_route_restart": True}
 
     def _restart_match_for_missing_jump_icon(self, w: 'FrameWorker'):
-        print("[Parachute] 自动化尚未点击跳伞，但跳伞图标已经消失，退出当前局并重开下一把")
-        self._set_frame_decision(
+        w.frame_log("[Parachute] 自动化尚未点击跳伞，但跳伞图标已经消失，退出当前局并重开下一把")
+        self._log_frame_state(
             w,
             "已经进入跳伞监控，但自动化尚未点击跳伞时离开图标消失",
             "判定本局未完成正确跳伞，退出当前局并重开下一把",
@@ -575,8 +492,8 @@ class ParachuteManager:
         """
         执行具体的：点击跳伞 -> 俯冲 -> 滑行 -> 落地 -> 切状态
         """
-        print(f"[Parachute] 到达跳伞点，执行动作序列...")
-        self._set_frame_decision(
+        w.frame_log(f"[Parachute] 到达跳伞点，执行动作序列...")
+        self._log_frame_state(
             w,
             f"跳伞开伞确认已完成：target_loc={self.target_pos}，"
             f"distances={self.jump_confirm_distances}，dive_duration_ms={self.DIVE_DURATION_MS}",

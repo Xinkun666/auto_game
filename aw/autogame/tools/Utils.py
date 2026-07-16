@@ -243,26 +243,10 @@ def _normalize_frame_log_entries(entries):
     return normalized
 
 
-def _normalize_frame_decision(runtime_logs):
-    if not isinstance(runtime_logs, dict):
-        return {}
-    decision = runtime_logs.get("frame_decision")
-    if not isinstance(decision, dict):
-        return {}
-    allowed_keys = {
-        "observation",
-        "target",
-        "decision",
-        "action",
-        "method",
-        "result",
-        "next_action",
-        "frame_log",
-        "frame_logs",
-        "observed_infos",
-        "control_actions",
-    }
-    return {str(key): value for key, value in decision.items() if key in allowed_keys}
+def _normalize_plain_frame_logs(entries):
+    if not isinstance(entries, (list, tuple)):
+        return []
+    return [str(item).strip() for item in entries if str(item or "").strip()]
 
 
 def _semantic_text(value, default=""):
@@ -289,7 +273,7 @@ def _infer_house_scene_state(value):
     return mapping.get(text)
 
 
-def _infer_scene_state(safe_info, frame_decision, code_branch):
+def _infer_scene_state(safe_info, code_branch):
     if isinstance(safe_info, dict):
         house_scene_state = _infer_house_scene_state(safe_info.get("house_scene"))
         if house_scene_state:
@@ -302,9 +286,6 @@ def _infer_scene_state(safe_info, frame_decision, code_branch):
     text_pool = " ".join(
         _semantic_text(value)
         for value in (
-            frame_decision.get("target") if isinstance(frame_decision, dict) else "",
-            frame_decision.get("observation") if isinstance(frame_decision, dict) else "",
-            frame_decision.get("decision") if isinstance(frame_decision, dict) else "",
             code_branch.get("target") if isinstance(code_branch, dict) else "",
             code_branch.get("observation") if isinstance(code_branch, dict) else "",
         )
@@ -390,39 +371,26 @@ def _normalize_semantic_actions(actions, default_reason=""):
     return normalized
 
 
-def _build_semantic_frame_log(stage, group_name, safe_info, info_keys, frame_decision, code_branch, next_action, index):
-    frame_decision = frame_decision if isinstance(frame_decision, dict) else {}
+def _build_semantic_frame_log(stage, group_name, safe_info, info_keys, code_branch, next_action, index):
     code_branch = code_branch if isinstance(code_branch, dict) else {}
-    observed_infos = frame_decision.get("observed_infos") if isinstance(frame_decision.get("observed_infos"), list) else []
-    scene_state = _infer_scene_state(safe_info, frame_decision, code_branch)
+    scene_state = _infer_scene_state(safe_info, code_branch)
     perception_summary = "看到 " + ", ".join(info_keys) if info_keys else "未识别到有效 info"
     judgment_reason = (
-        _semantic_text(frame_decision.get("observation"))
-        or _semantic_text(code_branch.get("observation"))
+        _semantic_text(code_branch.get("observation"))
         or perception_summary
     )
     judgment_decision = (
-        _semantic_text(frame_decision.get("decision"))
-        or _semantic_text(code_branch.get("action"))
+        _semantic_text(code_branch.get("action"))
         or _semantic_text(next_action, "等待下一轮逻辑判断")
     )
     branch_name = (
         _semantic_text(code_branch.get("target"))
-        or _semantic_text(frame_decision.get("target"))
         or _semantic_text(stage, "未知分支")
-    )
-    actions = _normalize_semantic_actions(
-        frame_decision.get("control_actions"),
-        default_reason=judgment_decision or judgment_reason,
     )
 
     return {
-        "frame_log": _semantic_text(frame_decision.get("frame_log")),
-        "frame_logs": [
-            _semantic_text(item)
-            for item in frame_decision.get("frame_logs", [])
-            if _semantic_text(item)
-        ] if isinstance(frame_decision.get("frame_logs"), list) else [],
+        "frame_log": "",
+        "frame_logs": [],
         "current_stage": {
             "stage": stage or "",
             "group": group_name or "",
@@ -433,37 +401,28 @@ def _build_semantic_frame_log(stage, group_name, safe_info, info_keys, frame_dec
             "summary": perception_summary,
             "info_keys": info_keys,
             "critical_values": _critical_frame_values(safe_info, info_keys),
-            "observed_infos": observed_infos,
+            "observed_infos": [],
         },
         "judgment": {
             "reason": judgment_reason,
             "decision": judgment_decision,
-            "evidence": _semantic_text(frame_decision.get("method") or code_branch.get("method")),
-            "result_expectation": _semantic_text(frame_decision.get("result") or code_branch.get("result")),
+            "evidence": _semantic_text(code_branch.get("method")),
+            "result_expectation": _semantic_text(code_branch.get("result")),
         },
         "branch": {
             "name": branch_name,
-            "observation": _semantic_text(code_branch.get("observation") or frame_decision.get("observation")),
-            "action": _semantic_text(code_branch.get("action") or frame_decision.get("action")),
-            "method": _semantic_text(code_branch.get("method") or frame_decision.get("method")),
-            "result": _semantic_text(code_branch.get("result") or frame_decision.get("result")),
+            "observation": _semantic_text(code_branch.get("observation")),
+            "action": _semantic_text(code_branch.get("action")),
+            "method": _semantic_text(code_branch.get("method")),
+            "result": _semantic_text(code_branch.get("result")),
         },
-        "actions": actions,
+        "actions": [],
     }
 
 
 def _select_frame_code_branch(runtime_logs):
     if not isinstance(runtime_logs, dict):
         return {}
-    frame_decision = _normalize_frame_decision(runtime_logs)
-    if frame_decision:
-        return {
-            "target": frame_decision.get("target", ""),
-            "observation": frame_decision.get("observation", ""),
-            "action": frame_decision.get("action") or frame_decision.get("decision", ""),
-            "method": frame_decision.get("method", ""),
-            "result": frame_decision.get("result", ""),
-        }
     branch = runtime_logs.get("current_branch")
     if isinstance(branch, dict) and branch:
         return dict(branch)
@@ -476,12 +435,6 @@ def _select_frame_code_branch(runtime_logs):
 
 def _select_next_action(runtime_logs, code_branch):
     if isinstance(runtime_logs, dict):
-        frame_decision = _normalize_frame_decision(runtime_logs)
-        if frame_decision:
-            for key in ("next_action", "action", "decision"):
-                value = str(frame_decision.get(key) or "").strip()
-                if value and value != "-":
-                    return value
         explicit = str(runtime_logs.get("next_action") or "").strip()
         if explicit and explicit != "-":
             return explicit
@@ -525,7 +478,7 @@ def build_frame_log_payload(
     safe_info = sanitize_frame_info_for_json(info)
     info_keys = _non_empty_info_keys(safe_info)
     runtime_logs = runtime_logs if isinstance(runtime_logs, dict) else {}
-    frame_decision = _normalize_frame_decision(runtime_logs)
+    frame_logs = _normalize_plain_frame_logs(runtime_logs.get("frame_logs"))
     code_branch = _select_frame_code_branch(runtime_logs)
     next_action = _select_next_action(runtime_logs, code_branch)
     semantic_log = _build_semantic_frame_log(
@@ -533,11 +486,12 @@ def build_frame_log_payload(
         group_name,
         safe_info,
         info_keys,
-        frame_decision,
         code_branch,
         next_action,
         index,
     )
+    semantic_log["frame_logs"] = list(frame_logs)
+    semantic_log["frame_log"] = frame_logs[-1] if frame_logs else ""
     frame_name = frame_name or f"frame_{int(index):05d}.jpg"
 
     frame_payload = {
@@ -572,7 +526,8 @@ def build_frame_log_payload(
         "time_logs": _normalize_frame_log_entries(runtime_logs.get("time_logs")),
         "logic_logs": _normalize_frame_log_entries(runtime_logs.get("logic_logs")),
         "recent_logs": _normalize_frame_log_entries(runtime_logs.get("recent_logs")),
-        "decision": frame_decision,
+        "frame_logs": frame_logs,
+        "frame_log": frame_logs[-1] if frame_logs else "",
         "code_branch": code_branch,
         "next_action": next_action,
         "semantic_log": semantic_log,
@@ -1581,8 +1536,7 @@ def visualizer_process(queue, visual=True):
                 raise RuntimeError(f"preview image write failed: {base_filename}.jpg")
             runtime_logs = frame_meta.get("runtime_logs")
             runtime_logs = dict(runtime_logs) if isinstance(runtime_logs, dict) else {}
-            if isinstance(frame_meta.get("frame_decision"), dict):
-                runtime_logs["frame_decision"] = frame_meta.get("frame_decision")
+            runtime_logs["frame_logs"] = _normalize_plain_frame_logs(frame_meta.get("frame_logs"))
             payload = build_frame_log_payload(
                 stage,
                 info,

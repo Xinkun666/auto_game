@@ -75,22 +75,6 @@ class HouseExitManager:
         self.trusted_exit_signal = False
         self.auto_forward_enabled = False
 
-    def _log_frame_state(
-        self,
-        w: "FrameWorker",
-        observation: str,
-        decision: str,
-        action: Optional[str] = None,
-        method: str = "",
-        result: str = "",
-        target: str = "出房兜底阶段",
-    ):
-        frame_logger = getattr(w, "frame_log", None)
-        if callable(frame_logger):
-            action_text = action or decision
-            frame_logger(
-                f"出房日志：目标是{target}；本帧观察到{observation}；接下来{action_text}"
-            )
 
     def process(self, w: "FrameWorker") -> bool:
         w.frame_log("进入出房兜底模块：这一帧先看是否死亡/结算，再看 house_scene，最后按门、窗、墙和室外信号选择出房动作")
@@ -99,32 +83,29 @@ class HouseExitManager:
 
         house_scene = self._get_house_scene(w)
         w.frame_log(f"出房观察：当前 house_scene={house_scene}，后续出房判断都基于这个室内/室外/贴墙状态")
-        self._log_frame_state(
-            w,
-            f"出房兜底：当前 house_scene={house_scene}",
-            "根据门、窗、贴墙/贴门和室外信号选择出房动作",
-            action="执行出房兜底决策",
-            method="HouseExitManager.process()",
-            result="本帧继续找门窗或确认已出房",
+        w.frame_log(
+            "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                '出房兜底阶段',
+                f'出房兜底：当前 house_scene={house_scene}',
+                '执行出房兜底决策',
+            )
         )
         if house_scene not in self.HOUSE_ACTIVE_EXIT_SCENES:
             if house_scene in self.HOUSE_EXIT_SCENES:
-                self._log_frame_state(
-                    w,
-                    f"出房兜底检测到室外/楼顶 house_scene={house_scene}",
-                    "复核出房成功，停止出房兜底流程",
-                    action="确认出房成功",
-                    method="_verify_exit_success()",
-                    result="回到后续阶段",
+                w.frame_log(
+                    "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                        '出房兜底阶段',
+                        f'出房兜底检测到室外/楼顶 house_scene={house_scene}',
+                        '确认出房成功',
+                    )
                 )
                 return self._verify_exit_success(w)
-            self._log_frame_state(
-                w,
-                f"出房兜底当前 house_scene={house_scene}，不在可出房处理场景",
-                "本帧不接管，让上层搜房/跑图逻辑继续处理",
-                action="不接管本帧",
-                method="return False",
-                result="上层逻辑继续决策",
+            w.frame_log(
+                "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                    '出房兜底阶段',
+                    f'出房兜底当前 house_scene={house_scene}，不在可出房处理场景',
+                    '不接管本帧',
+                )
             )
             return False
 
@@ -135,13 +116,12 @@ class HouseExitManager:
             return visible_result
 
         w.frame_log("出房决策：当前视野里没有直接可用的门或窗，所以进入扫描锚点搜索出口")
-        self._log_frame_state(
-            w,
-            f"出房兜底未直接看到门/窗，house_scene={house_scene}",
-            "按扫描锚点继续找出口，必要时转向、绕圈或随机冲出",
-            action="搜索出口",
-            method="_search_for_exit()",
-            result="下一帧继续确认门窗或室外信号",
+        w.frame_log(
+            "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                '出房兜底阶段',
+                f'出房兜底未直接看到门/窗，house_scene={house_scene}',
+                '搜索出口',
+            )
         )
         return self._search_for_exit(w)
 
@@ -152,13 +132,12 @@ class HouseExitManager:
         if door:
             w.frame_log("[HouseExit] 发现门，准备出门")
             w.frame_log(f"出房观察：forward_scene 里看到了门 {door}，所以停止自动前进并进入对门出房流程")
-            self._log_frame_state(
-                w,
-                f"当前帧 forward_scene 发现门，door={door}",
-                "停止自动前进，对准门，必要时开门后前推出房",
-                action="对准门并出门",
-                method="_exit_via_door()",
-                result="下一帧确认是否已到室外",
+            w.frame_log(
+                "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                    '出房兜底阶段',
+                    f'当前帧 forward_scene 发现门，door={door}',
+                    '对准门并出门',
+                )
             )
             self._stop_auto_forward(w)
             return self._exit_via_door(w, door)
@@ -167,13 +146,12 @@ class HouseExitManager:
         if window:
             w.frame_log("[HouseExit] 发现窗，准备翻窗")
             w.frame_log(f"出房观察：forward_scene 里看到了窗 {window}，所以停止自动前进并进入对窗翻出流程")
-            self._log_frame_state(
-                w,
-                f"当前帧 forward_scene 发现窗，window={window}",
-                "停止自动前进，对准窗，找跳跃按钮并前推翻窗",
-                action="对准窗并翻窗",
-                method="_exit_via_window()",
-                result="下一帧确认是否已到室外",
+            w.frame_log(
+                "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                    '出房兜底阶段',
+                    f'当前帧 forward_scene 发现窗，window={window}',
+                    '对准窗并翻窗',
+                )
             )
             self._stop_auto_forward(w)
             return self._exit_via_window(w, window)
@@ -239,13 +217,12 @@ class HouseExitManager:
 
         if w.get_info("开门"):
             w.frame_log("[HouseExit] 门已关闭，先开门")
-            self._log_frame_state(
-                w,
-                "当前帧检测到开门按钮，判断门处于关闭状态",
-                "先点击开门，再靠近门口前推出房",
-                action="点击开门",
-                method="w.click(开门)",
-                result="下一帧确认门是否打开并继续前推",
+            w.frame_log(
+                "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                    '出房兜底阶段',
+                    '当前帧检测到开门按钮，判断门处于关闭状态',
+                    '点击开门',
+                )
             )
             w.click("开门")
             self.trusted_exit_signal = True
@@ -255,13 +232,12 @@ class HouseExitManager:
                 return True
         elif w.get_info("关门"):
             w.frame_log("[HouseExit] 检测到关门按钮，表示门已打开，直接出门")
-            self._log_frame_state(
-                w,
-                "当前帧检测到关门按钮，判断门已经打开",
-                "不再点击门按钮，直接靠近门口前推出房",
-                action="前推出门",
-                method="_approach_door_with_recovery()",
-                result="下一帧确认是否已到室外",
+            w.frame_log(
+                "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                    '出房兜底阶段',
+                    '当前帧检测到关门按钮，判断门已经打开',
+                    '前推出门',
+                )
             )
             self.trusted_exit_signal = True
 
@@ -345,13 +321,12 @@ class HouseExitManager:
             )
             if w.get_info("开门"):
                 w.frame_log("[HouseExit] 顶出前再次看到开门按钮，补点开门")
-                self._log_frame_state(
-                    w,
-                    "门口顶出前再次看到开门按钮，说明门又处于关闭/未开状态",
-                    "补点开门后继续左右上小幅顶出",
-                    action="补点开门",
-                    method="w.click(开门)",
-                    result="继续门口顶出流程",
+                w.frame_log(
+                    "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                        '出房兜底阶段',
+                        '门口顶出前再次看到开门按钮，说明门又处于关闭/未开状态',
+                        '补点开门',
+                    )
                 )
                 w.click("开门")
                 self.trusted_exit_signal = True
@@ -359,17 +334,12 @@ class HouseExitManager:
                 w.refresh_frame()
                 if self._handle_terminal_state(w, "门口补开门后检测到死亡或结算界面，结束出房流程"):
                     return True
-            self._log_frame_state(
-                w,
-                f"门口出房受阻，第 {step + 1} 次左右上顶出，side_sign={side_sign}",
-                "用小幅左上/右上滑动尝试从门边挤出，避免继续原地撞门框",
-                action="门口左右上顶出",
-                method=(
-                    "tap_single(摇杆, "
-                    f"x_bias={side_sign * self.DOOR_DIAGONAL_SWEEP_X_BIAS}, "
-                    f"y_bias={self.DOOR_DIAGONAL_SWEEP_Y_BIAS}, dura={dura})"
-                ),
-                result="下一帧确认 house_scene 是否变为室外/楼顶",
+            w.frame_log(
+                "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                    '出房兜底阶段',
+                    f'门口出房受阻，第 {step + 1} 次左右上顶出，side_sign={side_sign}',
+                    '门口左右上顶出',
+                )
             )
             w.tap_single(
                 "摇杆",
@@ -400,13 +370,12 @@ class HouseExitManager:
 
             if w.get_info("跳跃"):
                 w.frame_log(f"[HouseExit] 靠窗 step={step + 1}，点击跳跃并前推翻窗")
-                self._log_frame_state(
-                    w,
-                    f"靠窗 step={step + 1} 检测到跳跃按钮，判断可以翻窗",
-                    "点击跳跃并前推翻窗出房",
-                    action="跳跃前推翻窗",
-                    method="w.click(跳跃); _move_forward()",
-                    result="下一帧确认是否已到室外",
+                w.frame_log(
+                    "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                        '出房兜底阶段',
+                        f'靠窗 step={step + 1} 检测到跳跃按钮，判断可以翻窗',
+                        '跳跃前推翻窗',
+                    )
                 )
                 w.click("跳跃")
                 time.sleep(0.12)
@@ -427,13 +396,12 @@ class HouseExitManager:
                 continue
 
             w.frame_log("[HouseExit] 小步靠近窗户")
-            self._log_frame_state(
-                w,
-                f"靠窗 step={step + 1} 未看到跳跃按钮",
-                "先小步前推靠近窗户，继续寻找跳跃按钮",
-                action="靠近窗户",
-                method=f"_move_forward(dura={self.WINDOW_APPROACH_DURA})",
-                result="下一帧继续检测跳跃/室外/贴墙信号",
+            w.frame_log(
+                "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                    '出房兜底阶段',
+                    f'靠窗 step={step + 1} 未看到跳跃按钮',
+                    '靠近窗户',
+                )
             )
             self._move_forward(w, dura=self.WINDOW_APPROACH_DURA, wait=self.WINDOW_APPROACH_WAIT)
             w.refresh_frame()
@@ -566,20 +534,12 @@ class HouseExitManager:
 
         target_dir = (self.scan_anchor_direction + self.SCAN_OFFSETS[self.scan_index]) % 360
         w.frame_log(f"[HouseExit] 扫视角度 {target_dir:.1f}")
-        self._log_frame_state(
-            w,
-            (
-                f"出房兜底扫门：scan_index={self.scan_index + 1}/{len(self.SCAN_OFFSETS)}，"
-                f"anchor_dir={self.scan_anchor_direction}，current_dir={current_dir}，"
-                f"target_dir={target_dir:.1f}，house_scene={self._get_house_scene(w)}"
-            ),
-            "当前没有直接看到门/窗，按扫描锚点转到下一个角度找出口",
-            action="转向扫描门窗",
-            method=(
-                f"_align_direction_blocking(current_dir={current_dir}, "
-                f"target_dir={target_dir:.1f}, tolerance=8)"
-            ),
-            result="转向并刷新后重新识别 forward_scene 中的门/窗",
+        w.frame_log(
+            "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                '出房兜底阶段',
+                f'出房兜底扫门：scan_index={self.scan_index + 1}/{len(self.SCAN_OFFSETS)}，anchor_dir={self.scan_anchor_direction}，current_dir={current_dir}，target_dir={target_dir:.1f}，house_scene={self._get_house_scene(w)}',
+                '转向扫描门窗',
+            )
         )
         self._align_direction_blocking(w, current_dir, target_dir, tolerance=8)
         w.refresh_frame()
@@ -595,13 +555,12 @@ class HouseExitManager:
 
     def _handle_no_exit_after_scan(self, w: "FrameWorker") -> bool:
         scene = self._get_house_scene(w)
-        self._log_frame_state(
-            w,
-            f"出房兜底一轮扫门结束仍未发现门窗，house_scene={scene}",
-            "根据当前是否贴墙/贴门决定撞墙恢复或死胡同随机逃逸",
-            action="选择扫门失败后的兜底动作",
-            method="_handle_no_exit_after_scan()",
-            result="贴墙则后拉掉头，否则启动随机逃逸",
+        w.frame_log(
+            "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                '出房兜底阶段',
+                f'出房兜底一轮扫门结束仍未发现门窗，house_scene={scene}',
+                '选择扫门失败后的兜底动作',
+            )
         )
         if scene in {self.HOUSE_NEAR_DOOR, self.HOUSE_NEAR_WALL}:
             if self._recover_from_wall_and_turn_back(w):
@@ -610,17 +569,12 @@ class HouseExitManager:
 
     def _recover_from_wall_and_turn_back(self, w: "FrameWorker") -> bool:
         w.frame_log("[HouseExit] 左右扫视仍是墙，先后拉再向后调转方向")
-        self._log_frame_state(
-            w,
-            f"出房兜底撞墙恢复：house_scene={self._get_house_scene(w)}，"
-            f"back_dura={self.WALL_BACKOFF_DURA}，turn_back_degrees={self.WALL_TURN_BACK_DEGREES}",
-            "多角度扫门仍处于贴墙/贴门，先后拉脱离墙面，再掉头继续找出口",
-            action="后拉并掉头",
-            method=(
-                f"_move_backward(dura={self.WALL_BACKOFF_DURA}, wait={self.WALL_BACKOFF_WAIT}); "
-                f"_align_direction_blocking(+{self.WALL_TURN_BACK_DEGREES}deg)"
-            ),
-            result="刷新后重新判断是否看到门/窗或已经出房",
+        w.frame_log(
+            "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                '出房兜底阶段',
+                f'出房兜底撞墙恢复：house_scene={self._get_house_scene(w)}，back_dura={self.WALL_BACKOFF_DURA}，turn_back_degrees={self.WALL_TURN_BACK_DEGREES}',
+                '后拉并掉头',
+            )
         )
         self._move_backward(w, dura=self.WALL_BACKOFF_DURA, wait=self.WALL_BACKOFF_WAIT)
         w.refresh_frame()
@@ -649,14 +603,12 @@ class HouseExitManager:
 
     def _escape_dead_end_randomly(self, w: "FrameWorker") -> bool:
         w.frame_log("[HouseExit] 仍未发现门窗，启动自动前进随机跑动脱离死胡同")
-        self._log_frame_state(
-            w,
-            f"出房兜底死胡同逃逸启动：steps={self.DEAD_END_ESCAPE_STEPS}，"
-            f"house_scene={self._get_house_scene(w)}",
-            "扫门和撞墙恢复都没有找到门窗，启动自动前进并随机转向/侧移寻找出口",
-            action="启动自动前进随机逃逸",
-            method="_start_auto_forward(); random turn + side move loop",
-            result="过程中一旦看到门/窗或室外信号就停止随机逃逸",
+        w.frame_log(
+            "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                '出房兜底阶段',
+                f'出房兜底死胡同逃逸启动：steps={self.DEAD_END_ESCAPE_STEPS}，house_scene={self._get_house_scene(w)}',
+                '启动自动前进随机逃逸',
+            )
         )
         self._start_auto_forward(w)
         for step in range(self.DEAD_END_ESCAPE_STEPS):
@@ -680,23 +632,12 @@ class HouseExitManager:
             turn_sign = random.choice((-1, 1))
             side_sign = random.choice((-1, 1))
             w.frame_log(f"[HouseExit] 死胡同随机跑动 {step + 1}/{self.DEAD_END_ESCAPE_STEPS}")
-            self._log_frame_state(
-                w,
-                (
-                    f"出房兜底死胡同随机跑动：step={step + 1}/{self.DEAD_END_ESCAPE_STEPS}，"
-                    f"turn_sign={turn_sign}，side_sign={side_sign}，"
-                    f"turn_x_bias={turn_sign * self.DEAD_END_ESCAPE_TURN_X_BIAS}，"
-                    f"side_x_bias={side_sign * self.DEAD_END_ESCAPE_SIDE_X_BIAS}"
-                ),
-                "当前仍未看到门/窗，随机转视角并侧向推进，扩大出口搜索范围",
-                action="随机转向并侧移",
-                method=(
-                    f"tap_single(视角, x_bias={turn_sign * self.DEAD_END_ESCAPE_TURN_X_BIAS}, "
-                    f"dura={self.DEAD_END_ESCAPE_TURN_DURA}); "
-                    f"tap_single(摇杆, x_bias={side_sign * self.DEAD_END_ESCAPE_SIDE_X_BIAS}, "
-                    f"y_bias=-300, dura={self.DEAD_END_ESCAPE_SIDE_DURA})"
-                ),
-                result="下一帧继续检查门/窗和出房信号",
+            w.frame_log(
+                "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                    '出房兜底阶段',
+                    f'出房兜底死胡同随机跑动：step={step + 1}/{self.DEAD_END_ESCAPE_STEPS}，turn_sign={turn_sign}，side_sign={side_sign}，turn_x_bias={turn_sign * self.DEAD_END_ESCAPE_TURN_X_BIAS}，side_x_bias={side_sign * self.DEAD_END_ESCAPE_SIDE_X_BIAS}',
+                    '随机转向并侧移',
+                )
             )
             w.tap_single(
                 "视角",
@@ -723,16 +664,12 @@ class HouseExitManager:
         if current_dir is not None:
             target_dir = (current_dir + 180) % 360
             w.frame_log(f"[HouseExit] 多角度未发现门窗，先调转 180 度到 {target_dir:.1f}")
-            self._log_frame_state(
-                w,
-                f"旧兜底出房扫描失败：current_dir={current_dir}，target_dir={target_dir:.1f}",
-                "旧兜底流程未发现门窗，先调转180度尝试找原路/出口方向",
-                action="调转180度",
-                method=(
-                    f"_align_direction_blocking(current_dir={current_dir}, "
-                    f"target_dir={target_dir:.1f}, tolerance=12, max_steps=8)"
-                ),
-                result="转身刷新后再执行左右上推进兜底",
+            w.frame_log(
+                "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                    '出房兜底阶段',
+                    f'旧兜底出房扫描失败：current_dir={current_dir}，target_dir={target_dir:.1f}',
+                    '调转180度',
+                )
             )
             self._align_direction_blocking(w, current_dir, target_dir, tolerance=12, max_steps=8)
             w.refresh_frame()
@@ -740,17 +677,12 @@ class HouseExitManager:
                 return True
 
         w.frame_log("[HouseExit] 未发现门窗，左上推动摇杆 5s 尝试出房")
-        self._log_frame_state(
-            w,
-            f"旧兜底左上推进：x_bias={-self.NO_EXIT_ESCAPE_X_BIAS}，"
-            f"y_bias={self.NO_EXIT_ESCAPE_Y_BIAS}，dura={self.NO_EXIT_ESCAPE_DURA}",
-            "仍未发现门窗，先左上长推尝试穿出死角",
-            action="左上长推逃逸",
-            method=(
-                f"tap_single(摇杆, x_bias={-self.NO_EXIT_ESCAPE_X_BIAS}, "
-                f"y_bias={self.NO_EXIT_ESCAPE_Y_BIAS}, dura={self.NO_EXIT_ESCAPE_DURA})"
-            ),
-            result="刷新后检查是否出房",
+        w.frame_log(
+            "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                '出房兜底阶段',
+                f'旧兜底左上推进：x_bias={-self.NO_EXIT_ESCAPE_X_BIAS}，y_bias={self.NO_EXIT_ESCAPE_Y_BIAS}，dura={self.NO_EXIT_ESCAPE_DURA}',
+                '左上长推逃逸',
+            )
         )
         w.tap_single(
             "摇杆",
@@ -764,17 +696,12 @@ class HouseExitManager:
             return True
 
         w.frame_log("[HouseExit] 未发现门窗，右上推动摇杆 5s 尝试出房")
-        self._log_frame_state(
-            w,
-            f"旧兜底右上推进：x_bias={self.NO_EXIT_ESCAPE_X_BIAS}，"
-            f"y_bias={self.NO_EXIT_ESCAPE_Y_BIAS}，dura={self.NO_EXIT_ESCAPE_DURA}",
-            "左上长推仍未确认出房，换右上长推尝试离开死角",
-            action="右上长推逃逸",
-            method=(
-                f"tap_single(摇杆, x_bias={self.NO_EXIT_ESCAPE_X_BIAS}, "
-                f"y_bias={self.NO_EXIT_ESCAPE_Y_BIAS}, dura={self.NO_EXIT_ESCAPE_DURA})"
-            ),
-            result="刷新后检查是否出房",
+        w.frame_log(
+            "出房日志：目标是{}；本帧观察到{}；接下来{}".format(
+                '出房兜底阶段',
+                f'旧兜底右上推进：x_bias={self.NO_EXIT_ESCAPE_X_BIAS}，y_bias={self.NO_EXIT_ESCAPE_Y_BIAS}，dura={self.NO_EXIT_ESCAPE_DURA}',
+                '右上长推逃逸',
+            )
         )
         w.tap_single(
             "摇杆",

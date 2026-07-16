@@ -49,10 +49,6 @@ class TurnCalibration:
         self.data: Dict[str, Dict[str, Any]] = {}
         self.load()
 
-    def _frame_log(self, message: str):
-        worker = getattr(self, "_frame_worker", None)
-        if worker is not None:
-            worker.frame_log(message)
 
     def load(self):
         raw = load_adaptive_motion_section(self.SECTION)
@@ -115,10 +111,8 @@ class TurnCalibration:
             "updated_at": time.time(),
         }
         self.save()
-        self._frame_log(
-            f"[TurnCalibration] 更新转向标定: key={key}, observed={observed_deg:.1f}deg/"
-            f"{duration_ms}ms, rate={new_rate:.4f}, samples={samples + 1}"
-        )
+        if getattr(self, "_frame_worker", None) is not None:
+            self._frame_worker.frame_log(f'[TurnCalibration] 更新转向标定: key={key}, observed={observed_deg:.1f}deg/{duration_ms}ms, rate={new_rate:.4f}, samples={samples + 1}')
         return True
 
     def _key(self, action: str, speed: Optional[int]) -> str:
@@ -354,7 +348,8 @@ class DrivingManager:
 
     def set_game_time(self, game_time: Optional[float] = None):
         started_at = self.match_clock.start(game_time)
-        self._frame_log(f"[Driving] 游戏开始时间设置为：{started_at:.3f}")
+        if getattr(self, "_frame_worker", None) is not None:
+            self._frame_worker.frame_log(f'[Driving] 游戏开始时间设置为：{started_at:.3f}')
 
     def get_elapsed_time(self) -> float:
         return self.match_clock.elapsed()
@@ -366,7 +361,8 @@ class DrivingManager:
         if remaining_time is None:
             return
         self.max_driving_time = max(0.0, float(remaining_time))
-        self._frame_log(f"[Driving] 剩余开车时长设置为：{self.max_driving_time:.2f}s")
+        if getattr(self, "_frame_worker", None) is not None:
+            self._frame_worker.frame_log(f'[Driving] 剩余开车时长设置为：{self.max_driving_time:.2f}s')
 
     def reset(self, max_driving_time: Optional[int] = None):
         if max_driving_time is not None:
@@ -414,7 +410,8 @@ class DrivingManager:
 
         self._frame_action_executed = False
         self.house_exit_manager.reset()
-        self._frame_log("[Driving] 状态已重置!")
+        if getattr(self, "_frame_worker", None) is not None:
+            self._frame_worker.frame_log('[Driving] 状态已重置!')
 
     def set_running_fallback_enabled(self, enabled: bool):
         self.allow_running_fallback = bool(enabled)
@@ -434,7 +431,8 @@ class DrivingManager:
         self.exit_garage_start_location = None
         self.last_motion_location = None
         self.blocked_motion_count = 0
-        self._frame_log(f"[Driving] 本次上车来源={reason}，跳过首次出库，直接进入巡航阶段")
+        if getattr(self, "_frame_worker", None) is not None:
+            self._frame_worker.frame_log(f'[Driving] 本次上车来源={reason}，跳过首次出库，直接进入巡航阶段')
 
     def process(self, w: "FrameWorker"):
         self._frame_worker = w
@@ -556,58 +554,10 @@ class DrivingManager:
         self._drive_toward_target(w, context, target_direction)
         self._finalize_frame(w)
 
-    def _log_drive_state(
-        self,
-        situation: str,
-        context: DriveContext,
-        decision: str,
-        target_direction: Optional[float] = None,
-    ):
-        circle_text = (
-            f"{self.stable_circle_angle:.1f}"
-            if self.stable_circle_angle is not None
-            else "None"
-        )
-        target_text = (
-            f"{target_direction:.1f}"
-            if target_direction is not None
-            else "None"
-        )
-        speed_text = "None" if context.speed is None else str(context.speed)
-        obstacle_count = int(context.obstacle_info.get("obstacles_count", 0) or 0)
-        obstacle_classes = ",".join(context.obstacle_info.get("classes", [])[:4]) or "None"
-        self._frame_log(
-            f"[情况:{situation}] "
-            f"[状态: speed={speed_text}, loc={context.location}, dir={context.direction:.1f}, "
-            f"circle={circle_text}, target={target_text}, obstacle_count={obstacle_count}, "
-            f"vision={context.decision}, classes={obstacle_classes}] "
-            f"[决策:{decision}]"
-        )
-        observation = (
-            f"开车阶段：驾驶子状态={self.current_stage}，情况={situation}，"
-            f"当前位置={context.location}，当前方位={context.direction:.1f}，"
-            f"速度={speed_text}，圈角={circle_text}，目标角={target_text}，"
-            f"障碍数量={obstacle_count}，视觉决策={context.decision}，障碍类别={obstacle_classes}"
-        )
-        method = (
-            "DrivingManager._log_drive_state "
-            f"target_direction={target_text}, speed={speed_text}, obstacle_count={obstacle_count}"
-        )
-        worker = getattr(self, "_frame_worker", None)
-        frame_logger = getattr(worker, "frame_log", None)
-        if callable(frame_logger):
-            frame_logger(
-                f"开车内部判断：{situation}；车辆位置={context.location}，方向={context.direction:.1f}，"
-                f"目标方向={target_text}，障碍数={obstacle_count}，视觉建议={context.decision}；接下来{decision}"
-            )
 
     def _begin_frame(self):
         self._frame_action_executed = False
 
-    def _frame_log(self, message: str):
-        worker = getattr(self, "_frame_worker", None)
-        if worker is not None:
-            worker.frame_log(message)
 
     def _finalize_frame(self, w: "FrameWorker"):
         if self._frame_action_executed:
@@ -643,13 +593,12 @@ class DrivingManager:
         if self.road_list:
             target = self.road_list[0]
             target_direction = calculate_angle(location, target)
-            self._frame_log(
-                f"[Driving] 路径巡航: loc={location}, target={target}, "
-                f"target_direction={target_direction}"
-            )
+            if getattr(self, "_frame_worker", None) is not None:
+                self._frame_worker.frame_log(f'[Driving] 路径巡航: loc={location}, target={target}, target_direction={target_direction}')
             return target_direction
 
-        self._frame_log(f"[Driving] 自由巡航: stable_circle_angle={self.stable_circle_angle}")
+        if getattr(self, "_frame_worker", None) is not None:
+            self._frame_worker.frame_log(f'[Driving] 自由巡航: stable_circle_angle={self.stable_circle_angle}')
         return self.stable_circle_angle
 
     def _consume_waypoints(self, location: Tuple[int, int]):
@@ -658,7 +607,8 @@ class DrivingManager:
             if dist > self.WAYPOINT_TOLERANCE:
                 break
             reached = self.road_list.pop(0)
-            self._frame_log(f"[Driving] 已到达路径点: {reached}")
+            if getattr(self, "_frame_worker", None) is not None:
+                self._frame_worker.frame_log(f'[Driving] 已到达路径点: {reached}')
 
     def _should_plan_route(self) -> bool:
         if self.stable_circle_angle is None:
@@ -677,13 +627,16 @@ class DrivingManager:
         self.last_planned_circle_angle = self.stable_circle_angle
 
         if self.road_list:
-            self._frame_log(f"[Driving] 路径已加载: {self.road_list}")
+            if getattr(self, "_frame_worker", None) is not None:
+                self._frame_worker.frame_log(f'[Driving] 路径已加载: {self.road_list}')
             try:
                 draw_points_with_arrows(self.road_list)
             except Exception as exc:
-                self._frame_log(f"[Driving] 绘制路径调试图失败: {exc}")
+                if getattr(self, "_frame_worker", None) is not None:
+                    self._frame_worker.frame_log(f'[Driving] 绘制路径调试图失败: {exc}')
         else:
-            self._frame_log("[Driving] 路径规划失败，回退自由巡航")
+            if getattr(self, "_frame_worker", None) is not None:
+                self._frame_worker.frame_log('[Driving] 路径规划失败，回退自由巡航')
 
     def _repair_route_after_deviation(self, location: Tuple[int, int]):
         if not self.road_list:
@@ -698,10 +651,8 @@ class DrivingManager:
         if nearest_idx > 0:
             skipped = self.road_list[:nearest_idx]
             del self.road_list[:nearest_idx]
-            self._frame_log(
-                f"[Driving] 车辆已越过部分路径点，跳过 {len(skipped)} 个旧路径点，"
-                f"nearest_dist={nearest_dist:.2f}"
-            )
+            if getattr(self, "_frame_worker", None) is not None:
+                self._frame_worker.frame_log(f'[Driving] 车辆已越过部分路径点，跳过 {len(skipped)} 个旧路径点，nearest_dist={nearest_dist:.2f}')
 
         if nearest_dist <= self.ROUTE_DEVIATION_REPLAN_DISTANCE:
             return
@@ -709,10 +660,8 @@ class DrivingManager:
         if not self.route_replan_cooldown.try_acquire(self.ROUTE_REPLAN_COOLDOWN_S):
             return
 
-        self._frame_log(
-            f"[Driving] 当前位置偏离规划路线过远 nearest_dist={nearest_dist:.2f}，"
-            "从当前位置重规划进圈路线"
-        )
+        if getattr(self, "_frame_worker", None) is not None:
+            self._frame_worker.frame_log(f'[Driving] 当前位置偏离规划路线过远 nearest_dist={nearest_dist:.2f}，从当前位置重规划进圈路线')
         self._load_path(location)
 
     def _record_local_avoidance(self, context: DriveContext, reason: str):
@@ -725,10 +674,8 @@ class DrivingManager:
             self.local_avoidance_fail_count = 1
 
         self.last_avoidance_location = location
-        self._frame_log(
-            f"[Driving] 记录局部避障: reason={reason}, "
-            f"count={self.local_avoidance_fail_count}, loc={location}"
-        )
+        if getattr(self, "_frame_worker", None) is not None:
+            self._frame_worker.frame_log(f'[Driving] 记录局部避障: reason={reason}, count={self.local_avoidance_fail_count}, loc={location}')
 
         if self.local_avoidance_fail_count < self.LOCAL_AVOIDANCE_REPEAT_LIMIT:
             return
@@ -739,7 +686,8 @@ class DrivingManager:
     def _recover_route_after_repeated_avoidance(self, location: Tuple[int, int], reason: str):
         if not self.road_list:
             self.last_planned_circle_angle = None
-            self._frame_log(f"[Driving] 避障反复失败但当前无路径点，等待下一轮重规划: reason={reason}")
+            if getattr(self, "_frame_worker", None) is not None:
+                self._frame_worker.frame_log(f'[Driving] 避障反复失败但当前无路径点，等待下一轮重规划: reason={reason}')
             return
 
         skipped = 0
@@ -756,10 +704,8 @@ class DrivingManager:
         if not self.road_list:
             self.last_planned_circle_angle = None
 
-        self._frame_log(
-            f"[Driving] 同一区域避障反复失败，跳过疑似受阻路径点: "
-            f"reason={reason}, skipped={skipped}, remain={len(self.road_list)}"
-        )
+        if getattr(self, "_frame_worker", None) is not None:
+            self._frame_worker.frame_log(f'[Driving] 同一区域避障反复失败，跳过疑似受阻路径点: reason={reason}, skipped={skipped}, remain={len(self.road_list)}')
 
     def _handle_first_car_alignment(self, w: "FrameWorker", context: DriveContext):
         if self.exit_garage_start_location is None:
@@ -767,11 +713,16 @@ class DrivingManager:
 
         if self.exit_garage_phase == 0:
             w.frame_log(f"[Driving] 首次出库第 1 步：固定前进 {self.EXIT_GARAGE_INITIAL_FORWARD_MS}ms 后点击刹车")
-            self._log_drive_state(
-                "首次出库",
-                context,
-                f"forward({self.EXIT_GARAGE_INITIAL_FORWARD_MS}ms)+brake_click",
-                self.stable_circle_angle,
+            w.frame_log(
+                "开车内部判断：{}；车辆位置={}，方向={}，目标方向={}，障碍数={}，视觉建议={}；接下来{}".format(
+                    '首次出库',
+                    context.location,
+                    context.direction,
+                    self.stable_circle_angle,
+                    int(context.obstacle_info.get("obstacles_count", 0) or 0),
+                    context.decision,
+                    f'forward({self.EXIT_GARAGE_INITIAL_FORWARD_MS}ms)+brake_click',
+                )
             )
             self._tap_single_control(w, "up", wait=self.EXIT_GARAGE_INITIAL_FORWARD_MS, dura=100)
             self._click_control(w, "brake")
@@ -780,11 +731,16 @@ class DrivingManager:
 
         if self.exit_garage_phase == 1:
             w.frame_log(f"[Driving] 首次出库第 2 步：倒车并向左打方向 {self.EXIT_GARAGE_INITIAL_REVERSE_LEFT_MS}ms")
-            self._log_drive_state(
-                "首次出库",
-                context,
-                f"reverse_turn_left({self.EXIT_GARAGE_INITIAL_REVERSE_LEFT_MS}ms)",
-                self.stable_circle_angle,
+            w.frame_log(
+                "开车内部判断：{}；车辆位置={}，方向={}，目标方向={}，障碍数={}，视觉建议={}；接下来{}".format(
+                    '首次出库',
+                    context.location,
+                    context.direction,
+                    self.stable_circle_angle,
+                    int(context.obstacle_info.get("obstacles_count", 0) or 0),
+                    context.decision,
+                    f'reverse_turn_left({self.EXIT_GARAGE_INITIAL_REVERSE_LEFT_MS}ms)',
+                )
             )
             self._tap_double_control(w, "down", "left", wait=self.EXIT_GARAGE_INITIAL_REVERSE_LEFT_MS)
             self.exit_garage_phase = 2
@@ -818,11 +774,16 @@ class DrivingManager:
 
         if not front_blocked:
             self.exit_garage_clear_rounds += 1
-            self._log_drive_state(
-                "出库阶段前方无石墙",
-                context,
-                f"forward({self.EXIT_GARAGE_VISUAL_FORWARD_MS}ms)",
-                self.stable_circle_angle,
+            w.frame_log(
+                "开车内部判断：{}；车辆位置={}，方向={}，目标方向={}，障碍数={}，视觉建议={}；接下来{}".format(
+                    '出库阶段前方无石墙',
+                    context.location,
+                    context.direction,
+                    self.stable_circle_angle,
+                    int(context.obstacle_info.get("obstacles_count", 0) or 0),
+                    context.decision,
+                    f'forward({self.EXIT_GARAGE_VISUAL_FORWARD_MS}ms)',
+                )
             )
             self._tap_single_control(w, "up", wait=self.EXIT_GARAGE_VISUAL_FORWARD_MS, dura=100)
             return
@@ -832,11 +793,16 @@ class DrivingManager:
             offset = float(wall_state["gate_center_offset"])
 
             if abs(offset) <= self.EXIT_GARAGE_GATE_CENTER_DEADZONE:
-                self._log_drive_state(
-                    "出库阶段出口居中",
-                    context,
-                    f"forward({self.EXIT_GARAGE_CENTERING_FORWARD_MS}ms)",
-                    self.stable_circle_angle,
+                w.frame_log(
+                    "开车内部判断：{}；车辆位置={}，方向={}，目标方向={}，障碍数={}，视觉建议={}；接下来{}".format(
+                        '出库阶段出口居中',
+                        context.location,
+                        context.direction,
+                        self.stable_circle_angle,
+                        int(context.obstacle_info.get("obstacles_count", 0) or 0),
+                        context.decision,
+                        f'forward({self.EXIT_GARAGE_CENTERING_FORWARD_MS}ms)',
+                    )
                 )
                 w.frame_log(
                     "[Driving] 出库阶段检测到左右石墙形成出口，出口基本居中，"
@@ -852,11 +818,16 @@ class DrivingManager:
 
             steer = "right" if offset > 0 else "left"
             duration = self._get_exit_gate_centering_duration(offset)
-            self._log_drive_state(
-                "出库阶段对准车库出口",
-                context,
-                f"forward_turn_{steer}({duration}ms)",
-                self.stable_circle_angle,
+            w.frame_log(
+                "开车内部判断：{}；车辆位置={}，方向={}，目标方向={}，障碍数={}，视觉建议={}；接下来{}".format(
+                    '出库阶段对准车库出口',
+                    context.location,
+                    context.direction,
+                    self.stable_circle_angle,
+                    int(context.obstacle_info.get("obstacles_count", 0) or 0),
+                    context.decision,
+                    f'forward_turn_{steer}({duration}ms)',
+                )
             )
             w.frame_log(
                 f"[Driving] 出库阶段检测到左右石墙形成出口，微调对准中间: "
@@ -877,11 +848,16 @@ class DrivingManager:
         else:
             steer = "left" if left_score < right_score else "right"
 
-        self._log_drive_state(
-            "出库阶段前方存在石墙",
-            context,
-            f"forward_turn_{steer}({self.EXIT_GARAGE_VISUAL_TURN_MS}ms)",
-            self.stable_circle_angle,
+        w.frame_log(
+            "开车内部判断：{}；车辆位置={}，方向={}，目标方向={}，障碍数={}，视觉建议={}；接下来{}".format(
+                '出库阶段前方存在石墙',
+                context.location,
+                context.direction,
+                self.stable_circle_angle,
+                int(context.obstacle_info.get("obstacles_count", 0) or 0),
+                context.decision,
+                f'forward_turn_{steer}({self.EXIT_GARAGE_VISUAL_TURN_MS}ms)',
+            )
         )
         w.frame_log(
             f"[Driving] 出库阶段根据石墙分布调整方向: steer={steer}, "
@@ -942,7 +918,17 @@ class DrivingManager:
 
         if safe_point is None:
             w.frame_log("[Driving] 黑区内未找到安全点，先执行保守倒车脱离")
-            self._log_drive_state("已进入不可通行区域", context, "backward(900ms)", self.stable_circle_angle)
+            w.frame_log(
+                "开车内部判断：{}；车辆位置={}，方向={}，目标方向={}，障碍数={}，视觉建议={}；接下来{}".format(
+                    '已进入不可通行区域',
+                    context.location,
+                    context.direction,
+                    self.stable_circle_angle,
+                    int(context.obstacle_info.get("obstacles_count", 0) or 0),
+                    context.decision,
+                    'backward(900ms)',
+                )
+            )
             self._record_forbidden_escape_action("backward")
             self._tap_single_control(w, "down", wait=900, dura=100)
             return True
@@ -958,7 +944,17 @@ class DrivingManager:
                     f"[Driving] 黑区脱离: safe_point={safe_point}, target={target_direction:.1f}, "
                     f"diff={diff:.2f}, action={action_text}"
                 )
-                self._log_drive_state("已进入不可通行区域", context, action_text, target_direction)
+                w.frame_log(
+                    "开车内部判断：{}；车辆位置={}，方向={}，目标方向={}，障碍数={}，视觉建议={}；接下来{}".format(
+                        '已进入不可通行区域',
+                        context.location,
+                        context.direction,
+                        target_direction,
+                        int(context.obstacle_info.get("obstacles_count", 0) or 0),
+                        context.decision,
+                        action_text,
+                    )
+                )
                 self._record_forbidden_escape_action("backward")
                 self._tap_single_control(w, "down", wait=900, dura=100)
                 return True
@@ -980,7 +976,17 @@ class DrivingManager:
                     duration = self.FORWARD_BLOCK_BACKWARD_TURN_MS
                     action_text = f"{recovery_action}({duration}ms)"
                     w.frame_log(f"[Driving] 黑区脱离前进受阻，切换倒车语义避障: {action_text}")
-                    self._log_drive_state("黑区脱离前进受阻", context, action_text, target_direction)
+                    w.frame_log(
+                        "开车内部判断：{}；车辆位置={}，方向={}，目标方向={}，障碍数={}，视觉建议={}；接下来{}".format(
+                            '黑区脱离前进受阻',
+                            context.location,
+                            context.direction,
+                            target_direction,
+                            int(context.obstacle_info.get("obstacles_count", 0) or 0),
+                            context.decision,
+                            action_text,
+                        )
+                    )
                     self._record_forbidden_escape_action(recovery_action)
                     self._execute_maneuver(
                         w,
@@ -991,7 +997,17 @@ class DrivingManager:
                     )
                     return True
 
-                self._log_drive_state("已进入不可通行区域", context, action_text, target_direction)
+                w.frame_log(
+                    "开车内部判断：{}；车辆位置={}，方向={}，目标方向={}，障碍数={}，视觉建议={}；接下来{}".format(
+                        '已进入不可通行区域',
+                        context.location,
+                        context.direction,
+                        target_direction,
+                        int(context.obstacle_info.get("obstacles_count", 0) or 0),
+                        context.decision,
+                        action_text,
+                    )
+                )
                 self._record_forbidden_escape_action(action)
                 self._tap_single_control(w, "up", wait=duration, dura=100)
                 return True
@@ -1018,11 +1034,16 @@ class DrivingManager:
             max_duration = self.FORBIDDEN_TURN_MAX_DURATION_MS
 
         action_text = f"{action}({duration}ms)"
-        self._log_drive_state(
-            "已进入不可通行区域",
-            context,
-            action_text,
-            target_direction,
+        w.frame_log(
+            "开车内部判断：{}；车辆位置={}，方向={}，目标方向={}，障碍数={}，视觉建议={}；接下来{}".format(
+                '已进入不可通行区域',
+                context.location,
+                context.direction,
+                target_direction,
+                int(context.obstacle_info.get("obstacles_count", 0) or 0),
+                context.decision,
+                action_text,
+            )
         )
         w.frame_log(
             f"[Driving] 黑区脱离: safe_point={safe_point}, target={target_direction:.1f}, "
@@ -1081,11 +1102,16 @@ class DrivingManager:
             duration = min(duration, max_duration)
 
         w.frame_log(f"[Driving] 前方不可通行，地图规避 sector={sector}, action={action}")
-        self._log_drive_state(
-            "前方有不可通行区域",
-            context,
-            f"{action_name}({duration}ms)",
-            self.stable_circle_angle,
+        w.frame_log(
+            "开车内部判断：{}；车辆位置={}，方向={}，目标方向={}，障碍数={}，视觉建议={}；接下来{}".format(
+                '前方有不可通行区域',
+                context.location,
+                context.direction,
+                self.stable_circle_angle,
+                int(context.obstacle_info.get("obstacles_count", 0) or 0),
+                context.decision,
+                f'{action_name}({duration}ms)',
+            )
         )
         self._execute_calibrated_turn(
             w,
@@ -1155,11 +1181,16 @@ class DrivingManager:
             "reverse_and_right": "前方障碍物过大需要倒车",
         }
         w.frame_log(f"[Driving] 视觉避障 decision={decision}, action={action}")
-        self._log_drive_state(
-            situation_map.get(decision, "前方有障碍物"),
-            context,
-            f"{action_name}({duration}ms)",
-            self.stable_circle_angle,
+        w.frame_log(
+            "开车内部判断：{}；车辆位置={}，方向={}，目标方向={}，障碍数={}，视觉建议={}；接下来{}".format(
+                situation_map.get(decision, '前方有障碍物'),
+                context.location,
+                context.direction,
+                self.stable_circle_angle,
+                int(context.obstacle_info.get("obstacles_count", 0) or 0),
+                context.decision,
+                f'{action_name}({duration}ms)',
+            )
         )
         self._execute_calibrated_turn(
             w,
@@ -1203,7 +1234,17 @@ class DrivingManager:
     ):
         if target_direction is None:
             w.frame_log("[Driving] 无进圈目标角度，保持直行")
-            self._log_drive_state("前方无障碍物", context, "straight", target_direction)
+            w.frame_log(
+                "开车内部判断：{}；车辆位置={}，方向={}，目标方向={}，障碍数={}，视觉建议={}；接下来{}".format(
+                    '前方无障碍物',
+                    context.location,
+                    context.direction,
+                    target_direction,
+                    int(context.obstacle_info.get("obstacles_count", 0) or 0),
+                    context.decision,
+                    'straight',
+                )
+            )
             self._execute_maneuver(w, "straight", context.speed)
             return
 
@@ -1214,7 +1255,17 @@ class DrivingManager:
         )
 
         if turn_dir is None or diff <= self.ALIGN_THRESHOLD:
-            self._log_drive_state("前方无障碍物", context, "straight", target_direction)
+            w.frame_log(
+                "开车内部判断：{}；车辆位置={}，方向={}，目标方向={}，障碍数={}，视觉建议={}；接下来{}".format(
+                    '前方无障碍物',
+                    context.location,
+                    context.direction,
+                    target_direction,
+                    int(context.obstacle_info.get("obstacles_count", 0) or 0),
+                    context.decision,
+                    'straight',
+                )
+            )
             self._execute_maneuver(w, "straight", context.speed)
             return
 
@@ -1228,7 +1279,17 @@ class DrivingManager:
             self.ROUTE_TURN_MAX_DURATION_MS,
         )
 
-        self._log_drive_state("发现进圈角度，进行对齐", context, f"{action}({duration}ms)", target_direction)
+        w.frame_log(
+            "开车内部判断：{}；车辆位置={}，方向={}，目标方向={}，障碍数={}，视觉建议={}；接下来{}".format(
+                '发现进圈角度，进行对齐',
+                context.location,
+                context.direction,
+                target_direction,
+                int(context.obstacle_info.get("obstacles_count", 0) or 0),
+                context.decision,
+                f'{action}({duration}ms)',
+            )
+        )
         self._execute_calibrated_turn(
             w,
             context,
@@ -1519,11 +1580,8 @@ class DrivingManager:
         if self.no_fuel_stall_count < self.NO_FUEL_FORWARD_STALL_LIMIT:
             return False
 
-        self._frame_log(
-            "[Driving] 疑似没油判定成立: "
-            f"stall_frames={self.no_fuel_stall_count}, loc={context.location}, "
-            f"circle={self._current_circle_angle_text()}"
-        )
+        if getattr(self, "_frame_worker", None) is not None:
+            self._frame_worker.frame_log(f'[Driving] 疑似没油判定成立: stall_frames={self.no_fuel_stall_count}, loc={context.location}, circle={self._current_circle_angle_text()}')
         return True
 
     def _is_open_forward_stall(self, context: DriveContext) -> bool:
@@ -1543,20 +1601,19 @@ class DrivingManager:
 
     def _should_find_car_after_no_fuel(self) -> bool:
         if self._should_continue_finding_car_after_running_fallback("疑似没油"):
-            self._frame_log("[Driving] 疑似没油但开车阶段未完成，切跑图后继续沿指定路线找车")
+            if getattr(self, "_frame_worker", None) is not None:
+                self._frame_worker.frame_log('[Driving] 疑似没油但开车阶段未完成，切跑图后继续沿指定路线找车')
             return True
 
-        self._frame_log("[Driving] 疑似没油且开车阶段已完成，切跑图后再考虑进圈")
+        if getattr(self, "_frame_worker", None) is not None:
+            self._frame_worker.frame_log('[Driving] 疑似没油且开车阶段已完成，切跑图后再考虑进圈')
         return False
 
     def _should_continue_finding_car_after_running_fallback(self, reason: str) -> bool:
         remaining = max(0.0, self.max_driving_time - self.get_driving_elapsed_time())
         should_find = remaining > 0.0
-        self._frame_log(
-            f"[Driving] {reason}回退跑图决策: "
-            f"driving_remaining={remaining:.2f}s, "
-            f"next={'继续找车' if should_find else '跑图/进圈'}"
-        )
+        if getattr(self, "_frame_worker", None) is not None:
+            self._frame_worker.frame_log(f"[Driving] {reason}回退跑图决策: driving_remaining={remaining:.2f}s, next={('继续找车' if should_find else '跑图/进圈')}")
         return should_find
 
     def _current_circle_angle_text(self) -> str:
@@ -1614,11 +1671,16 @@ class DrivingManager:
             steer = self._choose_less_obstructed_side(w)
             w.frame_log(f"[Driving] 前进卡住但前方未检测到明确障碍，倒车并向 {steer} 规避")
             self._record_local_avoidance(context, "前进卡住")
-            self._log_drive_state(
-                "前进卡住后全场景择路",
-                context,
-                f"backward_turn_{steer}({self.FORWARD_BLOCK_BACKWARD_TURN_MS}ms)",
-                self.stable_circle_angle,
+            w.frame_log(
+                "开车内部判断：{}；车辆位置={}，方向={}，目标方向={}，障碍数={}，视觉建议={}；接下来{}".format(
+                    '前进卡住后全场景择路',
+                    context.location,
+                    context.direction,
+                    self.stable_circle_angle,
+                    int(context.obstacle_info.get("obstacles_count", 0) or 0),
+                    context.decision,
+                    f'backward_turn_{steer}({self.FORWARD_BLOCK_BACKWARD_TURN_MS}ms)',
+                )
             )
             self._execute_maneuver(
                 w,
@@ -1635,11 +1697,16 @@ class DrivingManager:
             else:
                 forward_steer = self._choose_less_obstructed_side(w)
                 w.frame_log(f"[Driving] 倒车后仍无明确障碍，按障碍较少侧前进: {forward_steer}")
-                self._log_drive_state(
-                    "倒车规避后全场景择路",
-                    updated_context,
-                    f"forward_turn_{forward_steer}({self.FORWARD_BLOCK_TURN_MS}ms)",
-                    self.stable_circle_angle,
+                w.frame_log(
+                    "开车内部判断：{}；车辆位置={}，方向={}，目标方向={}，障碍数={}，视觉建议={}；接下来{}".format(
+                        '倒车规避后全场景择路',
+                        updated_context.location,
+                        updated_context.direction,
+                        self.stable_circle_angle,
+                        int(updated_context.obstacle_info.get("obstacles_count", 0) or 0),
+                        updated_context.decision,
+                        f'forward_turn_{forward_steer}({self.FORWARD_BLOCK_TURN_MS}ms)',
+                    )
                 )
                 self._execute_maneuver(
                     w,
@@ -1752,11 +1819,16 @@ class DrivingManager:
             f"steer={steer}, action={action}"
         )
         self._record_local_avoidance(context, "连续多帧位置不变")
-        self._log_drive_state(
-            "车辆连续多帧位置不变",
-            context,
-            f"{action}({self.MOTION_BLOCK_BACKWARD_TURN_MS}ms)",
-            self.stable_circle_angle,
+        w.frame_log(
+            "开车内部判断：{}；车辆位置={}，方向={}，目标方向={}，障碍数={}，视觉建议={}；接下来{}".format(
+                '车辆连续多帧位置不变',
+                context.location,
+                context.direction,
+                self.stable_circle_angle,
+                int(context.obstacle_info.get("obstacles_count", 0) or 0),
+                context.decision,
+                f'{action}({self.MOTION_BLOCK_BACKWARD_TURN_MS}ms)',
+            )
         )
         self.blocked_motion_count = 0
         self._execute_maneuver(
@@ -1828,10 +1900,8 @@ class DrivingManager:
             and self.TRAPPED_RADIUS_MIN <= max_radius <= self.TRAPPED_RADIUS_MAX
         )
         if self.trapped:
-            self._frame_log(
-                f"[Driving] 严格困死判定成立: radius={max_radius:.2f}, "
-                f"frames={len(valid_points)}"
-            )
+            if getattr(self, "_frame_worker", None) is not None:
+                self._frame_worker.frame_log(f'[Driving] 严格困死判定成立: radius={max_radius:.2f}, frames={len(valid_points)}')
 
     def _run_stage_finish(self, w: "FrameWorker"):
         self.current_stage = self.STAGE_FINISH
@@ -2110,7 +2180,8 @@ class DrivingManager:
             self.prior_location = location
             return location
         if self.prior_location is not None:
-            self._frame_log("[Driving] 当前坐标无效，回退到上一帧坐标")
+            if getattr(self, "_frame_worker", None) is not None:
+                self._frame_worker.frame_log('[Driving] 当前坐标无效，回退到上一帧坐标')
         return self.prior_location
 
     def _use_valid_direction(self, direction: Optional[float]) -> Optional[float]:
@@ -2118,7 +2189,8 @@ class DrivingManager:
             self.prior_angle = direction
             return direction
         if self.prior_angle is not None:
-            self._frame_log("[Driving] 当前角度无效，回退到上一帧角度")
+            if getattr(self, "_frame_worker", None) is not None:
+                self._frame_worker.frame_log('[Driving] 当前角度无效，回退到上一帧角度')
         return self.prior_angle
 
     def _is_dead(self, w: "FrameWorker") -> bool:
@@ -2419,7 +2491,8 @@ class DrivingManager:
             return
         if keys and all(key == "auto_forward" for key in keys):
             return
-        self._frame_log("[Driving] 检测到其他驾驶按键，标记自动前进已取消")
+        if getattr(self, "_frame_worker", None) is not None:
+            self._frame_worker.frame_log('[Driving] 检测到其他驾驶按键，标记自动前进已取消')
         self.drive_auto_forward_active = False
         self.drive_auto_forward_started_at = None
 

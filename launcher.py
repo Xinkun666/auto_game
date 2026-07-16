@@ -25,7 +25,6 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -2434,7 +2433,7 @@ class LauncherWindow(QWidget):
         self.test_profile_field = QWidget()
         self.test_profile_layout = QHBoxLayout(self.test_profile_field)
         self.test_profile_layout.setContentsMargins(0, 0, 0, 0)
-        self.test_profile_layout.setSpacing(10)
+        self.test_profile_layout.setSpacing(4)
         self.power_test_radio = QRadioButton("功耗测试")
         self.function_test_radio = QRadioButton("功能测试")
         self.power_test_radio.setChecked(True)
@@ -2668,6 +2667,32 @@ class LauncherWindow(QWidget):
                 QLabel#formLabel {
                     color: #475569;
                     font-weight: 600;
+                }
+                QWidget#configPanel,
+                QWidget#configItem {
+                    background: transparent;
+                }
+                QWidget#configSection {
+                    background: #ffffff;
+                    border: 1px solid #d9e5f1;
+                    border-radius: 8px;
+                }
+                QLabel#configSectionTitle {
+                    color: #2563eb;
+                    font-size: 12px;
+                    font-weight: 700;
+                }
+                QWidget#configSection QSpinBox,
+                QWidget#configSection QDoubleSpinBox,
+                QWidget#configSection QComboBox {
+                    min-height: 0px;
+                    max-height: 32px;
+                    padding: 3px 8px;
+                }
+                QWidget#configSection QPushButton {
+                    min-height: 0px;
+                    max-height: 32px;
+                    padding: 3px 10px;
                 }
                 QGroupBox {
                     background: #ffffff;
@@ -2914,6 +2939,32 @@ class LauncherWindow(QWidget):
                 color: #b8c2d0;
                 font-weight: 600;
             }
+            QWidget#configPanel,
+            QWidget#configItem {
+                background: transparent;
+            }
+            QWidget#configSection {
+                background: #151a21;
+                border: 1px solid #293241;
+                border-radius: 8px;
+            }
+            QLabel#configSectionTitle {
+                color: #5eead4;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QWidget#configSection QSpinBox,
+            QWidget#configSection QDoubleSpinBox,
+            QWidget#configSection QComboBox {
+                min-height: 0px;
+                max-height: 32px;
+                padding: 3px 8px;
+            }
+            QWidget#configSection QPushButton {
+                min-height: 0px;
+                max-height: 32px;
+                padding: 3px 10px;
+            }
             QGroupBox {
                 background: #151a21;
                 border: 1px solid #293241;
@@ -3155,7 +3206,7 @@ class LauncherWindow(QWidget):
 
         controls_widget = QWidget()
         controls_widget.setObjectName("controlsPanel")
-        controls_widget.setFixedHeight(320)
+        controls_widget.setFixedHeight(302)
         controls_layout = QVBoxLayout(controls_widget)
         controls_layout.setContentsMargins(0, 0, 4, 0)
         controls_layout.setSpacing(10)
@@ -3184,35 +3235,88 @@ class LauncherWindow(QWidget):
         launch_row.addWidget(testcase_group, 2)
         controls_layout.addLayout(launch_row)
 
-        config_group = QGroupBox("配置")
-        config_group.setFixedHeight(220)
-        config_layout = QGridLayout(config_group)
-        config_layout.setContentsMargins(12, 8, 12, 10)
-        config_layout.setHorizontalSpacing(12)
-        config_layout.setVerticalSpacing(4)
+        config_panel = QWidget()
+        config_panel.setObjectName("configPanel")
+        config_panel.setFixedHeight(184)
+        config_layout = QHBoxLayout(config_panel)
+        config_layout.setContentsMargins(0, 0, 0, 0)
+        config_layout.setSpacing(10)
 
-        def add_config_item(row: int, column: int, label_text: str, widget: QWidget):
+        def create_config_item(label_text: str, widget: QWidget, field_width: int = 150) -> QWidget:
+            item = QWidget()
+            item.setObjectName("configItem")
+            item.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            item_layout = QHBoxLayout(item)
+            item_layout.setContentsMargins(0, 0, 0, 0)
+            item_layout.setSpacing(8)
+
             label = QLabel(label_text)
             label.setObjectName("formLabel")
             label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            config_layout.addWidget(label, row, column * 2)
-            config_layout.addWidget(widget, row, column * 2 + 1)
+            label.setFixedWidth(96)
+            widget.setFixedWidth(field_width)
+            widget.setFixedHeight(32)
 
-        add_config_item(0, 0, "project_case", self.project_combo)
-        add_config_item(0, 1, "target_case", self.target_combo)
-        add_config_item(1, 0, "运行次数", self.run_count_field)
-        add_config_item(1, 1, "测试类型", self.test_profile_field)
-        add_config_item(2, 0, "单次循环", self.case_loop_count_field)
-        add_config_item(2, 1, "安全温度", self.safe_temp_field)
-        add_config_item(3, 0, "安全电量", self.safe_battery_field)
-        add_config_item(3, 1, "安全时间", self.safe_time_field)
-        add_config_item(4, 0, "无操控超时", self.inactivity_timeout_field)
-        add_config_item(4, 1, "视频归档", self.generate_preview_video_button)
-        add_config_item(5, 0, "回放录像时长", self.power_collection_duration_field)
+            item_layout.addStretch(1)
+            item_layout.addWidget(label)
+            item_layout.addWidget(widget)
+            item_layout.addStretch(1)
+            return item
 
-        config_layout.setColumnStretch(1, 1)
-        config_layout.setColumnStretch(3, 1)
-        controls_layout.addWidget(config_group)
+        def create_config_section(
+            title: str,
+            items: tuple[tuple[str, QWidget, int], ...],
+        ) -> QWidget:
+            section = QWidget()
+            section.setObjectName("configSection")
+            section_layout = QVBoxLayout(section)
+            section_layout.setContentsMargins(8, 6, 8, 6)
+            section_layout.setSpacing(4)
+
+            title_label = QLabel(title)
+            title_label.setObjectName("configSectionTitle")
+            title_label.setFixedHeight(18)
+            section_layout.addWidget(title_label)
+            for label_text, widget, field_width in items:
+                section_layout.addWidget(
+                    create_config_item(label_text, widget, field_width),
+                )
+            section_layout.addStretch(1)
+            return section
+
+        # 按用途分成三个等宽区块，每项始终是“标签 + 短控件”。
+        # 11 项的 4 / 4 / 3 数量差由分组语义吸收，不再产生单独的半行。
+        config_sections = (
+            create_config_section(
+                "用例与运行",
+                (
+                    ("project_case", self.project_combo, 150),
+                    ("target_case", self.target_combo, 150),
+                    ("运行次数", self.run_count_field, 150),
+                    ("单次循环", self.case_loop_count_field, 150),
+                ),
+            ),
+            create_config_section(
+                "安全限制",
+                (
+                    ("安全温度", self.safe_temp_field, 150),
+                    ("安全电量", self.safe_battery_field, 150),
+                    ("安全时间", self.safe_time_field, 150),
+                    ("无操控超时", self.inactivity_timeout_field, 150),
+                ),
+            ),
+            create_config_section(
+                "测试与归档",
+                (
+                    ("测试类型", self.test_profile_field, 170),
+                    ("视频归档", self.generate_preview_video_button, 150),
+                    ("回放录像时长", self.power_collection_duration_field, 150),
+                ),
+            ),
+        )
+        for section in config_sections:
+            config_layout.addWidget(section, 1)
+        controls_layout.addWidget(config_panel)
 
         main_layout.addWidget(controls_widget, 0)
 

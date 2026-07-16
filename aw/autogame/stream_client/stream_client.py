@@ -1140,6 +1140,9 @@ class GStreamerH264Decoder:
 
 
 class HOSScrcpyStreamClient:
+    HDC_RECOVERY_STATUS_ATTEMPTS = 3
+    HDC_RECOVERY_STATUS_DELAY_SECONDS = 1.0
+
     def __init__(
         self,
         buffer,
@@ -1171,6 +1174,7 @@ class HOSScrcpyStreamClient:
         self._last_data_at = None
         self._last_decoded_at = None
         self._start_monotonic = None
+        self._hdc_recovery_attempted = False
 
         config = _read_autogame_config()
         requested_decoder_backend = decoder_backend or _resolve_str_option(
@@ -1302,6 +1306,35 @@ class HOSScrcpyStreamClient:
                 except Exception as exc:
                     if not self.running or self._stop_event.is_set():
                         break
+                    if self._is_usb_offline_error(exc):
+                        try:
+                            if self._hdc_recovery_attempted:
+                                raise RuntimeError(
+                                    "hdc offline没有恢复：重启 hdc 后抓流仍报 USB Offline"
+                                )
+                            self._hdc_recovery_attempted = True
+                            self._recover_hdc_from_usb_offline()
+                        except Exception as hdc_exc:
+                            self._last_error = hdc_exc
+                            self._diagnostic_stage = "hdc_recovery_failed"
+                            message = "[HOS] Runtime Error: %s" % hdc_exc
+                            print(message, flush=True)
+                            self._write_disconnect_signal(
+                                "hdc_offline_recovery_failed",
+                                message,
+                                reconnect_attempt,
+                            )
+                            raise
+
+                        reconnect_attempt = 0
+                        self._reconnect_attempt = 0
+                        self._diagnostic_stage = "hdc_recovered_retrying_grpc"
+                        print(
+                            "[HOS] HDC 已恢复在线，现在开始恢复 gRPC 抓流。",
+                            flush=True,
+                        )
+                        continue
+
                     reconnect_attempt += 1
                     self._reconnect_attempt = reconnect_attempt
                     if reconnect_attempt > self.max_reconnect_attempts:
@@ -1409,9 +1442,12 @@ class HOSScrcpyStreamClient:
         )
         if result.returncode != 0:
             raise RuntimeError("自动获取 HOScrcpy 设备 SN 失败: %s" % ((result.stderr or result.stdout or "").strip()))
+        target_output = result.stdout or ""
+        if "usb offline" in target_output.lower():
+            raise RuntimeError("USB Offline")
         devices = [
             line.strip()
-            for line in (result.stdout or "").splitlines()
+            for line in target_output.splitlines()
             if line.strip() and "Empty" not in line and not line.startswith("ErrorMessage:")
         ]
         if not devices:
@@ -1476,6 +1512,7 @@ class HOSScrcpyStreamClient:
             return
         if self.is_capture_paused():
             return
+        self._hdc_recovery_attempted = False
         self._callback_data_count += 1
         self._last_data_bytes = len(data)
         self._last_data_at = time.monotonic()
@@ -1649,6 +1686,102 @@ class HOSScrcpyStreamClient:
         attempt = max(1, int(attempt))
         delay = self.reconnect_base_delay * (2 ** (attempt - 1))
         return min(self.reconnect_max_delay, delay)
+
+    @staticmethod
+    def _is_usb_offline_error(error) -> bool:
+        return "usb offline" in str(error or "").lower()
+
+    def _recover_hdc_from_usb_offline(self) -> None:
+        kill_command = hdc_command_args("hdc kill")
+        start_command = hdc_command_args("hdc start")
+        targets_command = hdc_command_args("hdc list targets")
+        if not kill_command or not start_command or not targets_command:
+            raise RuntimeError("hdc offline没有恢复：无法构造 hdc 恢复命令")
+
+        print(
+            "[HOS] 检测到 USB Offline：判定 HDC 已断连，先执行 hdc kill / hdc start，"
+            "确认 HDC 恢复后再恢复 gRPC。",
+            flush=True,
+        )
+        command_results = []
+        for description, command in (("kill", kill_command), ("start", start_command)):
+            try:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    timeout=30,
+                    text=True,
+                    encoding="utf-8",
+                    errors="ignore",
+                    **hidden_subprocess_kwargs(),
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "hdc offline没有恢复：hdc %s 执行异常: %s" % (description, exc)
+                ) from exc
+            output = ((result.stdout or "") + (result.stderr or "")).strip()
+            command_results.append(
+                "hdc %s rc=%s output=%s"
+                % (description, result.returncode, output or "<empty>")
+            )
+            print("[HOS] HDC 恢复命令：%s" % command_results[-1], flush=True)
+
+        last_status = ""
+        attempts = max(1, int(self.HDC_RECOVERY_STATUS_ATTEMPTS))
+        for attempt in range(1, attempts + 1):
+            try:
+                result = subprocess.run(
+                    targets_command,
+                    capture_output=True,
+                    timeout=30,
+                    text=True,
+                    encoding="utf-8",
+                    errors="ignore",
+                    **hidden_subprocess_kwargs(),
+                )
+            except Exception as exc:
+                last_status = "hdc list targets 执行异常: %s" % exc
+            else:
+                output = ((result.stdout or "") + (result.stderr or "")).strip()
+                last_status = "returncode=%s output=%s" % (
+                    result.returncode,
+                    output or "<empty>",
+                )
+                if result.returncode == 0 and self._hdc_target_is_online(output):
+                    print(
+                        "[HOS] HDC 恢复成功，设备已在线：%s" % last_status,
+                        flush=True,
+                    )
+                    return
+
+            print(
+                "[HOS] HDC 恢复状态检查 %s/%s 未通过：%s"
+                % (attempt, attempts, last_status),
+                flush=True,
+            )
+            if attempt < attempts and self.HDC_RECOVERY_STATUS_DELAY_SECONDS > 0:
+                time.sleep(self.HDC_RECOVERY_STATUS_DELAY_SECONDS)
+
+        detail = "; ".join(command_results + [last_status])
+        raise RuntimeError("hdc offline没有恢复：%s" % detail)
+
+    def _hdc_target_is_online(self, output: str) -> bool:
+        text = str(output or "").strip()
+        if not text or "offline" in text.lower():
+            return False
+
+        target_lines = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip()
+            and "[empty]" not in line.lower()
+            and not line.lower().startswith("errormessage:")
+        ]
+        if not target_lines:
+            return False
+        if self.sn:
+            return any(self.sn in line for line in target_lines)
+        return True
 
     def _write_disconnect_signal(self, reason, message, attempt):
         archive_dir = os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()

@@ -75,7 +75,6 @@ def _asset(source: str, pyinstaller_dest: Optional[str] = None, runtime_dest: Op
 
 def required_runtime_assets() -> list[ReleaseAsset]:
     return [
-        _asset("restart.bat", ".", "restart.bat"),
         _asset("testcases/pubg/pubg_full_flow"),
         _asset("aw/autogame/common"),
         _asset("aw/autogame/tools"),
@@ -251,7 +250,6 @@ def verify_release_output() -> None:
     internal_root = INTERNAL_DIR if INTERNAL_DIR.exists() else DIST_DIR
     checks = [
         (APP_NAME, _first_existing((DIST_DIR / f"{APP_NAME}.exe", DIST_DIR / APP_NAME))),
-        ("restart.bat", DIST_DIR / "restart.bat"),
         ("testcase", DIST_DIR / "testcases" / "pubg" / "pubg_full_flow" / "auto_pubg.py"),
         ("root ProcessUtils.py", DIST_DIR / "aw" / "autogame" / "tools" / "ProcessUtils.py"),
         ("root config.json", DIST_DIR / "aw" / "autogame" / "config" / "config.json"),

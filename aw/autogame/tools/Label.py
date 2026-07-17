@@ -143,8 +143,6 @@ class DrawingOverlay(QGraphicsRectItem):
         self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable)
     def _label_baseline(self):
         rect = self.rect()
-        if self.item_type == 'search_scope':
-            return QPointF(rect.left() + 5, rect.bottom() - 5)
         return QPointF(rect.left() + 5, rect.top() + 15)
     def _label_rect(self):
         fm = QFontMetricsF(QApplication.font())
@@ -154,10 +152,14 @@ class DrawingOverlay(QGraphicsRectItem):
         return QRectF(baseline.x(), top, width, fm.height())
     def boundingRect(self):
         base_rect = super().boundingRect()
+        if not self.label:
+            return base_rect
         label_rect = self._label_rect().adjusted(-4, -2, 4, 2)
         return base_rect.united(label_rect)
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
+        if not self.label:
+            return
         # 绘制标签文字，并给文字加底板以避免与移动引导线混叠
         text_pos = self._label_baseline()
         text_bg_rect = self._label_rect().adjusted(-3, -1, 3, 1)
@@ -274,6 +276,26 @@ class ImageCanvas(QGraphicsView):
         self.zoom_by_factor(1.15)
     def zoom_out(self):
         self.zoom_by_factor(1 / 1.15)
+    @staticmethod
+    def _rects_match(first: Optional[RectData], second: Optional[RectData], tolerance: float = 1e-6) -> bool:
+        if first is None or second is None:
+            return first is second
+        return all(
+            abs(first_value - second_value) <= tolerance
+            for first_value, second_value in (
+                (first.x, second.x),
+                (first.y, second.y),
+                (first.w, second.w),
+                (first.h, second.h),
+            )
+        )
+    @classmethod
+    def _search_scope_label(cls, item: ItemData) -> str:
+        if item.item_type != 'area' or not item.search_scope:
+            return ""
+        if cls._rects_match(item.rect, item.search_scope):
+            return ""
+        return f"搜索范围: {item.name}"
     def redraw_overlays(self, scene_data: SceneData):
         """根据数据重新绘制所有框"""
         # 清除旧的框 (保留图片)
@@ -293,10 +315,17 @@ class ImageCanvas(QGraphicsView):
             overlay = DrawingOverlay(r.x, r.y, r.w, r.h, item.item_type, item.name)
             overlay.setData(0, item)
             self.scene.addItem(overlay)
-            # 绘制搜索范围 (如果存在且当前选中了该区域或开启了调试显示)
+            # 搜索范围与区域本体不同时，在左上角显示对应的区域名。
             if item.item_type == 'area' and item.search_scope:
                 s = item.search_scope
-                scope = DrawingOverlay(s.x, s.y, s.w, s.h, 'search_scope', f"Scope: {item.name}")
+                scope = DrawingOverlay(
+                    s.x,
+                    s.y,
+                    s.w,
+                    s.h,
+                    'search_scope',
+                    self._search_scope_label(item),
+                )
                 scope.setData(0, item)
                 self.scene.addItem(scope)
     def mousePressEvent(self, event):
@@ -3675,7 +3704,14 @@ class AutoStudioWindow(QMainWindow):
             return
         self.coord_label.setText(f"坐标: ({int(x)}, {int(y)})")
     def select_item_in_tree(self, target_data):
-        self.select_data_in_tree(target_data)
+        preferred_tree = getattr(self, "_active_tree_widget", None)
+        valid_trees = (
+            getattr(self, "tree", None),
+            getattr(self, "scene_pool_tree", None),
+        )
+        if preferred_tree not in valid_trees:
+            preferred_tree = None
+        self.select_data_in_tree(target_data, preferred_tree=preferred_tree)
     def select_data_in_tree(self, target_data, preferred_tree=None):
         if not target_data:
             return

@@ -66,13 +66,14 @@ LANGUAGE_BY_SUFFIX = {
 
 @dataclass(frozen=True)
 class TextFile:
-    raw: bytes
+    size: int
+    digest: str
     text: str | None
     encoding: str | None
 
     @property
     def sha256(self) -> str:
-        return hashlib.sha256(self.raw).hexdigest()
+        return self.digest
 
 
 @dataclass(frozen=True)
@@ -194,16 +195,51 @@ def looks_binary(raw: bytes) -> bool:
     return control_bytes / len(sample) > 0.10
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def files_are_equal(base_path: Path, server_path: Path) -> bool:
+    if base_path.stat().st_size != server_path.stat().st_size:
+        return False
+    with base_path.open("rb") as base_file, server_path.open("rb") as server_file:
+        while True:
+            base_chunk = base_file.read(1024 * 1024)
+            server_chunk = server_file.read(1024 * 1024)
+            if base_chunk != server_chunk:
+                return False
+            if not base_chunk:
+                return True
+
+
 def read_text_file(path: Path) -> TextFile:
-    raw = path.read_bytes()
-    if looks_binary(raw):
-        return TextFile(raw=raw, text=None, encoding=None)
+    size = path.stat().st_size
+    with path.open("rb") as file:
+        sample = file.read(8192)
+        if looks_binary(sample):
+            return TextFile(
+                size=size,
+                digest=file_sha256(path),
+                text=None,
+                encoding=None,
+            )
+        raw = sample + file.read()
+    digest = hashlib.sha256(raw).hexdigest()
     for encoding in ("utf-8-sig", "utf-8", "gb18030"):
         try:
-            return TextFile(raw=raw, text=raw.decode(encoding), encoding=encoding)
+            return TextFile(
+                size=size,
+                digest=digest,
+                text=raw.decode(encoding),
+                encoding=encoding,
+            )
         except UnicodeDecodeError:
             pass
-    return TextFile(raw=raw, text=None, encoding=None)
+    return TextFile(size=size, digest=digest, text=None, encoding=None)
 
 
 def build_change_blocks(base_text: str, server_text: str) -> list[ChangeBlock]:
@@ -309,7 +345,7 @@ def append_added_or_deleted_file(
     if file.text is None:
         report.extend(
             [
-                f"{action}二进制文件，大小 {len(file.raw)} 字节，SHA-256：`{file.sha256}`。",
+                f"{action}二进制文件，大小 {file.size} 字节，SHA-256：`{file.sha256}`。",
                 "",
             ]
         )
@@ -332,14 +368,24 @@ def find_exact_renames(
     base_files: dict[str, Path],
     server_files: dict[str, Path],
 ) -> list[tuple[str, str]]:
+    base_by_size: dict[int, list[str]] = {}
+    server_by_size: dict[int, list[str]] = {}
+    for relative_path in sorted(base_only):
+        size = base_files[relative_path].stat().st_size
+        base_by_size.setdefault(size, []).append(relative_path)
+    for relative_path in sorted(server_only):
+        size = server_files[relative_path].stat().st_size
+        server_by_size.setdefault(size, []).append(relative_path)
+
     base_by_hash: dict[str, list[str]] = {}
     server_by_hash: dict[str, list[str]] = {}
-    for relative_path in sorted(base_only):
-        digest = hashlib.sha256(base_files[relative_path].read_bytes()).hexdigest()
-        base_by_hash.setdefault(digest, []).append(relative_path)
-    for relative_path in sorted(server_only):
-        digest = hashlib.sha256(server_files[relative_path].read_bytes()).hexdigest()
-        server_by_hash.setdefault(digest, []).append(relative_path)
+    for size in sorted(base_by_size.keys() & server_by_size.keys()):
+        for relative_path in base_by_size[size]:
+            digest = file_sha256(base_files[relative_path])
+            base_by_hash.setdefault(digest, []).append(relative_path)
+        for relative_path in server_by_size[size]:
+            digest = file_sha256(server_files[relative_path])
+            server_by_hash.setdefault(digest, []).append(relative_path)
 
     renames: list[tuple[str, str]] = []
     for digest in sorted(base_by_hash.keys() & server_by_hash.keys()):
@@ -374,11 +420,11 @@ def generate_report(
     modified: list[tuple[str, TextFile, TextFile]] = []
     unchanged_count = 0
     for relative_path in sorted(common):
-        base_file = read_text_file(base_files[relative_path])
-        server_file = read_text_file(server_files[relative_path])
-        if base_file.raw == server_file.raw:
+        if files_are_equal(base_files[relative_path], server_files[relative_path]):
             unchanged_count += 1
         else:
+            base_file = read_text_file(base_files[relative_path])
+            server_file = read_text_file(server_files[relative_path])
             modified.append((relative_path, base_file, server_file))
 
     stats = {
@@ -416,8 +462,8 @@ def generate_report(
                     [
                         "二进制文件内容发生变化。",
                         "",
-                        f"- 改动前：{len(base_file.raw)} 字节，SHA-256：`{base_file.sha256}`",
-                        f"- 改动后：{len(server_file.raw)} 字节，SHA-256：`{server_file.sha256}`",
+                        f"- 改动前：{base_file.size} 字节，SHA-256：`{base_file.sha256}`",
+                        f"- 改动后：{server_file.size} 字节，SHA-256：`{server_file.sha256}`",
                         "",
                     ]
                 )

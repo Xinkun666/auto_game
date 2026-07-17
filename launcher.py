@@ -2546,11 +2546,11 @@ class LauncherWindow(QWidget):
         self.power_collection_duration_spin.setDecimals(1)
         self.power_collection_duration_spin.setSingleStep(1.0)
         self.power_collection_duration_spin.setValue(0.0)
-        self.power_collection_duration_spin.setSuffix(" 分钟")
+        self.power_collection_duration_spin.setSuffix(" 秒")
         self.power_collection_duration_field = self._create_spin_with_presets(
             self.power_collection_duration_spin,
             [3, 5, 10, 15, 20],
-            suffix="分",
+            suffix="秒",
         )
 
         self.start_button = QPushButton("启动")
@@ -4301,8 +4301,8 @@ class LauncherWindow(QWidget):
                 str(float(self.current_plan.get("inactivity_timeout_minutes", 5.0))),
             )
             env.insert(
-                "POWER_COLLECTION_DURATION_MINUTES",
-                str(float(self.current_plan.get("power_collection_duration_minutes", 0.0))),
+                "POWER_COLLECTION_DURATION_SECONDS",
+                str(float(self.current_plan.get("power_collection_duration_seconds"))),
             )
         LOGGER.debug(
             "build_process_environment: project_case=%s target_case=%s run_no=%s batch_start=%s run_start=%s inactivity_timeout=%s power_collection_duration=%s",
@@ -4312,7 +4312,7 @@ class LauncherWindow(QWidget):
             self.current_batch_start_timestamp,
             self.current_run_start_timestamp,
             self.current_plan.get("inactivity_timeout_minutes") if self.current_plan else None,
-            self.current_plan.get("power_collection_duration_minutes") if self.current_plan else None,
+            self.current_plan.get("power_collection_duration_seconds") if self.current_plan else None,
         )
         return env
 
@@ -4817,7 +4817,7 @@ class LauncherWindow(QWidget):
             "safe_battery": int(self.safe_battery_spin.value()),
             "safe_minutes": float(self.safe_time_spin.value()),
             "inactivity_timeout_minutes": float(self.inactivity_timeout_spin.value()),
-            "power_collection_duration_minutes": float(self.power_collection_duration_spin.value()),
+            "power_collection_duration_seconds": float(self.power_collection_duration_spin.value()),
             "generate_preview_video": bool(self.generate_preview_video_button.isChecked()),
             "cleanup_apps": sorted(cleanup_apps),
             "runtime_description": runtime_description,
@@ -4866,7 +4866,7 @@ class LauncherWindow(QWidget):
             f"generate_preview_video={plan['generate_preview_video']}, "
             f"safe_temp={plan['safe_temp']}°C, safe_battery={plan['safe_battery']}%, "
             f"safe_time={plan['safe_minutes']}分钟, inactivity_timeout={plan['inactivity_timeout_minutes']}分钟, "
-            f"power_collection_duration={plan['power_collection_duration_minutes']}分钟, "
+            f"power_collection_duration={plan['power_collection_duration_seconds']}秒, "
             f"cleanup_apps={plan['cleanup_apps']}\n"
         )
         if plan.get("runtime_description"):

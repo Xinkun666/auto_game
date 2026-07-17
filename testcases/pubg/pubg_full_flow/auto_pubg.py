@@ -1,34 +1,36 @@
 # !/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2023. All rights reserved.
-import os
 import json
+import os
+import time
+from pathlib import Path
 
-project_case = 'Auto_PUBG_ALL'  # 这是你在标注工具导出的自动化资源目录名
-target_case = "auto_pubg"  # 这是你编写的自动化用例脚本名
+project_case = "Auto_PUBG_ALL"  # label-tool exported resource directory
+target_case = "auto_pubg"  # runtime script under customs_game_examples/<project_case>
+GAME_DISPLAY_NAME = "和平精英"  # name shown inside SP app selector
+GAME_PACKAGE_NAME = "com.tencent.tmgp.pubgmhd.hw"  # package launched for function tests
+STARTUP_WAIT_SECONDS = 10
 
 os.environ["TARGET_PROJECT_CASE"] = project_case
 os.environ["TARGET_GAME_CASE"] = target_case
 
-import sys
 from devicetest.core.test_case import TestCase
-from hypium import *
-import time
-from devicetest.core.test_case import TestCase
-from hypium import *
-from hypium import UiDriver
+from hypium import BY, UiDriver
 from hypium.action.os_hypium.device_logger import DeviceLogger
 from aw.autogame.tools.GameAutomator import GameAutomator
-from aw.autogame.tools.Utils import resolve_process_save_frames_dir
 from aw.autogame.tools.GameLaunchProfile import (
-    DEFAULT_PUBG_GAME_PACKAGE,
     DEFAULT_SP_PACKAGE,
     cleanup_packages_for_test_profile,
     should_use_sp_recording_for_profile,
 )
-from aw.autogame.tools.Utils import *
+from aw.autogame.tools.Utils import (
+    analyze_txt,
+    get_display_rotation,
+    normalize_rotation,
+    resolve_process_save_frames_dir,
+)
 
-GAME_PACKAGE_NAME = DEFAULT_PUBG_GAME_PACKAGE
 PERF_TOOL_PACKAGE = DEFAULT_SP_PACKAGE
 
 class auto_pubg(TestCase):
@@ -36,23 +38,32 @@ class auto_pubg(TestCase):
         self.TAG = self.__class__.__name__
         TestCase.__init__(self, self.TAG, controllers)
 
-        self.tests = [
-            "test_step"
-        ]
+        self.tests = ["test_step"]
         self.driver = UiDriver(self.device1)
         self.automator = None
-        self.task_name = os.environ.get("TARGET_GAME_CASE")
+        self.task_name = os.environ.get("TARGET_GAME_CASE") or target_case
         self.device_logger = DeviceLogger(self.driver)
         self.device_log_started = False
-        self.log_path = os.environ.get("AUTOGAME_DEVICE_LOG_PATH") or f'aw/autogame/temp/logs/{self.task_name}.txt'
+        self.log_path = os.environ.get("AUTOGAME_DEVICE_LOG_PATH") or f"aw/autogame/temp/logs/{self.task_name}.txt"
         self.frame_path = str(resolve_process_save_frames_dir())
-        self.game_display_name = '和平精英'
+        self.game_display_name = GAME_DISPLAY_NAME
         self.game_package = GAME_PACKAGE_NAME
         self.perf_tool_package = PERF_TOOL_PACKAGE
         self.test_profile = os.environ.get("AUTOGAME_TEST_PROFILE")
 
     def _use_sp_recording(self) -> bool:
         return should_use_sp_recording_for_profile(self.test_profile)
+
+    def _validate_runtime_entry(self):
+        runtime_file = Path("aw") / "autogame" / "customs_game_examples" / project_case / f"{target_case}.py"
+        info_file = Path("aw") / "autogame" / "customs_examples" / project_case / "info.py"
+        missing = [str(path) for path in (runtime_file, info_file) if not path.exists()]
+        if missing:
+            raise RuntimeError(
+                "testcase template values are not ready. "
+                "Copy this template, then update project_case/target_case and export label resources. "
+                f"Missing: {', '.join(missing)}"
+            )
 
     def _write_device_log_state(self, event_name, stop_ok=None, error=""):
         archive_dir = os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()
@@ -137,14 +148,19 @@ class auto_pubg(TestCase):
         time.sleep(1)
 
     def _open_perf_tool_app_selector(self):
-        steps = [
-            ((0.27, 0.55), 2, "点击性能功耗测试"),
-            ((0.48, 0.20), 2, "点击选择一个应用"),
-        ]
-        for pos, delay, msg in steps:
-            print(msg)
-            self.driver.touch(pos)
-            time.sleep(delay)
+        comp1 = self.driver.wait_for_component(
+            BY.text("应用测试").isAfter(BY.text('性能/功耗测试')),
+            timeout=5,
+        )
+        if comp1 is not None:
+            self.driver.touch(comp1)
+
+        comp2 = self.driver.wait_for_component(
+            BY.text("请选择一个应用"),
+            timeout=5,
+        )
+        if comp2 is not None:
+            self.driver.touch(comp2)
 
         return self._wait_for_component(
             BY.type("TextInput"),
@@ -201,9 +217,9 @@ class auto_pubg(TestCase):
         # time.sleep(30)
 
     def start_game_package(self):
-        print(f'和平精英-通过 HAP 包直接启动: {self.game_package}')
+        print(f"{self.game_display_name}-通过 HAP 包直接启动: {self.game_package}")
         self.driver.start_app(self.game_package)
-        time.sleep(10)
+        time.sleep(STARTUP_WAIT_SECONDS)
 
     def _wait_for_game_rotation(self, timeout=20, stable_rounds=3, interval=1.0):
         """
@@ -249,6 +265,7 @@ class auto_pubg(TestCase):
     def test_step(self):
         automation_completed = False
         try:
+            self._validate_runtime_entry()
             # 1. 启动本地设备日志。即使后续 gRPC 断流被 launcher 杀进程，
             #    已生成的日志文件也会被 launcher 归档到本次运行目录。
             self.start_device_log()

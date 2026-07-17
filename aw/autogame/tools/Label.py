@@ -3793,6 +3793,11 @@ class AutoStudioWindow(QMainWindow):
                 )
                 menu.addAction(copy_resolution_action)
                 menu.addSeparator()
+        if isinstance(data, ItemData):  # 添加节点复制名称按钮
+            if data.item_type in ('area', 'special_area', 'control'):
+                copy_name_action = QAction("复制名称", self)
+                copy_name_action.triggered.connect(lambda: QGuiApplication.clipboard().setText(data.name))
+                menu.addAction(copy_name_action)
         if isinstance(data, (StageData, ItemData)):
             del_action = QAction("删除", self)
             del_action.triggered.connect(lambda: self.delete_item(item, data))

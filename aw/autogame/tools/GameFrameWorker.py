@@ -2063,7 +2063,7 @@ class Controller:
 
 class FrameWorker(threading.Thread):
     LAUNCHER_INACTIVITY_TIMEOUT_SECONDS = 5 * 60
-    POWER_COLLECTION_DURATION_MINUTES = 0.0
+    POWER_COLLECTION_DURATION_SECONDS = 0.0
     WATCHDOG_CHECK_INTERVAL_SECONDS = 1.0
     POST_CONTROL_REFRESH_SETTLE_SECONDS = 0.5
     STREAM_RECOVERY_WAIT_POLL_SECONDS = 5.0
@@ -2210,14 +2210,14 @@ class FrameWorker(threading.Thread):
         return max(0.0, minutes * 60.0)
 
     def _resolve_launcher_power_collection_duration_seconds(self):
-        raw_value = os.environ.get("POWER_COLLECTION_DURATION_MINUTES", "").strip()
+        raw_value = os.environ.get("POWER_COLLECTION_DURATION_SECONDS", "").strip()
         if not raw_value:
-            return max(0.0, float(self.POWER_COLLECTION_DURATION_MINUTES) * 60.0)
+            return float(self.POWER_COLLECTION_DURATION_SECONDS)
         try:
-            minutes = float(raw_value)
+            seconds = float(raw_value)
         except ValueError:
-            return max(0.0, float(self.POWER_COLLECTION_DURATION_MINUTES) * 60.0)
-        return max(0.0, minutes * 60.0)
+            return float(self.POWER_COLLECTION_DURATION_SECONDS)
+        return max(0.0, seconds)
 
     def _resolve_post_control_refresh_settle_seconds(self):
         raw_value = os.environ.get("AUTOGAME_POST_CONTROL_REFRESH_SETTLE_SECONDS", "").strip()

@@ -56,15 +56,20 @@ class SPControllerBase:
         if self._start_time is not None and self._effective_time_at_stop is None:
             return True
 
-        # sp_area_name 既可以是标注的控制点名，也可以是坐标/区域。
-        # 这里不用 get_info() 预判，因为纯控制点不会出现在 stage_info 中。
-        result = self.w.click(sp_area_name)
+        # sp_area_name 只能是sp区域名。
+        sp_area = self.w.get_info(sp_area_name)
+        if sp_area:
+            result = self.w.click(sp_area)
+        else:
+            sp_area = sp_area_name
+            result = self.w.click(sp_area_name)
+
         if not self._control_executed(result):
             self._area = None
             self._log_missing()
             return False
 
-        self._area = sp_area_name
+        self._area = sp_area
         self._start_time = time.monotonic()
         self._paused_time = 0.0
         self._pause_start = None

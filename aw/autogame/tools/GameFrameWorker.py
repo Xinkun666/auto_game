@@ -2885,75 +2885,31 @@ class FrameWorker(threading.Thread):
         return True
 
     def pause_stream(self, paused_seconds=0):
-        """暂停 HOS 抓流；指定时长时会在结束前 30 秒自动恢复。"""
-        try:
-            paused_seconds = float(paused_seconds)
-        except (TypeError, ValueError):
-            print("[FrameWorker] 暂停时长必须是秒数。")
-            return False
-
-        if self.paused:
-            print("[FrameWorker] 抓流已经处于暂停状态。")
-            return False
-
-        pause = getattr(self.stream_client, "pause", None)
-        if not callable(pause):
-            print("[FrameWorker] 当前流不支持暂停抓流。")
-            return False
-
-        logging.info("暂停抓流")
+        logging.info('暂停抓流')
+        self.stream_client.pause()
+        self.clear_stream_fport()
         self.paused = True
-        pause_wait_event = getattr(self, "_pause_wait_event", None)
-        if pause_wait_event is None:
-            pause_wait_event = threading.Event()
-            self._pause_wait_event = pause_wait_event
-        pause_wait_event.clear()
-        try:
-            pause_result = pause()
-        except Exception as exc:
-            pause_result = False
-            print(f"[FrameWorker] 暂停抓流失败：{exc}")
-        if pause_result is False:
-            self.paused = False
-            pause_wait_event.set()
-            return False
-
-        if paused_seconds <= 0:
-            return True
-
-        wait_seconds = max(paused_seconds - 30.0, 0.0)
-        if wait_seconds > 0:
-            pause_wait_event.wait(wait_seconds)
-        if not self.running:
-            return False
-        if not self.paused:
-            return True
-        return self.resume_stream()
+        if paused_seconds <= 0: # 如果没有暂停时间则不自动恢复流
+            return
+        # t = Timer(max(paused_seconds - 20, 0), lambda: self.resume_stream()) # 提前20s恢复流
+        # t.start()
+        time.sleep(max(paused_seconds - 30, 0))
+        self.resume_stream()
 
     def resume_stream(self):
-        """恢复 HOS 抓流和自动化主循环。"""
-        logging.info("恢复抓流")
-        if not self.paused:
-            return True
-        resume = getattr(self.stream_client, "resume", None)
-        if not callable(resume):
-            print("[FrameWorker] 当前流不支持恢复抓流。")
-            return False
-
-        try:
-            resume_result = resume()
-        except Exception as exc:
-            print(f"[FrameWorker] 恢复抓流失败：{exc}")
-            return False
-        if resume_result is False:
-            return False
-
+        logging.info('恢复抓流')
+        self.stream_client.resume()
         self.paused = False
-        self.last_control_action_time = time.monotonic()
-        pause_wait_event = getattr(self, "_pause_wait_event", None)
-        if pause_wait_event is not None:
-            pause_wait_event.set()
-        return True
+
+    def clear_stream_fport(self):
+        ret = self.driver.hdc('fport ls')
+        logging.info('all fport: '+ ret)
+        pattern = r'(tcp:\d+\s+\S+:\S+)\s*\[Forward\]'
+        for line in ret.splitlines():
+            match = re.search(pattern, line)
+            if match:
+                ret = self.driver.hdc(f'fport rm {match.group(1)}')
+                logging.info('fport rm ret: '+ ret)
 
     def refresh_frame(self, settle: bool = True):
         self._flush_current_frame_log()

@@ -31,11 +31,31 @@ DEFAULT_IGNORED_NAMES = {
     "node_modules",
 }
 DEFAULT_IGNORED_PATTERNS = ("*.pyc", "*.pyo", "*.log", "*.tmp")
+ROOT_SCRIPT_NAMES = {
+    "build_release.py",
+    "launcher.py",
+    "main.py",
+}
+ALLOWED_TOP_LEVEL_DIRECTORIES = {"aw", "testcases"}
+AW_IGNORED_DIRECTORY_NAMES = {
+    ".cache",
+    "cache",
+    "caches",
+    "log",
+    "logs",
+    "output",
+    "outputs",
+    "result",
+    "results",
+    "temp",
+    "tmp",
+}
 PUBG_SCOPED_PARENT_NAMES = {
     "customs_examples",
     "customs_game_examples",
 }
 PUBG_SCOPED_PROJECT_NAME = "Auto_PUBG_ALL"
+
 
 @dataclass(frozen=True)
 class TextFile:
@@ -116,20 +136,12 @@ def normalize_output_path(output: Path) -> Path:
     return output
 
 
-def should_ignore(
+def matches_ignored_rule(
     relative_path: Path,
     patterns: Sequence[str],
     include_default_ignored: bool,
 ) -> bool:
     relative_posix = relative_path.as_posix()
-    parts = relative_path.parts
-    if (
-        len(parts) >= 4
-        and parts[:2] == ("aw", "autogame")
-        and parts[2] in PUBG_SCOPED_PARENT_NAMES
-        and parts[3] != PUBG_SCOPED_PROJECT_NAME
-    ):
-        return True
     if not include_default_ignored:
         if any(part in DEFAULT_IGNORED_NAMES for part in relative_path.parts):
             return True
@@ -140,6 +152,67 @@ def should_ignore(
         or fnmatch.fnmatch(relative_path.name, pattern)
         for pattern in patterns
     )
+
+
+def is_outside_pubg_example_scope(relative_path: Path) -> bool:
+    parts = relative_path.parts
+    return (
+        len(parts) >= 4
+        and parts[:2] == ("aw", "autogame")
+        and parts[2] in PUBG_SCOPED_PARENT_NAMES
+        and parts[3] != PUBG_SCOPED_PROJECT_NAME
+    )
+
+
+def is_ignored_aw_generated_path(relative_path: Path) -> bool:
+    parts = relative_path.parts
+    return bool(
+        parts
+        and parts[0] == "aw"
+        and any(part.lower() in AW_IGNORED_DIRECTORY_NAMES for part in parts[1:-1])
+    )
+
+
+def should_ignore_directory(
+    relative_path: Path,
+    patterns: Sequence[str],
+    include_default_ignored: bool,
+) -> bool:
+    if matches_ignored_rule(relative_path, patterns, include_default_ignored):
+        return True
+    parts = relative_path.parts
+    if not parts:
+        return False
+    if len(parts) == 1:
+        return parts[0] not in ALLOWED_TOP_LEVEL_DIRECTORIES
+    if parts[0] == "aw":
+        if any(part.lower() in AW_IGNORED_DIRECTORY_NAMES for part in parts[1:]):
+            return True
+        return is_outside_pubg_example_scope(relative_path)
+    if parts[0] == "testcases":
+        return parts[1] != "pubg"
+    return True
+
+
+def should_ignore_file(
+    relative_path: Path,
+    patterns: Sequence[str],
+    include_default_ignored: bool,
+) -> bool:
+    if matches_ignored_rule(relative_path, patterns, include_default_ignored):
+        return True
+    if relative_path.suffix.lower() != ".py":
+        return True
+    parts = relative_path.parts
+    if len(parts) == 1:
+        return relative_path.name not in ROOT_SCRIPT_NAMES
+    if parts[0] == "aw":
+        return is_ignored_aw_generated_path(relative_path) or is_outside_pubg_example_scope(
+            relative_path
+        )
+    if parts[0] == "testcases":
+        return len(parts) < 3 or parts[1] != "pubg"
+    return True
 
 
 def collect_files(
@@ -155,7 +228,7 @@ def collect_files(
         dir_names[:] = sorted(
             name
             for name in dir_names
-            if not should_ignore(
+            if not should_ignore_directory(
                 relative_current / name,
                 patterns,
                 include_default_ignored,
@@ -166,7 +239,7 @@ def collect_files(
             relative = path.relative_to(root)
             if path.resolve() in ignored_absolute_paths:
                 continue
-            if should_ignore(relative, patterns, include_default_ignored):
+            if should_ignore_file(relative, patterns, include_default_ignored):
                 continue
             if path.is_file():
                 files[relative.as_posix()] = path
@@ -425,8 +498,12 @@ def generate_report(
         f"移动/重命名文件：{stats['renamed']} 个",
         f"内容未变文件：{stats['unchanged']} 个",
         "",
-        "范围规则：customs_examples 和 customs_game_examples "
-        "目录下只比较 Auto_PUBG_ALL，其他项目不计入报告。",
+        "比较范围：",
+        "1. 只比较 Python（.py）文件。",
+        "2. 根目录只比较 launcher.py、main.py、build_release.py。",
+        "3. aw 目录忽略 temp、tmp、cache、logs、outputs、results 等生成目录。",
+        "4. customs_examples 和 customs_game_examples 只比较 Auto_PUBG_ALL。",
+        "5. testcases 只比较 testcases/pubg 下的 Python 文件。",
         "",
         "说明：“改动”表示原位置的一段文本被另一段文本替换；"
         "纯插入和纯删除分别列入“新增”和“删除”。",

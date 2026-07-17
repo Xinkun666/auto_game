@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare two source trees and write a human-readable Markdown report.
+"""Compare two source trees and write a human-readable plain-text report.
 
 The script is dependency-free and is intended for comparing a clean/base copy
 of a repository with a copy that was modified on a server.
@@ -37,38 +37,6 @@ PUBG_SCOPED_PARENT_NAMES = {
 }
 PUBG_SCOPED_PROJECT_NAME = "Auto_PUBG_ALL"
 
-LANGUAGE_BY_SUFFIX = {
-    ".bat": "bat",
-    ".c": "c",
-    ".cc": "cpp",
-    ".cfg": "ini",
-    ".cpp": "cpp",
-    ".css": "css",
-    ".go": "go",
-    ".h": "c",
-    ".hpp": "cpp",
-    ".html": "html",
-    ".ini": "ini",
-    ".java": "java",
-    ".js": "javascript",
-    ".json": "json",
-    ".jsx": "jsx",
-    ".md": "markdown",
-    ".php": "php",
-    ".ps1": "powershell",
-    ".py": "python",
-    ".rs": "rust",
-    ".sh": "bash",
-    ".sql": "sql",
-    ".toml": "toml",
-    ".ts": "typescript",
-    ".tsx": "tsx",
-    ".xml": "xml",
-    ".yaml": "yaml",
-    ".yml": "yaml",
-}
-
-
 @dataclass(frozen=True)
 class TextFile:
     size: int
@@ -94,7 +62,7 @@ class ChangeBlock:
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="比较两份代码目录，并生成按文件归类的中文 Markdown 差异报告。"
+        description="比较两份代码目录，并生成按文件归类的中文纯文本差异报告。"
     )
     parser.add_argument("base_dir", type=Path, help="基准代码目录（例如从 GitHub 新拉取的代码）")
     parser.add_argument("server_dir", type=Path, help="服务器改动后的代码目录")
@@ -102,8 +70,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "-o",
         "--output",
         type=Path,
-        default=Path("代码差异报告.md"),
-        help="报告保存路径，默认：./代码差异报告.md",
+        default=Path("代码差异报告.txt"),
+        help="报告保存路径，固定生成 .txt；默认：./代码差异报告.txt",
     )
     parser.add_argument(
         "--exclude",
@@ -139,6 +107,13 @@ def validate_directories(base_dir: Path, server_dir: Path) -> tuple[Path, Path]:
     if _is_relative_to(base_dir, server_dir) or _is_relative_to(server_dir, base_dir):
         raise ValueError("两个待比较目录不能互相嵌套，请把它们放在并列目录中。")
     return base_dir, server_dir
+
+
+def normalize_output_path(output: Path) -> Path:
+    output = output.expanduser().resolve()
+    if output.suffix.lower() != ".txt":
+        output = output.with_suffix(".txt")
+    return output
 
 
 def should_ignore(
@@ -288,25 +263,17 @@ def line_range(start: int, end: int) -> str:
     return f"第 {start}-{end} 行"
 
 
-def code_fence(lines: Iterable[str], language: str) -> list[str]:
-    content = "\n".join(lines)
-    fence = "````" if "```" in content else "```"
-    return [f"{fence}{language}", content, fence]
-
-
-def language_for(path: str) -> str:
-    return LANGUAGE_BY_SUFFIX.get(Path(path).suffix.lower(), "text")
+def text_block(lines: Iterable[str]) -> list[str]:
+    return ["----- 内容开始 -----", *lines, "----- 内容结束 -----"]
 
 
 def append_text_change_report(
     report: list[str],
-    relative_path: str,
     base_file: TextFile,
     server_file: TextFile,
 ) -> None:
     assert base_file.text is not None and server_file.text is not None
     blocks = build_change_blocks(base_file.text, server_file.text)
-    language = language_for(relative_path)
     if not blocks:
         report.extend(
             [
@@ -327,38 +294,36 @@ def append_text_change_report(
     }
     for kind in ("added", "deleted", "modified"):
         kind_blocks = grouped[kind]
-        report.extend([f"#### {headings[kind]}", ""])
+        report.extend([headings[kind], "-" * 40, ""])
         if not kind_blocks:
             report.extend(["无。", ""])
             continue
         for index, block in enumerate(kind_blocks, start=1):
             if kind == "added":
-                report.append(f"{index}. 服务器代码 {line_range(block.server_start, block.server_end)}：")
+                report.append(f"[{index}] 服务器代码 {line_range(block.server_start, block.server_end)}：")
                 report.append("")
-                report.extend(code_fence(block.server_lines, language))
+                report.extend(text_block(block.server_lines))
             elif kind == "deleted":
-                report.append(f"{index}. 基准代码 {line_range(block.base_start, block.base_end)}：")
+                report.append(f"[{index}] 基准代码 {line_range(block.base_start, block.base_end)}：")
                 report.append("")
-                report.extend(code_fence(block.base_lines, language))
+                report.extend(text_block(block.base_lines))
             else:
                 report.append(
-                    f"{index}. 基准代码 {line_range(block.base_start, block.base_end)} "
+                    f"[{index}] 基准代码 {line_range(block.base_start, block.base_end)} "
                     f"改为服务器代码 {line_range(block.server_start, block.server_end)}："
                 )
                 report.extend(["", "改动前：", ""])
-                report.extend(code_fence(block.base_lines, language))
+                report.extend(text_block(block.base_lines))
                 report.extend(["", "改动后：", ""])
-                report.extend(code_fence(block.server_lines, language))
+                report.extend(text_block(block.server_lines))
             report.append("")
 
 
-def append_added_or_deleted_file(
-    report: list[str], relative_path: str, file: TextFile, action: str
-) -> None:
+def append_added_or_deleted_file(report: list[str], file: TextFile, action: str) -> None:
     if file.text is None:
         report.extend(
             [
-                f"{action}二进制文件，大小 {file.size} 字节，SHA-256：`{file.sha256}`。",
+                f"{action}二进制文件，大小 {file.size} 字节，SHA-256：{file.sha256}。",
                 "",
             ]
         )
@@ -371,7 +336,7 @@ def append_added_or_deleted_file(
         ]
     )
     if lines:
-        report.extend(code_fence(lines, language_for(relative_path)))
+        report.extend(text_block(lines))
         report.append("")
 
 
@@ -448,21 +413,23 @@ def generate_report(
         "unchanged": unchanged_count,
     }
     report = [
-        "# 代码差异总报告",
+        "代码差异总报告",
+        "=" * 80,
         "",
-        f"- 生成时间：{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %z')}",
-        f"- 基准代码：`{base_dir}`",
-        f"- 服务器代码：`{server_dir}`",
-        f"- 修改文件：{stats['modified']} 个",
-        f"- 新增文件：{stats['added']} 个",
-        f"- 删除文件：{stats['deleted']} 个",
-        f"- 移动/重命名文件：{stats['renamed']} 个",
-        f"- 内容未变文件：{stats['unchanged']} 个",
+        f"生成时间：{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %z')}",
+        f"基准代码：{base_dir}",
+        f"服务器代码：{server_dir}",
+        f"修改文件：{stats['modified']} 个",
+        f"新增文件：{stats['added']} 个",
+        f"删除文件：{stats['deleted']} 个",
+        f"移动/重命名文件：{stats['renamed']} 个",
+        f"内容未变文件：{stats['unchanged']} 个",
         "",
-        "> 范围规则：`customs_examples` 和 `customs_game_examples` "
-        "目录下只比较 `Auto_PUBG_ALL`，其他项目不计入报告。",
+        "范围规则：customs_examples 和 customs_game_examples "
+        "目录下只比较 Auto_PUBG_ALL，其他项目不计入报告。",
         "",
-        "> “改动”表示原位置的一段文本被另一段文本替换；纯插入和纯删除分别列入“新增”和“删除”。",
+        "说明：“改动”表示原位置的一段文本被另一段文本替换；"
+        "纯插入和纯删除分别列入“新增”和“删除”。",
         "",
     ]
 
@@ -470,48 +437,46 @@ def generate_report(
         report.extend(["两份目录没有发现内容差异。", ""])
 
     if modified:
-        report.extend(["## 修改的文件", ""])
+        report.extend(["修改的文件", "=" * 80, ""])
         for relative_path, base_file, server_file in modified:
-            report.extend([f"### `{relative_path}`", ""])
+            report.extend([relative_path, "-" * 80, ""])
             if base_file.text is None or server_file.text is None:
                 report.extend(
                     [
                         "二进制文件内容发生变化。",
                         "",
-                        f"- 改动前：{base_file.size} 字节，SHA-256：`{base_file.sha256}`",
-                        f"- 改动后：{server_file.size} 字节，SHA-256：`{server_file.sha256}`",
+                        f"改动前：{base_file.size} 字节，SHA-256：{base_file.sha256}",
+                        f"改动后：{server_file.size} 字节，SHA-256：{server_file.sha256}",
                         "",
                     ]
                 )
             else:
-                append_text_change_report(report, relative_path, base_file, server_file)
+                append_text_change_report(report, base_file, server_file)
 
     if server_only:
-        report.extend(["## 新增的文件", ""])
+        report.extend(["新增的文件", "=" * 80, ""])
         for relative_path in sorted(server_only):
-            report.extend([f"### `{relative_path}`", ""])
+            report.extend([relative_path, "-" * 80, ""])
             append_added_or_deleted_file(
                 report,
-                relative_path,
                 read_text_file(server_files[relative_path]),
                 "新增",
             )
 
     if base_only:
-        report.extend(["## 删除的文件", ""])
+        report.extend(["删除的文件", "=" * 80, ""])
         for relative_path in sorted(base_only):
-            report.extend([f"### `{relative_path}`", ""])
+            report.extend([relative_path, "-" * 80, ""])
             append_added_or_deleted_file(
                 report,
-                relative_path,
                 read_text_file(base_files[relative_path]),
                 "删除",
             )
 
     if renames:
-        report.extend(["## 移动或重命名的文件", ""])
+        report.extend(["移动或重命名的文件", "=" * 80, ""])
         for old_path, new_path in sorted(renames):
-            report.append(f"- `{old_path}` → `{new_path}`（文件内容未变）")
+            report.append(f"{old_path} → {new_path}（文件内容未变）")
         report.append("")
 
     return "\n".join(report).rstrip() + "\n", stats
@@ -521,7 +486,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         base_dir, server_dir = validate_directories(args.base_dir, args.server_dir)
-        output = args.output.expanduser().resolve()
+        output = normalize_output_path(args.output)
         report, stats = generate_report(
             base_dir=base_dir,
             server_dir=server_dir,

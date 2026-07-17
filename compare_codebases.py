@@ -31,6 +31,11 @@ DEFAULT_IGNORED_NAMES = {
     "node_modules",
 }
 DEFAULT_IGNORED_PATTERNS = ("*.pyc", "*.pyo", "*.log", "*.tmp")
+PUBG_SCOPED_PARENT_NAMES = {
+    "customs_examples",
+    "customs_game_examples",
+}
+PUBG_SCOPED_PROJECT_NAME = "Auto_PUBG_ALL"
 
 LANGUAGE_BY_SUFFIX = {
     ".bat": "bat",
@@ -142,6 +147,14 @@ def should_ignore(
     include_default_ignored: bool,
 ) -> bool:
     relative_posix = relative_path.as_posix()
+    parts = relative_path.parts
+    if (
+        len(parts) >= 4
+        and parts[:2] == ("aw", "autogame")
+        and parts[2] in PUBG_SCOPED_PARENT_NAMES
+        and parts[3] != PUBG_SCOPED_PROJECT_NAME
+    ):
+        return True
     if not include_default_ignored:
         if any(part in DEFAULT_IGNORED_NAMES for part in relative_path.parts):
             return True
@@ -445,6 +458,9 @@ def generate_report(
         f"- 删除文件：{stats['deleted']} 个",
         f"- 移动/重命名文件：{stats['renamed']} 个",
         f"- 内容未变文件：{stats['unchanged']} 个",
+        "",
+        "> 范围规则：`customs_examples` 和 `customs_game_examples` "
+        "目录下只比较 `Auto_PUBG_ALL`，其他项目不计入报告。",
         "",
         "> “改动”表示原位置的一段文本被另一段文本替换；纯插入和纯删除分别列入“新增”和“删除”。",
         "",

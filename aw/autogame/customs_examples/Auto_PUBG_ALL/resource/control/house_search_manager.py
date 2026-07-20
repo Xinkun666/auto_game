@@ -10,6 +10,11 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_navigati
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import *
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_manager import HouseExitManager
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_house_search_strategy import (
+    NandaHouseSearchStrategy,
+    NandaSearchContext,
+    NandaSearchStatus,
+)
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import TimeoutTracker
 from aw.autogame.tools.Utils import *
 
@@ -229,7 +234,7 @@ class HouseSearchManager:
     OUTDOOR_NEAR_WALL_CLEAR_FORWARD_DURA = 1000
     OUTDOOR_NEAR_WALL_CLEAR_FORWARD_WAIT = 1000
 
-    def __init__(self):
+    def __init__(self, nanda_search_strategy=None):
         self.map_tool = MapNavigator()
         self.house_data = load_json(
             r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/house_entry/house_entries_summary.json')
@@ -306,6 +311,15 @@ class HouseSearchManager:
         self._entry_door_force_strict_align_once = False
         self._jump_forward_guard = False
         self._jump_forward_wait_until_hidden = False
+        self.nanda_search_strategy = (
+            nanda_search_strategy
+            if nanda_search_strategy is not None
+            else NandaHouseSearchStrategy()
+        )
+
+    def configure_nanda_search_strategy(self, strategy) -> None:
+        """配置南大门前房型匹配/回放方案；传 ``None`` 恢复现有搜房策略。"""
+        self.nanda_search_strategy = strategy or NandaHouseSearchStrategy()
 
     def _entry_location_tuple(self, entry):
         try:
@@ -393,6 +407,9 @@ class HouseSearchManager:
         self.entry_near_micro_adjust_attempts = 0
         self._jump_forward_guard = False
         self._jump_forward_wait_until_hidden = False
+        reset_nanda_strategy = getattr(self.nanda_search_strategy, 'reset', None)
+        if callable(reset_nanda_strategy):
+            reset_nanda_strategy()
 
 
 
@@ -717,6 +734,10 @@ class HouseSearchManager:
 
         if not self.start_searching(w):
             return False
+        return self._finalize_completed_house_search(w, reason)
+
+    def _finalize_completed_house_search(self, w: 'FrameWorker', reason: str) -> bool:
+        """统一登记已搜房屋；可供现有室内策略和南大回放策略共用。"""
         if w.current_stage != '搜房阶段':
             return False
 
@@ -2006,6 +2027,23 @@ class HouseSearchManager:
             return "failed"
 
         self.stop_auto_forward(w)
+        target_loc = self._entry_location_tuple(self.active_entry) if self.active_entry else None
+        current_loc = self._get_current_location(w)
+        dist = (
+            get_distance(current_loc, target_loc)
+            if current_loc is not None and target_loc is not None
+            else None
+        )
+        nanda_result = self._try_nanda_search_before_entry(
+            w,
+            door,
+            target_loc,
+            dist,
+            phase_label,
+        )
+        if nanda_result != "fallback":
+            return nanda_result
+
         result = self._push_aligned_entry_door_and_check_indoor(w, phase_label, door)
         if result == "failed":
             self._mark_current_entry_failed("对准门前推/跳跃翻障后仍未进入室内")
@@ -2040,6 +2078,155 @@ class HouseSearchManager:
             log_prefix="[EntryNearAlign]",
         )
 
+    @staticmethod
+    def _nanda_optional_float(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _build_nanda_search_context(
+        self,
+        w: 'FrameWorker',
+        door,
+        target_loc,
+        dist,
+        phase_label,
+    ) -> NandaSearchContext:
+        door_box = None
+        try:
+            door_box = tuple(float(value) for value in door[:4])
+        except (TypeError, ValueError, IndexError):
+            pass
+
+        door_center_offset_px = None
+        door_area_ratio = None
+        if door_box is not None:
+            door_center_offset_px, door_area_ratio, _ = self._get_visible_door_center_offset(
+                w,
+                door_box,
+            )
+
+        entry = dict(self.active_entry or {})
+        entry_location = self._entry_location_tuple(entry)
+        if entry_location is None:
+            entry_location = self._normalize_location_value(target_loc)
+        current_location = self._get_current_location(w)
+        current_direction = self._nanda_optional_float(w.get_info('direction'))
+        entry_direction = self._nanda_optional_float(entry.get('direction'))
+        house_id = None if self.current_house_id is None else str(self.current_house_id)
+
+        return NandaSearchContext(
+            worker=w,
+            frame=getattr(w, 'frame', None),
+            house_id=house_id,
+            entry=entry,
+            entry_location=entry_location,
+            entry_direction=entry_direction,
+            current_location=current_location,
+            current_direction=current_direction,
+            distance_to_entry=self._nanda_optional_float(dist),
+            door_box=door_box,
+            door_center_offset_px=door_center_offset_px,
+            door_area_ratio=door_area_ratio,
+            phase_label=str(phase_label),
+            refresh_frame=lambda reason='': self._refresh_frame_and_handle_jump(w, reason),
+            should_abort=lambda: self._should_abort(w),
+            is_outside=lambda: self._get_house_scene(w)
+            in {self.HOUSE_OUTDOOR, self.HOUSE_ROOFTOP},
+        )
+
+    def _try_nanda_search_before_entry(
+        self,
+        w: 'FrameWorker',
+        door,
+        target_loc,
+        dist,
+        phase_label,
+    ) -> str:
+        """在现有对门前推之前，给南大房型匹配/回放方案一次接管机会。"""
+        strategy = getattr(self, 'nanda_search_strategy', None)
+        if strategy is None or not getattr(strategy, 'enabled', False):
+            return "fallback"
+
+        context = self._build_nanda_search_context(
+            w,
+            door,
+            target_loc,
+            dist,
+            phase_label,
+        )
+        w.frame_log(
+            f"[NandaSearch] 门前接管：house={context.house_id}，"
+            f"entry={context.entry_location}，dist={context.distance_to_entry}，"
+            f"entry_direction={context.entry_direction}，door={context.door_box}"
+        )
+        try:
+            result = strategy.run(context)
+        except Exception as exc:
+            w.frame_log(f"[NandaSearch] 策略管线异常: {exc}，不继续执行南大回放")
+            return "failed"
+        if not hasattr(result, 'status'):
+            w.frame_log(
+                f"[NandaSearch] 策略返回值无效: {type(result).__name__}，"
+                "不继续执行南大回放"
+            )
+            return "failed"
+        if result.status == NandaSearchStatus.RETRY:
+            w.frame_log(f"[NandaSearch] 门前位姿尚未稳定：{result.message or '等待下一帧'}")
+            return "adjusting"
+        if result.status == NandaSearchStatus.ABORTED:
+            w.frame_log(f"[NandaSearch] 南大方案已中止：{result.message}")
+            return "aborted"
+        if result.status == NandaSearchStatus.COMPLETED:
+            w.refresh_frame()
+            w.frame_log(
+                f"[NandaSearch] 回放结束复核："
+                f"house_scene={self._house_scene_label(self._get_house_scene(w))}"
+            )
+            if context.should_abort():
+                return "aborted"
+            if context.is_outside():
+                room_label = result.room_id or "unknown"
+                w.frame_log(
+                    f"[NandaSearch] 房型 {room_label} 回放完成且已位于室外，"
+                    "直接登记当前房屋搜索完成"
+                )
+                finalized = self._finalize_completed_house_search(
+                    w,
+                    f"南大回放房型 {room_label} 搜索完成",
+                )
+                return "completed" if finalized else "aborted"
+
+            scene = self._get_house_scene(w)
+            if scene == self.HOUSE_INDOOR:
+                w.frame_log(
+                    "[NandaSearch] 回放报告完成但人物仍在室内，"
+                    "转入现有室内搜房/出房策略"
+                )
+                return "indoor"
+            w.frame_log(
+                f"[NandaSearch] 回放报告完成但未验证已出房 "
+                f"house_scene={scene}，不登记完成"
+            )
+            return "failed"
+
+        if result.status in {NandaSearchStatus.DISABLED, NandaSearchStatus.NO_MATCH}:
+            w.frame_log(
+                f"[NandaSearch] {result.message or result.status.value}，退回现有对门进房策略"
+            )
+            return "fallback"
+
+        scene = self._get_house_scene(w)
+        if result.metadata.get('phase') == 'match':
+            w.frame_log(f"[NandaSearch] {result.message}，匹配阶段未产生移动，退回现有策略")
+            return "fallback"
+        if scene == self.HOUSE_INDOOR:
+            w.frame_log(f"[NandaSearch] {result.message}，人物已在室内，转现有室内搜房")
+            return "indoor"
+        w.frame_log(f"[NandaSearch] {result.message or '南大方案执行失败'}")
+        return "failed"
+
     def _try_visible_entry_door_before_micro_adjust(
         self,
         w: 'FrameWorker',
@@ -2057,9 +2244,20 @@ class HouseSearchManager:
 
         w.frame_log(
             f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
-            f"方向已对齐且已看到门，跳过微调到0，直接对准门前推: door={door}"
+            f"方向已对齐且已看到门，跳过微调到0，先尝试南大门前方案: door={door}"
         )
         self.stop_auto_forward(w)
+        nanda_result = self._try_nanda_search_before_entry(
+            w,
+            door,
+            target_loc,
+            dist,
+            phase_label,
+        )
+        if nanda_result != "fallback":
+            return nanda_result
+
+        w.frame_log(f"[{phase_label}] 南大方案未接管，跳过微调到0，继续现有对门前推")
         result = self._push_aligned_entry_door_and_check_indoor(w, phase_label, door)
         if result == "failed":
             self._mark_current_entry_failed("入门点附近已见门但对准门前推/跳跃翻障后仍未进入室内")
@@ -2422,6 +2620,8 @@ class HouseSearchManager:
                     return
 
                 w.frame_log(f"[Nav] 当前距离入门点 {target_loc} 为 {dist:.2f}，近门处理结果={near_result}")
+                if near_result == "completed":
+                    return
                 if near_result == "indoor":
                     self._complete_current_house_search(w, "自动开门直推进房成功")
                     return
@@ -2444,6 +2644,8 @@ class HouseSearchManager:
                     f"<= {self.ENTRY_ARRIVAL_DISTANCE:g}，已经完全到达入门点，开始找门并对准"
                 )
                 arrival_result = self._align_entry_door_after_arrival(w, "Nav")
+                if arrival_result == "completed":
+                    return
                 if arrival_result == "indoor":
                     self._complete_current_house_search(w, "自动开门直推进房成功")
                     return
@@ -4325,8 +4527,8 @@ class HouseSceneSearchManager(HouseSearchManager):
     FORBIDDEN_ESCAPE_FORWARD_DURA = 700
     FORBIDDEN_ESCAPE_FORWARD_WAIT = 900
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, nanda_search_strategy=None):
+        super().__init__(nanda_search_strategy=nanda_search_strategy)
         self.r_city_config = {}
         self.r_city_center = self._load_r_city_center()
         self.r_city_landing_target = self._load_r_city_landing_target()
@@ -4653,6 +4855,8 @@ class HouseSceneSearchManager(HouseSearchManager):
                 near_result = self._handle_near_entry_point(
                     w, current_loc, target_loc, dist, "RCityEntry"
                 )
+                if near_result == "completed":
+                    return
                 if near_result == "indoor":
                     self._complete_current_house_search(w, "入门点+入门方向进门成功")
                     return
@@ -5850,6 +6054,9 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         if not self.start_searching(w):
             return False
+        return self._finalize_completed_house_search(w, reason)
+
+    def _finalize_completed_house_search(self, w: "FrameWorker", reason: str) -> bool:
         if w.current_stage != "搜房阶段":
             return False
 

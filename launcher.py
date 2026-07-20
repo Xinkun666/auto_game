@@ -2859,6 +2859,21 @@ class LauncherWindow(QWidget):
                     border-color: #34c79a;
                     color: #087f5b;
                 }
+                QPushButton#gameProcessPolicyButton:unchecked {
+                    background: #dcfce7;
+                    border-color: #22c55e;
+                    color: #166534;
+                    font-weight: 700;
+                }
+                QPushButton#gameProcessPolicyButton:unchecked:hover {
+                    background: #c7f5d5;
+                    border-color: #16a34a;
+                }
+                QPushButton#gameProcessPolicyButton:unchecked:disabled {
+                    background: #d8f2df;
+                    border-color: #4caf72;
+                    color: #23663c;
+                }
                 QPushButton#gameProcessPolicyButton:checked {
                     background: #ffe4e6;
                     border-color: #e11d48;
@@ -3139,6 +3154,21 @@ class LauncherWindow(QWidget):
                 background: #10231f;
                 border-color: #1f9d7a;
                 color: #97f5d2;
+            }
+            QPushButton#gameProcessPolicyButton:unchecked {
+                background: #12351f;
+                border-color: #2fbd6f;
+                color: #a7f3c1;
+                font-weight: 700;
+            }
+            QPushButton#gameProcessPolicyButton:unchecked:hover {
+                background: #174629;
+                border-color: #45d984;
+            }
+            QPushButton#gameProcessPolicyButton:unchecked:disabled {
+                background: #102a1a;
+                border-color: #287d4c;
+                color: #83c99b;
             }
             QPushButton#gameProcessPolicyButton:checked {
                 background: #4a1a24;

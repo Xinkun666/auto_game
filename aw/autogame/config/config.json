@@ -11,6 +11,21 @@
     "hoscrcpy_first_frame_timeout": 15,
     "hoscrcpy_device_port": 5000,
     "hoscrcpy_encoder_type": "0",
+    "nanda_house_search": {
+        "enabled": true,
+        "matcher_url": "http://127.0.0.1:7789/match",
+        "matcher_health_timeout_seconds": 0.35,
+        "matcher_timeout_seconds": 180,
+        "max_entry_distance": 2.5,
+        "area_min_ratio": 0.02,
+        "area_max_ratio": 0.04,
+        "coarse_center_ratio": 0.04,
+        "final_center_ratio": 0.01,
+        "stable_required_count": 2,
+        "pitch_compensation": true,
+        "joystick_radius_height_ratio": 0.0974,
+        "replay_skip_idle": true
+    },
     "stage_time_minutes": {
         "搜房": 10,
         "跑图": 10,

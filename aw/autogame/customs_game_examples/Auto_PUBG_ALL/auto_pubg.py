@@ -9,6 +9,9 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.driving_manager
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_search_manager import (
     HouseSceneSearchManager,
 )
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_latest_house_search import (
+    build_nanda_house_search_strategy,
+)
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_manager import (
     HouseExitManager,
 )
@@ -106,12 +109,15 @@ def initialize_runtime():
     SP_RECORDING_ENABLED = should_use_sp_recording_for_profile(
         os.environ.get("AUTOGAME_TEST_PROFILE")
     )
-    PHASE_DURATIONS = load_phase_durations_from_config(_read_autogame_config())
+    autogame_config = _read_autogame_config()
+    PHASE_DURATIONS = load_phase_durations_from_config(autogame_config)
 
     parachute_manager = ParachuteManager()
     running_manager = RunningManager()
     driving_manager = DrivingManager()
-    searching_house_manager = HouseSceneSearchManager()
+    searching_house_manager = HouseSceneSearchManager(
+        nanda_search_strategy=build_nanda_house_search_strategy(autogame_config)
+    )
     searching_house_manager.configure_r_city_landing_target(DROP_TARGET_R_CITY)
     searching_house_manager.configure_r_city_pre_search_target(
         DROP_TARGET_R_CITY_SEARCH_START,

@@ -2599,13 +2599,13 @@ class LauncherWindow(QWidget):
         self.stop_button.setProperty("dangerButton", True)
         self.stop_button.setEnabled(False)
         self.open_history_button = QPushButton("历史输出")
-        self.game_process_policy_button = QPushButton("保留进程")
+        self.game_process_policy_button = QPushButton("关闭进程")
         self.game_process_policy_button.setObjectName("gameProcessPolicyButton")
         self.game_process_policy_button.setCheckable(True)
-        self.game_process_policy_button.setChecked(False)
+        self.game_process_policy_button.setChecked(True)
         self.game_process_policy_button.setProperty("toggleButton", True)
         self.game_process_policy_button.setToolTip(
-            "仅功能测试生效：保留进程时不强杀游戏；切换到红色关闭进程后，启动和停止时都会强杀游戏"
+            "默认关闭进程；点击后切换为绿色保留进程。仅功能测试使用此选择"
         )
         self.generate_preview_video_button = QPushButton("生成视频：关")
         self.generate_preview_video_button.setObjectName("generatePreviewVideoButton")

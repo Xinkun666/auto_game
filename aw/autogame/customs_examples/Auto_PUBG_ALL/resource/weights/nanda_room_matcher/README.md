@@ -15,18 +15,16 @@ nanda_room_matcher/
 
 - `model.safetensors` 必须是真实 DINOv3 ViT-L/16 权重，不能是 Git LFS 指针。
 - `rgb_mlp_struct_v7.pkl` 使用南大最新 demo 的同名文件。
-- 服务只做本地离线加载，不会从 Hugging Face 或 ModelScope 自动下载权重。
+- 匹配运行时只做本地离线加载，不会从 Hugging Face 或 ModelScope 自动下载权重。
 
 房型模板与回放不放在这里，放到同级资源目录的
 `nanda_room_library/rooms/<room_id>/`。
 
-在项目根目录创建独立环境并启动：
+把房型匹配依赖安装到实际运行 auto_game 的同一个环境：
 
 ```bash
-python3.11 -m venv .venv_nanda_matcher
-.venv_nanda_matcher/bin/pip install -r requirements_nanda_room_matcher.txt
-PYTHONPATH=. .venv_nanda_matcher/bin/python -m aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_room_matcher_service
+python -m pip install -r requirements_nanda_room_matcher.txt
 ```
 
-默认监听 `127.0.0.1:7789`。服务启动后可访问 `GET /health`，响应中的
-`runtime.assets` 会打印实际使用的 DINOv3、MLP 和房型库绝对路径。
+不需要启动任何 HTTP 服务。人物完成门前对准并取得 `sam3_tiny` 分割结果后，
+搜房进程会在第一次匹配时惰性加载 DINOv3、MLP 和房型索引；之后持续复用。

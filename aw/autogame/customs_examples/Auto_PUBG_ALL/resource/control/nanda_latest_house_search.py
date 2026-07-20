@@ -1,7 +1,7 @@
 """南大最新版房型匹配与单摇杆回放的 auto_game 适配实现。
 
-匹配器通过独立 HTTP 服务调用南大 Python 3.11 环境；门前位姿只使用已有
-入门点方向和 YOLO 门框，不调用 SAM3。房型配准直接消费搜房阶段
+房型匹配直接在当前搜房进程内执行；门前位姿只使用已有入门点方向和
+YOLO 门框，不调用 SAM3。房型配准直接消费搜房阶段
 ``get_info("sam3")`` 产生的 special_area 分割结果，不再重复推理。
 真正的房屋回放使用当前 HOScrcpy 流的单指触控通道，只复现
 最新版房型库中唯一实际使用的 ``do_move`` 动作。
@@ -11,15 +11,16 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
-import io
+from importlib import metadata as importlib_metadata
+from importlib.util import find_spec
 import json
 import math
 import os
+from pathlib import Path
+import re
+import threading
 import time
 from typing import Any, Callable, List, Mapping, Optional, Sequence, Tuple
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit, urlunsplit
-from urllib.request import Request, urlopen
 
 import cv2
 import numpy as np
@@ -33,6 +34,10 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_house_sea
     NandaSearchContext,
     NandaSearchResult,
     NandaSearchStatus,
+)
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_room_matcher_runtime import (
+    IntegratedNandaRoomMatcher,
+    NandaMatcherAssetPaths,
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import (
     plan_view_turn_motion,
@@ -79,11 +84,10 @@ class NandaLatestSettings:
     enabled: bool = False
     door_pose_backend: str = "entry_direction_yolo"
     room_segmenter_backend: str = "sam3_special_area"
-    matcher_url: str = "http://127.0.0.1:7789/match"
-    matcher_health_timeout_seconds: float = 0.35
-    matcher_health_cache_seconds: float = 2.0
-    matcher_timeout_seconds: float = 180.0
-    jpeg_quality: int = 92
+    dino_model_dir: str = ""
+    mlp_model_path: str = ""
+    room_library_path: str = ""
+    matcher_device: str = ""
 
     max_entry_distance: float = 2.5
     direction_tolerance_degrees: float = 3.0
@@ -123,30 +127,26 @@ class NandaLatestSettings:
             room_segmenter_backend=str(
                 raw.get("room_segmenter_backend") or cls.room_segmenter_backend
             ).strip(),
-            matcher_url=str(
-                os.environ.get("AUTOGAME_NANDA_MATCHER_URL", "").strip()
-                or raw.get("matcher_url")
-                or cls.matcher_url
-            ),
-            matcher_health_timeout_seconds=max(
-                0.05,
-                _as_float(
-                    raw.get("matcher_health_timeout_seconds"),
-                    cls.matcher_health_timeout_seconds,
-                ),
-            ),
-            matcher_health_cache_seconds=max(
-                0.0,
-                _as_float(
-                    raw.get("matcher_health_cache_seconds"),
-                    cls.matcher_health_cache_seconds,
-                ),
-            ),
-            matcher_timeout_seconds=max(
-                1.0,
-                _as_float(raw.get("matcher_timeout_seconds"), cls.matcher_timeout_seconds),
-            ),
-            jpeg_quality=max(50, min(100, _as_int(raw.get("jpeg_quality"), cls.jpeg_quality))),
+            dino_model_dir=str(
+                os.environ.get("AUTOGAME_NANDA_DINO_MODEL_DIR", "").strip()
+                or raw.get("dino_model_dir")
+                or ""
+            ).strip(),
+            mlp_model_path=str(
+                os.environ.get("AUTOGAME_NANDA_MLP_MODEL_PATH", "").strip()
+                or raw.get("mlp_model_path")
+                or ""
+            ).strip(),
+            room_library_path=str(
+                os.environ.get("AUTOGAME_NANDA_ROOM_LIBRARY", "").strip()
+                or raw.get("room_library_path")
+                or ""
+            ).strip(),
+            matcher_device=str(
+                os.environ.get("AUTOGAME_NANDA_DEVICE", "").strip()
+                or raw.get("matcher_device")
+                or ""
+            ).strip(),
             max_entry_distance=max(
                 0.1, _as_float(raw.get("max_entry_distance"), cls.max_entry_distance)
             ),
@@ -465,74 +465,8 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
 NandaDoorPosePreparer = NandaYoloDoorPosePreparer
 
 
-class NandaHttpRoomMatcher(NandaRoomMatcher):
-    """把已有 SAM3 special_area 分割结果交给南大房型配准服务。"""
-
-    def __init__(
-        self,
-        settings: NandaLatestSettings,
-        opener: Optional[Callable[..., Any]] = None,
-    ):
-        self.settings = settings
-        self._opener = opener or urlopen
-        self._last_health_at = 0.0
-        self._last_health_ok = False
-        self.unavailable_reason = "南大房型匹配服务尚未启动"
-
-    def reset(self) -> None:
-        self._last_health_at = 0.0
-        self._last_health_ok = False
-
-    def _health_url(self) -> str:
-        parts = urlsplit(self.settings.matcher_url)
-        return urlunsplit((parts.scheme, parts.netloc, "/health", "", ""))
-
-    def _open_json(self, request: Request, timeout: float) -> Mapping[str, Any]:
-        response = self._opener(request, timeout=timeout)
-        try:
-            payload = response.read()
-        finally:
-            close = getattr(response, "close", None)
-            if callable(close):
-                close()
-        decoded = json.loads(payload.decode("utf-8"))
-        if not isinstance(decoded, dict):
-            raise ValueError("南大匹配服务返回的 JSON 不是对象")
-        return decoded
-
-    def is_available(self) -> bool:
-        now = time.monotonic()
-        if self._last_health_at > 0.0 and (
-            now - self._last_health_at <= self.settings.matcher_health_cache_seconds
-        ):
-            return self._last_health_ok
-        self._last_health_at = now
-        try:
-            payload = self._open_json(
-                Request(self._health_url(), method="GET"),
-                timeout=self.settings.matcher_health_timeout_seconds,
-            )
-            self._last_health_ok = payload.get("status") == "ok" and bool(
-                payload.get("ready", True)
-            )
-            actual_input_contract = str(
-                payload.get("input_contract") or ""
-            ).strip()
-            if actual_input_contract != self.settings.room_segmenter_backend:
-                self._last_health_ok = False
-                self.unavailable_reason = (
-                    "南大房型匹配服务输入协议不一致: "
-                    f"expected={self.settings.room_segmenter_backend}, "
-                    f"actual={actual_input_contract or 'unknown'}"
-                )
-                return False
-            self.unavailable_reason = str(
-                payload.get("message") or "南大房型匹配服务尚未就绪"
-            )
-        except (OSError, ValueError, HTTPError, URLError) as exc:
-            self._last_health_ok = False
-            self.unavailable_reason = f"南大房型匹配服务不可用: {exc}"
-        return self._last_health_ok
+class _NandaSpecialAreaRoomMatcher(NandaRoomMatcher):
+    """进程内匹配器共用的 SAM3 分组切换与立面重建。"""
 
     @staticmethod
     def _read_sam3_info(context: NandaSearchContext) -> Mapping[str, Any]:
@@ -728,95 +662,166 @@ class NandaHttpRoomMatcher(NandaRoomMatcher):
         segmented_bgr[cropped_mask > 0] = cropped_bgr[cropped_mask > 0]
         return segmented_bgr, cropped_mask, cropped_bgr, (x1, y1, x2, y2)
 
-    @classmethod
-    def _build_match_payload(
-        cls,
-        frame: np.ndarray,
-        sam3_info: Mapping[str, Any],
-    ) -> bytes:
-        segmented_bgr, cropped_mask, cropped_bgr, crop_xyxy = (
-            cls._special_area_facade(frame, sam3_info)
-        )
-        payload = io.BytesIO()
-        np.savez_compressed(
-            payload,
-            segmented_bgr=segmented_bgr,
-            cropped_mask=cropped_mask,
-            cropped_bgr=cropped_bgr,
-            crop_xyxy=np.asarray(crop_xyxy, dtype=np.int32),
-            sam3_score=np.asarray(
-                [float(sam3_info.get("score") or 0.0)], dtype=np.float32
+
+def _version_tuple(value: str) -> Tuple[int, ...]:
+    numbers = re.findall(r"\d+", str(value))
+    return tuple(int(number) for number in numbers[:3])
+
+
+class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
+    """在当前搜房进程内直接执行 DINOv3 + MLP 房型配准。"""
+
+    def __init__(
+        self,
+        settings: NandaLatestSettings,
+        runtime_factory: Callable[..., Any] = IntegratedNandaRoomMatcher,
+    ):
+        self.settings = settings
+        self._runtime_factory = runtime_factory
+        self._runtime = None
+        self._runtime_lock = threading.Lock()
+        self.unavailable_reason = "进程内 DINOv3/MLP 尚未检查"
+
+    def _asset_paths(self) -> NandaMatcherAssetPaths:
+        defaults = NandaMatcherAssetPaths.auto_game_defaults()
+        return NandaMatcherAssetPaths(
+            dino_model_dir=(
+                Path(self.settings.dino_model_dir)
+                if self.settings.dino_model_dir
+                else defaults.dino_model_dir
             ),
-            sam3_inference_ms=np.asarray(
-                [float(sam3_info.get("sam3_inference_ms") or 0.0)],
-                dtype=np.float32,
+            mlp_model_path=(
+                Path(self.settings.mlp_model_path)
+                if self.settings.mlp_model_path
+                else defaults.mlp_model_path
             ),
-        )
-        return payload.getvalue()
+            room_library_path=(
+                Path(self.settings.room_library_path)
+                if self.settings.room_library_path
+                else defaults.room_library_path
+            ),
+        ).resolved()
+
+    @staticmethod
+    def _dependency_problem() -> Optional[str]:
+        missing = [
+            name
+            for name in ("torch", "transformers", "safetensors", "sklearn")
+            if find_spec(name) is None
+        ]
+        if missing:
+            return "当前 auto_game 进程缺少依赖: " + ", ".join(missing)
+        try:
+            numpy_version = importlib_metadata.version("numpy")
+            sklearn_version = importlib_metadata.version("scikit-learn")
+        except importlib_metadata.PackageNotFoundError as exc:
+            return f"当前 auto_game 进程缺少依赖: {exc.name}"
+        if _version_tuple(numpy_version) < (2, 0):
+            return f"南大 MLP 要求 numpy>=2.0，当前为 {numpy_version}"
+        if _version_tuple(sklearn_version) < (1, 7, 2):
+            return f"南大 MLP 要求 scikit-learn>=1.7.2，当前为 {sklearn_version}"
+        return None
+
+    def is_available(self) -> bool:
+        dependency_problem = self._dependency_problem()
+        if dependency_problem:
+            self.unavailable_reason = dependency_problem
+            return False
+        try:
+            self._asset_paths().validate()
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.unavailable_reason = f"进程内房型匹配资产不可用: {exc}"
+            return False
+        self.unavailable_reason = "进程内 DINOv3/MLP 资产与依赖已就绪"
+        return True
+
+    def _get_runtime(self, context: NandaSearchContext):
+        if self._runtime is not None:
+            return self._runtime
+        with self._runtime_lock:
+            if self._runtime is None:
+                paths = self._asset_paths()
+                context.worker.frame_log(
+                    "[NandaMatch] 首次房型配准，正在当前进程惰性加载 "
+                    f"DINOv3、MLP 和房型索引：{paths.to_jsonable()}"
+                )
+                self._runtime = self._runtime_factory(
+                    paths,
+                    device=self.settings.matcher_device or None,
+                )
+        return self._runtime
 
     def match(self, context: NandaSearchContext) -> Optional[NandaRoomMatch]:
         if context.should_abort():
             return None
         try:
             frame, sam3_info = self._capture_match_frame(context)
-            request_body = self._build_match_payload(frame, sam3_info)
+            segmented_bgr, cropped_mask, cropped_bgr, crop_xyxy = (
+                self._special_area_facade(frame, sam3_info)
+            )
         except ValueError as exc:
             context.worker.frame_log(f"[NandaMatch] {exc}，本轮回退原搜房流程")
             return None
-        request = Request(
-            self.settings.matcher_url,
-            data=request_body,
-            headers={
-                "Content-Type": "application/x-npz",
-                "X-Nanda-House-Id": str(context.house_id or ""),
-                "X-Nanda-Door-Pose-Backend": self.settings.door_pose_backend,
-                "X-Nanda-Input-Contract": self.settings.room_segmenter_backend,
-            },
-            method="POST",
+
+        context.worker.frame_log(
+            f"[NandaMatch] sam3_tiny 房屋分割完成：crop={crop_xyxy}，"
+            f"score={sam3_info.get('score')}；直接在当前进程执行 DINOv3/MLP"
         )
-        payload = self._open_json(request, timeout=self.settings.matcher_timeout_seconds)
-        status = str(payload.get("status") or "")
-        metadata = payload.get("metadata")
-        if not isinstance(metadata, dict):
-            metadata = {}
-        decision = metadata.get("decision")
-        if not isinstance(decision, dict):
-            decision = {}
+        runtime = self._get_runtime(context)
+        room_id, replay_path, debug_payload = runtime.match(
+            segmented_bgr,
+            cropped_mask,
+            cropped_bgr,
+        )
+        debug_payload = debug_payload if isinstance(debug_payload, dict) else {}
+        decision = debug_payload.get("decision")
+        decision = decision if isinstance(decision, dict) else {}
         dino_score = decision.get("room_best_dino_score")
         mlp_score = decision.get("mlp_score")
         total_score = decision.get("total_score")
-        top2_margin = metadata.get("top2_margin")
-        matcher_elapsed_ms = metadata.get("matcher_elapsed_ms")
-        if status == "no_match":
+        margin = debug_payload.get("top2_margin")
+        elapsed_ms = debug_payload.get("elapsed_ms")
+        if room_id is None or replay_path is None:
             context.worker.frame_log(
-                f"[NandaMatch] 房型配准拒绝：reason="
-                f"{payload.get('reason') or 'unknown'}，dino={dino_score}，"
-                f"mlp={mlp_score}，total={total_score}，margin={top2_margin}，"
-                f"elapsed_ms={matcher_elapsed_ms}；不执行回放"
+                f"[NandaMatch] 本地房型配准拒绝：reason="
+                f"{debug_payload.get('no_match_reason') or 'unknown'}，"
+                f"dino={dino_score}，mlp={mlp_score}，total={total_score}，"
+                f"margin={margin}，elapsed_ms={elapsed_ms}；不执行回放"
             )
             return None
-        if status != "matched":
-            raise RuntimeError(str(payload.get("message") or f"匹配服务状态异常: {status}"))
+        if decision.get("replay_allow_actions") is False:
+            context.worker.frame_log(
+                f"[NandaMatch] 房型 {room_id} 禁止执行回放动作，不执行回放"
+            )
+            return None
 
-        room_id = str(payload.get("room_id") or "").strip()
-        replay_path = str(payload.get("replay_path") or "").strip()
-        replay_steps = payload.get("replay_steps")
-        if not room_id or not replay_path:
-            raise ValueError("匹配服务没有返回 room_id/replay_path")
+        replay_file = Path(replay_path).resolve()
+        try:
+            replay_steps = json.loads(replay_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"无法读取南大回放 DSL: {replay_file}: {exc}") from exc
         if not isinstance(replay_steps, list):
-            raise ValueError("匹配服务没有返回 replay_steps")
-        score_raw = payload.get("score")
-        score = None if score_raw is None else float(score_raw)
+            raise ValueError(f"南大回放 DSL 不是列表: {replay_file}")
+
         context.worker.frame_log(
-            f"[NandaMatch] 房型配准通过：room={room_id}，dino={dino_score}，"
-            f"mlp={mlp_score}，total={score}，margin={top2_margin}，"
-            f"steps={len(replay_steps)}，elapsed_ms={matcher_elapsed_ms}；开始 HOS 摇杆回放"
+            f"[NandaMatch] 本地房型配准通过：room={room_id}，dino={dino_score}，"
+            f"mlp={mlp_score}，total={total_score}，margin={margin}，"
+            f"steps={len(replay_steps)}，elapsed_ms={elapsed_ms}；开始 HOS 摇杆回放"
         )
         return NandaRoomMatch(
-            room_id=room_id,
-            replay_path=replay_path,
-            score=score,
-            metadata=metadata,
+            room_id=str(room_id),
+            replay_path=str(replay_file),
+            score=None if total_score is None else float(total_score),
+            metadata={
+                "decision": decision,
+                "thresholds": debug_payload.get("thresholds"),
+                "top2_margin": margin,
+                "top_candidates": debug_payload.get("top_candidates"),
+                "matcher_elapsed_ms": elapsed_ms,
+                "input_contract": self.settings.room_segmenter_backend,
+                "execution_mode": "inprocess",
+                "structure_mode": "disabled_zero_vector_no_extra_sam3",
+            },
             replay_steps=replay_steps,
         )
 
@@ -1102,7 +1107,7 @@ def build_nanda_house_search_strategy(
         raise ValueError(
             "南大房型配准当前只允许 sam3_special_area 输入"
         )
-    matcher = NandaHttpRoomMatcher(settings)
+    matcher = NandaLocalRoomMatcher(settings)
     return NandaHouseSearchStrategy(
         matcher=matcher,
         replay_executor=NandaHosJoystickReplayExecutor(settings),
@@ -1113,7 +1118,7 @@ def build_nanda_house_search_strategy(
 __all__ = [
     "NandaDoorPosePreparer",
     "NandaHosJoystickReplayExecutor",
-    "NandaHttpRoomMatcher",
+    "NandaLocalRoomMatcher",
     "NandaJoystickReplayStep",
     "NandaLatestSettings",
     "NandaYoloDoorPosePreparer",

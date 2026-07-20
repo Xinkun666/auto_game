@@ -1,5 +1,5 @@
-# 南大 DINOv3 + MLP 房型匹配服务专用环境。
-# 使用 Python 3.11 或 3.12 安装；不要安装进 auto_game 当前 Python 3.9 环境。
+# 南大 DINOv3 + MLP 进程内房型匹配依赖。
+# 必须安装到实际运行 auto_game 的同一个 Python 环境；推荐 Python 3.11/3.12。
 numpy~=2.2.6
 opencv-python~=4.10.0.84
 torch~=2.8.0

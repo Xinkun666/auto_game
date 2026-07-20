@@ -107,7 +107,7 @@ class NandaRoomMatcher(ABC):
     """SAM3、DINO 或其他房型检索实现的接入点。"""
 
     def is_available(self) -> bool:
-        """匹配服务当前是否可用；默认的进程内实现始终可用。"""
+        """匹配器当前是否可用；默认的进程内实现始终可用。"""
         return True
 
     @abstractmethod
@@ -185,25 +185,25 @@ class NandaHouseSearchStrategy:
         if context.should_abort():
             return NandaSearchResult(NandaSearchStatus.ABORTED, "搜房阶段已中止")
 
-        # 外部匹配器不可用时必须在位姿校准前退出。否则人物会为了一个
-        # 当前无法执行的方案反复横移/前后调整，破坏原搜房流程的接管点。
+        # 本地匹配资产或依赖不可用时必须在位姿校准前退出。否则人物会为
+        # 一个当前无法执行的方案反复横移/前后调整，破坏原搜房流程接管点。
         try:
             matcher_available = self.matcher.is_available()
         except Exception as exc:
             return NandaSearchResult(
                 NandaSearchStatus.NO_MATCH,
-                f"房型匹配服务探活异常: {exc}",
+                f"本地房型匹配检查异常: {exc}",
                 metadata={"phase": "match", "exception": type(exc).__name__},
             )
         if not matcher_available:
             unavailable_reason = getattr(
                 self.matcher,
                 "unavailable_reason",
-                "房型匹配服务当前不可用",
+                "本地房型匹配当前不可用",
             )
             return NandaSearchResult(
                 NandaSearchStatus.NO_MATCH,
-                str(unavailable_reason or "房型匹配服务当前不可用"),
+                str(unavailable_reason or "本地房型匹配当前不可用"),
                 metadata={"phase": "match", "matcher_unavailable": True},
             )
 

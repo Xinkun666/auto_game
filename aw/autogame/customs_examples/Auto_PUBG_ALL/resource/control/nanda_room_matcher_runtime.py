@@ -63,7 +63,7 @@ def _resource_root() -> Path:
 
 @dataclass(frozen=True)
 class NandaMatcherAssetPaths:
-    """房型匹配服务所需的三个独立资产入口。"""
+    """进程内房型匹配所需的三个独立资产入口。"""
 
     dino_model_dir: Path
     mlp_model_path: Path

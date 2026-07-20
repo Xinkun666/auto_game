@@ -4,13 +4,13 @@ torch
 torchvision
 
 # 图像与界面
-numpy>=1.26.0
+numpy>=2.0
 opencv-python
 Pillow
 PyQt6
 
 # 模型推理与识别
-scikit-learn
+scikit-learn>=1.7.2
 ultralytics
 timm
 tqdm
@@ -18,6 +18,9 @@ ftfy
 regex
 iopath
 huggingface-hub
+transformers~=5.0.0
+safetensors>=0.4.5
+faiss-cpu~=1.12.0
 typing_extensions
 
 # 拉流相关

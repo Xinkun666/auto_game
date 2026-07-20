@@ -581,10 +581,7 @@ def build_launcher_plan_env_values(plan: Optional[dict]) -> dict[str, str]:
 
 def should_preserve_game_process_for_plan(plan: Optional[dict]) -> bool:
     plan = plan or {}
-    return (
-        str(plan.get("test_profile") or "power") == "function"
-        and bool(plan.get("preserve_game_process"))
-    )
+    return bool(plan.get("preserve_game_process"))
 
 
 def _decode_process_output(output) -> str:
@@ -2605,7 +2602,7 @@ class LauncherWindow(QWidget):
         self.game_process_policy_button.setChecked(True)
         self.game_process_policy_button.setProperty("toggleButton", True)
         self.game_process_policy_button.setToolTip(
-            "默认关闭进程；点击后切换为绿色保留进程。仅功能测试使用此选择"
+            "功耗测试和功能测试均默认关闭进程；点击后切换为绿色保留进程"
         )
         self.generate_preview_video_button = QPushButton("生成视频：关")
         self.generate_preview_video_button.setObjectName("generatePreviewVideoButton")
@@ -3717,8 +3714,6 @@ class LauncherWindow(QWidget):
         self.history_tree.itemSelectionChanged.connect(self._on_history_selection_changed)
         self.history_prev_frame_button.clicked.connect(self._show_previous_history_frame)
         self.history_next_frame_button.clicked.connect(self._show_next_history_frame)
-        self.power_test_radio.toggled.connect(self._sync_game_process_policy_ui)
-        self.function_test_radio.toggled.connect(self._sync_game_process_policy_ui)
         self.game_process_policy_button.toggled.connect(self._toggle_game_process_policy)
         self.generate_preview_video_button.toggled.connect(self._toggle_generate_preview_video)
         self.preview_overlay_button.toggled.connect(self._toggle_preview_overlay)
@@ -3864,28 +3859,21 @@ class LauncherWindow(QWidget):
     def _toggle_game_process_policy(self, close_process: bool):
         self._sync_game_process_policy_ui()
         LOGGER.info(
-            "function-test game process policy toggled: %s",
+            "game process policy toggled: %s",
             "close" if close_process else "preserve",
         )
 
     def _sync_game_process_policy_ui(self):
         close_process = self.game_process_policy_button.isChecked()
-        function_test_selected = self.function_test_radio.isChecked()
         self.game_process_policy_button.setText(
             "关闭进程" if close_process else "保留进程"
         )
         self.game_process_policy_button.setEnabled(self.inputs_enabled)
-        if function_test_selected:
-            self.game_process_policy_button.setToolTip(
-                "当前为关闭进程：启动、手动停止、自动结束都会强杀游戏"
-                if close_process
-                else "当前为保留进程：启动、手动停止、自动结束都不强杀游戏"
-            )
-        else:
-            selected_policy = "关闭进程" if close_process else "保留进程"
-            self.game_process_policy_button.setToolTip(
-                f"已预选{selected_policy}；切换到功能测试后生效。功耗测试仍按原流程关闭游戏和 SP"
-            )
+        self.game_process_policy_button.setToolTip(
+            "当前为关闭进程：功耗测试和功能测试在启动、手动停止、自动结束时都会关闭相关应用"
+            if close_process
+            else "当前为保留进程：功耗测试和功能测试在启动、手动停止、自动结束时都不关闭相关应用"
+        )
 
     def _toggle_generate_preview_video(self, checked: bool):
         self.generate_preview_video_button.setText("生成视频：开" if checked else "生成视频：关")
@@ -4915,10 +4903,7 @@ class LauncherWindow(QWidget):
             "inactivity_timeout_minutes": float(self.inactivity_timeout_spin.value()),
             "power_collection_duration_seconds": float(self.power_collection_duration_spin.value()),
             "generate_preview_video": bool(self.generate_preview_video_button.isChecked()),
-            "preserve_game_process": (
-                test_profile == "function"
-                and not self.game_process_policy_button.isChecked()
-            ),
+            "preserve_game_process": not self.game_process_policy_button.isChecked(),
             "cleanup_apps": sorted(cleanup_apps),
             "runtime_description": runtime_description,
         }
@@ -5024,7 +5009,7 @@ class LauncherWindow(QWidget):
 
         if should_preserve_game_process_for_plan(self.current_plan):
             self._log_message(
-                f"[Launcher] {reason}：功能测试处于保留进程模式，跳过游戏进程清理。\n"
+                f"[Launcher] {reason}：当前测试处于保留进程模式，跳过应用进程清理。\n"
             )
             return
 

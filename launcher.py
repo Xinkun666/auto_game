@@ -148,14 +148,6 @@ DEVICE_LOG_SETTLE_TIMEOUT_SECONDS = 3.0
 DEVICE_LOG_SETTLE_INTERVAL_SECONDS = 0.2
 DEVICE_LOG_STOP_WAIT_TIMEOUT_SECONDS = 15.0
 HDC_SHELL_TIMEOUT_SECONDS = float(os.environ.get("AUTOGAME_HDC_SHELL_TIMEOUT_SECONDS", "5"))
-TEST_PROFILE_SCREEN_MODES = {
-    "power": "2",
-    "function": "2",
-}
-PUBG_CASE_SCREEN_MODES = {
-    "power": "2",
-    "function": "2",
-}
 STREAM_DISCONNECT_POLICY_PRESERVE = "preserve"
 STREAM_DISCONNECT_POLICY_DISABLED = "disabled"
 STREAM_DISCONNECT_POLICY_STOP_ONLY = "stop_only"
@@ -463,10 +455,13 @@ def close_pyinstaller_splash(context: str) -> bool:
         return False
 
 
-def resolve_screen_mode_for_test_profile(test_profile: str, target_case: Optional[str] = None) -> str:
-    profile = str(test_profile or "").strip().lower()
-    screen_modes = PUBG_CASE_SCREEN_MODES if is_pubg_testcase_target_case(target_case) else TEST_PROFILE_SCREEN_MODES
-    return screen_modes.get(profile, screen_modes["power"])
+def resolve_screen_mode_for_test_profile(
+    test_profile: str,
+    target_case: Optional[str] = None,
+    config_path: Path = AUTOGAME_CONFIG_FILE,
+) -> str:
+    del test_profile, target_case
+    return read_screen_mode_config(config_path)
 
 
 def resolve_test_profile_from_radio_selection(power_checked: bool, function_checked: bool) -> str:
@@ -479,8 +474,15 @@ def normalize_launcher_screen_mode(screen_mode: str) -> str:
     raw_mode = str(screen_mode).strip()
     if raw_mode not in {"0", "1", "2"}:
         raise ValueError(f"unsupported screen_mode: {screen_mode}")
-    # Launcher profile buttons now always use HOS mode; accept old plan values but do not persist them.
-    return "2"
+    return raw_mode
+
+
+def read_screen_mode_config(config_path: Path = AUTOGAME_CONFIG_FILE) -> str:
+    config_path = Path(config_path)
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise ValueError(f"config must be a json object: {config_path}")
+    return normalize_launcher_screen_mode(config.get("screen_mode", "0"))
 
 
 def write_screen_mode_config(screen_mode: str, config_path: Path = AUTOGAME_CONFIG_FILE) -> None:
@@ -4800,7 +4802,11 @@ class LauncherWindow(QWidget):
         )
         if not should_use_sp_recording_for_profile(test_profile):
             cleanup_apps.discard(DEFAULT_SP_PACKAGE)
-        screen_mode = resolve_screen_mode_for_test_profile(test_profile, target_case)
+        try:
+            screen_mode = resolve_screen_mode_for_test_profile(test_profile, target_case)
+        except Exception as exc:
+            issues.add_error("截图模式配置错误", f"读取 config.json 的 screen_mode 失败：{exc}")
+            return None
         runtime_description = ""
         if is_pubg_testcase_target_case(target_case):
             runtime_description = PUBG_CASE_RUNTIME_DESCRIPTION

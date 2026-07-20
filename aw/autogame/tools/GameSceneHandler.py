@@ -1,12 +1,48 @@
 import os
 import importlib
 import concurrent.futures
+import copy
 from aw.autogame.tools.Utils import *
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 import numpy as np
 
 DEFAULT_GROUP_NAME = "默认"
 GROUPABLE_ITEM_TYPES = ("area", "special_area")
+
+
+def load_stage_info(project_case, info_mod):
+    """加载阶段配置，并合并项目内可选的运行时分组覆盖。"""
+    stage_info = copy.deepcopy(getattr(info_mod, "STAGE_INFO"))
+    override_module_path = (
+        f"aw.autogame.customs_examples.{project_case}.resource.stage_group_config"
+    )
+    try:
+        override_mod = importlib.import_module(override_module_path)
+    except ModuleNotFoundError as exc:
+        missing_name = str(exc.name or "")
+        if not (
+            missing_name == override_module_path
+            or override_module_path.startswith(f"{missing_name}.")
+        ):
+            raise
+        return stage_info
+
+    overrides = getattr(override_mod, "STAGE_GROUP_OVERRIDES", {})
+    if not isinstance(overrides, dict):
+        raise ValueError(f"{override_module_path}.STAGE_GROUP_OVERRIDES 必须是字典")
+    for stage_name, override in overrides.items():
+        if not isinstance(override, dict):
+            continue
+        stage_data = stage_info.get(stage_name)
+        if not isinstance(stage_data, dict):
+            raise ValueError(f"分组覆盖引用了不存在的阶段: {stage_name}")
+        initial_group = override.get("initial_group")
+        if initial_group:
+            stage_data["initial_group"] = str(initial_group)
+        override_groups = override.get("groups", {})
+        if isinstance(override_groups, dict):
+            stage_data.setdefault("groups", {}).update(copy.deepcopy(override_groups))
+    return stage_info
 
 def load_special_handler(project_case):
     if not project_case:
@@ -273,7 +309,7 @@ class StageLogicController:
 
         self.project_name = getattr(info_mod, "PROJECT_NAME")
         self.processor = GameImageProcessor(project_case)
-        raw_stage_info = getattr(info_mod, "STAGE_INFO")
+        raw_stage_info = load_stage_info(project_case, info_mod)
         self.stage_info = lock_stage_info_scene_resolutions(
             raw_stage_info,
             self.processor.screen_w,
@@ -298,6 +334,27 @@ class StageLogicController:
             group_name = DEFAULT_GROUP_NAME
         return group_name in self.get_stage_groups(stage_name)
 
+    def get_initial_group(self, stage_name):
+        """返回进入阶段时应启用的运行分组。
+
+        未配置 initial_group 的老工程继续使用内置的“默认”全量组；
+        配置值无效时也安全回退，避免阶段切换后处于不存在的分组。
+        """
+        stage_data = self.stage_info.get(stage_name, {})
+        configured = (
+            stage_data.get('initial_group', DEFAULT_GROUP_NAME)
+            if isinstance(stage_data, dict)
+            else DEFAULT_GROUP_NAME
+        )
+        group_name = str(configured or DEFAULT_GROUP_NAME).strip()
+        if self.has_group(stage_name, group_name):
+            return group_name
+        print(
+            f"[WARN] 阶段 '{stage_name}' 的 initial_group '{group_name}' 不存在，"
+            f"回退到 '{DEFAULT_GROUP_NAME}'。"
+        )
+        return DEFAULT_GROUP_NAME
+
     def _resolve_group_filter(self, stage_data, group_name):
         if not group_name or group_name == DEFAULT_GROUP_NAME:
             return None
@@ -309,17 +366,39 @@ class StageLogicController:
             return set()
         if isinstance(group_data, dict) and group_data.get('all'):
             return None
+
+        def parse_item_refs(raw_items):
+            refs = set()
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    continue
+                scene_name = str(item.get('scene', '')).strip()
+                item_type = str(item.get('type', '')).strip()
+                item_name = str(item.get('name', '')).strip()
+                if scene_name and item_name and item_type in GROUPABLE_ITEM_TYPES:
+                    refs.add((scene_name, item_type, item_name))
+            return refs
+
         raw_items = group_data.get('items', []) if isinstance(group_data, dict) else []
+        allowed = parse_item_refs(raw_items)
+        excluded_items = (
+            group_data.get('exclude_items')
+            if isinstance(group_data, dict)
+            else None
+        )
+        if not isinstance(excluded_items, list):
+            return allowed
+
         allowed = set()
-        for item in raw_items:
-            if not isinstance(item, dict):
+        scenes = stage_data.get('scenes', {}) if isinstance(stage_data, dict) else {}
+        for scene_name, scene_info in scenes.items():
+            if not isinstance(scene_info, dict):
                 continue
-            scene_name = str(item.get('scene', '')).strip()
-            item_type = str(item.get('type', '')).strip()
-            item_name = str(item.get('name', '')).strip()
-            if scene_name and item_name and item_type in GROUPABLE_ITEM_TYPES:
-                allowed.add((scene_name, item_type, item_name))
-        return allowed
+            for area_name in scene_info.get('areas', {}):
+                allowed.add((scene_name, 'area', area_name))
+            for area_name in scene_info.get('special_areas', {}):
+                allowed.add((scene_name, 'special_area', area_name))
+        return allowed - parse_item_refs(excluded_items)
 
     def process_frame(self, frame_img, current_stage_name, group_name=DEFAULT_GROUP_NAME):
         """

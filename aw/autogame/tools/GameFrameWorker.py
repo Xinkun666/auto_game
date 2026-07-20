@@ -2856,10 +2856,16 @@ class FrameWorker(threading.Thread):
             self.stage_dict[key] = False
         self.stage_dict[stage_name] = True
         self.current_stage = stage_name
-        self.current_group = DEFAULT_GROUP_NAME
+        get_initial_group = getattr(self.stage_resolver, "get_initial_group", None)
+        self.current_group = (
+            get_initial_group(stage_name)
+            if callable(get_initial_group)
+            else DEFAULT_GROUP_NAME
+        )
 
         print("\n" + ">" * 40)
         print(f"  STATUS CHANGE: [{old_stage}] -> [{stage_name}]")
+        print(f"  ACTIVE GROUP: [{self.current_group}]")
         print(">" * 40 + "\n")
 
     def change_group(self, group_name=DEFAULT_GROUP_NAME):

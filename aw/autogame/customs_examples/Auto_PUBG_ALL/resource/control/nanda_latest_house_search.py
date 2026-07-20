@@ -544,6 +544,46 @@ class NandaHttpRoomMatcher(NandaRoomMatcher):
             raise ValueError("搜房阶段未取得 sam3 special_area 结果")
         return sam3_info
 
+    @staticmethod
+    def _activate_sam3_perception(
+        context: NandaSearchContext,
+    ) -> str:
+        """按实际导出配置启用 SAM3，返回恢复所需的原状态。
+
+        SAM3 必须是搜房阶段内的按需分组，不能作为常态感知或独立阶段运行。
+        """
+        worker = context.worker
+        original_stage = str(
+            getattr(worker, "current_stage", None)
+            or (worker.get_stage() if callable(getattr(worker, "get_stage", None)) else "")
+            or ""
+        )
+        original_group = str(getattr(worker, "current_group", None) or "默认")
+        if not original_stage:
+            raise ValueError("启用 sam3 前无法确定当前阶段")
+
+        resolver = getattr(worker, "stage_resolver", None)
+        has_group = getattr(resolver, "has_group", None)
+        if not callable(has_group) or not has_group(original_stage, "sam3"):
+            raise ValueError(f"阶段 {original_stage!r} 中没有 sam3 分组")
+        change_group = getattr(worker, "change_group", None)
+        if not callable(change_group) or change_group("sam3") is not True:
+            raise ValueError("切换到 sam3 分组失败")
+        worker.frame_log(
+            f"[NandaMatch] 房型匹配按需启用分组: "
+            f"{original_stage}/{original_group} -> sam3"
+        )
+        return original_group
+
+    @staticmethod
+    def _restore_perception(
+        context: NandaSearchContext,
+        original_group: Optional[str],
+    ) -> None:
+        if original_group is not None:
+            if context.worker.change_group(original_group) is not True:
+                raise RuntimeError(f"恢复搜房分组失败: {original_group}")
+
     def _capture_match_frame(
         self,
         context: NandaSearchContext,
@@ -559,34 +599,57 @@ class NandaHttpRoomMatcher(NandaRoomMatcher):
                 self.settings.pitch_max_seconds,
                 max(0.0, (0.5 - door_top_ratio) * 2.0),
             )
-        if pitch_seconds <= 0.0:
-            return frame.copy(), self._read_sam3_info(context)
-
-        pitch_bias = int(round(pitch_seconds * self.settings.pitch_pixels_per_second))
-        duration_ms = max(100, int(round(pitch_seconds * 1000.0)))
-        context.worker.frame_log(
-            f"[NandaMatch] 匹配前抬高视角 {pitch_seconds:.2f}s，完整采集门面"
-        )
-        context.worker.tap_single(
-            "视角",
-            y_bias=-pitch_bias,
-            dura=duration_ms,
-            wait=self.settings.pitch_wait_ms,
-        )
+        pitch_bias = 0
+        duration_ms = 0
+        pitch_applied = False
+        original_group = None
         try:
-            context.refresh_frame("NandaMatch 抬高视角采集房屋正面")
+            if pitch_seconds > 0.0:
+                pitch_bias = int(
+                    round(pitch_seconds * self.settings.pitch_pixels_per_second)
+                )
+                duration_ms = max(100, int(round(pitch_seconds * 1000.0)))
+                context.worker.frame_log(
+                    f"[NandaMatch] 匹配前抬高视角 {pitch_seconds:.2f}s，完整采集门面"
+                )
+                context.worker.tap_single(
+                    "视角",
+                    y_bias=-pitch_bias,
+                    dura=duration_ms,
+                    wait=self.settings.pitch_wait_ms,
+                )
+                pitch_applied = True
+                if not context.refresh_frame("NandaMatch 抬高视角采集房屋正面"):
+                    raise ValueError("抬高视角后刷新画面失败")
+
+            original_group = self._activate_sam3_perception(context)
+
             captured = getattr(context.worker, "frame", None)
             if captured is None:
-                raise ValueError("抬高视角后未取得最新画面")
+                raise ValueError("sam3 分割后未取得匹配画面")
             return captured.copy(), self._read_sam3_info(context)
         finally:
-            context.worker.tap_single(
-                "视角",
-                y_bias=pitch_bias,
-                dura=duration_ms,
-                wait=self.settings.pitch_wait_ms,
-            )
-            context.refresh_frame("NandaMatch 恢复门前回放视角")
+            restore_error = None
+            try:
+                self._restore_perception(
+                    context,
+                    original_group,
+                )
+            except Exception as exc:
+                restore_error = exc
+            if pitch_applied:
+                context.worker.tap_single(
+                    "视角",
+                    y_bias=pitch_bias,
+                    dura=duration_ms,
+                    wait=self.settings.pitch_wait_ms,
+                )
+                if not context.refresh_frame("NandaMatch 恢复门前回放视角"):
+                    restore_error = restore_error or RuntimeError(
+                        "恢复门前视角后刷新画面失败"
+                    )
+            if restore_error is not None:
+                raise restore_error
 
     @staticmethod
     def _special_area_facade(

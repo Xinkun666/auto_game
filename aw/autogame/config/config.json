@@ -13,6 +13,8 @@
     "hoscrcpy_encoder_type": "0",
     "nanda_house_search": {
         "enabled": true,
+        "door_pose_backend": "entry_direction_yolo",
+        "room_segmenter_backend": "sam3_special_area",
         "matcher_url": "http://127.0.0.1:7789/match",
         "matcher_health_timeout_seconds": 0.35,
         "matcher_timeout_seconds": 180,

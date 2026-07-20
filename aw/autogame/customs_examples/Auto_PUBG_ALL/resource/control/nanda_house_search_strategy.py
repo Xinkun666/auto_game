@@ -16,7 +16,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Mapping, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Mapping, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import numpy as np
 
@@ -74,6 +74,7 @@ class NandaRoomMatch:
     replay_path: str
     score: Optional[float] = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    replay_steps: Optional[Sequence[Mapping[str, Any]]] = None
 
 
 @dataclass(frozen=True)

@@ -1,12 +1,15 @@
-"""南大最新版房型匹配的独立 HTTP 服务。
+"""南大最新版房型配准的独立 HTTP 服务。
 
 该服务必须由南大 demo 的 Python 3.11/3.12 环境启动，避免把新版
 transformers/faiss/torch 依赖加载到 auto_game 当前 Python 3.9 进程。
+服务不启动也不连接 SAM3；它只接收 auto_game 搜房阶段
+``get_info("sam3")`` 已产生的房屋分割图、mask 和原始裁剪，再执行
+南大 DINOv3/MLP 房型检索。
 
 示例：
     python3.11 -m \
       aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_room_matcher_service \
-      --nanda-project ../pubg_test-main --sam3-port 7788
+      --nanda-project ../pubg_test-main
 """
 
 from __future__ import annotations
@@ -14,20 +17,21 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import io
 import json
 import logging
 import os
 from pathlib import Path
 import sys
 import threading
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Tuple
 
-import cv2
 import numpy as np
 
 
 LOGGER = logging.getLogger("NandaRoomMatcherService")
-MAX_IMAGE_BYTES = 24 * 1024 * 1024
+MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
+INPUT_CONTRACT = "sam3_special_area"
 
 
 def _json_safe(value: Any) -> Any:
@@ -68,16 +72,58 @@ def _ensure_real_dino_weights(project_root: Path) -> None:
         )
 
 
+def _decode_special_area_payload(
+    body: bytes,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Mapping[str, Any]]:
+    try:
+        with np.load(io.BytesIO(body), allow_pickle=False) as archive:
+            segmented_bgr = np.asarray(archive["segmented_bgr"]).copy()
+            cropped_mask = np.asarray(archive["cropped_mask"]).copy()
+            cropped_bgr = np.asarray(archive["cropped_bgr"]).copy()
+            crop_xyxy = np.asarray(
+                archive.get("crop_xyxy", np.zeros(4, dtype=np.int32))
+            ).reshape(-1)
+            sam3_score = np.asarray(
+                archive.get("sam3_score", np.zeros(1, dtype=np.float32))
+            ).reshape(-1)
+            sam3_inference_ms = np.asarray(
+                archive.get("sam3_inference_ms", np.zeros(1, dtype=np.float32))
+            ).reshape(-1)
+    except (KeyError, OSError, ValueError) as exc:
+        raise ValueError(f"无法解码 sam3 special_area NPZ: {exc}") from exc
+
+    if segmented_bgr.ndim != 3 or segmented_bgr.shape[2] != 3:
+        raise ValueError("segmented_bgr 必须是 HxWx3 图像")
+    if cropped_bgr.shape != segmented_bgr.shape:
+        raise ValueError("cropped_bgr 与 segmented_bgr 尺寸不一致")
+    if cropped_mask.ndim == 3:
+        cropped_mask = np.any(cropped_mask != 0, axis=2).astype(np.uint8) * 255
+    if cropped_mask.ndim != 2 or cropped_mask.shape != segmented_bgr.shape[:2]:
+        raise ValueError("cropped_mask 与门面图像尺寸不一致")
+    if not np.any(cropped_mask):
+        raise ValueError("cropped_mask 为空")
+    if segmented_bgr.dtype != np.uint8 or cropped_bgr.dtype != np.uint8:
+        raise ValueError("门面图像必须是 uint8")
+    cropped_mask = (cropped_mask > 0).astype(np.uint8) * 255
+    metadata = {
+        "crop_xyxy": [int(value) for value in crop_xyxy[:4]],
+        "sam3_score": float(sam3_score[0]) if sam3_score.size else None,
+        "sam3_inference_ms": (
+            float(sam3_inference_ms[0]) if sam3_inference_ms.size else None
+        ),
+        "mask_area_ratio": float(np.count_nonzero(cropped_mask))
+        / float(cropped_mask.size),
+    }
+    return segmented_bgr, cropped_mask, cropped_bgr, metadata
+
+
 class NandaLatestRoomMatcherRuntime:
-    """持久持有 DINO、房型索引和远程 SAM3 客户端。"""
+    """持久持有 DINO 与房型索引，只消费预分割门面。"""
 
     def __init__(
         self,
         project_root: Path,
         *,
-        sam3_host: str,
-        sam3_port: int,
-        sam3_timeout_ms: int,
         match_dump_dir: Optional[str] = None,
     ):
         if sys.version_info < (3, 11) or sys.version_info >= (3, 13):
@@ -91,45 +137,60 @@ class NandaLatestRoomMatcherRuntime:
         _ensure_real_dino_weights(project_root)
         sys.path.insert(0, str(source_root))
 
-        from gametest_proxy.pubg_room_explore.img_similarity.facade_structure import (
-            FacadeStructureExtractor,
-        )
         from gametest_proxy.pubg_room_explore.img_similarity.room_library_process import (
             RoomLibrary,
         )
         from gametest_proxy.pubg_room_explore.img_similarity.similarity_utils import (
             ImgSimilarityWithDinoV3,
         )
-        from gametest_proxy.pubg_room_explore.sam3.segmenter import Sam3Segmenter
 
-        LOGGER.info("正在加载南大 DINOv3 和房型库，首次启动会比较慢")
-        self.segmenter = Sam3Segmenter(
-            backend=Sam3Segmenter.BACKEND_REMOTE,
-            sam3_host=sam3_host,
-            sam3_port=int(sam3_port),
-            sam3_timeout_ms=int(sam3_timeout_ms),
-        )
-        self.segmenter.load_model()
-        structure_extractor = FacadeStructureExtractor(segmenter=self.segmenter)
-        self.room_library = RoomLibrary(
+        class PresegmentedRoomLibrary(RoomLibrary):
+            """禁止 RoomLibrary 内部再做 SAM3 门窗结构提取。"""
+
+            def _preload_template_structures(self) -> None:
+                LOGGER.info(
+                    "已跳过 SAM3 模板结构预加载；房型配准使用预分割 DINO/MLP"
+                )
+
+            def _extract_query_structure(self, image_bgr, mask, debug_payload):
+                debug_payload["structure_unavailable_reason"] = (
+                    "sam3_special_area_provides_building_mask_only"
+                )
+                return None
+
+        # 传入一个真值占位对象，防止 RoomLibrary 构造默认
+        # FacadeStructureExtractor/SAM3。上面的子类会屏蔽所有结构提取入口。
+        disabled_structure_extractor = object()
+        LOGGER.info("正在加载南大 DINOv3/MLP 和房型库，首次启动会比较慢")
+        self.room_library = PresegmentedRoomLibrary(
             extractor=ImgSimilarityWithDinoV3(),
-            structure_extractor=structure_extractor,
+            structure_extractor=disabled_structure_extractor,
             match_dump_dir=match_dump_dir,
         )
         self.project_root = project_root
+        self.input_contract = INPUT_CONTRACT
         self._match_lock = threading.Lock()
-        LOGGER.info("南大最新版房型匹配服务已就绪")
+        LOGGER.info("南大最新版预分割房型配准服务已就绪")
 
-    def match(self, image_bgr: np.ndarray) -> Mapping[str, Any]:
+    def _display_replay_path(self, replay_path: Path) -> str:
+        resolved = replay_path.resolve()
+        try:
+            return str(resolved.relative_to(self.project_root))
+        except ValueError:
+            return resolved.name
+
+    def match(
+        self,
+        segmented_bgr: np.ndarray,
+        cropped_mask: np.ndarray,
+        cropped_bgr: np.ndarray,
+        special_area_metadata: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
         with self._match_lock:
-            segmentation = self.segmenter.segment_house(image_bgr)
-            if segmentation is None:
-                return {"status": "no_match", "reason": "sam3_house_segmentation_failed"}
-
             room_id, replay_path, debug_payload = self.room_library.search_house(
-                segmentation.segmented_bgr,
-                segmented_house_mask=segmentation.cropped_mask,
-                original_house_image=segmentation.cropped_bgr,
+                segmented_bgr,
+                segmented_house_mask=cropped_mask,
+                original_house_image=cropped_bgr,
                 sample_started_at=datetime.now(),
             )
             debug_payload = debug_payload if isinstance(debug_payload, dict) else {}
@@ -138,11 +199,13 @@ class NandaLatestRoomMatcherRuntime:
             if room_id is None or replay_path is None:
                 return {
                     "status": "no_match",
-                    "reason": debug_payload.get("no_match_reason") or "room_threshold_rejected",
+                    "reason": debug_payload.get("no_match_reason")
+                    or "room_threshold_rejected",
                     "metadata": {
                         "decision": decision,
                         "thresholds": debug_payload.get("thresholds"),
                         "top2_margin": debug_payload.get("top2_margin"),
+                        "special_area": special_area_metadata,
                     },
                 }
             if decision.get("replay_allow_actions") is False:
@@ -152,24 +215,34 @@ class NandaLatestRoomMatcherRuntime:
                     "metadata": {"decision": decision},
                 }
 
+            replay_file = Path(replay_path).resolve()
+            try:
+                replay_steps = json.loads(replay_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError(f"无法读取南大回放 DSL: {replay_file}: {exc}") from exc
+            if not isinstance(replay_steps, list):
+                raise ValueError(f"南大回放 DSL 不是列表: {replay_file}")
+
             return {
                 "status": "matched",
                 "room_id": str(room_id),
-                "replay_path": str(Path(replay_path).resolve()),
+                "replay_path": self._display_replay_path(replay_file),
+                "replay_steps": replay_steps,
                 "score": decision.get("total_score"),
                 "metadata": {
                     "decision": decision,
                     "thresholds": debug_payload.get("thresholds"),
                     "top2_margin": debug_payload.get("top2_margin"),
-                    "sam3_score": getattr(segmentation, "score", None),
-                    "sam3_inference_ms": getattr(segmentation, "sam3_inference_ms", None),
+                    "special_area": special_area_metadata,
+                    "input_contract": self.input_contract,
+                    "structure_mode": "building_mask_only_no_extra_sam3",
                 },
             }
 
 
 def _handler_class(runtime: NandaLatestRoomMatcherRuntime):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "NandaRoomMatcher/1.0"
+        server_version = "NandaRoomMatcher/2.0"
 
         def _write_json(self, status_code: int, payload: Mapping[str, Any]) -> None:
             body = json.dumps(_json_safe(payload), ensure_ascii=False).encode("utf-8")
@@ -188,7 +261,11 @@ def _handler_class(runtime: NandaLatestRoomMatcherRuntime):
                 {
                     "status": "ok",
                     "ready": True,
-                    "message": "南大最新版 SAM3+DINO 房型匹配服务已就绪",
+                    "input_contract": runtime.input_contract,
+                    "message": (
+                        "南大最新版 DINO/MLP 房型配准已就绪，"
+                        "输入使用 auto_game sam3 special_area"
+                    ),
                 },
             )
 
@@ -196,26 +273,38 @@ def _handler_class(runtime: NandaLatestRoomMatcherRuntime):
             if self.path.rstrip("/") != "/match":
                 self._write_json(404, {"status": "error", "message": "not found"})
                 return
+            content_type = str(self.headers.get("Content-Type") or "").split(";", 1)[0]
+            input_contract = str(self.headers.get("X-Nanda-Input-Contract") or "")
+            if content_type != "application/x-npz" or input_contract != INPUT_CONTRACT:
+                self._write_json(
+                    415,
+                    {
+                        "status": "error",
+                        "message": (
+                            f"expected application/x-npz + {INPUT_CONTRACT}, "
+                            f"got {content_type or 'unknown'} + {input_contract or 'unknown'}"
+                        ),
+                    },
+                )
+                return
             try:
                 content_length = int(self.headers.get("Content-Length") or 0)
             except ValueError:
                 content_length = 0
-            if content_length <= 0 or content_length > MAX_IMAGE_BYTES:
+            if content_length <= 0 or content_length > MAX_PAYLOAD_BYTES:
                 self._write_json(
                     400,
-                    {"status": "error", "message": "invalid image payload size"},
-                )
-                return
-            encoded = np.frombuffer(self.rfile.read(content_length), dtype=np.uint8)
-            image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
-            if image is None:
-                self._write_json(
-                    400,
-                    {"status": "error", "message": "cannot decode JPEG image"},
+                    {"status": "error", "message": "invalid NPZ payload size"},
                 )
                 return
             try:
-                result = runtime.match(image)
+                decoded = _decode_special_area_payload(
+                    self.rfile.read(content_length)
+                )
+                result = runtime.match(*decoded)
+            except ValueError as exc:
+                self._write_json(400, {"status": "error", "message": str(exc)})
+                return
             except Exception as exc:
                 LOGGER.exception("南大房型匹配请求执行失败")
                 self._write_json(
@@ -235,7 +324,7 @@ def _handler_class(runtime: NandaLatestRoomMatcherRuntime):
 
 
 def _parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="南大最新版房型匹配独立服务")
+    parser = argparse.ArgumentParser(description="南大最新版房型配准独立服务")
     parser.add_argument(
         "--nanda-project",
         default=os.environ.get("NANDA_PUBG_PROJECT", "../pubg_test-main"),
@@ -243,9 +332,6 @@ def _parse_args(argv=None):
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7789)
-    parser.add_argument("--sam3-host", default="127.0.0.1")
-    parser.add_argument("--sam3-port", type=int, default=7788)
-    parser.add_argument("--sam3-timeout-ms", type=int, default=120000)
     parser.add_argument("--match-dump-dir", default=None)
     return parser.parse_args(argv)
 
@@ -258,9 +344,6 @@ def main(argv=None) -> int:
     args = _parse_args(argv)
     runtime = NandaLatestRoomMatcherRuntime(
         Path(args.nanda_project),
-        sam3_host=args.sam3_host,
-        sam3_port=args.sam3_port,
-        sam3_timeout_ms=args.sam3_timeout_ms,
         match_dump_dir=args.match_dump_dir,
     )
     server = ThreadingHTTPServer((args.host, args.port), _handler_class(runtime))

@@ -1,19 +1,22 @@
 """南大最新版房型匹配与单摇杆回放的 auto_game 适配实现。
 
-匹配器通过独立 HTTP 服务调用南大 Python 3.11 环境；人物门前微调继续
-使用 auto_game 已有控制链路；真正的房屋回放直接使用当前 HOScrcpy 流的
-单指触控通道，只复现最新版房型库中唯一实际使用的 ``do_move`` 动作。
+匹配器通过独立 HTTP 服务调用南大 Python 3.11 环境；门前位姿只使用已有
+入门点方向和 YOLO 门框，不调用 SAM3。房型配准直接消费搜房阶段
+``get_info("sam3")`` 产生的 special_area 分割结果，不再重复推理。
+真正的房屋回放使用当前 HOScrcpy 流的单指触控通道，只复现
+最新版房型库中唯一实际使用的 ``do_move`` 动作。
 """
 
 from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+import io
 import json
 import math
 import os
 import time
-from typing import Any, Callable, List, Mapping, Optional, Tuple
+from typing import Any, Callable, List, Mapping, Optional, Sequence, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -74,6 +77,8 @@ def _as_int(value: Any, default: int) -> int:
 @dataclass(frozen=True)
 class NandaLatestSettings:
     enabled: bool = False
+    door_pose_backend: str = "entry_direction_yolo"
+    room_segmenter_backend: str = "sam3_special_area"
     matcher_url: str = "http://127.0.0.1:7789/match"
     matcher_health_timeout_seconds: float = 0.35
     matcher_health_cache_seconds: float = 2.0
@@ -112,7 +117,17 @@ class NandaLatestSettings:
         raw = dict(config or {})
         return cls(
             enabled=_as_bool(raw.get("enabled"), False),
-            matcher_url=str(raw.get("matcher_url") or cls.matcher_url),
+            door_pose_backend=str(
+                raw.get("door_pose_backend") or cls.door_pose_backend
+            ).strip(),
+            room_segmenter_backend=str(
+                raw.get("room_segmenter_backend") or cls.room_segmenter_backend
+            ).strip(),
+            matcher_url=str(
+                os.environ.get("AUTOGAME_NANDA_MATCHER_URL", "").strip()
+                or raw.get("matcher_url")
+                or cls.matcher_url
+            ),
             matcher_health_timeout_seconds=max(
                 0.05,
                 _as_float(
@@ -217,8 +232,8 @@ class NandaLatestSettings:
         )
 
 
-class NandaDoorPosePreparer(NandaEntryPosePreparer):
-    """用已有入门方向和门检测框收敛南大回放所需门前位姿。"""
+class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
+    """只用入门点方向和现有 YOLO 门框收敛南大回放门前位姿。"""
 
     def __init__(self, settings: NandaLatestSettings):
         self.settings = settings
@@ -440,14 +455,18 @@ class NandaDoorPosePreparer(NandaEntryPosePreparer):
                 metadata={"phase": "pose", "stable_count": self._stable_count},
             )
         context.worker.frame_log(
-            f"[NandaPose] 门前位姿完成：center={center_delta:+.3f}，"
+            f"[NandaPose] 入门方向+YOLO门框位姿完成：center={center_delta:+.3f}，"
             f"area={area_ratio:.3f}，stable={self._stable_count}"
         )
         return None
 
 
+# 兼容已经引用过旧名称的本地测试/扩展；实际实现明确是 YOLO 门框校准。
+NandaDoorPosePreparer = NandaYoloDoorPosePreparer
+
+
 class NandaHttpRoomMatcher(NandaRoomMatcher):
-    """通过独立进程调用南大最新版 SAM3 + DINO 房型匹配。"""
+    """把已有 SAM3 special_area 分割结果交给南大房型配准服务。"""
 
     def __init__(
         self,
@@ -496,6 +515,17 @@ class NandaHttpRoomMatcher(NandaRoomMatcher):
             self._last_health_ok = payload.get("status") == "ok" and bool(
                 payload.get("ready", True)
             )
+            actual_input_contract = str(
+                payload.get("input_contract") or ""
+            ).strip()
+            if actual_input_contract != self.settings.room_segmenter_backend:
+                self._last_health_ok = False
+                self.unavailable_reason = (
+                    "南大房型匹配服务输入协议不一致: "
+                    f"expected={self.settings.room_segmenter_backend}, "
+                    f"actual={actual_input_contract or 'unknown'}"
+                )
+                return False
             self.unavailable_reason = str(
                 payload.get("message") or "南大房型匹配服务尚未就绪"
             )
@@ -504,7 +534,20 @@ class NandaHttpRoomMatcher(NandaRoomMatcher):
             self.unavailable_reason = f"南大房型匹配服务不可用: {exc}"
         return self._last_health_ok
 
-    def _capture_match_frame(self, context: NandaSearchContext) -> np.ndarray:
+    @staticmethod
+    def _read_sam3_info(context: NandaSearchContext) -> Mapping[str, Any]:
+        get_info = getattr(context.worker, "get_info", None)
+        if not callable(get_info):
+            raise ValueError("FrameWorker 不支持 get_info('sam3')")
+        sam3_info = get_info("sam3")
+        if not isinstance(sam3_info, dict):
+            raise ValueError("搜房阶段未取得 sam3 special_area 结果")
+        return sam3_info
+
+    def _capture_match_frame(
+        self,
+        context: NandaSearchContext,
+    ) -> Tuple[np.ndarray, Mapping[str, Any]]:
         frame = context.frame
         if frame is None:
             raise ValueError("当前没有可用于房型匹配的画面")
@@ -517,7 +560,7 @@ class NandaHttpRoomMatcher(NandaRoomMatcher):
                 max(0.0, (0.5 - door_top_ratio) * 2.0),
             )
         if pitch_seconds <= 0.0:
-            return frame.copy()
+            return frame.copy(), self._read_sam3_info(context)
 
         pitch_bias = int(round(pitch_seconds * self.settings.pitch_pixels_per_second))
         duration_ms = max(100, int(round(pitch_seconds * 1000.0)))
@@ -535,7 +578,7 @@ class NandaHttpRoomMatcher(NandaRoomMatcher):
             captured = getattr(context.worker, "frame", None)
             if captured is None:
                 raise ValueError("抬高视角后未取得最新画面")
-            return captured.copy()
+            return captured.copy(), self._read_sam3_info(context)
         finally:
             context.worker.tap_single(
                 "视角",
@@ -545,23 +588,126 @@ class NandaHttpRoomMatcher(NandaRoomMatcher):
             )
             context.refresh_frame("NandaMatch 恢复门前回放视角")
 
+    @staticmethod
+    def _special_area_facade(
+        frame: np.ndarray,
+        sam3_info: Mapping[str, Any],
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Tuple[int, int, int, int]]:
+        if sam3_info.get("found") is False:
+            raise ValueError("sam3 special_area 未分割到房屋")
+        visuals = sam3_info.get("__visualizations__")
+        if not isinstance(visuals, list):
+            raise ValueError("sam3 special_area 结果缺少可还原的 mask 轮廓")
+
+        frame_h, frame_w = frame.shape[:2]
+        best_mask = None
+        best_area = 0
+        for visual in visuals:
+            if not isinstance(visual, dict) or visual.get("type") != "sam3_mask":
+                continue
+            contours = visual.get("contours")
+            if not isinstance(contours, list):
+                continue
+            coord = str(visual.get("coord") or "local")
+            offset_x = 0
+            offset_y = 0
+            if coord != "frame":
+                source_crop = visual.get("source_crop_xyxy")
+                if isinstance(source_crop, (list, tuple)) and len(source_crop) >= 2:
+                    offset_x = int(round(float(source_crop[0])))
+                    offset_y = int(round(float(source_crop[1])))
+            mask = np.zeros((frame_h, frame_w), dtype=np.uint8)
+            polygons = []
+            for contour in contours:
+                if not isinstance(contour, list):
+                    continue
+                points = []
+                for point in contour:
+                    if isinstance(point, dict):
+                        raw_x, raw_y = point.get("x"), point.get("y")
+                    elif isinstance(point, (list, tuple)) and len(point) >= 2:
+                        raw_x, raw_y = point[0], point[1]
+                    else:
+                        continue
+                    try:
+                        point_x = int(round(float(raw_x))) + offset_x
+                        point_y = int(round(float(raw_y))) + offset_y
+                    except (TypeError, ValueError):
+                        continue
+                    points.append(
+                        [
+                            min(frame_w - 1, max(0, point_x)),
+                            min(frame_h - 1, max(0, point_y)),
+                        ]
+                    )
+                if len(points) >= 3:
+                    polygons.append(np.asarray(points, dtype=np.int32))
+            if polygons:
+                cv2.fillPoly(mask, polygons, 255)
+            mask_area = int(np.count_nonzero(mask))
+            if mask_area > best_area:
+                best_mask = mask
+                best_area = mask_area
+
+        if best_mask is None or best_area <= 0:
+            raise ValueError("sam3 special_area mask 轮廓为空")
+        nonzero_y, nonzero_x = np.nonzero(best_mask)
+        x1 = int(nonzero_x.min())
+        y1 = int(nonzero_y.min())
+        x2 = int(nonzero_x.max()) + 1
+        y2 = int(nonzero_y.max()) + 1
+        if x2 - x1 < 2 or y2 - y1 < 2:
+            raise ValueError("sam3 special_area mask 裁剪范围过小")
+
+        cropped_bgr = np.ascontiguousarray(frame[y1:y2, x1:x2]).copy()
+        cropped_mask = np.ascontiguousarray(best_mask[y1:y2, x1:x2]).copy()
+        segmented_bgr = np.zeros_like(cropped_bgr)
+        segmented_bgr[cropped_mask > 0] = cropped_bgr[cropped_mask > 0]
+        return segmented_bgr, cropped_mask, cropped_bgr, (x1, y1, x2, y2)
+
+    @classmethod
+    def _build_match_payload(
+        cls,
+        frame: np.ndarray,
+        sam3_info: Mapping[str, Any],
+    ) -> bytes:
+        segmented_bgr, cropped_mask, cropped_bgr, crop_xyxy = (
+            cls._special_area_facade(frame, sam3_info)
+        )
+        payload = io.BytesIO()
+        np.savez_compressed(
+            payload,
+            segmented_bgr=segmented_bgr,
+            cropped_mask=cropped_mask,
+            cropped_bgr=cropped_bgr,
+            crop_xyxy=np.asarray(crop_xyxy, dtype=np.int32),
+            sam3_score=np.asarray(
+                [float(sam3_info.get("score") or 0.0)], dtype=np.float32
+            ),
+            sam3_inference_ms=np.asarray(
+                [float(sam3_info.get("sam3_inference_ms") or 0.0)],
+                dtype=np.float32,
+            ),
+        )
+        return payload.getvalue()
+
     def match(self, context: NandaSearchContext) -> Optional[NandaRoomMatch]:
         if context.should_abort():
             return None
-        frame = self._capture_match_frame(context)
-        ok, encoded = cv2.imencode(
-            ".jpg",
-            frame,
-            [int(cv2.IMWRITE_JPEG_QUALITY), self.settings.jpeg_quality],
-        )
-        if not ok:
-            raise RuntimeError("门面画面 JPEG 编码失败")
+        try:
+            frame, sam3_info = self._capture_match_frame(context)
+            request_body = self._build_match_payload(frame, sam3_info)
+        except ValueError as exc:
+            context.worker.frame_log(f"[NandaMatch] {exc}，本轮回退原搜房流程")
+            return None
         request = Request(
             self.settings.matcher_url,
-            data=encoded.tobytes(),
+            data=request_body,
             headers={
-                "Content-Type": "image/jpeg",
+                "Content-Type": "application/x-npz",
                 "X-Nanda-House-Id": str(context.house_id or ""),
+                "X-Nanda-Door-Pose-Backend": self.settings.door_pose_backend,
+                "X-Nanda-Input-Contract": self.settings.room_segmenter_backend,
             },
             method="POST",
         )
@@ -576,11 +722,12 @@ class NandaHttpRoomMatcher(NandaRoomMatcher):
             raise RuntimeError(str(payload.get("message") or f"匹配服务状态异常: {status}"))
 
         room_id = str(payload.get("room_id") or "").strip()
-        replay_path = os.path.abspath(str(payload.get("replay_path") or ""))
+        replay_path = str(payload.get("replay_path") or "").strip()
+        replay_steps = payload.get("replay_steps")
         if not room_id or not replay_path:
             raise ValueError("匹配服务没有返回 room_id/replay_path")
-        if not os.path.isfile(replay_path):
-            raise FileNotFoundError(f"南大回放文件不存在: {replay_path}")
+        if not isinstance(replay_steps, list):
+            raise ValueError("匹配服务没有返回 replay_steps")
         score_raw = payload.get("score")
         score = None if score_raw is None else float(score_raw)
         metadata = payload.get("metadata")
@@ -594,6 +741,7 @@ class NandaHttpRoomMatcher(NandaRoomMatcher):
             replay_path=replay_path,
             score=score,
             metadata=metadata,
+            replay_steps=replay_steps,
         )
 
 
@@ -608,12 +756,13 @@ class NandaJoystickReplayStep:
         return not self.moving
 
 
-def load_nanda_joystick_replay(path: str) -> List[NandaJoystickReplayStep]:
-    """读取并验证新版 DSL；任何非摇杆有效动作都会拒绝执行。"""
-    with open(path, "r", encoding="utf-8") as replay_file:
-        raw = json.load(replay_file)
+def parse_nanda_joystick_replay(
+    raw: Sequence[Mapping[str, Any]],
+    source: str = "南大 replay_steps",
+) -> List[NandaJoystickReplayStep]:
+    """验证新版 DSL；任何非摇杆有效动作都会拒绝执行。"""
     if not isinstance(raw, list):
-        raise ValueError("南大 action_step.json 必须是列表")
+        raise ValueError(f"{source} 必须是列表")
 
     by_timestamp = OrderedDict()
     previous_timestamp = None
@@ -670,8 +819,15 @@ def load_nanda_joystick_replay(path: str) -> List[NandaJoystickReplayStep]:
             moving=do_move == 1,
         )
     if not by_timestamp:
-        raise ValueError("南大回放文件没有动作")
+        raise ValueError(f"{source} 没有动作")
     return list(by_timestamp.values())
+
+
+def load_nanda_joystick_replay(path: str) -> List[NandaJoystickReplayStep]:
+    """读取并验证本地南大回放文件（兼容旧的进程内匹配器）。"""
+    with open(path, "r", encoding="utf-8") as replay_file:
+        raw = json.load(replay_file)
+    return parse_nanda_joystick_replay(raw, source=path)
 
 
 class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
@@ -763,7 +919,13 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
         context: NandaSearchContext,
         match: NandaRoomMatch,
     ) -> NandaSearchResult:
-        steps = load_nanda_joystick_replay(match.replay_path)
+        if match.replay_steps is not None:
+            steps = parse_nanda_joystick_replay(
+                match.replay_steps,
+                source=f"room={match.room_id} replay_steps",
+            )
+        else:
+            steps = load_nanda_joystick_replay(match.replay_path)
         stream_client = getattr(context.worker, "stream_client", None)
         if stream_client is None:
             raise RuntimeError("当前 FrameWorker 没有可用的 HOScrcpy 触控流")
@@ -856,11 +1018,19 @@ def build_nanda_house_search_strategy(
     settings = NandaLatestSettings.from_mapping(section)
     if not settings.enabled:
         return NandaHouseSearchStrategy()
+    if settings.door_pose_backend != "entry_direction_yolo":
+        raise ValueError(
+            "南大门前位姿当前只允许 entry_direction_yolo，禁止接入 SAM3 门校准"
+        )
+    if settings.room_segmenter_backend != "sam3_special_area":
+        raise ValueError(
+            "南大房型配准当前只允许 sam3_special_area 输入"
+        )
     matcher = NandaHttpRoomMatcher(settings)
     return NandaHouseSearchStrategy(
         matcher=matcher,
         replay_executor=NandaHosJoystickReplayExecutor(settings),
-        pose_preparer=NandaDoorPosePreparer(settings),
+        pose_preparer=NandaYoloDoorPosePreparer(settings),
     )
 
 
@@ -870,6 +1040,8 @@ __all__ = [
     "NandaHttpRoomMatcher",
     "NandaJoystickReplayStep",
     "NandaLatestSettings",
+    "NandaYoloDoorPosePreparer",
     "build_nanda_house_search_strategy",
     "load_nanda_joystick_replay",
+    "parse_nanda_joystick_replay",
 ]

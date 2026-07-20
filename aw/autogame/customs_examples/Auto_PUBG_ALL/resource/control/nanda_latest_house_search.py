@@ -316,7 +316,7 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
             return None
         return NandaSearchResult(
             NandaSearchStatus.NO_MATCH,
-            "门前位姿多次调整仍未进入南大方案可接受范围，退回原搜房策略",
+            "门前位姿多次调整仍未进入南大方案可接受范围",
             metadata={
                 "phase": "pose",
                 "action_count": self._action_count,
@@ -760,7 +760,7 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
                 self._special_area_facade(frame, sam3_info)
             )
         except ValueError as exc:
-            context.worker.frame_log(f"[NandaMatch] {exc}，本轮回退原搜房流程")
+            context.worker.frame_log(f"[NandaMatch] {exc}，南大房型匹配失败")
             return None
 
         context.worker.frame_log(
@@ -1112,6 +1112,7 @@ def build_nanda_house_search_strategy(
         matcher=matcher,
         replay_executor=NandaHosJoystickReplayExecutor(settings),
         pose_preparer=NandaYoloDoorPosePreparer(settings),
+        exclusive=True,
     )
 
 

@@ -316,10 +316,12 @@ class HouseSearchManager:
             if nanda_search_strategy is not None
             else NandaHouseSearchStrategy()
         )
+        self._nanda_preflight_passed = False
 
     def configure_nanda_search_strategy(self, strategy) -> None:
         """配置南大门前房型匹配/回放方案；传 ``None`` 恢复现有搜房策略。"""
         self.nanda_search_strategy = strategy or NandaHouseSearchStrategy()
+        self._nanda_preflight_passed = False
 
     def _entry_location_tuple(self, entry):
         try:
@@ -407,6 +409,7 @@ class HouseSearchManager:
         self.entry_near_micro_adjust_attempts = 0
         self._jump_forward_guard = False
         self._jump_forward_wait_until_hidden = False
+        self._nanda_preflight_passed = False
         reset_nanda_strategy = getattr(self.nanda_search_strategy, 'reset', None)
         if callable(reset_nanda_strategy):
             reset_nanda_strategy()
@@ -428,6 +431,8 @@ class HouseSearchManager:
     def process(self, w: 'FrameWorker'):
         self._frame_worker = w
         if self._should_abort(w):
+            return
+        if not self._validate_nanda_only_ready(w):
             return
 
         confirmed_landing_location = None
@@ -2085,6 +2090,92 @@ class HouseSearchManager:
         except (TypeError, ValueError):
             return None
 
+    def _nanda_only_enabled(self) -> bool:
+        strategy = getattr(self, 'nanda_search_strategy', None)
+        return bool(strategy is not None and getattr(strategy, 'exclusive', False))
+
+    def _fail_nanda_only(
+        self,
+        w: 'FrameWorker',
+        message: str,
+        result=None,
+        phase: str = "pipeline",
+    ) -> str:
+        metadata = getattr(result, 'metadata', None)
+        metadata = metadata if isinstance(metadata, dict) else {}
+        failure_phase = str(metadata.get('phase') or phase or 'pipeline')
+        raw_status = getattr(result, 'status', None)
+        status_value = getattr(raw_status, 'value', raw_status)
+        status_text = str(status_value or 'exception')
+        reason_text = str(message or getattr(result, 'message', None) or '南大方案执行异常')
+        reason = (
+            f"南大独占搜房失败：phase={failure_phase}，"
+            f"status={status_text}，reason={reason_text}"
+        )
+        w.frame_log(
+            f"[NandaError] {reason}；原搜房逻辑仍保留，"
+            "但南大独占模式不回退，立即终止当前用例"
+        )
+        mark_failed = getattr(w, 'mark_failed', None)
+        if callable(mark_failed):
+            mark_failed(
+                'nanda_house_search_failed',
+                reason,
+                phase=failure_phase,
+                status=status_text,
+                house_id=str(getattr(self, 'current_house_id', None) or ''),
+                room_id=str(getattr(result, 'room_id', None) or ''),
+                replay_path=str(getattr(result, 'replay_path', None) or ''),
+            )
+        else:
+            w.frame_log("[NandaError] FrameWorker 不支持 mark_failed，仅设置终止状态")
+            setattr(w, 'failed', True)
+            setattr(w, 'failure_code', 'nanda_house_search_failed')
+            setattr(w, 'failure_reason', reason)
+        setattr(w, 'running', False)
+        setattr(w, 'finished', True)
+        return "failed"
+
+    def _validate_nanda_only_ready(self, w: 'FrameWorker') -> bool:
+        if not self._nanda_only_enabled():
+            return True
+        if getattr(self, '_nanda_preflight_passed', False):
+            return True
+
+        strategy = self.nanda_search_strategy
+        validate_ready = getattr(strategy, 'validate_ready', None)
+        if not callable(validate_ready):
+            self._fail_nanda_only(
+                w,
+                "南大策略缺少 validate_ready 预检接口",
+                phase="preflight",
+            )
+            return False
+        try:
+            result = validate_ready()
+        except Exception as exc:
+            self._fail_nanda_only(
+                w,
+                f"南大策略预检异常: {exc}",
+                phase="preflight",
+            )
+            return False
+        if result is not None:
+            self._fail_nanda_only(
+                w,
+                getattr(result, 'message', None) or "南大策略预检未通过",
+                result=result,
+                phase="preflight",
+            )
+            return False
+
+        self._nanda_preflight_passed = True
+        w.frame_log(
+            "[NandaSearch] 独占模式预检通过：DINOv3、MLP、房型库与运行依赖已就绪；"
+            "进房后仅执行南大房型匹配和回放"
+        )
+        return True
+
     def _build_nanda_search_context(
         self,
         w: 'FrameWorker',
@@ -2144,9 +2235,18 @@ class HouseSearchManager:
         dist,
         phase_label,
     ) -> str:
-        """在现有对门前推之前，给南大房型匹配/回放方案一次接管机会。"""
+        """在现有对门前推之前，将房屋搜索交给南大方案。"""
         strategy = getattr(self, 'nanda_search_strategy', None)
-        if strategy is None or not getattr(strategy, 'enabled', False):
+        if strategy is None:
+            return "fallback"
+        exclusive = bool(getattr(strategy, 'exclusive', False))
+        if not getattr(strategy, 'enabled', False):
+            if exclusive:
+                return self._fail_nanda_only(
+                    w,
+                    "南大独占策略未完整启用",
+                    phase="preflight",
+                )
             return "fallback"
 
         context = self._build_nanda_search_context(
@@ -2164,9 +2264,21 @@ class HouseSearchManager:
         try:
             result = strategy.run(context)
         except Exception as exc:
+            if exclusive:
+                return self._fail_nanda_only(
+                    w,
+                    f"策略管线异常: {exc}",
+                    phase="pipeline",
+                )
             w.frame_log(f"[NandaSearch] 策略管线异常: {exc}，不继续执行南大回放")
             return "failed"
         if not hasattr(result, 'status'):
+            if exclusive:
+                return self._fail_nanda_only(
+                    w,
+                    f"策略返回值无效: {type(result).__name__}",
+                    phase="pipeline",
+                )
             w.frame_log(
                 f"[NandaSearch] 策略返回值无效: {type(result).__name__}，"
                 "不继续执行南大回放"
@@ -2200,11 +2312,25 @@ class HouseSearchManager:
 
             scene = self._get_house_scene(w)
             if scene == self.HOUSE_INDOOR:
+                if exclusive:
+                    return self._fail_nanda_only(
+                        w,
+                        "南大回放报告完成，但人物仍在室内",
+                        result=result,
+                        phase="verify",
+                    )
                 w.frame_log(
                     "[NandaSearch] 回放报告完成但人物仍在室内，"
                     "转入现有室内搜房/出房策略"
                 )
                 return "indoor"
+            if exclusive:
+                return self._fail_nanda_only(
+                    w,
+                    f"南大回放完成后无法确认人物已在室外，house_scene={scene}",
+                    result=result,
+                    phase="verify",
+                )
             w.frame_log(
                 f"[NandaSearch] 回放报告完成但未验证已出房 "
                 f"house_scene={scene}，不登记完成"
@@ -2212,6 +2338,12 @@ class HouseSearchManager:
             return "failed"
 
         if result.status in {NandaSearchStatus.DISABLED, NandaSearchStatus.NO_MATCH}:
+            if exclusive:
+                return self._fail_nanda_only(
+                    w,
+                    result.message or result.status.value,
+                    result=result,
+                )
             w.frame_log(
                 f"[NandaSearch] {result.message or result.status.value}，退回现有对门进房策略"
             )
@@ -2219,11 +2351,29 @@ class HouseSearchManager:
 
         scene = self._get_house_scene(w)
         if result.metadata.get('phase') == 'match':
+            if exclusive:
+                return self._fail_nanda_only(
+                    w,
+                    result.message or "房型匹配失败",
+                    result=result,
+                )
             w.frame_log(f"[NandaSearch] {result.message}，匹配阶段未产生移动，退回现有策略")
             return "fallback"
         if scene == self.HOUSE_INDOOR:
+            if exclusive:
+                return self._fail_nanda_only(
+                    w,
+                    result.message or "南大方案执行失败",
+                    result=result,
+                )
             w.frame_log(f"[NandaSearch] {result.message}，人物已在室内，转现有室内搜房")
             return "indoor"
+        if exclusive:
+            return self._fail_nanda_only(
+                w,
+                result.message or "南大方案执行失败",
+                result=result,
+            )
         w.frame_log(f"[NandaSearch] {result.message or '南大方案执行失败'}")
         return "failed"
 

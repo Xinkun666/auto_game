@@ -8,7 +8,9 @@
 3. ``NandaReplayExecutor`` 在当前设备上执行回放；
 4. ``NandaHouseSearchStrategy`` 组合三者，并用统一结果协议回传给现有状态机。
 
-未配置南大方案时，策略返回 ``DISABLED``，现有搜房流程保持不变。
+未配置南大方案时，策略返回 ``DISABLED``，现有搜房流程保持不变；生产
+配置启用南大方案后使用 ``exclusive`` 模式，接管后任何异常都应
+终止当前用例并上报，不再回退原室内搜房逻辑。
 """
 
 from __future__ import annotations
@@ -157,10 +159,12 @@ class NandaHouseSearchStrategy:
         matcher: Optional[NandaRoomMatcher] = None,
         replay_executor: Optional[NandaReplayExecutor] = None,
         pose_preparer: Optional[NandaEntryPosePreparer] = None,
+        exclusive: bool = False,
     ):
         self.matcher = matcher
         self.replay_executor = replay_executor
         self.pose_preparer = pose_preparer
+        self.exclusive = bool(exclusive)
 
     @property
     def enabled(self) -> bool:
@@ -176,24 +180,21 @@ class NandaHouseSearchStrategy:
             if callable(reset):
                 reset()
 
-    def run(self, context: NandaSearchContext) -> NandaSearchResult:
+    def validate_ready(self) -> Optional[NandaSearchResult]:
+        """在人物移动前检查南大管线的本地资产与依赖。"""
         if not self.enabled:
             return NandaSearchResult(
                 NandaSearchStatus.DISABLED,
                 "南大方案需同时配置门前位姿准备器、房型匹配器和回放执行器",
+                metadata={"phase": "preflight"},
             )
-        if context.should_abort():
-            return NandaSearchResult(NandaSearchStatus.ABORTED, "搜房阶段已中止")
-
-        # 本地匹配资产或依赖不可用时必须在位姿校准前退出。否则人物会为
-        # 一个当前无法执行的方案反复横移/前后调整，破坏原搜房流程接管点。
         try:
             matcher_available = self.matcher.is_available()
         except Exception as exc:
             return NandaSearchResult(
-                NandaSearchStatus.NO_MATCH,
+                NandaSearchStatus.FAILED,
                 f"本地房型匹配检查异常: {exc}",
-                metadata={"phase": "match", "exception": type(exc).__name__},
+                metadata={"phase": "preflight", "exception": type(exc).__name__},
             )
         if not matcher_available:
             unavailable_reason = getattr(
@@ -202,10 +203,20 @@ class NandaHouseSearchStrategy:
                 "本地房型匹配当前不可用",
             )
             return NandaSearchResult(
-                NandaSearchStatus.NO_MATCH,
+                NandaSearchStatus.FAILED,
                 str(unavailable_reason or "本地房型匹配当前不可用"),
-                metadata={"phase": "match", "matcher_unavailable": True},
+                metadata={"phase": "preflight", "matcher_unavailable": True},
             )
+        return None
+
+    def run(self, context: NandaSearchContext) -> NandaSearchResult:
+        if context.should_abort():
+            return NandaSearchResult(NandaSearchStatus.ABORTED, "搜房阶段已中止")
+
+        # 本地匹配资产或依赖不可用时必须在位姿校准前退出。
+        ready_error = self.validate_ready()
+        if ready_error is not None:
+            return ready_error
 
         try:
             pose_result = self.pose_preparer.prepare(context)
@@ -234,7 +245,11 @@ class NandaHouseSearchStrategy:
             )
 
         if match is None:
-            return NandaSearchResult(NandaSearchStatus.NO_MATCH, "未匹配到可用回放房型")
+            return NandaSearchResult(
+                NandaSearchStatus.NO_MATCH,
+                "未匹配到可用回放房型",
+                metadata={"phase": "match"},
+            )
         if context.should_abort():
             return NandaSearchResult(
                 NandaSearchStatus.ABORTED,

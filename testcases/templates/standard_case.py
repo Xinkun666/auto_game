@@ -64,6 +64,12 @@ class StandardAutoGameCase(TestCase):
     def _use_sp_recording(self) -> bool:
         return should_use_sp_recording_for_profile(self.test_profile)
 
+    def _preserve_game_process(self) -> bool:
+        return (
+            not self._use_sp_recording()
+            and os.environ.get("AUTOGAME_PRESERVE_GAME_PROCESS", "0") == "1"
+        )
+
     def _validate_runtime_entry(self):
         runtime_file = Path("aw") / "autogame" / "customs_game_examples" / project_case / f"{target_case}.py"
         info_file = Path("aw") / "autogame" / "customs_examples" / project_case / "info.py"
@@ -288,6 +294,9 @@ class StandardAutoGameCase(TestCase):
                 game_package=self.game_package,
                 sp_package=self.perf_tool_package,
             )
+            if self._preserve_game_process():
+                cleanup_apps = ()
+                print("功能测试处于保留进程模式：仅清理自动化资源，不强杀游戏进程。")
             if self.automator is not None:
                 self.automator.cleanup(cleanup_apps)
             else:

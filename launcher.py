@@ -563,6 +563,9 @@ def build_launcher_plan_env_values(plan: Optional[dict]) -> dict[str, str]:
         "AUTOGAME_SCREEN_MODE": screen_mode,
         "AUTOGAME_SINGLE_CASE_LOOPS": str(max(1, case_loop_count)),
         "AUTOGAME_SP_RECORDING_ENABLED": "1" if should_use_sp_recording_for_profile(test_profile) else "0",
+        "AUTOGAME_PRESERVE_GAME_PROCESS": (
+            "1" if should_preserve_game_process_for_plan(plan) else "0"
+        ),
         "AUTOGAME_LOG_DIR": str(LOG_DIR),
         "AUTOGAME_PREVIEW_DIR": str(PREVIEW_DIR),
         "AUTOGAME_SAVE_FRAMES_DIR": str(LOG_DIR / "process_save_frames"),
@@ -574,6 +577,14 @@ def build_launcher_plan_env_values(plan: Optional[dict]) -> dict[str, str]:
         env_values["AUTOGAME_SCREEN_WIDTH"] = str(screen_width)
         env_values["AUTOGAME_SCREEN_HEIGHT"] = str(screen_height)
     return env_values
+
+
+def should_preserve_game_process_for_plan(plan: Optional[dict]) -> bool:
+    plan = plan or {}
+    return (
+        str(plan.get("test_profile") or "power") == "function"
+        and bool(plan.get("preserve_game_process"))
+    )
 
 
 def _decode_process_output(output) -> str:
@@ -2407,7 +2418,6 @@ class LauncherWindow(QWidget):
         self.current_run_failure_details: dict = {}
         self.current_run_inactivity_preserved = False
         self.dismiss_reboot_prompt_on_next_case_start = False
-        self.preserve_device_apps_on_manual_stop = True
         self.current_batch_start_timestamp: Optional[str] = None
         self.current_run_start_timestamp: Optional[str] = None
         self.current_run_archive_dir: Optional[Path] = None
@@ -2589,10 +2599,14 @@ class LauncherWindow(QWidget):
         self.stop_button.setProperty("dangerButton", True)
         self.stop_button.setEnabled(False)
         self.open_history_button = QPushButton("历史输出")
-        self.keep_process_on_manual_stop_button = QPushButton("停止保活")
-        self.keep_process_on_manual_stop_button.setCheckable(True)
-        self.keep_process_on_manual_stop_button.setChecked(False)
-        self.keep_process_on_manual_stop_button.setProperty("toggleButton", True)
+        self.game_process_policy_button = QPushButton("保留进程")
+        self.game_process_policy_button.setObjectName("gameProcessPolicyButton")
+        self.game_process_policy_button.setCheckable(True)
+        self.game_process_policy_button.setChecked(False)
+        self.game_process_policy_button.setProperty("toggleButton", True)
+        self.game_process_policy_button.setToolTip(
+            "仅功能测试生效：保留进程时不强杀游戏；切换到红色关闭进程后，启动和停止时都会强杀游戏"
+        )
         self.generate_preview_video_button = QPushButton("生成视频：关")
         self.generate_preview_video_button.setObjectName("generatePreviewVideoButton")
         self.generate_preview_video_button.setCheckable(True)
@@ -2653,6 +2667,7 @@ class LauncherWindow(QWidget):
         self._bind_signals()
         self._load_project_cases()
         self._sync_mode_ui()
+        self._sync_game_process_policy_ui()
         self._log_message(
             f"[Launcher] 启动器已初始化，日志文件：{LAUNCHER_LOG_FILE}\n",
             level=logging.INFO,
@@ -2843,6 +2858,17 @@ class LauncherWindow(QWidget):
                     background: #eafff7;
                     border-color: #34c79a;
                     color: #087f5b;
+                }
+                QPushButton#gameProcessPolicyButton:checked {
+                    background: #ffe4e6;
+                    border-color: #e11d48;
+                    color: #be123c;
+                    font-weight: 700;
+                }
+                QPushButton#gameProcessPolicyButton:checked:disabled {
+                    background: #fbd5da;
+                    border-color: #e65f6d;
+                    color: #a61b2b;
                 }
                 QPushButton#generatePreviewVideoButton {
                     background: #fff1f2;
@@ -3114,6 +3140,17 @@ class LauncherWindow(QWidget):
                 border-color: #1f9d7a;
                 color: #97f5d2;
             }
+            QPushButton#gameProcessPolicyButton:checked {
+                background: #4a1a24;
+                border-color: #ff6b7c;
+                color: #ffd6dc;
+                font-weight: 700;
+            }
+            QPushButton#gameProcessPolicyButton:checked:disabled {
+                background: #35151d;
+                border-color: #a84350;
+                color: #eaa8b1;
+            }
             QPushButton#generatePreviewVideoButton {
                 background: #3a151c;
                 border-color: #e5485b;
@@ -3372,7 +3409,7 @@ class LauncherWindow(QWidget):
         action_layout.addWidget(self.start_button)
         action_layout.addWidget(self.stop_button)
         action_layout.addWidget(self.open_history_button)
-        action_layout.addWidget(self.keep_process_on_manual_stop_button)
+        action_layout.addWidget(self.game_process_policy_button)
         action_layout.addWidget(self.preview_overlay_button)
         action_layout.addWidget(self.preview_points_button)
         action_layout.addWidget(self.preview_fullscreen_button)
@@ -3650,7 +3687,9 @@ class LauncherWindow(QWidget):
         self.history_tree.itemSelectionChanged.connect(self._on_history_selection_changed)
         self.history_prev_frame_button.clicked.connect(self._show_previous_history_frame)
         self.history_next_frame_button.clicked.connect(self._show_next_history_frame)
-        self.keep_process_on_manual_stop_button.toggled.connect(self._toggle_keep_process_on_manual_stop)
+        self.power_test_radio.toggled.connect(self._sync_game_process_policy_ui)
+        self.function_test_radio.toggled.connect(self._sync_game_process_policy_ui)
+        self.game_process_policy_button.toggled.connect(self._toggle_game_process_policy)
         self.generate_preview_video_button.toggled.connect(self._toggle_generate_preview_video)
         self.preview_overlay_button.toggled.connect(self._toggle_preview_overlay)
         self.preview_points_button.toggled.connect(self._toggle_preview_points)
@@ -3792,11 +3831,30 @@ class LauncherWindow(QWidget):
         self._apply_style()
         self._refresh_preview_pixmap()
 
-    def _toggle_keep_process_on_manual_stop(self, checked: bool):
-        self.keep_process_on_manual_stop_button.setText(
-            "停止保活: 开" if checked else "停止保活"
+    def _toggle_game_process_policy(self, close_process: bool):
+        self._sync_game_process_policy_ui()
+        LOGGER.info(
+            "function-test game process policy toggled: %s",
+            "close" if close_process else "preserve",
         )
-        LOGGER.info("keep process on manual stop toggled: %s", checked)
+
+    def _sync_game_process_policy_ui(self):
+        close_process = self.game_process_policy_button.isChecked()
+        function_test_selected = self.function_test_radio.isChecked()
+        self.game_process_policy_button.setText(
+            "关闭进程" if close_process else "保留进程"
+        )
+        self.game_process_policy_button.setEnabled(
+            self.inputs_enabled and function_test_selected
+        )
+        if function_test_selected:
+            self.game_process_policy_button.setToolTip(
+                "当前为关闭进程：启动、手动停止、自动结束都会强杀游戏"
+                if close_process
+                else "当前为保留进程：启动、手动停止、自动结束都不强杀游戏"
+            )
+        else:
+            self.game_process_policy_button.setToolTip("仅功能测试生效；功耗测试仍按原流程关闭游戏和 SP")
 
     def _toggle_generate_preview_video(self, checked: bool):
         self.generate_preview_video_button.setText("生成视频：开" if checked else "生成视频：关")
@@ -4380,6 +4438,7 @@ class LauncherWindow(QWidget):
         self.inactivity_timeout_spin.setEnabled(enabled)
         self.power_collection_duration_spin.setEnabled(enabled)
         self.generate_preview_video_button.setEnabled(enabled)
+        self._sync_game_process_policy_ui()
         for button in self.preset_buttons:
             button.setEnabled(enabled)
         self._sync_testcase_controls_state()
@@ -4825,6 +4884,10 @@ class LauncherWindow(QWidget):
             "inactivity_timeout_minutes": float(self.inactivity_timeout_spin.value()),
             "power_collection_duration_seconds": float(self.power_collection_duration_spin.value()),
             "generate_preview_video": bool(self.generate_preview_video_button.isChecked()),
+            "preserve_game_process": (
+                test_profile == "function"
+                and not self.game_process_policy_button.isChecked()
+            ),
             "cleanup_apps": sorted(cleanup_apps),
             "runtime_description": runtime_description,
         }
@@ -4870,6 +4933,7 @@ class LauncherWindow(QWidget):
             f"screen_size={screen_width}x{screen_height}, "
             f"case_loops={plan['case_loop_count']}, "
             f"generate_preview_video={plan['generate_preview_video']}, "
+            f"preserve_game_process={plan['preserve_game_process']}, "
             f"safe_temp={plan['safe_temp']}°C, safe_battery={plan['safe_battery']}%, "
             f"safe_time={plan['safe_minutes']}分钟, inactivity_timeout={plan['inactivity_timeout_minutes']}分钟, "
             f"power_collection_duration={plan['power_collection_duration_seconds']}秒, "
@@ -4909,7 +4973,6 @@ class LauncherWindow(QWidget):
         self.current_run_failure_details = {}
         self.current_run_inactivity_preserved = False
         self.dismiss_reboot_prompt_on_next_case_start = False
-        self.preserve_device_apps_on_manual_stop = True
         self.current_batch_start_timestamp = None
         self.current_run_start_timestamp = None
         self.current_run_archive_dir = None
@@ -4926,6 +4989,12 @@ class LauncherWindow(QWidget):
 
     def _cleanup_apps_between_runs(self, reason: str):
         if self.current_plan is None:
+            return
+
+        if should_preserve_game_process_for_plan(self.current_plan):
+            self._log_message(
+                f"[Launcher] {reason}：功能测试处于保留进程模式，跳过游戏进程清理。\n"
+            )
             return
 
         apps = list(self.current_plan.get("cleanup_apps", []))
@@ -6361,10 +6430,7 @@ class LauncherWindow(QWidget):
             return
 
         if self.stop_requested:
-            if self.preserve_device_apps_on_manual_stop:
-                self._log_message("[Launcher] 手动停止后保留设备现场，跳过应用清理。\n")
-            else:
-                self._cleanup_apps_between_runs("停止后清理")
+            self._cleanup_apps_between_runs("停止后清理")
             self._finish_batch("任务已停止。")
             return
 
@@ -6372,6 +6438,7 @@ class LauncherWindow(QWidget):
             if self.current_run_stream_disconnect_startup:
                 if self._current_plan_recovers_stream_only_on_disconnect():
                     if not self._recover_stream_only_for_stream_disconnect():
+                        self._cleanup_apps_between_runs("断流恢复失败后清理")
                         self._finish_batch(self._stream_recovery_failure_message())
                         return
                     self._set_status(
@@ -6392,6 +6459,7 @@ class LauncherWindow(QWidget):
                         "[Launcher] 本次 HOScrcpy 断流按直接停止处理，不计入已执行次数，"
                         "本轮不保存产物，不执行重启恢复。\n"
                     )
+                    self._cleanup_apps_between_runs("断流自动停止后清理")
                     self._finish_batch("HOScrcpy 抓图流断开，当前任务已停止。")
                     return
 
@@ -6400,6 +6468,7 @@ class LauncherWindow(QWidget):
                     "本轮不保存产物；重启手机后将重新运行当前用例。\n"
                 )
                 if not self._restart_device_for_stream_disconnect():
+                    self._cleanup_apps_between_runs("断流恢复失败后清理")
                     self._finish_batch("断流恢复失败，批量任务已终止。")
                     return
                 self._set_status(
@@ -6429,6 +6498,7 @@ class LauncherWindow(QWidget):
 
             if self._current_plan_recovers_stream_only_on_disconnect():
                 if not self._recover_stream_only_for_stream_disconnect():
+                    self._cleanup_apps_between_runs("断流恢复失败后清理")
                     self._finish_batch(self._stream_recovery_failure_message())
                     return
                 next_run = self.current_run_index + 1
@@ -6446,6 +6516,7 @@ class LauncherWindow(QWidget):
                 return
 
             if not self._restart_device_for_stream_disconnect():
+                self._cleanup_apps_between_runs("断流恢复失败后清理")
                 self._finish_batch("断流恢复失败，批量任务已终止。")
                 return
 
@@ -6479,31 +6550,22 @@ class LauncherWindow(QWidget):
 
     def _stop_run(self):
         LOGGER.info(
-            "stop_button clicked: batch_active=%s process_exists=%s keep_process=%s",
+            "stop_button clicked: batch_active=%s process_exists=%s preserve_game_process=%s",
             self.batch_active,
             self.process is not None,
-            self.keep_process_on_manual_stop_button.isChecked(),
+            should_preserve_game_process_for_plan(self.current_plan),
         )
         if not self.batch_active and self.process is None:
             return
 
         self.stop_requested = True
-        self.preserve_device_apps_on_manual_stop = True
         self.safety_timer.stop()
         self.run_timeout_timer.stop()
 
         if self.process is None:
             self._log_message("\n[Launcher] 已取消后续运行。\n")
-            self._log_message("[Launcher] 手动停止后保留设备现场，跳过应用清理。\n")
+            self._cleanup_apps_between_runs("停止后清理")
             self._finish_batch("任务已停止。")
-            return
-
-        if self.keep_process_on_manual_stop_button.isChecked():
-            self._log_message(
-                "\n[Launcher] 已取消后续运行，当前子进程将继续运行，直至自行结束。\n"
-            )
-            self._set_status("已手动停止后续运行，当前子进程继续运行中。")
-            self._set_runtime("运行信息：后续轮次已取消，等待当前子进程自然结束。")
             return
 
         self._log_message("\n[Launcher] 正在停止当前子进程，并取消后续运行...\n")

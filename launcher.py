@@ -3844,9 +3844,7 @@ class LauncherWindow(QWidget):
         self.game_process_policy_button.setText(
             "关闭进程" if close_process else "保留进程"
         )
-        self.game_process_policy_button.setEnabled(
-            self.inputs_enabled and function_test_selected
-        )
+        self.game_process_policy_button.setEnabled(self.inputs_enabled)
         if function_test_selected:
             self.game_process_policy_button.setToolTip(
                 "当前为关闭进程：启动、手动停止、自动结束都会强杀游戏"
@@ -3854,7 +3852,10 @@ class LauncherWindow(QWidget):
                 else "当前为保留进程：启动、手动停止、自动结束都不强杀游戏"
             )
         else:
-            self.game_process_policy_button.setToolTip("仅功能测试生效；功耗测试仍按原流程关闭游戏和 SP")
+            selected_policy = "关闭进程" if close_process else "保留进程"
+            self.game_process_policy_button.setToolTip(
+                f"已预选{selected_policy}；切换到功能测试后生效。功耗测试仍按原流程关闭游戏和 SP"
+            )
 
     def _toggle_generate_preview_video(self, checked: bool):
         self.generate_preview_video_button.setText("生成视频：开" if checked else "生成视频：关")

@@ -14,3 +14,8 @@ aw/autogame/customs_examples/Auto_PUBG_ALL/resource/control/driving_turn_calibra
 
 # Auto_PUBG_ALL local SAM3 weights are deployed separately on the server.
 aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/sam3_tiny/*.pt
+
+# 南大房型匹配的大模型与房型素材由服务器单独部署，不进入 Git。
+aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/nanda_room_matcher/dinov3_vitl16/model.safetensors
+aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/nanda_room_matcher/*.pkl
+aw/autogame/customs_examples/Auto_PUBG_ALL/resource/nanda_room_library/rooms/

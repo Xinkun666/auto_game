@@ -776,9 +776,23 @@ class NandaHttpRoomMatcher(NandaRoomMatcher):
         )
         payload = self._open_json(request, timeout=self.settings.matcher_timeout_seconds)
         status = str(payload.get("status") or "")
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        decision = metadata.get("decision")
+        if not isinstance(decision, dict):
+            decision = {}
+        dino_score = decision.get("room_best_dino_score")
+        mlp_score = decision.get("mlp_score")
+        total_score = decision.get("total_score")
+        top2_margin = metadata.get("top2_margin")
+        matcher_elapsed_ms = metadata.get("matcher_elapsed_ms")
         if status == "no_match":
             context.worker.frame_log(
-                f"[NandaMatch] 未通过最新版房型阈值: {payload.get('reason') or 'unknown'}"
+                f"[NandaMatch] 房型配准拒绝：reason="
+                f"{payload.get('reason') or 'unknown'}，dino={dino_score}，"
+                f"mlp={mlp_score}，total={total_score}，margin={top2_margin}，"
+                f"elapsed_ms={matcher_elapsed_ms}；不执行回放"
             )
             return None
         if status != "matched":
@@ -793,11 +807,10 @@ class NandaHttpRoomMatcher(NandaRoomMatcher):
             raise ValueError("匹配服务没有返回 replay_steps")
         score_raw = payload.get("score")
         score = None if score_raw is None else float(score_raw)
-        metadata = payload.get("metadata")
-        if not isinstance(metadata, dict):
-            metadata = {}
         context.worker.frame_log(
-            f"[NandaMatch] 房型匹配成功：room={room_id}，score={score}"
+            f"[NandaMatch] 房型配准通过：room={room_id}，dino={dino_score}，"
+            f"mlp={mlp_score}，total={score}，margin={top2_margin}，"
+            f"steps={len(replay_steps)}，elapsed_ms={matcher_elapsed_ms}；开始 HOS 摇杆回放"
         )
         return NandaRoomMatch(
             room_id=room_id,

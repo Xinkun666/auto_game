@@ -1,21 +1,18 @@
-"""南大最新版房型配准的独立 HTTP 服务。
+"""auto_game 内置的南大 DINOv3 + MLP 房型配准 HTTP 服务。
 
-该服务必须由南大 demo 的 Python 3.11/3.12 环境启动，避免把新版
+该服务使用独立 Python 3.11/3.12 进程，避免把新版
 transformers/faiss/torch 依赖加载到 auto_game 当前 Python 3.9 进程。
-服务不启动也不连接 SAM3；它只接收 auto_game 搜房阶段
-``get_info("sam3")`` 已产生的房屋分割图、mask 和原始裁剪，再执行
-南大 DINOv3/MLP 房型检索。
+服务不启动也不连接 SAM3；它只接收搜房阶段 ``get_info("sam3")``
+产生的房屋分割图、mask 和原始裁剪。
 
-示例：
-    python3.11 -m \
-      aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_room_matcher_service \
-      --nanda-project ../pubg_test-main
+默认直接从 auto_game 的 ``resource/weights/nanda_room_matcher`` 和
+``resource/nanda_room_library`` 加载资产，不再依赖一份可导入的南大源码。
+``--nanda-project`` 仅作为迁移/对照旧目录的兼容选项。
 """
 
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
@@ -27,6 +24,11 @@ import threading
 from typing import Any, Mapping, Optional, Tuple
 
 import numpy as np
+
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_room_matcher_runtime import (
+    IntegratedNandaRoomMatcher,
+    NandaMatcherAssetPaths,
+)
 
 
 LOGGER = logging.getLogger("NandaRoomMatcherService")
@@ -46,30 +48,6 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_json_safe(item) for item in value]
     return str(value)
-
-
-def _ensure_real_dino_weights(project_root: Path) -> None:
-    model_path = (
-        project_root
-        / "control_proxy"
-        / "src"
-        / "gametest_proxy"
-        / "pubg_room_explore"
-        / "img_similarity"
-        / "dinov3_vitl16"
-        / "model.safetensors"
-    )
-    if not model_path.is_file():
-        raise FileNotFoundError(f"缺少南大 DINOv3 权重: {model_path}")
-    with model_path.open("rb") as model_file:
-        header = model_file.read(256)
-    if model_path.stat().st_size < 1024 or header.startswith(
-        b"version https://git-lfs.github.com/spec/"
-    ):
-        raise RuntimeError(
-            "南大 DINOv3 model.safetensors 仍是 Git LFS 指针，"
-            "请先取得真实权重后再启动匹配服务"
-        )
 
 
 def _decode_special_area_payload(
@@ -122,62 +100,35 @@ class NandaLatestRoomMatcherRuntime:
 
     def __init__(
         self,
-        project_root: Path,
+        asset_paths: NandaMatcherAssetPaths,
         *,
+        device: Optional[str] = None,
         match_dump_dir: Optional[str] = None,
     ):
         if sys.version_info < (3, 11) or sys.version_info >= (3, 13):
             raise RuntimeError(
                 f"南大最新版匹配服务要求 Python 3.11/3.12，当前为 {sys.version.split()[0]}"
             )
-        project_root = project_root.expanduser().resolve()
-        source_root = project_root / "control_proxy" / "src"
-        if not source_root.is_dir():
-            raise FileNotFoundError(f"南大项目目录无效，缺少: {source_root}")
-        _ensure_real_dino_weights(project_root)
-        sys.path.insert(0, str(source_root))
-
-        from gametest_proxy.pubg_room_explore.img_similarity.room_library_process import (
-            RoomLibrary,
+        if match_dump_dir:
+            LOGGER.warning("内置匹配器暂不写南大 match_dump，已忽略: %s", match_dump_dir)
+        self.asset_paths = asset_paths.resolved()
+        LOGGER.info(
+            "正在从 auto_game 资产目录加载 DINOv3、MLP 和房型库: %s", self.asset_paths.to_jsonable(),
         )
-        from gametest_proxy.pubg_room_explore.img_similarity.similarity_utils import (
-            ImgSimilarityWithDinoV3,
-        )
-
-        class PresegmentedRoomLibrary(RoomLibrary):
-            """禁止 RoomLibrary 内部再做 SAM3 门窗结构提取。"""
-
-            def _preload_template_structures(self) -> None:
-                LOGGER.info(
-                    "已跳过 SAM3 模板结构预加载；房型配准使用预分割 DINO/MLP"
-                )
-
-            def _extract_query_structure(self, image_bgr, mask, debug_payload):
-                debug_payload["structure_unavailable_reason"] = (
-                    "sam3_special_area_provides_building_mask_only"
-                )
-                return None
-
-        # 传入一个真值占位对象，防止 RoomLibrary 构造默认
-        # FacadeStructureExtractor/SAM3。上面的子类会屏蔽所有结构提取入口。
-        disabled_structure_extractor = object()
-        LOGGER.info("正在加载南大 DINOv3/MLP 和房型库，首次启动会比较慢")
-        self.room_library = PresegmentedRoomLibrary(
-            extractor=ImgSimilarityWithDinoV3(),
-            structure_extractor=disabled_structure_extractor,
-            match_dump_dir=match_dump_dir,
-        )
-        self.project_root = project_root
+        self.room_matcher = IntegratedNandaRoomMatcher(self.asset_paths, device=device,)
         self.input_contract = INPUT_CONTRACT
         self._match_lock = threading.Lock()
-        LOGGER.info("南大最新版预分割房型配准服务已就绪")
+        LOGGER.info("auto_game 内置南大 DINOv3/MLP 房型配准服务已就绪")
 
     def _display_replay_path(self, replay_path: Path) -> str:
         resolved = replay_path.resolve()
         try:
-            return str(resolved.relative_to(self.project_root))
+            return str(resolved.relative_to(self.asset_paths.room_library_path))
         except ValueError:
             return resolved.name
+
+    def health_payload(self) -> Mapping[str, Any]:
+        return self.room_matcher.health_payload()
 
     def match(
         self,
@@ -187,11 +138,8 @@ class NandaLatestRoomMatcherRuntime:
         special_area_metadata: Mapping[str, Any],
     ) -> Mapping[str, Any]:
         with self._match_lock:
-            room_id, replay_path, debug_payload = self.room_library.search_house(
-                segmented_bgr,
-                segmented_house_mask=cropped_mask,
-                original_house_image=cropped_bgr,
-                sample_started_at=datetime.now(),
+            room_id, replay_path, debug_payload = self.room_matcher.match(
+                segmented_bgr, cropped_mask, cropped_bgr,
             )
             debug_payload = debug_payload if isinstance(debug_payload, dict) else {}
             decision = debug_payload.get("decision")
@@ -205,6 +153,8 @@ class NandaLatestRoomMatcherRuntime:
                         "decision": decision,
                         "thresholds": debug_payload.get("thresholds"),
                         "top2_margin": debug_payload.get("top2_margin"),
+                        "top_candidates": debug_payload.get("top_candidates"),
+                        "matcher_elapsed_ms": debug_payload.get("elapsed_ms"),
                         "special_area": special_area_metadata,
                     },
                 }
@@ -233,9 +183,11 @@ class NandaLatestRoomMatcherRuntime:
                     "decision": decision,
                     "thresholds": debug_payload.get("thresholds"),
                     "top2_margin": debug_payload.get("top2_margin"),
+                    "top_candidates": debug_payload.get("top_candidates"),
+                    "matcher_elapsed_ms": debug_payload.get("elapsed_ms"),
                     "special_area": special_area_metadata,
                     "input_contract": self.input_contract,
-                    "structure_mode": "building_mask_only_no_extra_sam3",
+                    "structure_mode": "disabled_zero_vector_no_extra_sam3",
                 },
             }
 
@@ -262,8 +214,9 @@ def _handler_class(runtime: NandaLatestRoomMatcherRuntime):
                     "status": "ok",
                     "ready": True,
                     "input_contract": runtime.input_contract,
+                    "runtime": runtime.health_payload(),
                     "message": (
-                        "南大最新版 DINO/MLP 房型配准已就绪，"
+                        "auto_game 内置南大 DINOv3/MLP 房型配准已就绪，"
                         "输入使用 auto_game sam3 special_area"
                     ),
                 },
@@ -293,14 +246,11 @@ def _handler_class(runtime: NandaLatestRoomMatcherRuntime):
                 content_length = 0
             if content_length <= 0 or content_length > MAX_PAYLOAD_BYTES:
                 self._write_json(
-                    400,
-                    {"status": "error", "message": "invalid NPZ payload size"},
+                    400, {"status": "error", "message": "invalid NPZ payload size"},
                 )
                 return
             try:
-                decoded = _decode_special_area_payload(
-                    self.rfile.read(content_length)
-                )
+                decoded = _decode_special_area_payload(self.rfile.read(content_length))
                 result = runtime.match(*decoded)
             except ValueError as exc:
                 self._write_json(400, {"status": "error", "message": str(exc)})
@@ -309,10 +259,7 @@ def _handler_class(runtime: NandaLatestRoomMatcherRuntime):
                 LOGGER.exception("南大房型匹配请求执行失败")
                 self._write_json(
                     500,
-                    {
-                        "status": "error",
-                        "message": f"{type(exc).__name__}: {exc}",
-                    },
+                    {"status": "error", "message": f"{type(exc).__name__}: {exc}",},
                 )
                 return
             self._write_json(200, result)
@@ -324,26 +271,84 @@ def _handler_class(runtime: NandaLatestRoomMatcherRuntime):
 
 
 def _parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="南大最新版房型配准独立服务")
+    defaults = NandaMatcherAssetPaths.auto_game_defaults()
+    parser = argparse.ArgumentParser(description="auto_game 内置南大房型配准服务")
     parser.add_argument(
         "--nanda-project",
-        default=os.environ.get("NANDA_PUBG_PROJECT", "../pubg_test-main"),
-        help="最新版 pubg_test-main 解压目录",
+        default=os.environ.get("NANDA_PUBG_PROJECT") or None,
+        help="兼容入口：从最新版 pubg_test-main 目录读取三类资产",
+    )
+    parser.add_argument(
+        "--dino-model-dir",
+        default=(
+            os.environ.get("AUTOGAME_NANDA_DINO_MODEL_DIR")
+            or str(defaults.dino_model_dir)
+        ),
+        help="包含 config.json/preprocessor_config.json/model.safetensors 的目录",
+    )
+    parser.add_argument(
+        "--mlp-model-path",
+        default=(
+            os.environ.get("AUTOGAME_NANDA_MLP_MODEL_PATH")
+            or str(defaults.mlp_model_path)
+        ),
+        help="南大 rgb_mlp_struct_v7.pkl 路径",
+    )
+    parser.add_argument(
+        "--room-library",
+        default=(
+            os.environ.get("AUTOGAME_NANDA_ROOM_LIBRARY")
+            or str(defaults.room_library_path)
+        ),
+        help="包含 rooms/ 的南大 room_library 目录",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7789)
+    parser.add_argument("--device", default=os.environ.get("AUTOGAME_NANDA_DEVICE"))
     parser.add_argument("--match-dump-dir", default=None)
     return parser.parse_args(argv)
 
 
+def _resolve_asset_paths(args) -> NandaMatcherAssetPaths:
+    if args.nanda_project:
+        legacy = NandaMatcherAssetPaths.from_nanda_project(Path(args.nanda_project))
+        defaults = NandaMatcherAssetPaths.auto_game_defaults()
+        # 只有未显式覆盖集成默认值时，--nanda-project 才接管对应路径。
+        dino_model_dir = (
+            legacy.dino_model_dir
+            if Path(args.dino_model_dir).expanduser() == defaults.dino_model_dir
+            else Path(args.dino_model_dir)
+        )
+        mlp_model_path = (
+            legacy.mlp_model_path
+            if Path(args.mlp_model_path).expanduser() == defaults.mlp_model_path
+            else Path(args.mlp_model_path)
+        )
+        room_library_path = (
+            legacy.room_library_path
+            if Path(args.room_library).expanduser() == defaults.room_library_path
+            else Path(args.room_library)
+        )
+        return NandaMatcherAssetPaths(
+            dino_model_dir=dino_model_dir,
+            mlp_model_path=mlp_model_path,
+            room_library_path=room_library_path,
+        )
+    return NandaMatcherAssetPaths(
+        dino_model_dir=Path(args.dino_model_dir),
+        mlp_model_path=Path(args.mlp_model_path),
+        room_library_path=Path(args.room_library),
+    )
+
+
 def main(argv=None) -> int:
     logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     args = _parse_args(argv)
     runtime = NandaLatestRoomMatcherRuntime(
-        Path(args.nanda_project),
+        _resolve_asset_paths(args),
+        device=args.device,
         match_dump_dir=args.match_dump_dir,
     )
     server = ThreadingHTTPServer((args.host, args.port), _handler_class(runtime))

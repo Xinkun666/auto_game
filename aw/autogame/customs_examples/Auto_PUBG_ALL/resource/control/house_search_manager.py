@@ -2351,7 +2351,17 @@ class HouseSearchManager:
             )
             return "completed" if finalized else "aborted"
 
-        if result.status in {NandaSearchStatus.DISABLED, NandaSearchStatus.NO_MATCH}:
+        if result.status == NandaSearchStatus.NO_MATCH:
+            reason = result.message or "未匹配到可用回放房型"
+            w.frame_log(
+                f"[NandaSearch] {reason}，临时跳过当前入门点，"
+                "下一帧选择下一个入门点"
+            )
+            self._mark_current_entry_failed(f"南大房型匹配失败：{reason}")
+            self.status = "IDLE"
+            return "skipped"
+
+        if result.status == NandaSearchStatus.DISABLED:
             if exclusive:
                 return self._fail_nanda_only(
                     w,
@@ -2359,7 +2369,8 @@ class HouseSearchManager:
                     result=result,
                 )
             w.frame_log(
-                f"[NandaSearch] {result.message or result.status.value}，退回现有对门进房策略"
+                f"[NandaSearch] {result.message or result.status.value}，"
+                "退回现有对门进房策略"
             )
             return "fallback"
 

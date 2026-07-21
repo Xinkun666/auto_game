@@ -25,7 +25,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.phase_time_mana
     parse_case_loop_count,
 )
 from aw.autogame.tools.GameLaunchProfile import should_use_sp_recording_for_profile
-from aw.autogame.tools.Utils import _read_autogame_config
+from aw.autogame.tools.Utils import _read_project_config
 
 """
 1. w.current_stage ： 当前自动化的阶段，可以参考你标注工程导出的info.py里，对应的阶段为True，即表示当前阶段
@@ -109,7 +109,7 @@ def initialize_runtime():
     SP_RECORDING_ENABLED = should_use_sp_recording_for_profile(
         os.environ.get("AUTOGAME_TEST_PROFILE")
     )
-    autogame_config = _read_autogame_config()
+    autogame_config = _read_project_config("Auto_PUBG_ALL")
     PHASE_DURATIONS = load_phase_durations_from_config(autogame_config)
 
     parachute_manager = ParachuteManager()

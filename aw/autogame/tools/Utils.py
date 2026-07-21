@@ -956,11 +956,10 @@ def get_wh():
         w_h = resolution[0] / resolution[1]
     else:
         w_h = resolution[1] / resolution[0]
-    with open(r'aw\autogame\config\config.json', 'r', encoding='utf-8') as f:
-        config = json.load(f)
-        width = config["width"]
-        height = int(width * w_h)
-        return width, height
+    config = _read_project_config()
+    width = int(config.get("width", 768))
+    height = int(width * w_h)
+    return width, height
 
 def normalize_rotation(rotation):
     if rotation is None:
@@ -1576,6 +1575,22 @@ def _read_autogame_config(config_path="aw/autogame/config/config.json"):
         return {}
 
 
+def _read_project_config(project_case=None, config_path=None):
+    if config_path is None:
+        project_case = project_case or os.environ.get("TARGET_PROJECT_CASE")
+        if not project_case:
+            return {}
+        config_path = (
+            APP_DIR
+            / "aw"
+            / "autogame"
+            / "customs_examples"
+            / project_case
+            / "config.json"
+        )
+    return _read_autogame_config(str(config_path))
+
+
 def get_screen_mode(config_path="aw/autogame/config/config.json"):
     """
     仅读取并返回 config.json 中的 screen_mode 字段
@@ -1584,15 +1599,19 @@ def get_screen_mode(config_path="aw/autogame/config/config.json"):
     return str(config.get("screen_mode", "0"))
 
 
-def get_touch_backend(config_path="aw/autogame/config/config.json"):
+def get_touch_backend(config_path=None):
     """
     读取触控后端配置。
 
-    统一从 config.json 中读取 touch_backend。
+    默认从当前自动化项目的 config.json 中读取 touch_backend。
     可选值：sendevent / uinput / hos
     未配置或配置非法时，默认使用 uinput。
     """
-    config = _read_autogame_config(config_path)
+    config = (
+        _read_autogame_config(config_path)
+        if config_path is not None
+        else _read_project_config()
+    )
     backend = str(config.get("touch_backend", "")).strip().lower()
     if backend in {"sendevent", "uinput", "hos"}:
         return backend

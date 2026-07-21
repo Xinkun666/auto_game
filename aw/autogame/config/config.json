@@ -1,6 +1,5 @@
 {
     "screen_mode": "2",
-    "touch_backend": "uinput",
     "stream_disable_save_frames": true,
     "stream_diagnostics": true,
     "stream_diagnostics_interval": 1.0,
@@ -10,24 +9,5 @@
     "hoscrcpy_decoder": "gstreamer",
     "hoscrcpy_first_frame_timeout": 15,
     "hoscrcpy_device_port": 5000,
-    "hoscrcpy_encoder_type": "0",
-    "nanda_house_search": {
-        "enabled": true,
-        "door_pose_backend": "entry_direction_yolo",
-        "room_segmenter_backend": "sam3_special_area",
-        "max_entry_distance": 2.5,
-        "area_min_ratio": 0.02,
-        "area_max_ratio": 0.04,
-        "acceptable_center_ratio": 0.03,
-        "stable_required_count": 2,
-        "pitch_compensation": true,
-        "joystick_radius_height_ratio": 0.0974,
-        "replay_skip_idle": true
-    },
-    "stage_time_minutes": {
-        "搜房": 10,
-        "跑图": 10,
-        "开车": 10
-    },
-    "width": 768
+    "hoscrcpy_encoder_type": "0"
 }

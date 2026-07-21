@@ -2099,11 +2099,11 @@ class HouseSearchManager:
         w: 'FrameWorker',
         message: str,
         result=None,
-        phase: str = "pipeline",
+        phase: Optional[str] = None,
     ) -> str:
         metadata = getattr(result, 'metadata', None)
         metadata = metadata if isinstance(metadata, dict) else {}
-        failure_phase = str(metadata.get('phase') or phase or 'pipeline')
+        failure_phase = str(phase or metadata.get('phase') or 'pipeline')
         raw_status = getattr(result, 'status', None)
         status_value = getattr(raw_status, 'value', raw_status)
         status_text = str(status_value or 'exception')
@@ -2292,50 +2292,64 @@ class HouseSearchManager:
             return "aborted"
         if result.status == NandaSearchStatus.COMPLETED:
             w.refresh_frame()
+            scene = self._get_house_scene(w)
             w.frame_log(
                 f"[NandaSearch] 回放结束复核："
-                f"house_scene={self._house_scene_label(self._get_house_scene(w))}"
+                f"house_scene={self._house_scene_label(scene)}"
             )
             if context.should_abort():
                 return "aborted"
-            if context.is_outside():
-                room_label = result.room_id or "unknown"
-                w.frame_log(
-                    f"[NandaSearch] 房型 {room_label} 回放完成且已位于室外，"
-                    "直接登记当前房屋搜索完成"
-                )
-                finalized = self._finalize_completed_house_search(
-                    w,
-                    f"南大回放房型 {room_label} 搜索完成",
-                )
-                return "completed" if finalized else "aborted"
 
-            scene = self._get_house_scene(w)
+            room_label = result.room_id or "unknown"
             if scene == self.HOUSE_INDOOR:
+                w.frame_log(
+                    f"[NandaSearch] 房型 {room_label} 回放完成但人物仍在室内，"
+                    "交给现有出房策略"
+                )
+                try:
+                    self._exit_house(w)
+                except Exception as exc:
+                    if exclusive:
+                        return self._fail_nanda_only(
+                            w,
+                            f"南大回放完成后调用出房策略异常: {exc}",
+                            result=result,
+                            phase="exit",
+                        )
+                    w.frame_log(f"[NandaSearch] 出房策略异常: {exc}")
+                    return "failed"
+                if context.should_abort():
+                    return "aborted"
+                w.refresh_frame()
+                scene = self._get_house_scene(w)
+                w.frame_log(
+                    f"[NandaSearch] 出房结束复核："
+                    f"house_scene={self._house_scene_label(scene)}"
+                )
+
+            if scene not in {self.HOUSE_OUTDOOR, self.HOUSE_ROOFTOP}:
                 if exclusive:
                     return self._fail_nanda_only(
                         w,
-                        "南大回放报告完成，但人物仍在室内",
+                        f"南大回放完成后出房失败，house_scene={scene}",
                         result=result,
-                        phase="verify",
+                        phase="exit" if scene == self.HOUSE_INDOOR else "verify",
                     )
                 w.frame_log(
-                    "[NandaSearch] 回放报告完成但人物仍在室内，"
-                    "转入现有室内搜房/出房策略"
+                    f"[NandaSearch] 回放完成后未确认人物在室外，"
+                    f"house_scene={scene}"
                 )
-                return "indoor"
-            if exclusive:
-                return self._fail_nanda_only(
-                    w,
-                    f"南大回放完成后无法确认人物已在室外，house_scene={scene}",
-                    result=result,
-                    phase="verify",
-                )
+                return "failed"
+
             w.frame_log(
-                f"[NandaSearch] 回放报告完成但未验证已出房 "
-                f"house_scene={scene}，不登记完成"
+                f"[NandaSearch] 房型 {room_label} 已确认位于室外，"
+                "登记当前房屋完成并在下一帧选择下一个入门点"
             )
-            return "failed"
+            finalized = self._finalize_completed_house_search(
+                w,
+                f"南大回放房型 {room_label} 搜索完成",
+            )
+            return "completed" if finalized else "aborted"
 
         if result.status in {NandaSearchStatus.DISABLED, NandaSearchStatus.NO_MATCH}:
             if exclusive:

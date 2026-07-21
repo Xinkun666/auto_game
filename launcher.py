@@ -2508,7 +2508,7 @@ class LauncherWindow(QWidget):
         self.safe_temp_spin.setRange(0.0, 100.0)
         self.safe_temp_spin.setDecimals(1)
         self.safe_temp_spin.setSingleStep(0.5)
-        self.safe_temp_spin.setValue(26.0)
+        self.safe_temp_spin.setValue(36.0)
         self.safe_temp_spin.setSuffix(" °C")
         self.safe_temp_field = self._create_spin_with_presets(
             self.safe_temp_spin,
@@ -2518,7 +2518,7 @@ class LauncherWindow(QWidget):
 
         self.safe_battery_spin = QSpinBox()
         self.safe_battery_spin.setRange(0, 100)
-        self.safe_battery_spin.setValue(80)
+        self.safe_battery_spin.setValue(60)
         self.safe_battery_spin.setSuffix(" %")
         self.safe_battery_field = self._create_spin_with_presets(
             self.safe_battery_spin,

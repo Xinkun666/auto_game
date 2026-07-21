@@ -1,5 +1,4 @@
 {
-    "touch_backend": "uinput",
     "nanda_house_search": {
         "enabled": true,
         "door_pose_backend": "entry_direction_yolo",
@@ -17,6 +16,5 @@
         "搜房": 10,
         "跑图": 10,
         "开车": 10
-    },
-    "width": 768
+    }
 }

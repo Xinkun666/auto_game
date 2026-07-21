@@ -1,5 +1,6 @@
 {
     "screen_mode": "2",
+    "touch_backend": "uinput",
     "stream_disable_save_frames": true,
     "stream_diagnostics": true,
     "stream_diagnostics_interval": 1.0,
@@ -9,5 +10,6 @@
     "hoscrcpy_decoder": "gstreamer",
     "hoscrcpy_first_frame_timeout": 15,
     "hoscrcpy_device_port": 5000,
-    "hoscrcpy_encoder_type": "0"
+    "hoscrcpy_encoder_type": "0",
+    "width": 768
 }

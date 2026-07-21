@@ -8,7 +8,7 @@ import numpy as np
 from sklearn.cluster import DBSCAN
 from typing import Dict, List, Optional, Any, Tuple
 from aw.autogame.tools.ProcessUtils import hdc_command_args, hidden_subprocess_kwargs
-from aw.autogame.tools.Utils import _read_project_config
+from aw.autogame.tools.Utils import _read_autogame_config
 
 def hex_to_rgb(hex_str: str):
     """'#00a2e8' → (0, 162, 232)"""
@@ -234,7 +234,7 @@ def get_wh():
         w_h = resolution[0] / resolution[1]
     else:
         w_h = resolution[1] / resolution[0]
-    config = _read_project_config("Auto_PUBG_ALL")
+    config = _read_autogame_config()
     width = int(config.get("width", 768))
     height = int(width * w_h)
     return width, height

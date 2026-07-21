@@ -956,7 +956,7 @@ def get_wh():
         w_h = resolution[0] / resolution[1]
     else:
         w_h = resolution[1] / resolution[0]
-    config = _read_project_config()
+    config = _read_autogame_config()
     width = int(config.get("width", 768))
     height = int(width * w_h)
     return width, height
@@ -1599,19 +1599,15 @@ def get_screen_mode(config_path="aw/autogame/config/config.json"):
     return str(config.get("screen_mode", "0"))
 
 
-def get_touch_backend(config_path=None):
+def get_touch_backend(config_path="aw/autogame/config/config.json"):
     """
     读取触控后端配置。
 
-    默认从当前自动化项目的 config.json 中读取 touch_backend。
+    从工程级 config.json 中读取 touch_backend。
     可选值：sendevent / uinput / hos
     未配置或配置非法时，默认使用 uinput。
     """
-    config = (
-        _read_autogame_config(config_path)
-        if config_path is not None
-        else _read_project_config()
-    )
+    config = _read_autogame_config(config_path)
     backend = str(config.get("touch_backend", "")).strip().lower()
     if backend in {"sendevent", "uinput", "hos"}:
         return backend

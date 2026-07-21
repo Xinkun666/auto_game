@@ -1,21 +1,5 @@
-# 南大搜房在当前服务器 auto_game 环境上的增量依赖。
-#
-# 依据服务器 pip list 生成：现有 torch/torchvision/numpy/OpenCV/Pillow、
-# safetensors/scikit-learn 及 sam3_tiny 依赖均不重复声明，避免改动现有
-# Torch/CUDA 和视觉推理环境。
-#
-# 安装到实际启动 launcher.py 的同一个 Python 3.10+ 环境：
-#   python -m pip install --upgrade-strategy only-if-needed -r requirements_nada_room.txt
-
-# DINOv3 本地离线加载（必需）。
 transformers~=5.0.0
-
-# Transformers 5.0 的运行依赖。服务器现有 huggingface-hub==0.34.4
-# 需要升级；显式排除与 huggingface-hub>=1.3 不兼容的 tokenizers 0.22.0。
 huggingface-hub>=1.3.0,<2.0
 tokenizers>=0.22.1,<=0.23.0
 typer-slim
-
-# 南大模板向量召回。当前代码缺失时会退回 NumPy，但正式搜房环境安装
-# FAISS 可以保持预期的索引后端；faiss-cpu 1.12.0 提供 Windows x64 轮子。
 faiss-cpu~=1.12.0

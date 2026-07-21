@@ -947,6 +947,7 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
 
     _ABORT_POLL_SECONDS = 0.05
     _TOUCH_RECOVERY_POLL_SECONDS = 0.1
+    _STREAM_DIAG_INTERVAL_SECONDS = 1.0
     _TRANSIENT_TOUCH_ERRORS = (
         "HOS touch is unavailable: stream device is not ready",
         "HOS touch is unavailable: capture is paused",
@@ -1023,10 +1024,17 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
             int(round(center[1] + radius * math.sin(angle_radians))),
         )
 
-    def _wait_until(self, deadline: float, context: NandaSearchContext) -> bool:
+    def _wait_until(
+        self,
+        deadline: float,
+        context: NandaSearchContext,
+        periodic_callback: Optional[Callable[[], None]] = None,
+    ) -> bool:
         while True:
             if context.should_abort():
                 return False
+            if periodic_callback is not None:
+                periodic_callback()
             remaining = deadline - self._monotonic()
             if remaining <= 0:
                 return True
@@ -1085,6 +1093,99 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
         return any(marker in message for marker in self._TRANSIENT_TOUCH_ERRORS)
 
     @staticmethod
+    def _sanitize_diagnostic_text(value: Any, limit: int = 240) -> str:
+        text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+        return text[:limit] if text else "-"
+
+    def _log_stream_diagnostic(
+        self,
+        context: NandaSearchContext,
+        stream_client: Any,
+        checkpoint: str,
+        replay_started_at: float,
+        *,
+        step_index: int = 0,
+        step_count: int = 0,
+        step: Optional[NandaJoystickReplayStep] = None,
+        action: str = "-",
+        previous_counts: Optional[Tuple[int, int, int]] = None,
+        touch_error: str = "",
+    ) -> Tuple[int, int, int]:
+        snapshot = {}
+        snapshot_error = ""
+        diagnostic_snapshot = getattr(stream_client, "diagnostic_snapshot", None)
+        if callable(diagnostic_snapshot):
+            try:
+                raw_snapshot = diagnostic_snapshot()
+                if isinstance(raw_snapshot, dict):
+                    snapshot = raw_snapshot
+            except Exception as exc:
+                snapshot_error = f"diagnostic_snapshot failed: {exc}"
+
+        callback_count = int(
+            snapshot.get(
+                "callback_data_count",
+                getattr(stream_client, "_callback_data_count", 0),
+            )
+            or 0
+        )
+        decoded_count = int(
+            snapshot.get(
+                "decoded_frame_count",
+                getattr(stream_client, "_decoded_frame_count", 0),
+            )
+            or 0
+        )
+        frame_buffer = getattr(stream_client, "buffer", None)
+        buffer_count = int(getattr(frame_buffer, "count", 0) or 0)
+        counts = (callback_count, decoded_count, buffer_count)
+
+        if previous_counts is None:
+            count_text = (
+                f"callback={callback_count}(delta=-) "
+                f"decoded={decoded_count}(delta=-) "
+                f"buffer={buffer_count}(delta=-)"
+            )
+        else:
+            count_text = (
+                f"callback={callback_count}(delta={callback_count - previous_counts[0]:+d}) "
+                f"decoded={decoded_count}(delta={decoded_count - previous_counts[1]:+d}) "
+                f"buffer={buffer_count}(delta={buffer_count - previous_counts[2]:+d})"
+            )
+
+        now = self._monotonic()
+
+        def age_text(timestamp: Any) -> str:
+            try:
+                if timestamp is None:
+                    return "-"
+                return f"{max(0.0, now - float(timestamp)):.2f}s"
+            except (TypeError, ValueError):
+                return "-"
+
+        last_error = snapshot_error or snapshot.get("last_error", "")
+        direction = step.move_direction if step is not None else "-"
+        record_time = f"{step.timestamp:.3f}s" if step is not None else "-"
+        context.worker.frame_log(
+            f"[NandaStreamDiag] checkpoint={checkpoint} "
+            f"elapsed={max(0.0, now - replay_started_at):.2f}s "
+            f"step={step_index}/{step_count} record_time={record_time} "
+            f"action={action} direction={direction} "
+            f"stream_stage={snapshot.get('stage', '-')} "
+            f"running={snapshot.get('running', getattr(stream_client, 'running', '-'))} "
+            f"device_ready={self._stream_touch_ready(stream_client)} "
+            f"capture_paused={snapshot.get('capture_paused', '-')} "
+            f"{count_text} "
+            f"last_data_age={age_text(getattr(stream_client, '_last_data_at', None))} "
+            f"last_decoded_age={age_text(getattr(stream_client, '_last_decoded_at', None))} "
+            f"reconnect={snapshot.get('reconnect_attempt', '-')}/"
+            f"{snapshot.get('max_reconnect_attempts', '-')} "
+            f"last_error={self._sanitize_diagnostic_text(last_error)} "
+            f"touch_error={self._sanitize_diagnostic_text(touch_error)}"
+        )
+        return counts
+
+    @staticmethod
     def _close_touch(touch: Any) -> None:
         close = getattr(touch, "close", None)
         if callable(close):
@@ -1106,6 +1207,16 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
         if stream_client is None:
             raise RuntimeError("当前 FrameWorker 没有可用的 HOScrcpy 触控流")
         center, radius = self._resolve_joystick_geometry(context)
+        started_at = self._monotonic()
+        diagnostic_counts = self._log_stream_diagnostic(
+            context,
+            stream_client,
+            "start",
+            started_at,
+            step_count=len(steps),
+            action="prepare",
+        )
+        last_diagnostic_at = started_at
         if not self._stream_touch_ready(stream_client):
             recovered = self._wait_for_touch_recovery(
                 context,
@@ -1113,6 +1224,15 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
                 "回放开始前 stream device is not ready",
             )
             if recovered is None:
+                self._log_stream_diagnostic(
+                    context,
+                    stream_client,
+                    "aborted",
+                    started_at,
+                    step_count=len(steps),
+                    action="wait_stream_before_start",
+                    previous_counts=diagnostic_counts,
+                )
                 return NandaSearchResult(
                     NandaSearchStatus.ABORTED,
                     "等待 HOS 触控流恢复时搜房阶段已中止",
@@ -1120,19 +1240,56 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
                     replay_path=match.replay_path,
                     metadata={"phase": "replay"},
                 )
+            diagnostic_counts = self._log_stream_diagnostic(
+                context,
+                stream_client,
+                "recovered",
+                started_at,
+                step_count=len(steps),
+                action="stream_before_start",
+                previous_counts=diagnostic_counts,
+            )
+            last_diagnostic_at = self._monotonic()
         touch = self._make_touch_controller(stream_client)
         current_moving = False
         current_direction = 0
         previous_record_time = 0.0
         previous_was_idle = True
         scheduled_at = self._monotonic()
-        started_at = scheduled_at
         context.worker.frame_log(
             f"[NandaReplay] 开始 HOS 单摇杆回放：room={match.room_id}，"
             f"steps={len(steps)}，center={center}，radius={radius}"
         )
         try:
-            for step in steps:
+            for step_index, step in enumerate(steps, start=1):
+                if step.moving:
+                    if not current_moving:
+                        action = "press"
+                    elif step.move_direction != current_direction:
+                        action = "move"
+                    else:
+                        action = "hold"
+                else:
+                    action = "up" if current_moving else "idle"
+
+                def log_periodic() -> None:
+                    nonlocal diagnostic_counts, last_diagnostic_at
+                    now = self._monotonic()
+                    if now - last_diagnostic_at < self._STREAM_DIAG_INTERVAL_SECONDS:
+                        return
+                    diagnostic_counts = self._log_stream_diagnostic(
+                        context,
+                        stream_client,
+                        "periodic",
+                        started_at,
+                        step_index=step_index,
+                        step_count=len(steps),
+                        step=step,
+                        action=f"waiting->{action}",
+                        previous_counts=diagnostic_counts,
+                    )
+                    last_diagnostic_at = now
+
                 wait_seconds = step.timestamp - previous_record_time
                 previous_record_time = step.timestamp
                 skip_wait = self.settings.replay_skip_idle and previous_was_idle
@@ -1141,7 +1298,22 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
                     scheduled_at = self._monotonic()
                 else:
                     scheduled_at += wait_seconds
-                    if not self._wait_until(scheduled_at, context):
+                    if not self._wait_until(
+                        scheduled_at,
+                        context,
+                        periodic_callback=log_periodic,
+                    ):
+                        self._log_stream_diagnostic(
+                            context,
+                            stream_client,
+                            "aborted",
+                            started_at,
+                            step_index=step_index,
+                            step_count=len(steps),
+                            step=step,
+                            action=f"waiting->{action}",
+                            previous_counts=diagnostic_counts,
+                        )
                         return NandaSearchResult(
                             NandaSearchStatus.ABORTED,
                             "南大摇杆回放被搜房阶段中止",
@@ -1151,6 +1323,17 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
                         )
 
                 if context.should_abort():
+                    self._log_stream_diagnostic(
+                        context,
+                        stream_client,
+                        "aborted",
+                        started_at,
+                        step_index=step_index,
+                        step_count=len(steps),
+                        step=step,
+                        action=action,
+                        previous_counts=diagnostic_counts,
+                    )
                     return NandaSearchResult(
                         NandaSearchStatus.ABORTED,
                         "南大摇杆回放被搜房阶段中止",
@@ -1175,6 +1358,19 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
                         touch.move_up(0)
                         current_moving = False
                 except RuntimeError as exc:
+                    diagnostic_counts = self._log_stream_diagnostic(
+                        context,
+                        stream_client,
+                        "touch_error",
+                        started_at,
+                        step_index=step_index,
+                        step_count=len(steps),
+                        step=step,
+                        action=action,
+                        previous_counts=diagnostic_counts,
+                        touch_error=str(exc),
+                    )
+                    last_diagnostic_at = self._monotonic()
                     if not self._is_transient_touch_error(exc):
                         raise
                     self._close_touch(touch)
@@ -1184,6 +1380,18 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
                         str(exc),
                     )
                     if recovered is None:
+                        self._log_stream_diagnostic(
+                            context,
+                            stream_client,
+                            "aborted",
+                            started_at,
+                            step_index=step_index,
+                            step_count=len(steps),
+                            step=step,
+                            action="wait_touch_recovery",
+                            previous_counts=diagnostic_counts,
+                            touch_error=str(exc),
+                        )
                         return NandaSearchResult(
                             NandaSearchStatus.ABORTED,
                             "等待 HOS 触控流恢复时搜房阶段已中止",
@@ -1191,6 +1399,18 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
                             replay_path=match.replay_path,
                             metadata={"phase": "replay"},
                         )
+                    diagnostic_counts = self._log_stream_diagnostic(
+                        context,
+                        stream_client,
+                        "recovered",
+                        started_at,
+                        step_index=step_index,
+                        step_count=len(steps),
+                        step=step,
+                        action="retry_current_direction",
+                        previous_counts=diagnostic_counts,
+                    )
+                    last_diagnostic_at = self._monotonic()
                     scheduled_at += recovered
                     touch = self._make_touch_controller(stream_client)
                     current_moving = False
@@ -1205,6 +1425,18 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
             except RuntimeError as exc:
                 if not self._is_transient_touch_error(exc):
                     raise
+                diagnostic_counts = self._log_stream_diagnostic(
+                    context,
+                    stream_client,
+                    "cleanup_error",
+                    started_at,
+                    step_index=len(steps),
+                    step_count=len(steps),
+                    step=steps[-1] if steps else None,
+                    action="up",
+                    previous_counts=diagnostic_counts,
+                    touch_error=str(exc),
+                )
                 context.worker.frame_log(
                     f"[NandaReplay] 回放收尾时 HOS 流已断开，无法发送抬指：{exc}；"
                     "设备触控会话已随流断开，继续关闭本地回放控制器"
@@ -1213,6 +1445,17 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
                 self._close_touch(touch)
 
         elapsed = self._monotonic() - started_at
+        self._log_stream_diagnostic(
+            context,
+            stream_client,
+            "end",
+            started_at,
+            step_index=len(steps),
+            step_count=len(steps),
+            step=steps[-1] if steps else None,
+            action="completed",
+            previous_counts=diagnostic_counts,
+        )
         context.worker.frame_log(
             f"[NandaReplay] HOS 单摇杆回放结束：room={match.room_id}，elapsed={elapsed:.2f}s"
         )

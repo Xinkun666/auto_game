@@ -7,6 +7,8 @@
         "area_min_ratio": 0.02,
         "area_max_ratio": 0.04,
         "acceptable_center_ratio": 0.03,
+        "lateral_band_ratio": 0.05,
+        "lateral_band_duration_ms": 40,
         "stable_required_count": 2,
         "pitch_compensation": true,
         "joystick_radius_height_ratio": 0.1177,

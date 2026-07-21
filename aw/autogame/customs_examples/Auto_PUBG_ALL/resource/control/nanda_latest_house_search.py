@@ -96,6 +96,8 @@ class NandaLatestSettings:
     area_acceptable_min_ratio: float = 0.015
     area_acceptable_max_ratio: float = 0.055
     acceptable_center_ratio: float = 0.03
+    lateral_band_ratio: float = 0.05
+    lateral_band_duration_ms: int = 40
     stable_required_count: int = 2
     max_pose_actions: int = 18
     move_axis_bias: int = 240
@@ -172,6 +174,17 @@ class NandaLatestSettings:
             acceptable_center_ratio=max(
                 0.001,
                 _as_float(raw.get("acceptable_center_ratio"), cls.acceptable_center_ratio),
+            ),
+            lateral_band_ratio=max(
+                0.001,
+                _as_float(raw.get("lateral_band_ratio"), cls.lateral_band_ratio),
+            ),
+            lateral_band_duration_ms=max(
+                1,
+                _as_int(
+                    raw.get("lateral_band_duration_ms"),
+                    cls.lateral_band_duration_ms,
+                ),
             ),
             stable_required_count=max(
                 1, _as_int(raw.get("stable_required_count"), cls.stable_required_count)
@@ -263,10 +276,13 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
         return int(round(low + (high - low) * ratio))
 
     def _lateral_duration_for_error(self, center_error: float) -> Tuple[int, int]:
-        segment = self.settings.acceptable_center_ratio
-        active_error = max(0.0, center_error - segment)
+        segment = self.settings.lateral_band_ratio
+        active_error = max(
+            0.0,
+            center_error - self.settings.acceptable_center_ratio,
+        )
         band = max(1, math.ceil(active_error / segment - 1e-9))
-        return band, min(500, band * 50)
+        return band, min(500, band * self.settings.lateral_band_duration_ms)
 
     def _retry_after_action(
         self,
@@ -387,7 +403,7 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
             return timeout_result
         relaxed_accept = self._action_count >= self.settings.max_pose_actions
 
-        # 3% 内视为精准对准；之后每增加 3%，横移时间增加 50ms。
+        # 3% 内视为精准对准；之后每增加 5%，横移时间增加 40ms。
         if not relaxed_accept and center_error > self.settings.acceptable_center_ratio:
             band, duration = self._lateral_duration_for_error(center_error)
             side = 1 if center_delta > 0 else -1

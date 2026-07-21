@@ -115,6 +115,7 @@ class NandaLatestSettings:
     joystick_radius_height_ratio: float = 0.0974
     joystick_slide_duration_ms: int = 100
     replay_skip_idle: bool = True
+    replay_touch_recovery_timeout_seconds: float = 60.0
 
     @classmethod
     def from_mapping(cls, config: Optional[Mapping[str, Any]]) -> "NandaLatestSettings":
@@ -232,6 +233,13 @@ class NandaLatestSettings:
                 ),
             ),
             replay_skip_idle=_as_bool(raw.get("replay_skip_idle"), cls.replay_skip_idle),
+            replay_touch_recovery_timeout_seconds=max(
+                1.0,
+                _as_float(
+                    raw.get("replay_touch_recovery_timeout_seconds"),
+                    cls.replay_touch_recovery_timeout_seconds,
+                ),
+            ),
         )
 
 
@@ -665,6 +673,9 @@ def _version_tuple(value: str) -> Tuple[int, ...]:
 class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
     """在当前搜房进程内直接执行 DINOv3 + MLP 房型配准。"""
 
+    _shared_runtime_lock = threading.Lock()
+    _shared_runtimes: Dict[Tuple[Any, ...], Any] = {}
+
     def __init__(
         self,
         settings: NandaLatestSettings,
@@ -673,7 +684,6 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
         self.settings = settings
         self._runtime_factory = runtime_factory
         self._runtime = None
-        self._runtime_lock = threading.Lock()
         self.unavailable_reason = "进程内 DINOv3/MLP 尚未检查"
 
     def _asset_paths(self) -> NandaMatcherAssetPaths:
@@ -732,17 +742,34 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
     def _get_runtime(self, context: NandaSearchContext):
         if self._runtime is not None:
             return self._runtime
-        with self._runtime_lock:
-            if self._runtime is None:
-                paths = self._asset_paths()
+
+        paths = self._asset_paths()
+        cache_key = (
+            str(paths.dino_model_dir),
+            str(paths.mlp_model_path),
+            str(paths.room_library_path),
+            self.settings.matcher_device or "auto",
+            self._runtime_factory,
+        )
+        with self._shared_runtime_lock:
+            shared_runtime = self._shared_runtimes.get(cache_key)
+            if shared_runtime is not None:
+                self._runtime = shared_runtime
+                context.worker.frame_log(
+                    "[NandaMatch] 复用当前进程已加载的 "
+                    "DINOv3、MLP 和房型索引，不重复加载权重"
+                )
+            else:
                 context.worker.frame_log(
                     "[NandaMatch] 首次房型配准，正在当前进程惰性加载 "
-                    f"DINOv3、MLP 和房型索引：{paths.to_jsonable()}"
+                    f"DINOv3、MLP 和房型索引：{paths.to_jsonable()}；"
+                    "本进程后续房屋将直接复用"
                 )
                 self._runtime = self._runtime_factory(
                     paths,
                     device=self.settings.matcher_device or None,
                 )
+                self._shared_runtimes[cache_key] = self._runtime
         return self._runtime
 
     def match(self, context: NandaSearchContext) -> Optional[NandaRoomMatch]:
@@ -909,6 +936,12 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
     """把南大 scrcpy 摇杆 DSL 复刻到 HOScrcpy 单指触控通道。"""
 
     _ABORT_POLL_SECONDS = 0.05
+    _TOUCH_RECOVERY_POLL_SECONDS = 0.1
+    _TRANSIENT_TOUCH_ERRORS = (
+        "HOS touch is unavailable: stream device is not ready",
+        "HOS touch is unavailable: capture is paused",
+        "HOS touch is unavailable: device setup is incomplete",
+    )
 
     def __init__(
         self,
@@ -989,6 +1022,64 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
                 return True
             self._sleep(min(self._ABORT_POLL_SECONDS, remaining))
 
+    @staticmethod
+    def _stream_touch_ready(stream_client: Any) -> bool:
+        """仅对真实 HOS 流客户端检查就绪状态；测试替身默认可用。"""
+        has_runtime_state = any(
+            hasattr(stream_client, name)
+            for name in ("device", "running", "is_capture_paused")
+        )
+        if not has_runtime_state:
+            return True
+        if hasattr(stream_client, "running") and not bool(stream_client.running):
+            return False
+        if getattr(stream_client, "device", None) is None:
+            return False
+        is_capture_paused = getattr(stream_client, "is_capture_paused", None)
+        if callable(is_capture_paused) and is_capture_paused():
+            return False
+        inner_device = getattr(getattr(stream_client, "device", None), "device", None)
+        if inner_device is not None and not bool(getattr(inner_device, "is_setup", False)):
+            return False
+        return True
+
+    def _wait_for_touch_recovery(
+        self,
+        context: NandaSearchContext,
+        stream_client: Any,
+        reason: str,
+    ) -> Optional[float]:
+        started_at = self._monotonic()
+        timeout = self.settings.replay_touch_recovery_timeout_seconds
+        context.worker.frame_log(
+            f"[NandaReplay] HOS触控流暂时不可用：{reason}；"
+            f"暂停回放并等待流恢复，超时={timeout:g}s"
+        )
+        while self._monotonic() - started_at < timeout:
+            if context.should_abort():
+                return None
+            if self._stream_touch_ready(stream_client):
+                elapsed = self._monotonic() - started_at
+                context.worker.frame_log(
+                    f"[NandaReplay] HOS触控流已恢复，等待={elapsed:.2f}s，"
+                    "从当前摇杆方向续播"
+                )
+                return elapsed
+            self._sleep(self._TOUCH_RECOVERY_POLL_SECONDS)
+        raise RuntimeError(
+            f"HOS触控流在 {timeout:g}s 内未恢复: {reason}"
+        )
+
+    def _is_transient_touch_error(self, exc: Exception) -> bool:
+        message = str(exc)
+        return any(marker in message for marker in self._TRANSIENT_TOUCH_ERRORS)
+
+    @staticmethod
+    def _close_touch(touch: Any) -> None:
+        close = getattr(touch, "close", None)
+        if callable(close):
+            close()
+
     def replay(
         self,
         context: NandaSearchContext,
@@ -1005,6 +1096,20 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
         if stream_client is None:
             raise RuntimeError("当前 FrameWorker 没有可用的 HOScrcpy 触控流")
         center, radius = self._resolve_joystick_geometry(context)
+        if not self._stream_touch_ready(stream_client):
+            recovered = self._wait_for_touch_recovery(
+                context,
+                stream_client,
+                "回放开始前 stream device is not ready",
+            )
+            if recovered is None:
+                return NandaSearchResult(
+                    NandaSearchStatus.ABORTED,
+                    "等待 HOS 触控流恢复时搜房阶段已中止",
+                    room_id=match.room_id,
+                    replay_path=match.replay_path,
+                    metadata={"phase": "replay"},
+                )
         touch = self._make_touch_controller(stream_client)
         current_moving = False
         current_direction = 0
@@ -1043,28 +1148,59 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
                         replay_path=match.replay_path,
                         metadata={"phase": "replay"},
                     )
-                if step.moving:
-                    target = self._target_for_direction(center, radius, step.move_direction)
-                    if not current_moving:
-                        touch.move_press(0, target)
-                    elif step.move_direction != current_direction:
-                        touch.move_to(
-                            0,
-                            target,
-                            duration_ms=self.settings.joystick_slide_duration_ms,
+                try:
+                    if step.moving:
+                        target = self._target_for_direction(center, radius, step.move_direction)
+                        if not current_moving:
+                            touch.move_press(0, target)
+                        elif step.move_direction != current_direction:
+                            touch.move_to(
+                                0,
+                                target,
+                                duration_ms=self.settings.joystick_slide_duration_ms,
+                            )
+                        current_moving = True
+                        current_direction = step.move_direction
+                    elif current_moving:
+                        touch.move_up(0)
+                        current_moving = False
+                except RuntimeError as exc:
+                    if not self._is_transient_touch_error(exc):
+                        raise
+                    self._close_touch(touch)
+                    recovered = self._wait_for_touch_recovery(
+                        context,
+                        stream_client,
+                        str(exc),
+                    )
+                    if recovered is None:
+                        return NandaSearchResult(
+                            NandaSearchStatus.ABORTED,
+                            "等待 HOS 触控流恢复时搜房阶段已中止",
+                            room_id=match.room_id,
+                            replay_path=match.replay_path,
+                            metadata={"phase": "replay"},
                         )
-                    current_moving = True
-                    current_direction = step.move_direction
-                elif current_moving:
-                    touch.move_up(0)
+                    scheduled_at += recovered
+                    touch = self._make_touch_controller(stream_client)
                     current_moving = False
+                    if step.moving:
+                        target = self._target_for_direction(center, radius, step.move_direction)
+                        touch.move_press(0, target)
+                        current_moving = True
+                        current_direction = step.move_direction
         finally:
             try:
                 touch.move_up(0)
+            except RuntimeError as exc:
+                if not self._is_transient_touch_error(exc):
+                    raise
+                context.worker.frame_log(
+                    f"[NandaReplay] 回放收尾时 HOS 流已断开，无法发送抬指：{exc}；"
+                    "设备触控会话已随流断开，继续关闭本地回放控制器"
+                )
             finally:
-                close = getattr(touch, "close", None)
-                if callable(close):
-                    close()
+                self._close_touch(touch)
 
         elapsed = self._monotonic() - started_at
         context.worker.frame_log(

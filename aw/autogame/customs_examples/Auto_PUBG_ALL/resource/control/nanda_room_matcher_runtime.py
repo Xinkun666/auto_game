@@ -236,6 +236,7 @@ class DinoV3FeatureExtractor:
         try:
             import torch
             from transformers import AutoImageProcessor, AutoModel
+            from transformers.utils import logging as transformers_logging
         except ImportError as exc:
             raise RuntimeError(
                 "DINOv3 匹配环境缺少 torch/transformers；"
@@ -246,6 +247,7 @@ class DinoV3FeatureExtractor:
         self.model_dir = model_dir.expanduser().resolve()
         self.device = self._resolve_device(device)
         LOGGER.info("加载 DINOv3：path=%s device=%s", self.model_dir, self.device)
+        transformers_logging.disable_progress_bar()
         self.processor = AutoImageProcessor.from_pretrained(
             str(self.model_dir), use_fast=True, local_files_only=True,
         )

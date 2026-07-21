@@ -12,7 +12,8 @@
         "stable_required_count": 2,
         "pitch_compensation": true,
         "joystick_radius_height_ratio": 0.1177,
-        "replay_skip_idle": true
+        "replay_skip_idle": true,
+        "replay_touch_recovery_timeout_seconds": 60
     },
     "stage_time_minutes": {
         "搜房": 10,

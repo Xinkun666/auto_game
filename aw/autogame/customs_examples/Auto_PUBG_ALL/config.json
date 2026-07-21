@@ -9,7 +9,7 @@
         "acceptable_center_ratio": 0.03,
         "stable_required_count": 2,
         "pitch_compensation": true,
-        "joystick_radius_height_ratio": 0.0974,
+        "joystick_radius_height_ratio": 0.1177,
         "replay_skip_idle": true
     },
     "stage_time_minutes": {

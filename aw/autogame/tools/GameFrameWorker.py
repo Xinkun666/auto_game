@@ -2751,7 +2751,7 @@ class FrameWorker(threading.Thread):
 
             try:
                 self.frame = np.array(frame, copy=True)
-                self.current_stage = self.get_stage()
+                self._sync_current_stage_and_group()
                 self.stage_info = self.stage_resolver.process_frame(
                     self.frame,
                     self.current_stage,
@@ -2839,6 +2839,31 @@ class FrameWorker(threading.Thread):
                 return stage
         return None
 
+    def _get_initial_group_for_stage(self, stage_name):
+        if not stage_name:
+            return DEFAULT_GROUP_NAME
+        get_initial_group = getattr(self.stage_resolver, "get_initial_group", None)
+        return (
+            get_initial_group(stage_name)
+            if callable(get_initial_group)
+            else DEFAULT_GROUP_NAME
+        )
+
+    def _sync_current_stage_and_group(self):
+        """同步直接配置的初始阶段，并仅在阶段变化时加载初始分组。"""
+        stage_name = self.get_stage()
+        if stage_name == self.current_stage:
+            return stage_name
+
+        old_stage = self.current_stage
+        self.current_stage = stage_name
+        self.current_group = self._get_initial_group_for_stage(stage_name)
+        print(
+            f"[STAGE SYNC] [{old_stage}] -> [{stage_name}], "
+            f"ACTIVE GROUP: [{self.current_group}]"
+        )
+        return stage_name
+
     def get_info(self, area_name):
         suffix = f"__{area_name}"
         for key, value in self.stage_info.items():
@@ -2856,12 +2881,7 @@ class FrameWorker(threading.Thread):
             self.stage_dict[key] = False
         self.stage_dict[stage_name] = True
         self.current_stage = stage_name
-        get_initial_group = getattr(self.stage_resolver, "get_initial_group", None)
-        self.current_group = (
-            get_initial_group(stage_name)
-            if callable(get_initial_group)
-            else DEFAULT_GROUP_NAME
-        )
+        self.current_group = self._get_initial_group_for_stage(stage_name)
 
         print("\n" + ">" * 40)
         print(f"  STATUS CHANGE: [{old_stage}] -> [{stage_name}]")
@@ -2927,7 +2947,7 @@ class FrameWorker(threading.Thread):
             return False
 
         self.frame = np.array(frame, copy=True)
-        self.current_stage = self.get_stage()
+        self._sync_current_stage_and_group()
         self.stage_info = self.stage_resolver.process_frame(
             self.frame,
             self.current_stage,

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from importlib import metadata as importlib_metadata
 from importlib.util import find_spec
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -42,6 +43,9 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_room_matc
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import (
     plan_view_turn_motion,
 )
+
+
+LOGGER = logging.getLogger("NandaLatestHouseSearch")
 
 
 _UNSUPPORTED_REPLAY_ACTIONS = {
@@ -739,7 +743,7 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
         self.unavailable_reason = "进程内 DINOv3/MLP 资产与依赖已就绪"
         return True
 
-    def _get_runtime(self, context: NandaSearchContext):
+    def _ensure_runtime(self, emit_log: Callable[[str], None]):
         if self._runtime is not None:
             return self._runtime
 
@@ -755,13 +759,13 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
             shared_runtime = self._shared_runtimes.get(cache_key)
             if shared_runtime is not None:
                 self._runtime = shared_runtime
-                context.worker.frame_log(
+                emit_log(
                     "[NandaMatch] 复用当前进程已加载的 "
                     "DINOv3、MLP 和房型索引，不重复加载权重"
                 )
             else:
-                context.worker.frame_log(
-                    "[NandaMatch] 首次房型配准，正在当前进程惰性加载 "
+                emit_log(
+                    "[NandaMatch] 当前进程首次初始化，正在加载 "
                     f"DINOv3、MLP 和房型索引：{paths.to_jsonable()}；"
                     "本进程后续房屋将直接复用"
                 )
@@ -771,6 +775,12 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
                 )
                 self._shared_runtimes[cache_key] = self._runtime
         return self._runtime
+
+    def warmup(self) -> None:
+        self._ensure_runtime(LOGGER.info)
+
+    def _get_runtime(self, context: NandaSearchContext):
+        return self._ensure_runtime(context.worker.frame_log)
 
     def match(self, context: NandaSearchContext) -> Optional[NandaRoomMatch]:
         if context.should_abort():

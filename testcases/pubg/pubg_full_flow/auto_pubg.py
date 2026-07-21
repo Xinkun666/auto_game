@@ -19,6 +19,7 @@ from devicetest.core.test_case import TestCase
 from hypium import BY, UiDriver
 from hypium.action.os_hypium.device_logger import DeviceLogger
 from aw.autogame.tools.GameAutomator import GameAutomator
+from aw.autogame.customs_game_examples.Auto_PUBG_ALL.auto_pubg import preload_runtime
 from aw.autogame.tools.GameLaunchProfile import (
     DEFAULT_SP_PACKAGE,
     cleanup_packages_for_test_profile,
@@ -269,6 +270,8 @@ class auto_pubg(TestCase):
         automation_completed = False
         try:
             self._validate_runtime_entry()
+            print("预加载南大房型匹配运行时...")
+            preload_runtime()
             # 1. 启动本地设备日志。即使后续 gRPC 断流被 launcher 杀进程，
             #    已生成的日志文件也会被 launcher 归档到本次运行目录。
             self.start_device_log()

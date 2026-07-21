@@ -112,6 +112,9 @@ class NandaRoomMatcher(ABC):
         """匹配器当前是否可用；默认的进程内实现始终可用。"""
         return True
 
+    def warmup(self) -> None:
+        """可选预加载入口；默认匹配器不需要预热。"""
+
     @abstractmethod
     def match(self, context: NandaSearchContext) -> Optional[NandaRoomMatch]:
         """匹配当前房型；无可靠匹配时返回 ``None``。"""
@@ -165,6 +168,8 @@ class NandaHouseSearchStrategy:
         self.replay_executor = replay_executor
         self.pose_preparer = pose_preparer
         self.exclusive = bool(exclusive)
+        self._ready_checked = False
+        self._ready_result: Optional[NandaSearchResult] = None
 
     @property
     def enabled(self) -> bool:
@@ -182,6 +187,13 @@ class NandaHouseSearchStrategy:
 
     def validate_ready(self) -> Optional[NandaSearchResult]:
         """在人物移动前检查南大管线的本地资产与依赖。"""
+        if self._ready_checked:
+            return self._ready_result
+        self._ready_result = self._validate_ready_once()
+        self._ready_checked = True
+        return self._ready_result
+
+    def _validate_ready_once(self) -> Optional[NandaSearchResult]:
         if not self.enabled:
             return NandaSearchResult(
                 NandaSearchStatus.DISABLED,
@@ -206,6 +218,14 @@ class NandaHouseSearchStrategy:
                 NandaSearchStatus.FAILED,
                 str(unavailable_reason or "本地房型匹配当前不可用"),
                 metadata={"phase": "preflight", "matcher_unavailable": True},
+            )
+        try:
+            self.matcher.warmup()
+        except Exception as exc:
+            return NandaSearchResult(
+                NandaSearchStatus.FAILED,
+                f"本地房型匹配预加载异常: {exc}",
+                metadata={"phase": "preflight", "exception": type(exc).__name__},
             )
         return None
 

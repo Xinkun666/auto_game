@@ -115,8 +115,20 @@ def initialize_runtime():
     parachute_manager = ParachuteManager()
     running_manager = RunningManager()
     driving_manager = DrivingManager()
+    nanda_search_strategy = build_nanda_house_search_strategy(autogame_config)
+    if nanda_search_strategy.enabled:
+        print("[NandaPreload] 功能测试启动预热 DINOv3、MLP 和房型索引...", flush=True)
+        preload_error = nanda_search_strategy.validate_ready()
+        if preload_error is None:
+            print("[NandaPreload] 南大房型匹配运行时预热完成，门前匹配将直接推理。", flush=True)
+        else:
+            print(
+                f"[NandaPreload] 南大房型匹配预热失败：{preload_error.message}；"
+                "进入搜房阶段后将按预检失败上报。",
+                flush=True,
+            )
     searching_house_manager = HouseSceneSearchManager(
-        nanda_search_strategy=build_nanda_house_search_strategy(autogame_config)
+        nanda_search_strategy=nanda_search_strategy
     )
     searching_house_manager.configure_r_city_landing_target(DROP_TARGET_R_CITY)
     searching_house_manager.configure_r_city_pre_search_target(
@@ -142,6 +154,11 @@ def initialize_runtime():
     searching_house_manager.finish_callback = finish_searching_and_enter_running
 
     _runtime_initialized = True
+
+
+def preload_runtime():
+    """在启动游戏和 HOS 抓流前预加载项目运行时。"""
+    initialize_runtime()
 
 
 def _require_runtime():

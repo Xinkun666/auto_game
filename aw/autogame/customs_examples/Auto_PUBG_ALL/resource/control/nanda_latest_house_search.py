@@ -95,8 +95,6 @@ class NandaLatestSettings:
     area_max_ratio: float = 0.04
     area_acceptable_min_ratio: float = 0.015
     area_acceptable_max_ratio: float = 0.055
-    coarse_center_ratio: float = 0.04
-    final_center_ratio: float = 0.01
     acceptable_center_ratio: float = 0.03
     stable_required_count: int = 2
     max_pose_actions: int = 18
@@ -170,14 +168,6 @@ class NandaLatestSettings:
                 _as_float(
                     raw.get("area_acceptable_max_ratio"), cls.area_acceptable_max_ratio
                 ),
-            ),
-            coarse_center_ratio=max(
-                0.001,
-                _as_float(raw.get("coarse_center_ratio"), cls.coarse_center_ratio),
-            ),
-            final_center_ratio=max(
-                0.001,
-                _as_float(raw.get("final_center_ratio"), cls.final_center_ratio),
             ),
             acceptable_center_ratio=max(
                 0.001,
@@ -271,6 +261,12 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
         low = min(self.settings.pose_min_duration_ms, self.settings.pose_max_duration_ms)
         high = max(self.settings.pose_min_duration_ms, self.settings.pose_max_duration_ms)
         return int(round(low + (high - low) * ratio))
+
+    def _lateral_duration_for_error(self, center_error: float) -> Tuple[int, int]:
+        segment = self.settings.acceptable_center_ratio
+        active_error = max(0.0, center_error - segment)
+        band = max(1, math.ceil(active_error / segment - 1e-9))
+        return band, min(500, band * 50)
 
     def _retry_after_action(
         self,
@@ -391,17 +387,14 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
             return timeout_result
         relaxed_accept = self._action_count >= self.settings.max_pose_actions
 
-        # 新版南大校准先用 4% 粗阈值横移人物，再用门框面积调整距离。
-        if not relaxed_accept and center_error > self.settings.coarse_center_ratio:
-            duration = self._duration_for_error(
-                center_error,
-                self.settings.coarse_center_ratio,
-                0.10,
-            )
+        # 3% 内视为精准对准；之后每增加 3%，横移时间增加 50ms。
+        if not relaxed_accept and center_error > self.settings.acceptable_center_ratio:
+            band, duration = self._lateral_duration_for_error(center_error)
             side = 1 if center_delta > 0 else -1
             return self._retry_after_action(
                 context,
-                f"门中心偏差 {center_delta:+.3f}，横移人物做粗对中",
+                f"门中心偏差 {center_delta:+.3f}({center_error:.1%})，"
+                f"第 {band} 档横移 {duration}ms",
                 x_bias=side * self.settings.move_axis_bias,
                 duration_ms=duration,
             )
@@ -428,21 +421,6 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
                 context,
                 f"门框面积 {area_ratio:.3f} 偏大，向后退到标准回放距离",
                 y_bias=self.settings.move_axis_bias,
-                duration_ms=duration,
-            )
-
-        # 距离收敛后，以 1% 的最新版最终阈值再次横移人物对中。
-        if not relaxed_accept and center_error > self.settings.final_center_ratio:
-            duration = self._duration_for_error(
-                center_error,
-                self.settings.final_center_ratio,
-                0.03,
-            )
-            side = 1 if center_delta > 0 else -1
-            return self._retry_after_action(
-                context,
-                f"距离已稳定，门中心偏差 {center_delta:+.3f}，做最终横移对中",
-                x_bias=side * self.settings.move_axis_bias,
                 duration_ms=duration,
             )
 

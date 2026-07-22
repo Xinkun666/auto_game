@@ -878,10 +878,11 @@ def _parse_screen_resolution(screen_info: str):
     return None
 
 
-_AUTO_ROTATION = object()
+def get_resolution(r=True, rotation=None):
+    """读取 DisplayManagerService 报告的当前屏幕分辨率。
 
-
-def get_resolution(r = True, rotation=_AUTO_ROTATION):
+    rotation 参数仅保留旧调用兼容，不再参与宽高换算。
+    """
     command = 'hdc shell hidumper -s DisplayManagerService -a -a'
     resolution_mode = run_shell(command, r)
     resolution = _parse_screen_resolution(resolution_mode)
@@ -893,13 +894,7 @@ def get_resolution(r = True, rotation=_AUTO_ROTATION):
         )
 
     width, height = resolution
-    if rotation is _AUTO_ROTATION:
-        rotation = normalize_rotation(get_display_rotation())
-    else:
-        rotation = normalize_rotation(rotation)
-    if rotation is None:
-        return max(width, height), min(width, height)
-    return normalize_resolution_by_rotation(width, height, rotation)
+    return int(width), int(height)
 
 
 def set_runtime_screen_resolution_env(width=None, height=None):
@@ -910,8 +905,7 @@ def set_runtime_screen_resolution_env(width=None, height=None):
 
 def wait_for_landscape_resolution_stable(timeout=12, stable_rounds=3, interval=0.5):
     """
-    Wait until the device reports a stable landscape resolution, then return
-    the real display resolution normalized to landscape orientation.
+    Wait until DisplayManagerService reports a stable landscape resolution.
     """
     deadline = time.time() + timeout
     last_state = None
@@ -919,12 +913,11 @@ def wait_for_landscape_resolution_stable(timeout=12, stable_rounds=3, interval=0
     latest_resolution = (None, None)
 
     while time.time() < deadline:
-        rotation = normalize_rotation(get_display_rotation())
-        width, height = get_resolution(rotation=rotation)
+        width, height = get_resolution()
         latest_resolution = (width, height)
-        state = (rotation, width, height)
+        state = (width, height)
 
-        if width and height and width > height and (rotation in (90, 270) or rotation is None):
+        if width and height and width > height:
             if state == last_state:
                 stable_count += 1
             else:
@@ -933,7 +926,7 @@ def wait_for_landscape_resolution_stable(timeout=12, stable_rounds=3, interval=0
 
             if stable_count >= stable_rounds:
                 set_runtime_screen_resolution_env(width, height)
-                print(f"[Resolution] 横屏分辨率已稳定: {width}x{height}, rotation={rotation}")
+                print(f"[Resolution] 横屏分辨率已稳定: {width}x{height}")
                 return width, height
         else:
             last_state = state

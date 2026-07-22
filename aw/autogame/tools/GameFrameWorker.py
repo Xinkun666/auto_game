@@ -1545,12 +1545,8 @@ class Controller:
         return self._cached_rotation
 
     def refresh_resolution(self):
-        """强制重新读取手机旋转角和分辨率，替换坐标换算缓存。"""
-        rotation = normalize_rotation(get_display_rotation())
-        if rotation is None:
-            return None
-
-        res_w, res_h = get_resolution(rotation=rotation)
+        """强制重新读取手机当前分辨率，替换坐标换算缓存。"""
+        res_w, res_h = get_resolution()
         if res_w is None or res_h is None:
             return None
 
@@ -1562,7 +1558,9 @@ class Controller:
             return None
 
         self._cached_resolution = resolution
-        self._cached_rotation = rotation
+        # 宽高顺序直接以 DisplayManagerService 为准。旋转角只在
+        # sendevent 真正换算物理坐标时再按需读取，避免使用旧缓存。
+        self._cached_rotation = None
         set_runtime_screen_resolution_env(*resolution)
         return resolution
 
@@ -2972,9 +2970,10 @@ class FrameWorker(threading.Thread):
         screen_width, screen_height = resolution
         self.stage_resolver.refresh_resolution(screen_width, screen_height)
         self.controller.buttons = extract_absolute_points(self.stage_resolver.stage_info)
+        orientation = "横屏" if screen_width > screen_height else "竖屏"
         self.frame_log(
             f"[Resolution] 手机分辨率已刷新：{previous_resolution} -> "
-            f"{screen_width}x{screen_height}，rotation={self.controller._cached_rotation}"
+            f"{screen_width}x{screen_height}（{orientation}）"
         )
         return resolution
 

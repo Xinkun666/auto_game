@@ -1375,6 +1375,11 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
             return False
         if getattr(stream_client, "device", None) is None:
             return False
+        if getattr(stream_client, "_last_error", None) is not None:
+            return False
+        stream_error_event = getattr(stream_client, "_stream_error_event", None)
+        if stream_error_event is not None and stream_error_event.is_set():
+            return False
         is_capture_paused = getattr(stream_client, "is_capture_paused", None)
         if callable(is_capture_paused) and is_capture_paused():
             return False
@@ -1497,6 +1502,9 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
             f"running={snapshot.get('running', getattr(stream_client, 'running', '-'))} "
             f"device_ready={self._stream_touch_ready(stream_client)} "
             f"capture_paused={snapshot.get('capture_paused', '-')} "
+            f"touch_replay={snapshot.get('touch_replay_active', '-')} "
+            f"touch_replay_waiting={snapshot.get('touch_replay_waiting_fresh_frame', '-')} "
+            f"touch_replay_deferred={self._sanitize_diagnostic_text(snapshot.get('touch_replay_deferred_error', ''))} "
             f"{count_text} "
             f"last_data_age={age_text(getattr(stream_client, '_last_data_at', None))} "
             f"last_decoded_age={age_text(getattr(stream_client, '_last_decoded_at', None))} "
@@ -1573,6 +1581,20 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
             )
             last_diagnostic_at = self._monotonic()
         touch = self._make_touch_controller(stream_client)
+        begin_touch_replay = getattr(stream_client, "begin_touch_replay", None)
+        end_touch_replay = getattr(stream_client, "end_touch_replay", None)
+        replay_guard_started = False
+        replay_guard_stream_healthy = None
+        if callable(begin_touch_replay):
+            replay_guard_started = bool(
+                begin_touch_replay(f"Nanda room={match.room_id}")
+            )
+            if not replay_guard_started:
+                raise RuntimeError("无法启用 HOS 南大回放抓流保护期")
+            context.worker.frame_log(
+                "[NandaReplay] 已启用 HOS 回放抓流保护："
+                "回放中普通视频异常延迟确认，回放结束以新解码帧决定是否恢复流"
+            )
         current_moving = False
         current_direction = 0
         previous_record_time = 0.0
@@ -1696,6 +1718,9 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
                     if not self._is_transient_touch_error(exc):
                         raise
                     self._close_touch(touch)
+                    if replay_guard_started and callable(end_touch_replay):
+                        replay_guard_stream_healthy = bool(end_touch_replay())
+                        replay_guard_started = False
                     recovered = self._wait_for_touch_recovery(
                         context,
                         stream_client,
@@ -1735,6 +1760,12 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
                     last_diagnostic_at = self._monotonic()
                     scheduled_at += recovered
                     touch = self._make_touch_controller(stream_client)
+                    if callable(begin_touch_replay):
+                        replay_guard_started = bool(
+                            begin_touch_replay(f"Nanda room={match.room_id} resumed")
+                        )
+                        if not replay_guard_started:
+                            raise RuntimeError("HOS 触控流恢复后无法重新启用抓流保护期")
                     current_moving = False
                     if step.moving:
                         target = self._target_for_direction(center, radius, step.move_direction)
@@ -1765,6 +1796,17 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
                 )
             finally:
                 self._close_touch(touch)
+                if replay_guard_started and callable(end_touch_replay):
+                    replay_guard_stream_healthy = bool(end_touch_replay())
+                    if replay_guard_stream_healthy:
+                        context.worker.frame_log(
+                            "[NandaReplay] HOS 回放结束后已收到新帧，抓流保持正常"
+                        )
+                    else:
+                        context.worker.frame_log(
+                            "[NandaReplay] HOS 回放结束后未收到新帧，"
+                            "已触发流内重连；用例将在刷新帧处等待恢复"
+                        )
 
         elapsed = self._monotonic() - started_at
         self._log_stream_diagnostic(
@@ -1790,6 +1832,7 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
                 "step_count": len(steps),
                 "elapsed_seconds": elapsed,
                 "source_score": match.score,
+                "stream_guard_healthy": replay_guard_stream_healthy,
             },
         )
 

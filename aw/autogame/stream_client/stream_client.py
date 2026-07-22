@@ -1175,6 +1175,13 @@ class HOSScrcpyStreamClient:
         self._last_decoded_at = None
         self._start_monotonic = None
         self._hdc_recovery_attempted = False
+        self._touch_replay_depth = 0
+        self._touch_replay_label = ""
+        self._touch_replay_started_at = None
+        self._touch_replay_deferred_error = None
+        self._touch_replay_deferred_error_at = None
+        self._touch_replay_waiting_for_frame = False
+        self._touch_replay_frame_event = threading.Event()
 
         config = _read_autogame_config()
         requested_decoder_backend = decoder_backend or _resolve_str_option(
@@ -1217,6 +1224,15 @@ class HOSScrcpyStreamClient:
             ),
         )
         self._reconnect_attempt = 0
+        self.touch_replay_frame_grace_seconds = max(
+            0.0,
+            _resolve_float_option(
+                "AUTOGAME_HOSCRCPY_TOUCH_REPLAY_FRAME_GRACE_SECONDS",
+                config,
+                "hoscrcpy_touch_replay_frame_grace_seconds",
+                5.0,
+            ),
+        )
 
         self.save_frame_disabled = _resolve_bool_option(
             "AUTOGAME_DISABLE_SAVE_FRAMES",
@@ -1369,6 +1385,13 @@ class HOSScrcpyStreamClient:
             with self._capture_state_lock:
                 self._capture_paused = False
                 self._active_callback = None
+                self._touch_replay_depth = 0
+                self._touch_replay_waiting_for_frame = False
+                self._touch_replay_deferred_error = None
+                self._touch_replay_deferred_error_at = None
+                self._touch_replay_label = ""
+                self._touch_replay_started_at = None
+                self._touch_replay_frame_event.set()
             self._stop_device()
             self._close_decoder()
             try:
@@ -1387,6 +1410,13 @@ class HOSScrcpyStreamClient:
         with self._capture_state_lock:
             self._capture_paused = False
             self._active_callback = None
+            self._touch_replay_depth = 0
+            self._touch_replay_waiting_for_frame = False
+            self._touch_replay_deferred_error = None
+            self._touch_replay_deferred_error_at = None
+            self._touch_replay_label = ""
+            self._touch_replay_started_at = None
+            self._touch_replay_frame_event.set()
         self._stop_device()
         self._close_decoder()
         try:
@@ -1532,6 +1562,9 @@ class HOSScrcpyStreamClient:
             self._decoded_frame_count += 1
             self._last_decoded_at = time.monotonic()
             self.on_frame(frame)
+            with self._capture_state_lock:
+                if self._touch_replay_depth > 0 or self._touch_replay_waiting_for_frame:
+                    self._touch_replay_frame_event.set()
             if self.save_frame:
                 self._enqueue_save(frame)
             if not self._first_frame_received:
@@ -1544,11 +1577,28 @@ class HOSScrcpyStreamClient:
         if self.is_capture_paused():
             print("[HOS] Ignore stream close caused by intentional pause: %s" % err, flush=True)
             return
+        with self._capture_state_lock:
+            if self._touch_replay_depth > 0 and not self._is_usb_offline_error(err):
+                self._touch_replay_deferred_error = err
+                self._touch_replay_deferred_error_at = time.monotonic()
+                self._diagnostic_stage = "touch_replay_stream_exception_deferred"
+                self._touch_replay_frame_event.clear()
+                label = self._touch_replay_label or "touch replay"
+                print(
+                    "[HOS] Defer stream exception during %s; "
+                    "wait for a fresh frame after replay before reconnecting: %s"
+                    % (label, err),
+                    flush=True,
+                )
+                return
         self._last_error = err
         self._diagnostic_stage = "stream_error"
         message = "[HOS] Stream Error: %s" % err
         print(message, flush=True)
         self._stream_error_event.set()
+        with self._capture_state_lock:
+            if self._touch_replay_waiting_for_frame:
+                self._touch_replay_frame_event.set()
 
     def diagnostic_snapshot(self):
         main_thread = self.main_thread
@@ -1557,6 +1607,18 @@ class HOSScrcpyStreamClient:
         elapsed = None
         if self._start_monotonic is not None:
             elapsed = round(time.monotonic() - self._start_monotonic, 3)
+        with self._capture_state_lock:
+            touch_replay_active = self._touch_replay_depth > 0
+            touch_replay_waiting = self._touch_replay_waiting_for_frame
+            touch_replay_label = self._touch_replay_label
+            deferred_error = self._touch_replay_deferred_error
+            touch_replay_started_at = self._touch_replay_started_at
+        touch_replay_elapsed = None
+        if touch_replay_started_at is not None and (touch_replay_active or touch_replay_waiting):
+            touch_replay_elapsed = round(
+                max(0.0, time.monotonic() - touch_replay_started_at),
+                3,
+            )
         snapshot = {
             "stage": self._diagnostic_stage,
             "running": self.running,
@@ -1581,6 +1643,14 @@ class HOSScrcpyStreamClient:
             "reconnect_attempt": self._reconnect_attempt,
             "max_reconnect_attempts": self.max_reconnect_attempts,
             "capture_paused": self.is_capture_paused(),
+            "touch_replay_active": touch_replay_active,
+            "touch_replay_waiting_fresh_frame": touch_replay_waiting,
+            "touch_replay_label": touch_replay_label,
+            "touch_replay_elapsed_seconds": touch_replay_elapsed,
+            "touch_replay_deferred_error": (
+                str(deferred_error) if deferred_error is not None else ""
+            ),
+            "touch_replay_frame_grace_seconds": self.touch_replay_frame_grace_seconds,
             "elapsed_seconds": elapsed,
         }
         if device_inner is not None:
@@ -1631,6 +1701,128 @@ class HOSScrcpyStreamClient:
 
     def touch_up(self, x, y):
         self._send_touch_event("on_touch_up", x, y)
+
+    def is_touch_replay_active(self):
+        with self._capture_state_lock:
+            return self._touch_replay_depth > 0
+
+    def begin_touch_replay(self, label="touch replay"):
+        """Delay ordinary video-stream errors while a HOS touch replay is active."""
+        with self._capture_state_lock:
+            if (
+                not self.running
+                or self.device is None
+                or self._capture_paused
+                or self._last_error is not None
+                or self._stream_error_event.is_set()
+            ):
+                print(
+                    "[HOS] Touch replay guard unavailable: stream is not ready.",
+                    flush=True,
+                )
+                return False
+            self._touch_replay_depth += 1
+            if self._touch_replay_depth > 1:
+                return True
+            self._touch_replay_label = str(label or "touch replay")
+            self._touch_replay_started_at = time.monotonic()
+            self._touch_replay_deferred_error = None
+            self._touch_replay_deferred_error_at = None
+            self._touch_replay_waiting_for_frame = False
+            self._touch_replay_frame_event.clear()
+            self._diagnostic_stage = "touch_replay_active"
+            print(
+                "[HOS] Touch replay guard started: label=%s decoded=%s"
+                % (self._touch_replay_label, self._decoded_frame_count),
+                flush=True,
+            )
+            return True
+
+    def end_touch_replay(self, grace_seconds=None):
+        """Require one newly decoded frame before deciding whether replay broke capture."""
+        with self._capture_state_lock:
+            if self._touch_replay_depth <= 0:
+                return bool(
+                    self.running
+                    and self.device is not None
+                    and self._last_error is None
+                )
+            self._touch_replay_depth -= 1
+            if self._touch_replay_depth > 0:
+                return True
+
+            timeout = (
+                self.touch_replay_frame_grace_seconds
+                if grace_seconds is None
+                else max(0.0, float(grace_seconds))
+            )
+            label = self._touch_replay_label or "touch replay"
+            baseline_decoded = self._decoded_frame_count
+            deferred_error = self._touch_replay_deferred_error
+            self._touch_replay_waiting_for_frame = True
+            self._touch_replay_frame_event.clear()
+            self._diagnostic_stage = "touch_replay_waiting_fresh_frame"
+
+        print(
+            "[HOS] Touch replay ended: label=%s; wait %.1fs for a fresh frame "
+            "before deciding whether stream recovery is needed."
+            % (label, timeout),
+            flush=True,
+        )
+        deadline = time.monotonic() + timeout
+        fresh_frame = False
+        while True:
+            with self._capture_state_lock:
+                fresh_frame = self._decoded_frame_count > baseline_decoded
+                immediate_error = self._last_error
+                stopped = not self.running or self._stop_event.is_set()
+            if fresh_frame or immediate_error is not None or stopped:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self._touch_replay_frame_event.wait(remaining)
+            self._touch_replay_frame_event.clear()
+
+        with self._capture_state_lock:
+            fresh_frame = self._decoded_frame_count > baseline_decoded
+            hard_error = self._is_usb_offline_error(self._last_error)
+            self._touch_replay_waiting_for_frame = False
+            self._touch_replay_frame_event.clear()
+            if fresh_frame and not hard_error:
+                self._last_error = None
+                self._stream_error_event.clear()
+                self._touch_replay_deferred_error = None
+                self._touch_replay_deferred_error_at = None
+                self._touch_replay_label = ""
+                self._touch_replay_started_at = None
+                self._diagnostic_stage = "stream_ready_after_touch_replay"
+                print(
+                    "[HOS] Fresh frame received after touch replay; "
+                    "deferred stream warning is treated as transient.",
+                    flush=True,
+                )
+                return True
+
+            recovery_error = self._last_error or deferred_error
+            if recovery_error is None:
+                recovery_error = RuntimeError(
+                    "HOS touch replay ended but no fresh frame arrived within %.1fs"
+                    % timeout
+                )
+            self._last_error = recovery_error
+            self._touch_replay_deferred_error = None
+            self._touch_replay_deferred_error_at = None
+            self._touch_replay_label = ""
+            self._touch_replay_started_at = None
+            self._diagnostic_stage = "touch_replay_frame_timeout"
+            self._stream_error_event.set()
+            print(
+                "[HOS] No fresh frame after touch replay; request stream-only recovery: %s"
+                % recovery_error,
+                flush=True,
+            )
+            return False
 
     def _enqueue_save(self, frame):
         ts_str = datetime.now().strftime("%m-%d %H-%M-%S.%f")[:-3]

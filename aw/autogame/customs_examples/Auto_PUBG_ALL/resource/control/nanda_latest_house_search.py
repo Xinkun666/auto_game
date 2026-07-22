@@ -119,6 +119,7 @@ class NandaLatestSettings:
 
     joystick_center_x_ratio: float = 0.1965
     joystick_center_y_ratio: float = 0.7563
+    joystick_radius_px: int = 0
     joystick_radius_height_ratio: float = 0.0974
     joystick_slide_duration_ms: int = 100
     replay_skip_idle: bool = True
@@ -249,6 +250,10 @@ class NandaLatestSettings:
             ),
             joystick_center_y_ratio=_as_float(
                 raw.get("joystick_center_y_ratio"), cls.joystick_center_y_ratio
+            ),
+            joystick_radius_px=max(
+                0,
+                _as_int(raw.get("joystick_radius_px"), cls.joystick_radius_px),
             ),
             joystick_radius_height_ratio=max(
                 0.01,
@@ -1327,11 +1332,14 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
                 int(round(screen_width * self.settings.joystick_center_x_ratio)),
                 int(round(screen_height * self.settings.joystick_center_y_ratio)),
             )
-        radius_reference = min(screen_width, screen_height)
-        radius = max(
-            1,
-            int(round(radius_reference * self.settings.joystick_radius_height_ratio)),
-        )
+        if self.settings.joystick_radius_px > 0:
+            radius = self.settings.joystick_radius_px
+        else:
+            radius_reference = min(screen_width, screen_height)
+            radius = max(
+                1,
+                int(round(radius_reference * self.settings.joystick_radius_height_ratio)),
+            )
         return (int(center[0]), int(center[1])), radius
 
     @staticmethod

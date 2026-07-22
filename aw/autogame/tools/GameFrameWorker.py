@@ -1544,6 +1544,28 @@ class Controller:
                     self._cached_rotation = infer_landscape_rotation(*resolution)
         return self._cached_rotation
 
+    def refresh_resolution(self):
+        """强制重新读取手机旋转角和分辨率，替换坐标换算缓存。"""
+        rotation = normalize_rotation(get_display_rotation())
+        if rotation is None:
+            return None
+
+        res_w, res_h = get_resolution(rotation=rotation)
+        if res_w is None or res_h is None:
+            return None
+
+        try:
+            resolution = (int(res_w), int(res_h))
+        except (TypeError, ValueError):
+            return None
+        if resolution[0] <= 0 or resolution[1] <= 0:
+            return None
+
+        self._cached_resolution = resolution
+        self._cached_rotation = rotation
+        set_runtime_screen_resolution_env(*resolution)
+        return resolution
+
     def _get_current_frame_size(self):
         frame = getattr(self.worker, "frame", None)
         if frame is None:
@@ -2936,6 +2958,25 @@ class FrameWorker(threading.Thread):
             if match:
                 ret = self.driver.hdc(f'fport rm {match.group(1)}')
                 logging.info('fport rm ret: '+ ret)
+
+    def refresh_resolution(self):
+        """刷新手机当前分辨率，并同步场景处理与触控坐标。"""
+        previous_resolution = getattr(self.controller, "_cached_resolution", None)
+        resolution = self.controller.refresh_resolution()
+        if resolution is None:
+            self.frame_log(
+                f"[Resolution] 刷新失败，继续使用缓存分辨率={previous_resolution}"
+            )
+            return None
+
+        screen_width, screen_height = resolution
+        self.stage_resolver.refresh_resolution(screen_width, screen_height)
+        self.controller.buttons = extract_absolute_points(self.stage_resolver.stage_info)
+        self.frame_log(
+            f"[Resolution] 手机分辨率已刷新：{previous_resolution} -> "
+            f"{screen_width}x{screen_height}，rotation={self.controller._cached_rotation}"
+        )
+        return resolution
 
     def refresh_frame(self, settle: bool = True):
         self._flush_current_frame_log()

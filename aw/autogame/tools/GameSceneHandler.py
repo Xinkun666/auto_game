@@ -309,14 +309,30 @@ class StageLogicController:
 
         self.project_name = getattr(info_mod, "PROJECT_NAME")
         self.processor = GameImageProcessor(project_case)
-        raw_stage_info = load_stage_info(project_case, info_mod)
+        self.raw_stage_info = load_stage_info(project_case, info_mod)
         self.stage_info = lock_stage_info_scene_resolutions(
-            raw_stage_info,
+            self.raw_stage_info,
             self.processor.screen_w,
             self.processor.screen_h,
         )
         print(f"[{self.project_name}] 场景分辨率已锁定: {self.processor.screen_w}x{self.processor.screen_h}")
         print(f"[{self.project_name}] 逻辑控制器已就绪。")
+
+    def refresh_resolution(self, screen_width, screen_height):
+        """同步屏幕分辨率，并重新选择当前分辨率对应的场景配置。"""
+        screen_width = int(screen_width)
+        screen_height = int(screen_height)
+        if screen_width <= 0 or screen_height <= 0:
+            raise ValueError(f"无效的屏幕分辨率: {screen_width}x{screen_height}")
+
+        self.processor.screen_w = screen_width
+        self.processor.screen_h = screen_height
+        self.stage_info = lock_stage_info_scene_resolutions(
+            self.raw_stage_info,
+            screen_width,
+            screen_height,
+        )
+        return self.stage_info
 
     def get_stage_groups(self, stage_name):
         stage_data = self.stage_info.get(stage_name, {})

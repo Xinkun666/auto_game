@@ -101,7 +101,7 @@ class NandaLatestSettings:
     area_acceptable_max_ratio: float = 0.055
     acceptable_center_ratio: float = 0.03
     lateral_band_ratio: float = 0.05
-    lateral_band_duration_ms: int = 40
+    lateral_band_duration_ms: int = 30
     stable_required_count: int = 2
     max_pose_actions: int = 18
     move_axis_bias: int = 240
@@ -443,7 +443,7 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
             return timeout_result
         relaxed_accept = self._action_count >= self.settings.max_pose_actions
 
-        # 3% 内视为精准对准；之后每增加 5%，横移时间增加 40ms。
+        # 3% 内视为精准对准；之后每增加 5%，横移时间增加 30ms。
         if not relaxed_accept and center_error > self.settings.acceptable_center_ratio:
             band, duration = self._lateral_duration_for_error(center_error)
             side = 1 if center_delta > 0 else -1

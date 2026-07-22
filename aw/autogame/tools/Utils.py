@@ -903,43 +903,6 @@ def set_runtime_screen_resolution_env(width=None, height=None):
         os.environ["AUTOGAME_SCREEN_HEIGHT"] = str(int(height))
 
 
-def wait_for_landscape_resolution_stable(timeout=12, stable_rounds=3, interval=0.5):
-    """
-    Wait until DisplayManagerService reports a stable landscape resolution.
-    """
-    deadline = time.time() + timeout
-    last_state = None
-    stable_count = 0
-    latest_resolution = (None, None)
-
-    while time.time() < deadline:
-        width, height = get_resolution()
-        latest_resolution = (width, height)
-        state = (width, height)
-
-        if width and height and width > height:
-            if state == last_state:
-                stable_count += 1
-            else:
-                stable_count = 1
-                last_state = state
-
-            if stable_count >= stable_rounds:
-                set_runtime_screen_resolution_env(width, height)
-                print(f"[Resolution] 横屏分辨率已稳定: {width}x{height}")
-                return width, height
-        else:
-            last_state = state
-            stable_count = 0
-
-        time.sleep(interval)
-
-    width, height = latest_resolution
-    if width and height:
-        set_runtime_screen_resolution_env(width, height)
-        print(f"[Resolution] 等待横屏稳定超时，使用当前分辨率: {width}x{height}")
-    return width, height
-
 def get_wh():
     resolution = get_resolution()
     assert resolution[0] is not None, '分辨率获取失败'

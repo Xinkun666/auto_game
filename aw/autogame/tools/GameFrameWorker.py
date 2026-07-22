@@ -2970,10 +2970,9 @@ class FrameWorker(threading.Thread):
         screen_width, screen_height = resolution
         self.stage_resolver.refresh_resolution(screen_width, screen_height)
         self.controller.buttons = extract_absolute_points(self.stage_resolver.stage_info)
-        orientation = "横屏" if screen_width > screen_height else "竖屏"
         self.frame_log(
             f"[Resolution] 手机分辨率已刷新：{previous_resolution} -> "
-            f"{screen_width}x{screen_height}（{orientation}）"
+            f"{screen_width}x{screen_height}"
         )
         return resolution
 

@@ -39,9 +39,11 @@ class GameAutomator:
         self.driver = driver
         self.logger = logger
 
-        self.screen_w, self.screen_h = wait_for_landscape_resolution_stable()
+        self.screen_w, self.screen_h = get_resolution()
+        set_runtime_screen_resolution_env(self.screen_w, self.screen_h)
         self.W, self.H = get_wh()
         self.screen_mode = get_screen_mode()
+        display_rotation = get_display_rotation() if str(self.screen_mode) == "0" else None
         self.client = create_stream_client_for_mode(
             self.screen_mode,
             global_buffer,
@@ -49,7 +51,7 @@ class GameAutomator:
             self.screen_h,
             self.W,
             self.H,
-            get_display_rotation(),
+            display_rotation,
         )
         if self.screen_mode == "0":
             self.client.start_backend(lowh=0, highh=10000, skip=20, width=self.W, height=self.H)

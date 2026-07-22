@@ -21,7 +21,7 @@ from pathlib import Path
 import re
 import threading
 import time
-from typing import Any, Callable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -109,9 +109,12 @@ class NandaLatestSettings:
     pose_max_duration_ms: int = 600
     pose_wait_ms: int = 500
 
+    match_backoff_duration_ms: int = 500
+    match_backoff_wait_ms: int = 500
+    mask_top_edge_ratio: float = 0.01
     pitch_compensation: bool = True
-    pitch_pixels_per_second: float = 1000.0
-    pitch_max_seconds: float = 0.8
+    pitch_height_ratio: float = 0.08
+    pitch_duration_ms: int = 320
     pitch_wait_ms: int = 450
 
     joystick_center_x_ratio: float = 0.1965
@@ -203,17 +206,42 @@ class NandaLatestSettings:
                 1, _as_int(raw.get("pose_max_duration_ms"), cls.pose_max_duration_ms)
             ),
             pose_wait_ms=max(0, _as_int(raw.get("pose_wait_ms"), cls.pose_wait_ms)),
+            match_backoff_duration_ms=max(
+                1,
+                _as_int(
+                    raw.get("match_backoff_duration_ms"),
+                    cls.match_backoff_duration_ms,
+                ),
+            ),
+            match_backoff_wait_ms=max(
+                0,
+                _as_int(
+                    raw.get("match_backoff_wait_ms"),
+                    cls.match_backoff_wait_ms,
+                ),
+            ),
+            mask_top_edge_ratio=min(
+                0.2,
+                max(
+                    0.0,
+                    _as_float(
+                        raw.get("mask_top_edge_ratio"), cls.mask_top_edge_ratio
+                    ),
+                ),
+            ),
             pitch_compensation=_as_bool(
                 raw.get("pitch_compensation"), cls.pitch_compensation
             ),
-            pitch_pixels_per_second=max(
-                1.0,
-                _as_float(
-                    raw.get("pitch_pixels_per_second"), cls.pitch_pixels_per_second
+            pitch_height_ratio=min(
+                0.2,
+                max(
+                    0.001,
+                    _as_float(raw.get("pitch_height_ratio"), cls.pitch_height_ratio),
                 ),
             ),
-            pitch_max_seconds=max(
-                0.0, _as_float(raw.get("pitch_max_seconds"), cls.pitch_max_seconds)
+            pitch_duration_ms=max(
+                1,
+                _as_int(raw.get("pitch_duration_ms"), cls.pitch_duration_ms),
             ),
             pitch_wait_ms=max(0, _as_int(raw.get("pitch_wait_ms"), cls.pitch_wait_ms)),
             joystick_center_x_ratio=_as_float(
@@ -527,40 +555,33 @@ class _NandaSpecialAreaRoomMatcher(NandaRoomMatcher):
     def _capture_match_frame(
         self,
         context: NandaSearchContext,
+        *,
+        apply_pitch: bool = False,
     ) -> Tuple[np.ndarray, Mapping[str, Any]]:
         frame = context.frame
         if frame is None:
             raise ValueError("当前没有可用于房型匹配的画面")
-        pitch_seconds = 0.0
-        if self.settings.pitch_compensation and context.door_box is not None:
-            frame_h = max(1, int(frame.shape[0]))
-            door_top_ratio = float(context.door_box[1]) / float(frame_h)
-            pitch_seconds = min(
-                self.settings.pitch_max_seconds,
-                max(0.0, (0.5 - door_top_ratio) * 2.0),
-            )
-        pitch_bias = 0
-        duration_ms = 0
+        pitch_bias = max(
+            1,
+            int(round(float(frame.shape[0]) * self.settings.pitch_height_ratio)),
+        )
         pitch_applied = False
         original_group = None
         try:
-            if pitch_seconds > 0.0:
-                pitch_bias = int(
-                    round(pitch_seconds * self.settings.pitch_pixels_per_second)
-                )
-                duration_ms = max(100, int(round(pitch_seconds * 1000.0)))
+            if apply_pitch:
                 context.worker.frame_log(
-                    f"[NandaMatch] 匹配前抬高视角 {pitch_seconds:.2f}s，完整采集门面"
+                    f"[NandaMatch] 第三阶段轻微抬头复核："
+                    f"y_bias=-{pitch_bias}，dura={self.settings.pitch_duration_ms}ms"
                 )
                 context.worker.tap_single(
                     "视角",
                     y_bias=-pitch_bias,
-                    dura=duration_ms,
+                    dura=self.settings.pitch_duration_ms,
                     wait=self.settings.pitch_wait_ms,
                 )
                 pitch_applied = True
-                if not context.refresh_frame("NandaMatch 抬高视角采集房屋正面"):
-                    raise ValueError("抬高视角后刷新画面失败")
+                if not context.refresh_frame("NandaMatch 轻微抬头采集房屋正面"):
+                    raise ValueError("轻微抬头后刷新画面失败")
 
             original_group = self._activate_sam3_perception(context)
 
@@ -581,7 +602,7 @@ class _NandaSpecialAreaRoomMatcher(NandaRoomMatcher):
                 context.worker.tap_single(
                     "视角",
                     y_bias=pitch_bias,
-                    dura=duration_ms,
+                    dura=self.settings.pitch_duration_ms,
                     wait=self.settings.pitch_wait_ms,
                 )
                 if not context.refresh_frame("NandaMatch 恢复门前回放视角"):
@@ -672,6 +693,45 @@ class _NandaSpecialAreaRoomMatcher(NandaRoomMatcher):
 def _version_tuple(value: str) -> Tuple[int, ...]:
     numbers = re.findall(r"\d+", str(value))
     return tuple(int(number) for number in numbers[:3])
+
+
+@dataclass(frozen=True)
+class _NandaRoomMatchAttempt:
+    index: int
+    label: str
+    room_id: Optional[str]
+    replay_path: Optional[str]
+    score: Optional[float]
+    mask_found: bool
+    touches_top: bool
+    crop_xyxy: Optional[Tuple[int, int, int, int]]
+    sam3_score: Any
+    replay_allowed: bool
+    no_match_reason: str
+    decision: Mapping[str, Any]
+    debug_payload: Mapping[str, Any]
+
+    @property
+    def valid(self) -> bool:
+        return bool(
+            self.room_id
+            and self.replay_path
+            and self.replay_allowed
+        )
+
+    def summary(self) -> Mapping[str, Any]:
+        return {
+            "index": self.index,
+            "label": self.label,
+            "room_id": self.room_id,
+            "confidence": self.score,
+            "mask_found": self.mask_found,
+            "touches_top": self.touches_top,
+            "crop_xyxy": self.crop_xyxy,
+            "sam3_score": self.sam3_score,
+            "replay_allowed": self.replay_allowed,
+            "no_match_reason": self.no_match_reason,
+        }
 
 
 class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
@@ -782,20 +842,78 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
     def _get_runtime(self, context: NandaSearchContext):
         return self._ensure_runtime(context.worker.frame_log)
 
-    def match(self, context: NandaSearchContext) -> Optional[NandaRoomMatch]:
-        if context.should_abort():
-            return None
+    @staticmethod
+    def _optional_score(value: Any) -> Optional[float]:
         try:
-            frame, sam3_info = self._capture_match_frame(context)
+            score = float(value)
+        except (TypeError, ValueError):
+            return None
+        return score if math.isfinite(score) else None
+
+    @classmethod
+    def _decision_score(cls, decision: Mapping[str, Any]) -> Optional[float]:
+        for key in ("total_score", "mlp_score", "room_best_dino_score"):
+            score = cls._optional_score(decision.get(key))
+            if score is not None:
+                return score
+        return None
+
+    @staticmethod
+    def _invalid_attempt(
+        index: int,
+        label: str,
+        reason: str,
+    ) -> _NandaRoomMatchAttempt:
+        return _NandaRoomMatchAttempt(
+            index=index,
+            label=label,
+            room_id=None,
+            replay_path=None,
+            score=None,
+            mask_found=False,
+            touches_top=False,
+            crop_xyxy=None,
+            sam3_score=None,
+            replay_allowed=False,
+            no_match_reason=str(reason),
+            decision={},
+            debug_payload={},
+        )
+
+    def _run_match_attempt(
+        self,
+        context: NandaSearchContext,
+        *,
+        index: int,
+        label: str,
+        apply_pitch: bool = False,
+    ) -> _NandaRoomMatchAttempt:
+        if context.should_abort():
+            return self._invalid_attempt(index, label, "搜房阶段已中止")
+        frame, sam3_info = self._capture_match_frame(
+            context,
+            apply_pitch=apply_pitch,
+        )
+        try:
             segmented_bgr, cropped_mask, cropped_bgr, crop_xyxy = (
                 self._special_area_facade(frame, sam3_info)
             )
         except ValueError as exc:
-            context.worker.frame_log(f"[NandaMatch] {exc}，南大房型匹配失败")
-            return None
+            context.worker.frame_log(
+                f"[NandaMatch] 第{index}阶段({label}) SAM3 房屋分割无效：{exc}"
+            )
+            return self._invalid_attempt(index, label, str(exc))
+
+        top_edge_limit = max(
+            0,
+            int(round(float(frame.shape[0]) * self.settings.mask_top_edge_ratio)),
+        )
+        touches_top = int(crop_xyxy[1]) <= top_edge_limit
 
         context.worker.frame_log(
-            f"[NandaMatch] sam3_tiny 房屋分割完成：crop={crop_xyxy}，"
+            f"[NandaMatch] 第{index}阶段({label}) sam3_tiny 分割完成："
+            f"crop={crop_xyxy}，top_limit={top_edge_limit}，"
+            f"touches_top={touches_top}，"
             f"score={sam3_info.get('score')}；直接在当前进程执行 DINOv3/MLP"
         )
         runtime = self._get_runtime(context)
@@ -810,23 +928,117 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
         dino_score = decision.get("room_best_dino_score")
         mlp_score = decision.get("mlp_score")
         total_score = decision.get("total_score")
+        score = self._decision_score(decision)
         margin = debug_payload.get("top2_margin")
         elapsed_ms = debug_payload.get("elapsed_ms")
-        if room_id is None or replay_path is None:
+        replay_allowed = decision.get("replay_allow_actions") is not False
+        no_match_reason = str(debug_payload.get("no_match_reason") or "")
+        if room_id is None or replay_path is None or not replay_allowed:
+            if not replay_allowed:
+                no_match_reason = (
+                    str(decision.get("replay_disabled_reason") or "")
+                    or "replay_actions_rejected"
+                )
             context.worker.frame_log(
-                f"[NandaMatch] 本地房型配准拒绝：reason="
-                f"{debug_payload.get('no_match_reason') or 'unknown'}，"
+                f"[NandaMatch] 第{index}阶段({label}) 房型配准未通过："
+                f"reason={no_match_reason or 'unknown'}，"
                 f"dino={dino_score}，mlp={mlp_score}，total={total_score}，"
-                f"margin={margin}，elapsed_ms={elapsed_ms}；不执行回放"
+                f"margin={margin}，elapsed_ms={elapsed_ms}"
             )
-            return None
-        if decision.get("replay_allow_actions") is False:
+        else:
             context.worker.frame_log(
-                f"[NandaMatch] 房型 {room_id} 禁止执行回放动作，不执行回放"
+                f"[NandaMatch] 第{index}阶段({label}) 匹配候选："
+                f"room={room_id}，confidence={score}，dino={dino_score}，"
+                f"mlp={mlp_score}，total={total_score}，margin={margin}，"
+                f"touches_top={touches_top}，elapsed_ms={elapsed_ms}"
             )
+
+        return _NandaRoomMatchAttempt(
+            index=index,
+            label=label,
+            room_id=None if room_id is None else str(room_id),
+            replay_path=None if replay_path is None else str(replay_path),
+            score=score,
+            mask_found=True,
+            touches_top=touches_top,
+            crop_xyxy=crop_xyxy,
+            sam3_score=sam3_info.get("score"),
+            replay_allowed=replay_allowed,
+            no_match_reason=no_match_reason,
+            decision=decision,
+            debug_payload=debug_payload,
+        )
+
+    def _move_backward_for_rematch(self, context: NandaSearchContext) -> None:
+        context.worker.frame_log(
+            f"[NandaMatch] 首次结果不足以直接采信，后拉 "
+            f"{self.settings.match_backoff_duration_ms}ms 扩大房屋正面取景"
+        )
+        context.worker.tap_single(
+            "摇杆",
+            y_bias=self.settings.move_axis_bias,
+            dura=self.settings.match_backoff_duration_ms,
+            wait=self.settings.match_backoff_wait_ms,
+        )
+        if not context.refresh_frame("NandaMatch 后拉后重新采集房屋正面"):
+            raise RuntimeError("房型复核后拉后刷新画面失败")
+
+    @staticmethod
+    def _best_valid_attempt(
+        attempts: Sequence[_NandaRoomMatchAttempt],
+    ) -> Optional[_NandaRoomMatchAttempt]:
+        valid = [attempt for attempt in attempts if attempt.valid]
+        if not valid:
             return None
 
-        replay_file = Path(replay_path).resolve()
+        def sort_key(attempt: _NandaRoomMatchAttempt) -> Tuple[float, int]:
+            score = attempt.score
+            return (
+                score if score is not None and math.isfinite(score) else float("-inf"),
+                attempt.index,
+            )
+
+        return max(valid, key=sort_key)
+
+    @classmethod
+    def _consensus_attempt(
+        cls,
+        attempts: Sequence[_NandaRoomMatchAttempt],
+    ) -> Optional[_NandaRoomMatchAttempt]:
+        by_room: Dict[str, List[_NandaRoomMatchAttempt]] = {}
+        for attempt in attempts:
+            if attempt.valid and attempt.room_id is not None:
+                by_room.setdefault(attempt.room_id, []).append(attempt)
+        repeated = [room_attempts for room_attempts in by_room.values() if len(room_attempts) >= 2]
+        if not repeated:
+            return None
+        repeated.sort(
+            key=lambda room_attempts: (
+                len(room_attempts),
+                max(
+                    attempt.score
+                    if attempt.score is not None and math.isfinite(attempt.score)
+                    else float("-inf")
+                    for attempt in room_attempts
+                ),
+            ),
+            reverse=True,
+        )
+        return cls._best_valid_attempt(repeated[0])
+
+    def _build_selected_match(
+        self,
+        context: NandaSearchContext,
+        selected: _NandaRoomMatchAttempt,
+        attempts: Sequence[_NandaRoomMatchAttempt],
+        *,
+        selection_reason: str,
+        requires_pose_realign: bool,
+    ) -> NandaRoomMatch:
+        if not selected.valid or selected.replay_path is None or selected.room_id is None:
+            raise ValueError("无法从无效候选构建南大房型匹配结果")
+
+        replay_file = Path(selected.replay_path).resolve()
         try:
             replay_steps = json.loads(replay_file.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -834,26 +1046,136 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
         if not isinstance(replay_steps, list):
             raise ValueError(f"南大回放 DSL 不是列表: {replay_file}")
 
+        attempt_summaries = [dict(attempt.summary()) for attempt in attempts]
         context.worker.frame_log(
-            f"[NandaMatch] 本地房型配准通过：room={room_id}，dino={dino_score}，"
-            f"mlp={mlp_score}，total={total_score}，margin={margin}，"
-            f"steps={len(replay_steps)}，elapsed_ms={elapsed_ms}；开始 HOS 摇杆回放"
+            f"[NandaMatch] 三阶段决策完成：reason={selection_reason}，"
+            f"selected_room={selected.room_id}，confidence={selected.score}，"
+            f"selected_stage={selected.index}({selected.label})，"
+            f"requires_pose_realign={requires_pose_realign}，attempts={attempt_summaries}；"
+            "恢复标准门前位姿后再开始 HOS 摇杆回放"
         )
         return NandaRoomMatch(
-            room_id=str(room_id),
+            room_id=selected.room_id,
             replay_path=str(replay_file),
-            score=None if total_score is None else float(total_score),
+            score=selected.score,
             metadata={
-                "decision": decision,
-                "thresholds": debug_payload.get("thresholds"),
-                "top2_margin": margin,
-                "top_candidates": debug_payload.get("top_candidates"),
-                "matcher_elapsed_ms": elapsed_ms,
+                "decision": dict(selected.decision),
+                "thresholds": selected.debug_payload.get("thresholds"),
+                "top2_margin": selected.debug_payload.get("top2_margin"),
+                "top_candidates": selected.debug_payload.get("top_candidates"),
+                "matcher_elapsed_ms": selected.debug_payload.get("elapsed_ms"),
                 "input_contract": self.settings.room_segmenter_backend,
                 "execution_mode": "inprocess",
                 "structure_mode": "disabled_zero_vector_no_extra_sam3",
+                "matching_attempts": attempt_summaries,
+                "selected_attempt": selected.index,
+                "selection_reason": selection_reason,
+                "requires_pose_realign": requires_pose_realign,
             },
             replay_steps=replay_steps,
+        )
+
+    def _finish_attempts(
+        self,
+        context: NandaSearchContext,
+        attempts: Sequence[_NandaRoomMatchAttempt],
+        *,
+        selection_reason: str,
+        requires_pose_realign: bool,
+        prefer_consensus: bool = False,
+    ) -> Optional[NandaRoomMatch]:
+        selected = self._consensus_attempt(attempts) if prefer_consensus else None
+        resolved_reason = selection_reason
+        if selected is not None:
+            resolved_reason = "room_consensus"
+        else:
+            selected = self._best_valid_attempt(attempts)
+        if selected is None:
+            context.worker.frame_log(
+                f"[NandaMatch] 多阶段房型匹配结束仍无可用候选："
+                f"reason={selection_reason}，"
+                f"attempts={[dict(attempt.summary()) for attempt in attempts]}"
+            )
+            return None
+        return self._build_selected_match(
+            context,
+            selected,
+            attempts,
+            selection_reason=resolved_reason,
+            requires_pose_realign=requires_pose_realign,
+        )
+
+    def match(self, context: NandaSearchContext) -> Optional[NandaRoomMatch]:
+        if context.should_abort():
+            return None
+
+        attempts: List[_NandaRoomMatchAttempt] = []
+        first = self._run_match_attempt(
+            context,
+            index=1,
+            label="normal",
+        )
+        attempts.append(first)
+        if first.valid and not first.touches_top:
+            return self._finish_attempts(
+                context,
+                attempts,
+                selection_reason="first_match_complete_mask",
+                requires_pose_realign=False,
+            )
+
+        if context.should_abort():
+            return None
+        self._move_backward_for_rematch(context)
+        second = self._run_match_attempt(
+            context,
+            index=2,
+            label="backoff_500ms",
+        )
+        attempts.append(second)
+
+        if first.valid and second.valid and first.room_id == second.room_id:
+            return self._finish_attempts(
+                context,
+                attempts,
+                selection_reason="room_consensus",
+                requires_pose_realign=True,
+                prefer_consensus=True,
+            )
+
+        if second.mask_found and not second.touches_top:
+            return self._finish_attempts(
+                context,
+                attempts,
+                selection_reason="backoff_mask_complete_best_confidence",
+                requires_pose_realign=True,
+            )
+
+        if not self.settings.pitch_compensation or context.should_abort():
+            return self._finish_attempts(
+                context,
+                attempts,
+                selection_reason="pitch_disabled_best_confidence",
+                requires_pose_realign=True,
+            )
+
+        context.worker.frame_log(
+            f"[NandaMatch] 第二阶段 mask_found={second.mask_found}，"
+            f"touches_top={second.touches_top}，启动一次轻微抬头终检"
+        )
+        third = self._run_match_attempt(
+            context,
+            index=3,
+            label="slight_pitch",
+            apply_pitch=True,
+        )
+        attempts.append(third)
+        return self._finish_attempts(
+            context,
+            attempts,
+            selection_reason="highest_confidence_after_three_attempts",
+            requires_pose_realign=True,
+            prefer_consensus=True,
         )
 
 

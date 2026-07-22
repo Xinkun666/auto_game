@@ -10,7 +10,13 @@
         "lateral_band_ratio": 0.05,
         "lateral_band_duration_ms": 40,
         "stable_required_count": 2,
+        "match_backoff_duration_ms": 500,
+        "match_backoff_wait_ms": 500,
+        "mask_top_edge_ratio": 0.01,
         "pitch_compensation": true,
+        "pitch_height_ratio": 0.08,
+        "pitch_duration_ms": 320,
+        "pitch_wait_ms": 450,
         "joystick_radius_height_ratio": 0.1177,
         "replay_skip_idle": true,
         "replay_touch_recovery_timeout_seconds": 60

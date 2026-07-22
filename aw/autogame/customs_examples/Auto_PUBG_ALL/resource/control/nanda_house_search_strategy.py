@@ -66,6 +66,9 @@ class NandaSearchContext:
     refresh_frame: Callable[[str], bool]
     should_abort: Callable[[], bool]
     is_outside: Callable[[], bool]
+    refresh_context: Optional[
+        Callable[[str], Optional["NandaSearchContext"]]
+    ] = None
 
 
 @dataclass(frozen=True)
@@ -229,6 +232,114 @@ class NandaHouseSearchStrategy:
             )
         return None
 
+    def _realign_pose_for_replay(
+        self,
+        context: NandaSearchContext,
+        match: NandaRoomMatch,
+    ) -> tuple[NandaSearchContext, Optional[NandaSearchResult]]:
+        if not bool(match.metadata.get("requires_pose_realign")):
+            return context, None
+        refresh_context = context.refresh_context
+        if not callable(refresh_context):
+            return context, NandaSearchResult(
+                NandaSearchStatus.FAILED,
+                "房型复核改变了人物位置，但当前上下文无法重新执行门前位姿校准",
+                room_id=match.room_id,
+                replay_path=match.replay_path,
+                metadata={"phase": "pose_restore"},
+            )
+
+        settings = getattr(self.pose_preparer, "settings", None)
+        max_actions = int(getattr(settings, "max_pose_actions", 18) or 18)
+        stable_count = int(getattr(settings, "stable_required_count", 2) or 2)
+        max_cycles = max(4, max_actions + stable_count + 4)
+        current_context = context
+        reset_pose = getattr(self.pose_preparer, "reset", None)
+        if callable(reset_pose):
+            reset_pose()
+        context.worker.frame_log(
+            f"[NandaPoseRestore] 房型已确定为 {match.room_id}，"
+            "后拉复核改变了回放起点；重新按入门方向、YOLO门中心和门框面积校准"
+        )
+        for cycle in range(1, max_cycles + 1):
+            if current_context.should_abort():
+                return current_context, NandaSearchResult(
+                    NandaSearchStatus.ABORTED,
+                    "恢复标准门前回放位姿时搜房阶段已中止",
+                    room_id=match.room_id,
+                    replay_path=match.replay_path,
+                    metadata={"phase": "pose_restore", "cycle": cycle},
+                )
+            refresh_context = current_context.refresh_context
+            if not callable(refresh_context):
+                return current_context, NandaSearchResult(
+                    NandaSearchStatus.FAILED,
+                    "恢复门前位姿过程中丢失刷新上下文接口",
+                    room_id=match.room_id,
+                    replay_path=match.replay_path,
+                    metadata={"phase": "pose_restore", "cycle": cycle},
+                )
+            fresh_context = refresh_context(
+                f"NandaPoseRestore 第 {cycle}/{max_cycles} 轮刷新门框"
+            )
+            if fresh_context is None:
+                return current_context, NandaSearchResult(
+                    NandaSearchStatus.FAILED,
+                    "恢复标准门前回放位姿时无法刷新门框上下文",
+                    room_id=match.room_id,
+                    replay_path=match.replay_path,
+                    metadata={"phase": "pose_restore", "cycle": cycle},
+                )
+            current_context = fresh_context
+            try:
+                pose_result = self.pose_preparer.prepare(current_context)
+            except Exception as exc:
+                return current_context, NandaSearchResult(
+                    NandaSearchStatus.FAILED,
+                    f"恢复标准门前回放位姿异常: {exc}",
+                    room_id=match.room_id,
+                    replay_path=match.replay_path,
+                    metadata={
+                        "phase": "pose_restore",
+                        "cycle": cycle,
+                        "exception": type(exc).__name__,
+                    },
+                )
+            if pose_result is None:
+                context.worker.frame_log(
+                    f"[NandaPoseRestore] 标准门前回放位姿恢复完成："
+                    f"cycle={cycle}/{max_cycles}，room={match.room_id}"
+                )
+                return current_context, None
+            if not isinstance(pose_result, NandaSearchResult):
+                return current_context, NandaSearchResult(
+                    NandaSearchStatus.FAILED,
+                    f"恢复位姿时准备器返回无效类型: {type(pose_result).__name__}",
+                    room_id=match.room_id,
+                    replay_path=match.replay_path,
+                    metadata={"phase": "pose_restore", "cycle": cycle},
+                )
+            if pose_result.status != NandaSearchStatus.RETRY:
+                return current_context, NandaSearchResult(
+                    status=pose_result.status,
+                    message=pose_result.message,
+                    room_id=match.room_id,
+                    replay_path=match.replay_path,
+                    metadata={
+                        **dict(pose_result.metadata),
+                        "phase": "pose_restore",
+                        "cycle": cycle,
+                    },
+                )
+
+        return current_context, NandaSearchResult(
+            NandaSearchStatus.FAILED,
+            f"恢复标准门前回放位姿超过最大循环次数 {max_cycles}",
+            room_id=match.room_id,
+            replay_path=match.replay_path,
+            metadata={"phase": "pose_restore", "max_cycles": max_cycles},
+        )
+
     def run(self, context: NandaSearchContext) -> NandaSearchResult:
         if context.should_abort():
             return NandaSearchResult(NandaSearchStatus.ABORTED, "搜房阶段已中止")
@@ -278,8 +389,15 @@ class NandaHouseSearchStrategy:
                 replay_path=match.replay_path,
             )
 
+        replay_context, pose_restore_result = self._realign_pose_for_replay(
+            context,
+            match,
+        )
+        if pose_restore_result is not None:
+            return pose_restore_result
+
         try:
-            result = self.replay_executor.replay(context, match)
+            result = self.replay_executor.replay(replay_context, match)
         except Exception as exc:
             return NandaSearchResult(
                 NandaSearchStatus.FAILED,

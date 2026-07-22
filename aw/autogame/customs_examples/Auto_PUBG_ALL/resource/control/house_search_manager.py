@@ -2225,6 +2225,50 @@ class HouseSearchManager:
             should_abort=lambda: self._should_abort(w),
             is_outside=lambda: self._get_house_scene(w)
             in {self.HOUSE_OUTDOOR, self.HOUSE_ROOFTOP},
+            refresh_context=lambda reason='': self._refresh_nanda_search_context(
+                w,
+                target_loc,
+                phase_label,
+                reason,
+            ),
+        )
+
+    def _refresh_nanda_search_context(
+        self,
+        w: 'FrameWorker',
+        target_loc,
+        phase_label,
+        reason: str = '',
+    ) -> Optional[NandaSearchContext]:
+        if not self._refresh_frame_and_handle_jump(w, reason):
+            return None
+        if self._should_abort(w):
+            return None
+
+        fresh_target_loc = (
+            self._entry_location_tuple(self.active_entry)
+            if self.active_entry
+            else None
+        )
+        if fresh_target_loc is None:
+            fresh_target_loc = self._normalize_location_value(target_loc)
+        current_loc = self._get_current_location(w)
+        distance = (
+            get_distance(current_loc, fresh_target_loc)
+            if current_loc is not None and fresh_target_loc is not None
+            else None
+        )
+        door = self.find_largest_door(w)
+        w.frame_log(
+            f"[NandaPoseRestore] 刷新门前上下文："
+            f"entry={fresh_target_loc}，dist={distance}，door={door}"
+        )
+        return self._build_nanda_search_context(
+            w,
+            door,
+            fresh_target_loc,
+            distance,
+            phase_label,
         )
 
     def _try_nanda_search_before_entry(

@@ -882,26 +882,24 @@ _AUTO_ROTATION = object()
 
 
 def get_resolution(r = True, rotation=_AUTO_ROTATION):
-    resolution_mode = run_shell('hdc shell hidumper -s DisplayManagerService -a -a', r)
+    command = 'hdc shell hidumper -s DisplayManagerService -a -a'
+    resolution_mode = run_shell(command, r)
     resolution = _parse_screen_resolution(resolution_mode)
     if resolution is None:
-        # 旧版系统仍可能只提供 RenderService 输出，保留回退以兼容原有设备。
-        resolution_mode = run_shell('hdc shell hidumper -s RenderService -a screen', r)
-        resolution = _parse_screen_resolution(resolution_mode)
-    if resolution:
-        width, height = resolution
-        if rotation is _AUTO_ROTATION:
-            rotation = normalize_rotation(get_display_rotation())
-        else:
-            rotation = normalize_rotation(rotation)
-        if rotation is None:
-            return max(width, height), min(width, height)
-        return normalize_resolution_by_rotation(width, height, rotation)
+        output_snippet = str(resolution_mode or "").strip()[:500]
+        detail = f"，输出片段={output_snippet}" if output_snippet else "，命令无输出"
+        raise RuntimeError(
+            f"[Resolution] 获取分辨率失败：{command} 未返回可解析的分辨率{detail}"
+        )
 
-    print('未能获取分辨率信息!')
-    if resolution_mode:
-        print(f"[Resolution] 显示服务输出片段: {resolution_mode[:500]}")
-    return None, None
+    width, height = resolution
+    if rotation is _AUTO_ROTATION:
+        rotation = normalize_rotation(get_display_rotation())
+    else:
+        rotation = normalize_rotation(rotation)
+    if rotation is None:
+        return max(width, height), min(width, height)
+    return normalize_resolution_by_rotation(width, height, rotation)
 
 
 def set_runtime_screen_resolution_env(width=None, height=None):

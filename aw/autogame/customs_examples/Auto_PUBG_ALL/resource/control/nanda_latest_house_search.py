@@ -123,11 +123,13 @@ class NandaLatestSettings:
     view_pitch_enabled: bool = True
     view_pitch_reference_top_ratio: float = 0.5
     view_pitch_time_scale: float = 2.0
-    view_pitch_min_duration_ms: int = 100
+    view_pitch_min_duration_ms: int = 0
     view_pitch_max_duration_ms: int = 800
     view_pitch_height_ratio_per_reference: float = 0.0545
     view_pitch_reference_duration_ms: int = 300
     view_pitch_wait_ms: int = 450
+    match_retry_backoff_duration_ms: int = 1500
+    match_retry_forward_recover_duration_ms: int = 1300
 
     joystick_center_x_ratio: float = 0.1965
     joystick_center_y_ratio: float = 0.7563
@@ -328,6 +330,20 @@ class NandaLatestSettings:
             view_pitch_wait_ms=max(
                 0,
                 _as_int(raw.get("view_pitch_wait_ms"), cls.view_pitch_wait_ms),
+            ),
+            match_retry_backoff_duration_ms=max(
+                1,
+                _as_int(
+                    raw.get("match_retry_backoff_duration_ms"),
+                    cls.match_retry_backoff_duration_ms,
+                ),
+            ),
+            match_retry_forward_recover_duration_ms=max(
+                1,
+                _as_int(
+                    raw.get("match_retry_forward_recover_duration_ms"),
+                    cls.match_retry_forward_recover_duration_ms,
+                ),
             ),
             joystick_center_x_ratio=_as_float(
                 raw.get("joystick_center_x_ratio"), cls.joystick_center_x_ratio
@@ -1272,6 +1288,51 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
         ):
             raise RuntimeError("door frame 取景后拉后刷新画面失败")
 
+    def _move_for_match_retry(
+        self,
+        context: NandaSearchContext,
+        *,
+        forward: bool,
+    ) -> None:
+        center, radius = self._joystick_geometry(context)
+        direction = "前推恢复" if forward else "后拉重试"
+        duration_ms = (
+            self.settings.match_retry_forward_recover_duration_ms
+            if forward
+            else self.settings.match_retry_backoff_duration_ms
+        )
+        y_offset = -radius if forward else radius
+        target = (center[0], center[1] + y_offset)
+        context.worker.frame_log(
+            f"[NandaMatch] 按南大房型匹配流程执行{direction}："
+            f"radius={radius}px，slide={self.settings.joystick_slide_duration_ms}ms，"
+            f"hold={duration_ms}ms"
+        )
+
+        def action(touch: Any) -> None:
+            pressed = False
+            try:
+                touch.move_press(0, center)
+                pressed = True
+                touch.move_to(
+                    0,
+                    target,
+                    duration_ms=self.settings.joystick_slide_duration_ms,
+                )
+                if not self._wait_control_ms(context, duration_ms):
+                    raise RuntimeError(f"房型匹配{direction}时搜房阶段已中止")
+            finally:
+                if pressed:
+                    touch.move_up(0)
+
+        self._run_hos_touch_action(
+            context,
+            label=f"房型匹配{direction}",
+            action=action,
+        )
+        if not context.refresh_frame(f"NandaMatch {direction}后刷新画面"):
+            raise RuntimeError(f"房型匹配{direction}后刷新画面失败")
+
     def _move_view_for_segmentation(
         self,
         context: NandaSearchContext,
@@ -1352,7 +1413,10 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
             ),
         )
         duration_ms = int(round(pitch_seconds * 1000.0))
-        if duration_ms < self.settings.view_pitch_min_duration_ms:
+        if (
+            duration_ms <= 0
+            or duration_ms < self.settings.view_pitch_min_duration_ms
+        ):
             return 0, 0
         bias_ratio = (
             self.settings.view_pitch_height_ratio_per_reference
@@ -1744,32 +1808,85 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
             return None
 
         try:
-            view = self._prepare_door_view(context)
+            first_view = self._prepare_door_view(context)
         except NandaViewPreparationError:
             raise
         except Exception as exc:
             raise NandaViewPreparationError(str(exc)) from exc
         if context.should_abort():
             return None
-        attempt = self._run_match_attempt(
+        first_attempt = self._run_match_attempt(
             context,
             index=1,
             label="door_view_prepared",
-            view=view,
+            view=first_view,
         )
-        if not attempt.valid:
+        if first_attempt.valid:
+            return self._build_selected_match(
+                context,
+                first_attempt,
+                [first_attempt],
+                selection_reason="door_view_prepared_building_match",
+                requires_pose_realign=first_view.backoff_pulses > 0,
+                view_metadata=first_view.metadata(),
+            )
+        if context.should_abort():
+            return None
+
+        context.worker.frame_log(
+            f"[NandaMatch] 第一次房型配准失败："
+            f"{dict(first_attempt.summary())}；按南大流程后拉 "
+            f"{self.settings.match_retry_backoff_duration_ms}ms 后只重试一次"
+        )
+        self._move_for_match_retry(context, forward=False)
+        if context.should_abort():
+            return None
+
+        try:
+            retry_view = self._prepare_door_view(context)
+        except NandaViewPreparationError:
+            raise
+        except Exception as exc:
+            raise NandaViewPreparationError(str(exc)) from exc
+        retry_attempt = self._run_match_attempt(
+            context,
+            index=2,
+            label="nanda_backoff_retry",
+            view=retry_view,
+        )
+        attempts = [first_attempt, retry_attempt]
+        if not retry_attempt.valid:
             context.worker.frame_log(
-                f"[NandaMatch] door frame 取景完成，但 building 房型配准无可用结果："
-                f"{dict(attempt.summary())}"
+                f"[NandaMatch] 后拉后的第二次房型配准仍失败："
+                f"{dict(retry_attempt.summary())}；已用完两次匹配机会，"
+                "不再继续后拉，结果按 unmatch 处理"
             )
             return None
+
+        context.worker.frame_log(
+            f"[NandaMatch] 后拉重试匹配成功：room={retry_attempt.room_id}，"
+            f"confidence={retry_attempt.score}；按南大流程前推 "
+            f"{self.settings.match_retry_forward_recover_duration_ms}ms 恢复位置，"
+            "随后由现有门前位姿模块复校准"
+        )
+        self._move_for_match_retry(context, forward=True)
+        view_metadata = {
+            "initial": dict(first_view.metadata()),
+            "retry": dict(retry_view.metadata()),
+            "match_retry_backoff_duration_ms": (
+                self.settings.match_retry_backoff_duration_ms
+            ),
+            "match_retry_forward_recover_duration_ms": (
+                self.settings.match_retry_forward_recover_duration_ms
+            ),
+        }
         return self._build_selected_match(
             context,
-            attempt,
-            [attempt],
-            selection_reason="door_view_prepared_building_match",
-            requires_pose_realign=view.backoff_pulses > 0,
-            view_metadata=view.metadata(),
+            retry_attempt,
+            attempts,
+            selection_reason="nanda_backoff_retry_match",
+            requires_pose_realign=True,
+            view_metadata=view_metadata,
         )
 
 

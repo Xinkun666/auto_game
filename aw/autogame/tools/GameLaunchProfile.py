@@ -1,3 +1,6 @@
+import os
+
+
 TEST_PROFILE_POWER = "power"
 TEST_PROFILE_FUNCTION = "function"
 DEFAULT_PUBG_GAME_PACKAGE = "com.tencent.tmgp.pubgmhd.hw"
@@ -15,11 +18,19 @@ def should_use_sp_recording_for_profile(profile) -> bool:
     return normalize_test_profile(profile) != TEST_PROFILE_FUNCTION
 
 
+def should_preserve_game_process() -> bool:
+    """Return the launcher-wide process preservation policy."""
+    return os.environ.get("AUTOGAME_PRESERVE_GAME_PROCESS", "0").strip() == "1"
+
+
 def cleanup_packages_for_test_profile(
     profile,
     game_package: str = DEFAULT_PUBG_GAME_PACKAGE,
     sp_package: str = DEFAULT_SP_PACKAGE,
 ) -> tuple[str, ...]:
+    if should_preserve_game_process():
+        return ()
+
     packages = [str(game_package).strip()]
     if should_use_sp_recording_for_profile(profile):
         packages.append(str(sp_package).strip())

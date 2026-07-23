@@ -3,6 +3,7 @@ import shutil
 import atexit
 import threading
 from aw.autogame.tools.GameFrameWorker import FrameWorker
+from aw.autogame.tools.GameLaunchProfile import should_preserve_game_process
 from aw.autogame.tools.Utils import *
 from aw.autogame.stream_client.stream_client import global_buffer, StreamClient, HDCSnapshotClient, HOSScrcpyStreamClient
 
@@ -141,6 +142,9 @@ class GameAutomator:
         self._set_hiz_mode(False)
 
         try:
+            if should_preserve_game_process():
+                print("当前测试处于保留进程模式：仅清理自动化资源，不强杀应用进程。")
+                app_list = ()
             if len(app_list) > 0:
                 for app in app_list:
                     print(f"停止应用: {app}")

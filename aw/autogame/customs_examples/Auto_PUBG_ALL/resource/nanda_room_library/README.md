@@ -17,7 +17,12 @@ nanda_room_library/
 ```
 
 服务首次启动会计算每个模板的彩色和灰度 DINOv3 特征，并将缓存写入
-`rooms/<room_id>/derived/autogame_embeddings/`。后续启动会直接复用缓存。
+`rooms/<room_id>/derived/autogame_embeddings/`。房型首次进入候选集时，
+还会用进程内的 SAM3 提取模板的 `door frame` 和 `window` 结构，并将缓存写入
+`rooms/<room_id>/derived/autogame_structure/`。后续匹配和进程重启都会直接复用。
+
+游戏画面的 `building`、`door frame`、`window` 都通过搜房阶段的 `sam3`
+special_area 按需获取，不需要启动 HTTP 匹配服务。`other` 仍是搜房阶段默认分组。
 
 运行时只索引 `status != disabled`、存在 `action_step.json` 且至少有一个
 有效模板的房型。匹配成功后仍会检查 `metadata.json` 中的

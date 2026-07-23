@@ -1,16 +1,16 @@
 """auto_game 内置的南大 DINOv3 + MLP 房型匹配运行时。
 
-该模块只消费已经由 ``sam3_tiny`` 生成的房屋立面和 building mask，
-不会启动或再次调用南大 SAM3。实现保留南大最新版的核心链路：
+该模块消费 ``sam3_tiny`` 生成的房屋立面、building mask、door frame
+和 window 多目标 mask，实现南大最新版完整房型匹配链路：
 
 1. DINOv3 masked-patch pooling 提取彩色/灰度房屋特征；
 2. 对房型模板做向量召回并展开候选房型的全部模板；
-3. 使用 ``rgb_mlp_struct_v7.pkl`` 做 MLP 重排；
-4. 使用南大阈值拒绝弱匹配，再返回房型绑定的回放 DSL。
+3. 使用门框和窗户 mask 构建与南大一致的门窗结构向量；
+4. 使用 ``rgb_mlp_struct_v7.pkl`` 做 MLP 重排；
+5. 使用南大阈值拒绝弱匹配，再返回房型绑定的回放 DSL。
 
-南大当前 MLP 的特征契约包含门窗结构向量。auto_game 的方案明确不再
-额外调用 SAM3 提取门窗，因此这里保留相同特征维度并传入零结构向量，
-同时保留南大“无强结构时 DINO 至少 0.65”的拒绝规则。
+当前游戏画面的三类分割都来自搜房阶段的 SAM3 special_area，不使用 HTTP。
+模板门窗结构在首次入选候选时使用同一个进程内 SAM3 模型计算并落盘缓存。
 """
 
 from __future__ import annotations
@@ -42,6 +42,16 @@ STRUCTURE_VECTOR_DIM = (
     STRUCTURE_VECTOR_GLOBAL_DIM
     + STRUCTURE_VECTOR_MAX_ROWS * 3 * STRUCTURE_VECTOR_CHANNELS
 )
+FACADE_STRUCTURE_CACHE_VERSION = 1
+FACADE_OPENING_MAX_MASKS = 12
+FACADE_OPENING_MIN_MASK_AREA_RATIO = 0.001
+FACADE_WINDOW_MERGE_Y_OVERLAP = 0.55
+FACADE_WINDOW_MERGE_MAX_GAP_RATIO = 12.0 / 1024.0
+FACADE_WINDOW_MERGE_HEIGHT_RATIO = 1.6
+FACADE_DOOR_UNCERTAIN_SCORE_BELOW = 0.6
+FACADE_WINDOW_UNCERTAIN_SCORE_BELOW = 0.6
+FACADE_UNCERTAIN_DOOR_WEIGHT = 0.50
+FACADE_UNCERTAIN_WINDOW_WEIGHT = 0.25
 
 # 与南大最新版 control_proxy/pubg_room_explore/sam3/config.py 保持一致。
 FACADE_TOP_K = 16
@@ -229,6 +239,591 @@ def _gray_bgr(image: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
 
+@dataclass(frozen=True)
+class FacadeMaskObservation:
+    """One SAM3 opening mask in the cropped building coordinate system."""
+
+    mask: np.ndarray
+    score: float
+
+
+@dataclass(frozen=True)
+class FacadeOpening:
+    kind: str
+    bbox_xyxy: Tuple[float, float, float, float]
+    score: float = 1.0
+    reason: Optional[str] = None
+
+    @property
+    def width(self) -> float:
+        return max(0.0, self.bbox_xyxy[2] - self.bbox_xyxy[0])
+
+    @property
+    def height(self) -> float:
+        return max(0.0, self.bbox_xyxy[3] - self.bbox_xyxy[1])
+
+    @property
+    def area(self) -> float:
+        return self.width * self.height
+
+    @property
+    def center(self) -> Tuple[float, float]:
+        x1, y1, x2, y2 = self.bbox_xyxy
+        return (x1 + x2) / 2.0, (y1 + y2) / 2.0
+
+
+@dataclass
+class FacadeStructureFeature:
+    anchor_door: Optional[FacadeOpening]
+    row_bounds: List[Tuple[float, float]]
+    structure_matrix: np.ndarray
+    doors: List[FacadeOpening]
+    uncertain_doors: List[FacadeOpening]
+    windows_raw: List[FacadeOpening]
+    windows: List[FacadeOpening]
+    uncertain_windows: List[FacadeOpening]
+
+    @property
+    def available(self) -> bool:
+        return self.anchor_door is not None
+
+
+def _bbox_from_mask(mask: np.ndarray) -> Tuple[int, int, int, int]:
+    ys, xs = np.where(mask)
+    if not len(xs) or not len(ys):
+        raise ValueError("门窗 mask 为空")
+    return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+
+def _opening_intersection(first: FacadeOpening, second: FacadeOpening) -> float:
+    ax1, ay1, ax2, ay2 = first.bbox_xyxy
+    bx1, by1, bx2, by2 = second.bbox_xyxy
+    width = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    height = max(0.0, min(ay2, by2) - max(ay1, by1))
+    return width * height
+
+
+def _opening_iou(first: FacadeOpening, second: FacadeOpening) -> float:
+    intersection = _opening_intersection(first, second)
+    union = first.area + second.area - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def _dedupe_openings(openings: List[FacadeOpening]) -> List[FacadeOpening]:
+    kept: List[FacadeOpening] = []
+    for opening in sorted(openings, key=lambda item: (-item.score, -item.area)):
+        duplicate = False
+        for existing in kept:
+            intersection = _opening_intersection(opening, existing)
+            smaller = min(opening.area, existing.area)
+            if _opening_iou(opening, existing) >= 0.55 or (
+                smaller > 0 and intersection / smaller >= 0.85
+            ):
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(opening)
+    return sorted(kept, key=lambda item: (item.bbox_xyxy[1], item.bbox_xyxy[0]))
+
+
+def _normalize_facade_mask(
+    facade_mask: Optional[np.ndarray],
+    shape_hw: Tuple[int, int],
+) -> np.ndarray:
+    height, width = shape_hw
+    if facade_mask is None:
+        return np.ones((height, width), dtype=bool)
+    normalized = _normalize_mask(facade_mask, shape_hw)
+    if normalized is None or not np.any(normalized):
+        return np.ones((height, width), dtype=bool)
+    return normalized.astype(bool)
+
+
+def _opening_from_observation(
+    observation: FacadeMaskObservation,
+    *,
+    kind: str,
+    facade_mask: np.ndarray,
+) -> Optional[FacadeOpening]:
+    raw_mask = np.asarray(observation.mask)
+    if raw_mask.ndim == 3:
+        raw_mask = np.any(raw_mask != 0, axis=2)
+    if raw_mask.shape != facade_mask.shape:
+        raw_mask = cv2.resize(
+            raw_mask.astype(np.uint8),
+            (facade_mask.shape[1], facade_mask.shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        )
+    raw_mask = raw_mask.astype(bool)
+    raw_area = int(raw_mask.sum())
+    if raw_area <= 0:
+        return None
+    inside_mask = raw_mask & facade_mask
+    if int(inside_mask.sum()) / float(raw_area) <= 0.5 or not inside_mask.any():
+        return None
+    x1, y1, x2, y2 = _bbox_from_mask(inside_mask)
+    return FacadeOpening(
+        kind=kind,
+        bbox_xyxy=(float(x1), float(y1), float(x2), float(y2)),
+        score=float(observation.score),
+    )
+
+
+def _normalize_openings(
+    openings: List[FacadeOpening],
+    facade_bbox: Tuple[int, int, int, int],
+) -> List[FacadeOpening]:
+    x1, y1, x2, y2 = facade_bbox
+    width = max(1.0, float(x2 - x1))
+    height = max(1.0, float(y2 - y1))
+    normalized: List[FacadeOpening] = []
+    for opening in openings:
+        ox1, oy1, ox2, oy2 = opening.bbox_xyxy
+        clipped_x1 = max(float(x1), ox1)
+        clipped_y1 = max(float(y1), oy1)
+        clipped_x2 = min(float(x2), ox2)
+        clipped_y2 = min(float(y2), oy2)
+        if clipped_x2 <= clipped_x1 or clipped_y2 <= clipped_y1:
+            continue
+        normalized.append(
+            FacadeOpening(
+                kind=opening.kind,
+                bbox_xyxy=(
+                    (clipped_x1 - x1) / width,
+                    (clipped_y1 - y1) / height,
+                    (clipped_x2 - x1) / width,
+                    (clipped_y2 - y1) / height,
+                ),
+                score=opening.score,
+                reason=opening.reason,
+            )
+        )
+    return normalized
+
+
+def _retag_opening(
+    opening: FacadeOpening,
+    *,
+    kind: str,
+    reason: str,
+) -> FacadeOpening:
+    return FacadeOpening(
+        kind=kind,
+        bbox_xyxy=opening.bbox_xyxy,
+        score=opening.score,
+        reason=reason,
+    )
+
+
+def _merge_windows(windows: List[FacadeOpening]) -> List[FacadeOpening]:
+    windows = _dedupe_openings(windows)
+    changed = True
+    while changed:
+        changed = False
+        merged: List[FacadeOpening] = []
+        used: set[int] = set()
+        for index, window in enumerate(windows):
+            if index in used:
+                continue
+            current = window
+            used.add(index)
+            for other_index in range(index + 1, len(windows)):
+                if other_index in used:
+                    continue
+                other = windows[other_index]
+                overlap = max(
+                    0.0,
+                    min(current.bbox_xyxy[3], other.bbox_xyxy[3])
+                    - max(current.bbox_xyxy[1], other.bbox_xyxy[1]),
+                )
+                y_overlap_ratio = overlap / max(
+                    1e-6, min(current.height, other.height)
+                )
+                shorter = max(1e-6, min(current.height, other.height))
+                taller = max(current.height, other.height)
+                horizontal_gap = max(
+                    0.0,
+                    max(current.bbox_xyxy[0], other.bbox_xyxy[0])
+                    - min(current.bbox_xyxy[2], other.bbox_xyxy[2]),
+                )
+                if (
+                    y_overlap_ratio < FACADE_WINDOW_MERGE_Y_OVERLAP
+                    or taller / shorter > FACADE_WINDOW_MERGE_HEIGHT_RATIO
+                    or horizontal_gap > FACADE_WINDOW_MERGE_MAX_GAP_RATIO
+                ):
+                    continue
+                current = FacadeOpening(
+                    kind="window",
+                    bbox_xyxy=(
+                        min(current.bbox_xyxy[0], other.bbox_xyxy[0]),
+                        min(current.bbox_xyxy[1], other.bbox_xyxy[1]),
+                        max(current.bbox_xyxy[2], other.bbox_xyxy[2]),
+                        max(current.bbox_xyxy[3], other.bbox_xyxy[3]),
+                    ),
+                    score=max(current.score, other.score),
+                )
+                used.add(other_index)
+                changed = True
+            merged.append(current)
+        windows = sorted(
+            merged, key=lambda item: (item.bbox_xyxy[1], item.bbox_xyxy[0])
+        )
+    return windows
+
+
+def _choose_anchor_door(
+    doors: List[FacadeOpening],
+    uncertain_doors: List[FacadeOpening],
+) -> Optional[FacadeOpening]:
+    if doors:
+        return min(
+            doors,
+            key=lambda item: (
+                abs(item.center[0] - 0.5),
+                -item.area,
+                -item.score,
+            ),
+        )
+    if uncertain_doors:
+        return min(
+            uncertain_doors,
+            key=lambda item: (
+                -item.score,
+                abs(item.center[0] - 0.5),
+                -item.area,
+            ),
+        )
+    return None
+
+
+def _dynamic_facade_rows(
+    openings: List[FacadeOpening],
+) -> List[Tuple[float, float, List[FacadeOpening]]]:
+    rows: List[List[FacadeOpening]] = []
+    for opening in openings:
+        matching_indexes = []
+        for index, row in enumerate(rows):
+            if any(
+                max(opening.bbox_xyxy[1], existing.bbox_xyxy[1])
+                <= min(opening.bbox_xyxy[3], existing.bbox_xyxy[3])
+                for existing in row
+            ):
+                matching_indexes.append(index)
+        if not matching_indexes:
+            rows.append([opening])
+            continue
+        first_index = matching_indexes[0]
+        rows[first_index].append(opening)
+        for index in reversed(matching_indexes[1:]):
+            rows[first_index].extend(rows.pop(index))
+    row_data = [
+        (
+            min(opening.bbox_xyxy[1] for opening in row),
+            max(opening.bbox_xyxy[3] for opening in row),
+            row,
+        )
+        for row in rows
+    ]
+    return sorted(row_data, key=lambda item: (item[1], item[0]), reverse=True)
+
+
+def _build_facade_feature(
+    *,
+    doors: List[FacadeOpening],
+    uncertain_doors: List[FacadeOpening],
+    windows_raw: List[FacadeOpening],
+    windows: List[FacadeOpening],
+    uncertain_windows: List[FacadeOpening],
+) -> FacadeStructureFeature:
+    anchor = _choose_anchor_door(doors, uncertain_doors)
+    all_openings = doors + uncertain_doors + windows + uncertain_windows
+    rows = _dynamic_facade_rows(all_openings) if anchor is not None else []
+    matrix = np.zeros((len(rows), 3, 4), dtype="float32")
+    if anchor is not None:
+        for channel, channel_openings in enumerate(
+            (doors, uncertain_doors, windows, uncertain_windows)
+        ):
+            for opening in channel_openings:
+                row_index = next(
+                    index
+                    for index, (_top, _bottom, row) in enumerate(rows)
+                    if any(opening is row_opening for row_opening in row)
+                )
+                if opening.bbox_xyxy[2] < anchor.bbox_xyxy[0]:
+                    side = 0
+                elif opening.bbox_xyxy[0] > anchor.bbox_xyxy[2]:
+                    side = 2
+                else:
+                    side = 1
+                matrix[row_index, side, channel] += 1.0
+    return FacadeStructureFeature(
+        anchor_door=anchor,
+        row_bounds=[(top, bottom) for top, bottom, _ in rows],
+        structure_matrix=matrix,
+        doors=doors,
+        uncertain_doors=uncertain_doors,
+        windows_raw=windows_raw,
+        windows=windows,
+        uncertain_windows=uncertain_windows,
+    )
+
+
+def build_facade_structure(
+    facade_mask: Optional[np.ndarray],
+    door_observations: Iterable[FacadeMaskObservation],
+    window_observations: Iterable[FacadeMaskObservation],
+) -> FacadeStructureFeature:
+    """Convert SAM3 building/door/window masks to Nanda's facade feature contract."""
+    if facade_mask is None:
+        raise ValueError("构建南大门窗结构缺少 building mask")
+    shape_hw = tuple(int(value) for value in facade_mask.shape[:2])
+    facade_bool = _normalize_facade_mask(facade_mask, shape_hw)
+    facade_bbox = _bbox_from_mask(facade_bool)
+
+    raw_doors = [
+        opening
+        for observation in list(door_observations)[:FACADE_OPENING_MAX_MASKS]
+        if (
+            opening := _opening_from_observation(
+                observation,
+                kind="door",
+                facade_mask=facade_bool,
+            )
+        )
+        is not None
+    ]
+    raw_windows = [
+        opening
+        for observation in list(window_observations)[:FACADE_OPENING_MAX_MASKS]
+        if (
+            opening := _opening_from_observation(
+                observation,
+                kind="window",
+                facade_mask=facade_bool,
+            )
+        )
+        is not None
+    ]
+    raw_doors = _dedupe_openings(raw_doors)
+    raw_windows = _dedupe_openings(raw_windows)
+
+    confident_doors: List[FacadeOpening] = []
+    uncertain_doors: List[FacadeOpening] = []
+    for door in raw_doors:
+        aspect_ratio = door.height / max(1e-6, door.width)
+        if aspect_ratio < 1.0:
+            uncertain_doors.append(
+                _retag_opening(
+                    door,
+                    kind="uncertain_door",
+                    reason="partial_door_frame",
+                )
+            )
+        elif aspect_ratio > 4.0:
+            uncertain_doors.append(
+                _retag_opening(
+                    door,
+                    kind="uncertain_door",
+                    reason="slender_aspect_ratio",
+                )
+            )
+        elif door.score < FACADE_DOOR_UNCERTAIN_SCORE_BELOW:
+            uncertain_doors.append(
+                _retag_opening(
+                    door,
+                    kind="uncertain_door",
+                    reason="low_score",
+                )
+            )
+        else:
+            confident_doors.append(door)
+
+    confident_windows: List[FacadeOpening] = []
+    uncertain_windows: List[FacadeOpening] = []
+    for window in raw_windows:
+        if window.score < FACADE_WINDOW_UNCERTAIN_SCORE_BELOW:
+            uncertain_windows.append(
+                _retag_opening(
+                    window,
+                    kind="uncertain_window",
+                    reason="low_score",
+                )
+            )
+        else:
+            confident_windows.append(window)
+
+    normalized_doors = _normalize_openings(confident_doors, facade_bbox)
+    normalized_uncertain_doors = _normalize_openings(uncertain_doors, facade_bbox)
+    normalized_windows_raw = _normalize_openings(confident_windows, facade_bbox)
+    normalized_uncertain_windows = _normalize_openings(
+        uncertain_windows, facade_bbox
+    )
+    normalized_windows = _merge_windows(normalized_windows_raw)
+    return _build_facade_feature(
+        doors=normalized_doors,
+        uncertain_doors=normalized_uncertain_doors,
+        windows_raw=normalized_windows_raw,
+        windows=normalized_windows,
+        uncertain_windows=normalized_uncertain_windows,
+    )
+
+
+def structure_feature_vector(
+    feature: Optional[FacadeStructureFeature],
+) -> np.ndarray:
+    if feature is None or not feature.available:
+        return np.zeros((STRUCTURE_VECTOR_DIM,), dtype="float32")
+    matrix = np.asarray(feature.structure_matrix, dtype="float32")
+    row_count = int(matrix.shape[0]) if matrix.ndim >= 1 else 0
+    padded = np.zeros(
+        (STRUCTURE_VECTOR_MAX_ROWS, 3, STRUCTURE_VECTOR_CHANNELS),
+        dtype="float32",
+    )
+    if matrix.size:
+        rows_to_copy = min(STRUCTURE_VECTOR_MAX_ROWS, row_count)
+        channels_to_copy = min(STRUCTURE_VECTOR_CHANNELS, matrix.shape[2])
+        padded[:rows_to_copy, :, :channels_to_copy] = matrix[
+            :rows_to_copy, :, :channels_to_copy
+        ]
+    counts = np.asarray(
+        [
+            len(feature.doors),
+            len(feature.uncertain_doors),
+            len(feature.windows),
+            len(feature.uncertain_windows),
+            min(row_count, STRUCTURE_VECTOR_MAX_ROWS),
+            max(0, row_count - STRUCTURE_VECTOR_MAX_ROWS),
+        ],
+        dtype="float32",
+    )
+    return np.concatenate([counts, padded.reshape(-1)]).astype("float32")
+
+
+def compare_structure_features(
+    query: Optional[FacadeStructureFeature],
+    template: Optional[FacadeStructureFeature],
+) -> float:
+    if (
+        query is None
+        or template is None
+        or not query.available
+        or not template.available
+    ):
+        return 0.0
+    query_matrix = query.structure_matrix.astype("float32")
+    template_matrix = template.structure_matrix.astype("float32")
+    observed = query_matrix > 0
+    row_count = query_matrix.shape[0]
+    channel_count = max(query_matrix.shape[2], template_matrix.shape[2], 4)
+    if template_matrix.shape[0] < row_count:
+        template_matrix = np.pad(
+            template_matrix,
+            ((0, row_count - template_matrix.shape[0]), (0, 0), (0, 0)),
+        )
+    elif template_matrix.shape[0] > row_count:
+        template_matrix = template_matrix[:row_count]
+    if query_matrix.shape[2] < channel_count:
+        padding = channel_count - query_matrix.shape[2]
+        query_matrix = np.pad(query_matrix, ((0, 0), (0, 0), (0, padding)))
+        observed = np.pad(observed, ((0, 0), (0, 0), (0, padding)))
+    if template_matrix.shape[2] < channel_count:
+        template_matrix = np.pad(
+            template_matrix,
+            ((0, 0), (0, 0), (0, channel_count - template_matrix.shape[2])),
+        )
+    weights = np.ones((channel_count,), dtype="float32")
+    weights[1] = FACADE_UNCERTAIN_DOOR_WEIGHT
+    weights[3] = FACADE_UNCERTAIN_WINDOW_WEIGHT
+    query_matrix *= weights.reshape((1, 1, channel_count))
+    template_matrix *= weights.reshape((1, 1, channel_count))
+    observed_float = observed.astype("float32")
+    difference = float(
+        (np.abs(query_matrix - template_matrix) * observed_float).sum()
+    )
+    denominator = max(
+        float((query_matrix * observed_float).sum()),
+        1.0,
+    )
+    return max(0.0, min(1.0, 1.0 - difference / denominator))
+
+
+def facade_structure_payload(
+    feature: Optional[FacadeStructureFeature],
+) -> Dict[str, Any]:
+    if feature is None:
+        return {"available": False, "counts": {}, "rows": []}
+    return {
+        "available": feature.available,
+        "counts": {
+            "door_count": len(feature.doors),
+            "uncertain_door_count": len(feature.uncertain_doors),
+            "window_raw_count": len(feature.windows_raw),
+            "window_count": len(feature.windows),
+            "uncertain_window_count": len(feature.uncertain_windows),
+        },
+        "rows": np.asarray(feature.structure_matrix, dtype="float32").tolist(),
+        "openings": {
+            "doors": [_opening_payload(value) for value in feature.doors],
+            "uncertain_doors": [
+                _opening_payload(value) for value in feature.uncertain_doors
+            ],
+            "windows_raw": [
+                _opening_payload(value) for value in feature.windows_raw
+            ],
+            "windows": [_opening_payload(value) for value in feature.windows],
+            "uncertain_windows": [
+                _opening_payload(value) for value in feature.uncertain_windows
+            ],
+        },
+    }
+
+
+def _opening_payload(opening: FacadeOpening) -> Dict[str, Any]:
+    return {
+        "kind": opening.kind,
+        "bbox_xyxy": list(opening.bbox_xyxy),
+        "score": opening.score,
+        "reason": opening.reason,
+    }
+
+
+def _facade_structure_from_payload(
+    payload: Mapping[str, Any],
+) -> Optional[FacadeStructureFeature]:
+    if not payload.get("available"):
+        return None
+    raw_openings = payload.get("openings")
+    if not isinstance(raw_openings, Mapping):
+        raise ValueError("门窗结构缓存缺少 openings")
+
+    def load_openings(name: str) -> List[FacadeOpening]:
+        values = raw_openings.get(name) or []
+        result = []
+        for value in values:
+            if not isinstance(value, Mapping):
+                continue
+            bbox = value.get("bbox_xyxy")
+            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                continue
+            result.append(
+                FacadeOpening(
+                    kind=str(value.get("kind") or name),
+                    bbox_xyxy=tuple(float(item) for item in bbox),
+                    score=float(value.get("score", 1.0)),
+                    reason=value.get("reason"),
+                )
+            )
+        return result
+
+    return _build_facade_feature(
+        doors=load_openings("doors"),
+        uncertain_doors=load_openings("uncertain_doors"),
+        windows_raw=load_openings("windows_raw"),
+        windows=load_openings("windows"),
+        uncertain_windows=load_openings("uncertain_windows"),
+    )
+
+
 class DinoV3FeatureExtractor:
     """从 auto_game 指定目录离线加载 DINOv3，不访问模型网络。"""
 
@@ -385,6 +980,8 @@ def _build_mlp_features(
     candidate_rgb: np.ndarray,
     query_gray: Optional[np.ndarray],
     candidate_gray: Optional[np.ndarray],
+    query_structure: Optional[FacadeStructureFeature] = None,
+    candidate_structure: Optional[FacadeStructureFeature] = None,
 ) -> np.ndarray:
     if spec.feature_set == "gray":
         if query_gray is None or candidate_gray is None:
@@ -412,9 +1009,17 @@ def _build_mlp_features(
             [_normalize_embedding(query_gray), _normalize_embedding(candidate_gray)]
         )
     if spec.uses_structure:
-        # 不再额外调用 SAM3 门窗结构；与南大 None 结构的向量表达完全一致。
-        zero_structure = np.zeros((STRUCTURE_VECTOR_DIM,), dtype="float32")
-        parts.extend([zero_structure, zero_structure, zero_structure])
+        query_structure_vector = structure_feature_vector(query_structure)
+        candidate_structure_vector = structure_feature_vector(candidate_structure)
+        parts.extend(
+            [
+                query_structure_vector,
+                candidate_structure_vector,
+                np.abs(
+                    query_structure_vector - candidate_structure_vector
+                ).astype("float32"),
+            ]
+        )
     return np.concatenate(parts).astype("float32")
 
 
@@ -489,12 +1094,16 @@ class MlpRoomReranker:
 class RoomTemplate:
     room_id: str
     template_id: str
+    room_dir: Path
+    template_dir: Path
     template_path: Path
     mask_path: Optional[Path]
     action_path: Path
     metadata: Dict[str, Any]
     rgb_embedding: np.ndarray
     gray_embedding: Optional[np.ndarray]
+    structure: Optional[FacadeStructureFeature] = None
+    structure_resolved: bool = False
 
 
 def _iter_room_dirs(room_library_path: Path) -> Iterable[Path]:
@@ -592,6 +1201,126 @@ def _load_template_dino_input(
     crop = _locate_source_crop(source, segment, mask) if source is not None else None
     base = crop if crop is not None else segment
     return _build_masked_dino_input(base, mask)
+
+
+def _load_template_structure_input(
+    room_dir: Path,
+    template_dir: Path,
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """Read the unmasked facade crop used by Nanda's opening extractor."""
+    segment_path = template_dir / "segment.png"
+    segment = cv2.imread(str(segment_path), cv2.IMREAD_COLOR)
+    if segment is None:
+        raise FileNotFoundError(f"无法读取房型结构模板: {segment_path}")
+    mask_path = template_dir / "mask.png"
+    raw_mask = (
+        cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        if mask_path.is_file()
+        else None
+    )
+    mask = _normalize_mask(raw_mask, segment.shape[:2])
+    source_path = _find_capture(room_dir, template_dir.name)
+    source = (
+        cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        if source_path is not None
+        else None
+    )
+    located = _locate_source_crop(source, segment, mask) if source is not None else None
+    image = located if located is not None else segment
+    if mask is not None and mask.shape[:2] != image.shape[:2]:
+        mask = cv2.resize(
+            mask,
+            (image.shape[1], image.shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        )
+    if mask is None or not np.any(mask):
+        return image.copy(), mask
+    ys, xs = np.where(mask > 0)
+    x1, y1 = int(xs.min()), int(ys.min())
+    x2, y2 = int(xs.max()) + 1, int(ys.max()) + 1
+    return (
+        np.ascontiguousarray(image[y1:y2, x1:x2]).copy(),
+        np.ascontiguousarray(mask[y1:y2, x1:x2]).copy(),
+    )
+
+
+def _template_structure_cache_path(room_dir: Path, template_id: str) -> Path:
+    return room_dir / "derived" / "autogame_structure" / f"{template_id}.json"
+
+
+def _load_cached_facade_structure(
+    cache_path: Path,
+    *,
+    image: np.ndarray,
+    mask: Optional[np.ndarray],
+) -> Tuple[bool, Optional[FacadeStructureFeature]]:
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False, None
+    if not isinstance(payload, Mapping):
+        return False, None
+    expected = {
+        "cache_version": FACADE_STRUCTURE_CACHE_VERSION,
+        "image_md5": _image_md5(image),
+        "mask_md5": _image_md5(mask),
+    }
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping) or any(
+        metadata.get(key) != value for key, value in expected.items()
+    ):
+        return False, None
+    feature_payload = payload.get("feature")
+    if not isinstance(feature_payload, Mapping):
+        return False, None
+    try:
+        return True, _facade_structure_from_payload(feature_payload)
+    except (TypeError, ValueError):
+        return False, None
+
+
+def _write_cached_facade_structure(
+    cache_path: Path,
+    *,
+    image: np.ndarray,
+    mask: Optional[np.ndarray],
+    feature: Optional[FacadeStructureFeature],
+) -> None:
+    payload = {
+        "metadata": {
+            "cache_version": FACADE_STRUCTURE_CACHE_VERSION,
+            "image_md5": _image_md5(image),
+            "mask_md5": _image_md5(mask),
+            "door_prompt": "door frame",
+            "window_prompt": "window",
+            "max_masks": FACADE_OPENING_MAX_MASKS,
+        },
+        "feature": facade_structure_payload(feature),
+    }
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(cache_path)
+
+
+def _candidate_observations(
+    candidates: Iterable[Mapping[str, Any]],
+) -> List[FacadeMaskObservation]:
+    observations = []
+    for candidate in candidates:
+        mask = candidate.get("mask")
+        if mask is None:
+            continue
+        observations.append(
+            FacadeMaskObservation(
+                mask=np.asarray(mask, dtype=np.uint8),
+                score=float(candidate.get("score", 0.0)),
+            )
+        )
+    return observations
 
 
 class IntegratedNandaRoomMatcher:
@@ -702,9 +1431,28 @@ class IntegratedNandaRoomMatcher:
                             mask,
                             variant="gray",
                         )
+                    structure = None
+                    structure_resolved = False
+                    if self.reranker.feature_spec.uses_structure:
+                        structure_image, structure_mask = (
+                            _load_template_structure_input(
+                                room_dir,
+                                template_dir,
+                            )
+                        )
+                        structure_resolved, structure = _load_cached_facade_structure(
+                            _template_structure_cache_path(
+                                room_dir,
+                                template_dir.name,
+                            ),
+                            image=structure_image,
+                            mask=structure_mask,
+                        )
                     record = RoomTemplate(
                         room_id=room_dir.name,
                         template_id=template_dir.name,
+                        room_dir=room_dir,
+                        template_dir=template_dir,
                         template_path=template_dir / "segment.png",
                         mask_path=(
                             template_dir / "mask.png"
@@ -715,6 +1463,8 @@ class IntegratedNandaRoomMatcher:
                         metadata=metadata,
                         rgb_embedding=rgb_embedding,
                         gray_embedding=gray_embedding,
+                        structure=structure,
+                        structure_resolved=structure_resolved,
                     )
                     room_templates.append(record)
                     self.templates.append(record)
@@ -752,6 +1502,115 @@ class IntegratedNandaRoomMatcher:
             perf_counter() - started,
         )
 
+    def _ensure_template_structure(
+        self,
+        template: RoomTemplate,
+    ) -> Optional[FacadeStructureFeature]:
+        if template.structure_resolved:
+            return template.structure
+        image, mask = _load_template_structure_input(
+            template.room_dir,
+            template.template_dir,
+        )
+        try:
+            from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.sam3_tiny.local_segmenter import (
+                get_sam3_segmenter,
+            )
+
+            segmenter = get_sam3_segmenter()
+            door_candidates = segmenter.infer_all_masks(
+                image,
+                prompt="door frame",
+                max_masks=FACADE_OPENING_MAX_MASKS,
+                min_mask_area_ratio=FACADE_OPENING_MIN_MASK_AREA_RATIO,
+            )
+            window_candidates = segmenter.infer_all_masks(
+                image,
+                prompt="window",
+                max_masks=FACADE_OPENING_MAX_MASKS,
+                min_mask_area_ratio=FACADE_OPENING_MIN_MASK_AREA_RATIO,
+            )
+            feature = build_facade_structure(
+                mask,
+                _candidate_observations(door_candidates),
+                _candidate_observations(window_candidates),
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "南大模板门窗结构提取失败: "
+                f"room={template.room_id}, template={template.template_id}: {exc}"
+            ) from exc
+
+        template.structure = feature if feature.available else None
+        template.structure_resolved = True
+        cache_path = _template_structure_cache_path(
+            template.room_dir,
+            template.template_id,
+        )
+        try:
+            _write_cached_facade_structure(
+                cache_path,
+                image=image,
+                mask=mask,
+                feature=template.structure,
+            )
+        except OSError as exc:
+            raise RuntimeError(f"无法写入南大模板门窗结构缓存: {cache_path}") from exc
+        LOGGER.info(
+            "南大模板门窗结构已生成：room=%s template=%s available=%s "
+            "doors=%d uncertain_doors=%d windows=%d uncertain_windows=%d",
+            template.room_id,
+            template.template_id,
+            feature.available,
+            len(feature.doors),
+            len(feature.uncertain_doors),
+            len(feature.windows),
+            len(feature.uncertain_windows),
+        )
+        return template.structure
+
+    def _ensure_candidate_structures(
+        self,
+        candidates: Iterable[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        if not self.reranker.feature_spec.uses_structure:
+            return {
+                "template_count": 0,
+                "cached_count": 0,
+                "generated_count": 0,
+                "elapsed_ms": 0.0,
+            }
+        seen: set[Tuple[str, str]] = set()
+        generated = 0
+        cached = 0
+        started = perf_counter()
+        for candidate in candidates:
+            template = candidate["template"]
+            key = (template.room_id, template.template_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            was_resolved = template.structure_resolved
+            self._ensure_template_structure(template)
+            if was_resolved:
+                cached += 1
+            else:
+                generated += 1
+        LOGGER.info(
+            "南大候选模板门窗结构就绪：templates=%d cached=%d generated=%d "
+            "elapsed=%.2fs",
+            len(seen),
+            cached,
+            generated,
+            perf_counter() - started,
+        )
+        return {
+            "template_count": len(seen),
+            "cached_count": cached,
+            "generated_count": generated,
+            "elapsed_ms": (perf_counter() - started) * 1000.0,
+        }
+
     def health_payload(self) -> Dict[str, Any]:
         return {
             "assets": self.asset_paths.to_jsonable(),
@@ -760,7 +1619,7 @@ class IntegratedNandaRoomMatcher:
             "dino_device": self.extractor.device,
             "mlp_feature_set": self.reranker.feature_spec.feature_set,
             "mlp_feature_mode": self.reranker.feature_spec.feature_mode,
-            "structure_mode": "disabled_zero_vector",
+            "structure_mode": "sam3_door_window_full",
         }
 
     def _retrieve(self, query_embedding: np.ndarray) -> List[Dict[str, Any]]:
@@ -829,6 +1688,9 @@ class IntegratedNandaRoomMatcher:
         segmented_bgr: np.ndarray,
         cropped_mask: np.ndarray,
         cropped_bgr: np.ndarray,
+        *,
+        door_observations: Iterable[FacadeMaskObservation] = (),
+        window_observations: Iterable[FacadeMaskObservation] = (),
     ) -> Tuple[Optional[str], Optional[Path], Dict[str, Any]]:
         started = perf_counter()
         query_image, query_mask = _build_masked_dino_input(
@@ -841,23 +1703,51 @@ class IntegratedNandaRoomMatcher:
         query_gray = None
         if self.reranker.feature_spec.uses_gray_embedding:
             query_gray = self.extractor.extract(_gray_bgr(query_image), query_mask)
+        query_structure = None
+        query_structure_feature = None
+        if self.reranker.feature_spec.uses_structure:
+            query_structure_feature = build_facade_structure(
+                cropped_mask,
+                door_observations,
+                window_observations,
+            )
+            if query_structure_feature.available:
+                query_structure = query_structure_feature
 
         candidates = self._retrieve(query_rgb)
+        if query_structure is not None:
+            template_structure_cache = self._ensure_candidate_structures(candidates)
+        else:
+            template_structure_cache = {
+                "template_count": 0,
+                "cached_count": 0,
+                "generated_count": 0,
+                "elapsed_ms": 0.0,
+                "skipped_reason": "query_structure_unavailable",
+            }
         ranked: List[Dict[str, Any]] = []
         for candidate in candidates:
             template = candidate["template"]
+            candidate_structure = (
+                template.structure if query_structure is not None else None
+            )
             features = _build_mlp_features(
                 self.reranker.feature_spec,
                 query_rgb,
                 template.rgb_embedding,
                 query_gray,
                 template.gray_embedding,
+                query_structure,
+                candidate_structure,
             )
             mlp_score = self.reranker.predict(features)
             mlp_rank_score = max(
                 0.0, float(mlp_score) - FACADE_LOW_MLP_CONFIDENCE_SCORE
             )
-            structure_score = 0.0
+            structure_score = compare_structure_features(
+                query_structure,
+                candidate_structure,
+            )
             total_score = mlp_rank_score + FACADE_STRUCT_SCORE_ALPHA * structure_score
             ranked.append(
                 {
@@ -898,7 +1788,9 @@ class IntegratedNandaRoomMatcher:
         }
         debug: Dict[str, Any] = {
             "thresholds": thresholds,
-            "structure_mode": "disabled_zero_vector",
+            "structure_mode": "sam3_door_window_full",
+            "query_structure": facade_structure_payload(query_structure_feature),
+            "template_structure_cache": template_structure_cache,
             "candidate_count": len(ranked),
             "room_candidate_count": len(room_candidates),
             "elapsed_ms": (perf_counter() - started) * 1000.0,
@@ -942,7 +1834,11 @@ class IntegratedNandaRoomMatcher:
                 "dino_score": value["dino_score"],
                 "room_best_dino_score": value["room_best_dino_score"],
                 "mlp_score": value["mlp_score"],
+                "structure_score": value["structure_score"],
                 "total_score": value["total_score"],
+                "template_structure": facade_structure_payload(
+                    value["template"].structure
+                ),
                 "template_path": str(value["template"].template_path),
             }
             for value in room_candidates[:5]
@@ -988,6 +1884,12 @@ class IntegratedNandaRoomMatcher:
 
 
 __all__ = [
+    "FacadeMaskObservation",
+    "FacadeStructureFeature",
     "IntegratedNandaRoomMatcher",
     "NandaMatcherAssetPaths",
+    "build_facade_structure",
+    "compare_structure_features",
+    "facade_structure_payload",
+    "structure_feature_vector",
 ]

@@ -26,5 +26,6 @@ nanda_room_matcher/
 python -m pip install -r requirements_nanda_room_matcher.txt
 ```
 
-不需要启动任何 HTTP 服务。人物完成门前对准并取得 `sam3_tiny` 分割结果后，
-搜房进程会在第一次匹配时惰性加载 DINOv3、MLP 和房型索引；之后持续复用。
+不需要启动任何 HTTP 服务。人物完成门前对准后，搜房进程会按需取得
+`building`、`door frame`、`window` 三类 `sam3_tiny` 分割结果，并在当前进程
+完成 DINOv3 + MLP 匹配。DINOv3、MLP 和房型索引只加载一次，之后持续复用。

@@ -239,8 +239,23 @@ class LocalSam3Segmenter:
         *,
         prompt: str,
     ) -> Optional[Dict[str, Any]]:
+        candidates = self._collect_mask_candidates(masks, scores)
+        return self._select_best_candidate(candidates, prompt=prompt)
+
+    def _collect_mask_candidates(
+        self,
+        masks: Any,
+        scores: Any,
+        *,
+        min_mask_area_ratio: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
         score_values = _to_numpy(scores).reshape(-1)
         candidates: List[Dict[str, Any]] = []
+        minimum_area_ratio = (
+            self.min_mask_area_ratio
+            if min_mask_area_ratio is None
+            else float(min_mask_area_ratio)
+        )
         for index in range(min(len(score_values), len(masks))):
             mask_value = masks[index]
             mask_array = _to_numpy(mask_value)
@@ -250,7 +265,7 @@ class LocalSam3Segmenter:
             if not mask.any():
                 continue
             area_ratio = float(mask.mean())
-            if area_ratio < self.min_mask_area_ratio:
+            if area_ratio < minimum_area_ratio:
                 continue
             bbox = self._bbox_from_mask(mask)
             bbox_width = max(1, bbox[2] - bbox[0])
@@ -271,7 +286,14 @@ class LocalSam3Segmenter:
                     ),
                 }
             )
+        return candidates
 
+    @staticmethod
+    def _select_best_candidate(
+        candidates: List[Dict[str, Any]],
+        *,
+        prompt: str,
+    ) -> Optional[Dict[str, Any]]:
         if not candidates:
             return None
 
@@ -319,7 +341,13 @@ class LocalSam3Segmenter:
             ),
         )
 
-    def infer(self, image_bgr: np.ndarray, prompt: Optional[str] = None) -> Dict[str, Any]:
+    def _infer_candidates(
+        self,
+        image_bgr: np.ndarray,
+        *,
+        prompt: Optional[str],
+        min_mask_area_ratio: Optional[float] = None,
+    ) -> Tuple[str, List[Dict[str, Any]], float]:
         if (
             not isinstance(image_bgr, np.ndarray)
             or image_bgr.ndim != 3
@@ -343,22 +371,61 @@ class LocalSam3Segmenter:
         masks = output.get("masks") if isinstance(output, dict) else None
         scores = output.get("scores") if isinstance(output, dict) else None
         if masks is None or scores is None or len(masks) == 0:
-            return {
-                "found": False,
-                "prompt": active_prompt,
-                "score": None,
-                "bbox_xyxy_local": None,
-                "mask_area_ratio": 0.0,
-                "sam3_inference_ms": inference_ms,
-                "device": self.effective_device,
-                "__visualizations__": [],
-            }
-
-        selected = self._select_best_mask(
+            return active_prompt, [], inference_ms
+        candidates = self._collect_mask_candidates(
             masks,
             scores,
-            prompt=active_prompt,
+            min_mask_area_ratio=min_mask_area_ratio,
         )
+        return active_prompt, candidates, inference_ms
+
+    @classmethod
+    def _candidate_visualization(
+        cls,
+        candidate: Dict[str, Any],
+        *,
+        prompt: str,
+        index: int,
+    ) -> Dict[str, Any]:
+        bbox = candidate["bbox"]
+        return {
+            "type": "sam3_mask",
+            "label": f"sam3:{prompt}:{index}",
+            "bbox_xyxy": bbox,
+            "contours": cls._mask_contours(candidate["mask"]),
+            "score": candidate["score"],
+            "coord": "local",
+            "color_bgr": [0, 165, 255],
+            "bbox_color_bgr": [0, 255, 0],
+            "alpha": 0.35,
+        }
+
+    def infer_all_masks(
+        self,
+        image_bgr: np.ndarray,
+        *,
+        prompt: str,
+        max_masks: int = 12,
+        min_mask_area_ratio: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return numpy-mask candidates for local template preprocessing."""
+        _, candidates, _ = self._infer_candidates(
+            image_bgr,
+            prompt=prompt,
+            min_mask_area_ratio=min_mask_area_ratio,
+        )
+        ordered = sorted(
+            candidates,
+            key=lambda item: (-item["score"], -item["area"]),
+        )
+        return ordered[: max(0, int(max_masks))]
+
+    def infer(self, image_bgr: np.ndarray, prompt: Optional[str] = None) -> Dict[str, Any]:
+        active_prompt, candidates, inference_ms = self._infer_candidates(
+            image_bgr,
+            prompt=prompt,
+        )
+        selected = self._select_best_candidate(candidates, prompt=active_prompt)
         if selected is None:
             return {
                 "found": False,
@@ -371,28 +438,36 @@ class LocalSam3Segmenter:
                 "__visualizations__": [],
             }
 
-        contours = self._mask_contours(selected["mask"])
         bbox = selected["bbox"]
+        normalized_prompt = active_prompt.casefold()
+        if normalized_prompt in {"door frame", "window"}:
+            ordered_candidates = [selected] + [
+                candidate
+                for candidate in sorted(
+                    candidates,
+                    key=lambda item: (-item["score"], -item["area"]),
+                )
+                if candidate is not selected
+            ]
+            ordered_candidates = ordered_candidates[:12]
+        else:
+            ordered_candidates = [selected]
         return {
             "found": True,
             "prompt": active_prompt,
             "score": selected["score"],
             "bbox_xyxy_local": bbox,
             "mask_area_ratio": selected["area_ratio"],
+            "mask_count": len(ordered_candidates),
             "sam3_inference_ms": inference_ms,
             "device": self.effective_device,
             "__visualizations__": [
-                {
-                    "type": "sam3_mask",
-                    "label": f"sam3:{active_prompt}",
-                    "bbox_xyxy": bbox,
-                    "contours": contours,
-                    "score": selected["score"],
-                    "coord": "local",
-                    "color_bgr": [0, 165, 255],
-                    "bbox_color_bgr": [0, 255, 0],
-                    "alpha": 0.35,
-                }
+                self._candidate_visualization(
+                    candidate,
+                    prompt=active_prompt,
+                    index=index,
+                )
+                for index, candidate in enumerate(ordered_candidates)
             ],
         }
 

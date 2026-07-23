@@ -3,8 +3,9 @@
 门前位姿仍只使用已有入门点方向和 YOLO 门框完成。位姿稳定后，
 按需把 ``get_info("sam3")`` 的 ``seg_name`` 切成 ``door frame``，
 取得门框分割结果，
-只判断房屋取景是否需要后拉与抬头；取景完成后再用
-``get_info("sam3")`` 的 ``building`` 结果在当前进程执行 DINOv3/MLP 配准。
+只判断房屋取景是否需要后拉与抬头；取景完成后再按需取得
+``building``、``door frame``、``window`` 三类结果，在当前进程执行
+DINOv3 彩色/灰度特征、门窗结构特征与 MLP 配准。
 真正的房屋回放使用当前 HOScrcpy 流的单指触控通道，只复现
 最新版房型库中唯一实际使用的 ``do_move`` 动作。
 """
@@ -40,6 +41,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_house_sea
     NandaViewPreparationError,
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_room_matcher_runtime import (
+    FacadeMaskObservation,
     IntegratedNandaRoomMatcher,
     NandaMatcherAssetPaths,
 )
@@ -737,15 +739,43 @@ class _NandaSpecialAreaRoomMatcher(NandaRoomMatcher):
         *,
         subject: str,
     ) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
+        observations = _NandaSpecialAreaRoomMatcher._special_area_observations(
+            frame,
+            sam3_info,
+            subject=subject,
+            allow_no_match=False,
+        )
+        best_mask = max(
+            observations,
+            key=lambda observation: int(np.count_nonzero(observation.mask)),
+        ).mask
+        nonzero_y, nonzero_x = np.nonzero(best_mask)
+        x1 = int(nonzero_x.min())
+        y1 = int(nonzero_y.min())
+        x2 = int(nonzero_x.max()) + 1
+        y2 = int(nonzero_y.max()) + 1
+        if x2 - x1 < 2 or y2 - y1 < 2:
+            raise ValueError(f"sam3 {subject} mask 范围过小")
+        return best_mask, (x1, y1, x2, y2)
+
+    @staticmethod
+    def _special_area_observations(
+        frame: np.ndarray,
+        sam3_info: Mapping[str, Any],
+        *,
+        subject: str,
+        allow_no_match: bool,
+    ) -> List[FacadeMaskObservation]:
         if sam3_info.get("found") is False:
+            if allow_no_match:
+                return []
             raise ValueError(f"sam3 special_area 未分割到{subject}")
         visuals = sam3_info.get("__visualizations__")
         if not isinstance(visuals, list):
             raise ValueError(f"sam3 {subject}结果缺少可还原的 mask 轮廓")
 
         frame_h, frame_w = frame.shape[:2]
-        best_mask = None
-        best_area = 0
+        observations: List[FacadeMaskObservation] = []
         for visual in visuals:
             if not isinstance(visual, dict) or visual.get("type") != "sam3_mask":
                 continue
@@ -789,20 +819,53 @@ class _NandaSpecialAreaRoomMatcher(NandaRoomMatcher):
             if polygons:
                 cv2.fillPoly(mask, polygons, 255)
             mask_area = int(np.count_nonzero(mask))
-            if mask_area > best_area:
-                best_mask = mask
-                best_area = mask_area
+            if mask_area <= 0:
+                continue
+            try:
+                score = float(visual.get("score", sam3_info.get("score", 0.0)))
+            except (TypeError, ValueError):
+                score = 0.0
+            observations.append(
+                FacadeMaskObservation(
+                    mask=mask,
+                    score=score,
+                )
+            )
 
-        if best_mask is None or best_area <= 0:
+        if not observations:
             raise ValueError(f"sam3 {subject} mask 轮廓为空")
-        nonzero_y, nonzero_x = np.nonzero(best_mask)
-        x1 = int(nonzero_x.min())
-        y1 = int(nonzero_y.min())
-        x2 = int(nonzero_x.max()) + 1
-        y2 = int(nonzero_y.max()) + 1
-        if x2 - x1 < 2 or y2 - y1 < 2:
-            raise ValueError(f"sam3 {subject} mask 范围过小")
-        return best_mask, (x1, y1, x2, y2)
+        return observations
+
+    @staticmethod
+    def _crop_observations(
+        observations: Sequence[FacadeMaskObservation],
+        *,
+        target_shape: Tuple[int, int],
+        crop_xyxy: Tuple[int, int, int, int],
+    ) -> List[FacadeMaskObservation]:
+        target_height, target_width = target_shape
+        x1, y1, x2, y2 = crop_xyxy
+        cropped: List[FacadeMaskObservation] = []
+        for observation in observations:
+            mask = np.asarray(observation.mask, dtype=np.uint8)
+            if mask.ndim == 3:
+                mask = np.any(mask != 0, axis=2).astype(np.uint8) * 255
+            if mask.shape[:2] != (target_height, target_width):
+                mask = cv2.resize(
+                    mask,
+                    (target_width, target_height),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+            crop = np.ascontiguousarray(mask[y1:y2, x1:x2]).copy()
+            if not np.any(crop):
+                continue
+            cropped.append(
+                FacadeMaskObservation(
+                    mask=crop,
+                    score=float(observation.score),
+                )
+            )
+        return cropped
 
     @staticmethod
     def _special_area_facade(
@@ -888,6 +951,16 @@ class _NandaDoorViewPreparation:
             "pitch_duration_ms": self.pitch_duration_ms,
             "pitch_bias_px": self.pitch_bias_px,
         }
+
+
+@dataclass(frozen=True)
+class _NandaMatchPerception:
+    building_frame: np.ndarray
+    building_info: Mapping[str, Any]
+    door_frame: np.ndarray
+    door_info: Mapping[str, Any]
+    window_frame: np.ndarray
+    window_info: Mapping[str, Any]
 
 
 class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
@@ -1392,11 +1465,11 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
             pitch_bias_px=pitch_bias_px,
         )
 
-    def _capture_match_frame(
+    def _capture_match_perception(
         self,
         context: NandaSearchContext,
         view: _NandaDoorViewPreparation,
-    ) -> Tuple[np.ndarray, Mapping[str, Any]]:
+    ) -> _NandaMatchPerception:
         pitch_applied = False
         restore_error = None
         try:
@@ -1415,12 +1488,34 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
                 if not context.refresh_frame("NandaView 抬头后采集 building"):
                     raise RuntimeError("door frame 抬头后刷新画面失败")
 
-            return self._capture_segment_frame(
+            building_frame, building_info = self._capture_segment_frame(
                 context,
                 group_name=self.settings.building_segment_group,
                 info_name=self.settings.building_segment_info_name,
                 expected_prompt="building",
                 log_prefix="[NandaMatch] building 房型配准",
+            )
+            door_frame, door_info = self._capture_segment_frame(
+                context,
+                group_name=self.settings.building_segment_group,
+                info_name=self.settings.building_segment_info_name,
+                expected_prompt="door frame",
+                log_prefix="[NandaMatch] door frame 结构配准",
+            )
+            window_frame, window_info = self._capture_segment_frame(
+                context,
+                group_name=self.settings.building_segment_group,
+                info_name=self.settings.building_segment_info_name,
+                expected_prompt="window",
+                log_prefix="[NandaMatch] window 结构配准",
+            )
+            return _NandaMatchPerception(
+                building_frame=building_frame,
+                building_info=building_info,
+                door_frame=door_frame,
+                door_info=door_info,
+                window_frame=window_frame,
+                window_info=window_info,
             )
         finally:
             if pitch_applied:
@@ -1437,7 +1532,8 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
                         )
                     else:
                         context.worker.frame_log(
-                            f"[NandaView] building 采集完成，已反向恢复视角："
+                            f"[NandaView] building/door frame/window 采集完成，"
+                            f"已反向恢复视角："
                             f"y_bias=+{view.pitch_bias_px}，dura={view.pitch_duration_ms}ms"
                         )
                 except Exception as exc:
@@ -1455,16 +1551,45 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
     ) -> _NandaRoomMatchAttempt:
         if context.should_abort():
             return self._invalid_attempt(index, label, "搜房阶段已中止")
-        frame, sam3_info = self._capture_match_frame(context, view)
+        perception = self._capture_match_perception(context, view)
+        frame = perception.building_frame
+        sam3_info = perception.building_info
         try:
             segmented_bgr, cropped_mask, cropped_bgr, crop_xyxy = (
                 self._special_area_facade(frame, sam3_info)
             )
         except ValueError as exc:
-            context.worker.frame_log(
-                f"[NandaMatch] 第{index}阶段({label}) SAM3 房屋分割无效：{exc}"
+            if sam3_info.get("found") is False:
+                context.worker.frame_log(
+                    f"[NandaMatch] 第{index}阶段({label}) 未分割到房屋：{exc}"
+                )
+                return self._invalid_attempt(index, label, str(exc))
+            raise RuntimeError(f"SAM3 building 结果无法还原: {exc}") from exc
+        try:
+            door_observations = self._special_area_observations(
+                perception.door_frame,
+                perception.door_info,
+                subject="门框结构",
+                allow_no_match=True,
             )
-            return self._invalid_attempt(index, label, str(exc))
+            window_observations = self._special_area_observations(
+                perception.window_frame,
+                perception.window_info,
+                subject="窗户结构",
+                allow_no_match=True,
+            )
+            door_observations = self._crop_observations(
+                door_observations,
+                target_shape=frame.shape[:2],
+                crop_xyxy=crop_xyxy,
+            )
+            window_observations = self._crop_observations(
+                window_observations,
+                target_shape=frame.shape[:2],
+                crop_xyxy=crop_xyxy,
+            )
+        except ValueError as exc:
+            raise RuntimeError(f"SAM3 门窗结构结果无法还原: {exc}") from exc
 
         top_edge_limit = 0
         touches_top = int(crop_xyxy[1]) <= 0
@@ -1473,13 +1598,21 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
             f"[NandaMatch] 第{index}阶段({label}) sam3_tiny 分割完成："
             f"crop={crop_xyxy}，top_limit={top_edge_limit}，"
             f"touches_top={touches_top}，"
-            f"score={sam3_info.get('score')}；直接在当前进程执行 DINOv3/MLP"
+            f"building_score={sam3_info.get('score')}，"
+            f"door_masks={len(door_observations)}，"
+            f"window_masks={len(window_observations)}，"
+            f"sam3_ms=building:{sam3_info.get('sam3_inference_ms')}/"
+            f"door:{perception.door_info.get('sam3_inference_ms')}/"
+            f"window:{perception.window_info.get('sam3_inference_ms')}；"
+            "直接在当前进程执行 DINOv3/MLP"
         )
         runtime = self._get_runtime(context)
         room_id, replay_path, debug_payload = runtime.match(
             segmented_bgr,
             cropped_mask,
             cropped_bgr,
+            door_observations=door_observations,
+            window_observations=window_observations,
         )
         debug_payload = debug_payload if isinstance(debug_payload, dict) else {}
         decision = debug_payload.get("decision")
@@ -1490,6 +1623,22 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
         score = self._decision_score(decision)
         margin = debug_payload.get("top2_margin")
         elapsed_ms = debug_payload.get("elapsed_ms")
+        query_structure = debug_payload.get("query_structure")
+        structure_counts = (
+            query_structure.get("counts")
+            if isinstance(query_structure, Mapping)
+            else None
+        )
+        template_structure_cache = debug_payload.get("template_structure_cache")
+        structure_score = decision.get("structure_score")
+        if isinstance(template_structure_cache, Mapping):
+            context.worker.frame_log(
+                f"[NandaMatch] 南大模板门窗结构就绪："
+                f"templates={template_structure_cache.get('template_count')}，"
+                f"cached={template_structure_cache.get('cached_count')}，"
+                f"generated={template_structure_cache.get('generated_count')}，"
+                f"elapsed_ms={template_structure_cache.get('elapsed_ms')}"
+            )
         replay_allowed = decision.get("replay_allow_actions") is not False
         no_match_reason = str(debug_payload.get("no_match_reason") or "")
         if room_id is None or replay_path is None or not replay_allowed:
@@ -1502,13 +1651,15 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
                 f"[NandaMatch] 第{index}阶段({label}) 房型配准未通过："
                 f"reason={no_match_reason or 'unknown'}，"
                 f"dino={dino_score}，mlp={mlp_score}，total={total_score}，"
+                f"structure={structure_score}/{structure_counts}，"
                 f"margin={margin}，elapsed_ms={elapsed_ms}"
             )
         else:
             context.worker.frame_log(
                 f"[NandaMatch] 第{index}阶段({label}) 匹配候选："
                 f"room={room_id}，confidence={score}，dino={dino_score}，"
-                f"mlp={mlp_score}，total={total_score}，margin={margin}，"
+                f"mlp={mlp_score}，structure={structure_score}/{structure_counts}，"
+                f"total={total_score}，margin={margin}，"
                 f"touches_top={touches_top}，elapsed_ms={elapsed_ms}"
             )
 
@@ -1568,7 +1719,8 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
                 "matcher_elapsed_ms": selected.debug_payload.get("elapsed_ms"),
                 "input_contract": self.settings.room_segmenter_backend,
                 "execution_mode": "inprocess",
-                "structure_mode": "disabled_zero_vector_no_extra_sam3",
+                "structure_mode": "sam3_door_window_full",
+                "query_structure": selected.debug_payload.get("query_structure"),
                 "matching_attempts": attempt_summaries,
                 "selected_attempt": selected.index,
                 "selection_reason": selection_reason,

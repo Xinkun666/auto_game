@@ -1,7 +1,8 @@
 """南大最新版房型匹配与单摇杆回放的 auto_game 适配实现。
 
 门前位姿仍只使用已有入门点方向和 YOLO 门框完成。位姿稳定后，
-按需调用 ``get_info("sam3_door")`` 的 ``door frame`` 分割结果，
+按需把 ``get_info("sam3")`` 的 ``seg_name`` 切成 ``door frame``，
+取得门框分割结果，
 只判断房屋取景是否需要后拉与抬头；取景完成后再用
 ``get_info("sam3")`` 的 ``building`` 结果在当前进程执行 DINOv3/MLP 配准。
 真正的房屋回放使用当前 HOScrcpy 流的单指触控通道，只复现
@@ -106,8 +107,8 @@ class NandaLatestSettings:
     pose_max_duration_ms: int = 600
     pose_wait_ms: int = 500
 
-    door_segment_group: str = "sam3_door"
-    door_segment_info_name: str = "sam3_door"
+    door_segment_group: str = "sam3"
+    door_segment_info_name: str = "sam3"
     building_segment_group: str = "sam3"
     building_segment_info_name: str = "sam3"
     view_backoff_duration_ms: int = 600
@@ -592,9 +593,11 @@ class _NandaSpecialAreaRoomMatcher(NandaRoomMatcher):
         context: NandaSearchContext,
         group_name: str,
         *,
+        info_name: str,
+        expected_prompt: str,
         log_prefix: str,
-    ) -> str:
-        """按实际导出配置启用指定 SAM3 分组，返回原分组。
+    ) -> Tuple[str, Tuple[Dict[str, Any], bool, Any]]:
+        """复用 SAM3 分组并临时切换提示词，返回原分组与恢复信息。
 
         SAM3 必须是搜房阶段内的按需分组，不能作为常态感知或独立阶段运行。
         """
@@ -612,14 +615,61 @@ class _NandaSpecialAreaRoomMatcher(NandaRoomMatcher):
         has_group = getattr(resolver, "has_group", None)
         if not callable(has_group) or not has_group(original_stage, group_name):
             raise ValueError(f"阶段 {original_stage!r} 中没有 {group_name} 分组")
+
+        resolver_stage_info = getattr(resolver, "stage_info", None)
+        stage_data = (
+            resolver_stage_info.get(original_stage)
+            if isinstance(resolver_stage_info, dict)
+            else None
+        )
+        scenes = stage_data.get("scenes") if isinstance(stage_data, dict) else None
+        target_area = None
+        if isinstance(scenes, dict):
+            for scene_data in scenes.values():
+                special_areas = (
+                    scene_data.get("special_areas")
+                    if isinstance(scene_data, dict)
+                    else None
+                )
+                if isinstance(special_areas, dict) and isinstance(
+                    special_areas.get(info_name),
+                    dict,
+                ):
+                    target_area = special_areas[info_name]
+                    break
+        if target_area is None:
+            raise ValueError(
+                f"阶段 {original_stage!r} 的 {group_name} 分组中"
+                f"没有 {info_name} special_area"
+            )
+
+        had_seg_name = "seg_name" in target_area
+        original_seg_name = target_area.get("seg_name")
+        target_area["seg_name"] = expected_prompt
+        prompt_restore = (target_area, had_seg_name, original_seg_name)
+
         change_group = getattr(worker, "change_group", None)
         if not callable(change_group) or change_group(group_name) is not True:
+            _NandaSpecialAreaRoomMatcher._restore_sam3_prompt(prompt_restore)
             raise ValueError(f"切换到 {group_name} 分组失败")
         worker.frame_log(
-            f"{log_prefix} 按需启用 SAM3 分组: "
-            f"{original_stage}/{original_group} -> {group_name}"
+            f"{log_prefix} 按需复用 SAM3 分组并切换提示词: "
+            f"{original_stage}/{original_group} -> {group_name}，"
+            f"info={info_name}，seg_name={expected_prompt}"
         )
-        return original_group
+        return original_group, prompt_restore
+
+    @staticmethod
+    def _restore_sam3_prompt(
+        prompt_restore: Optional[Tuple[Dict[str, Any], bool, Any]],
+    ) -> None:
+        if prompt_restore is None:
+            return
+        target_area, had_seg_name, original_seg_name = prompt_restore
+        if had_seg_name:
+            target_area["seg_name"] = original_seg_name
+        else:
+            target_area.pop("seg_name", None)
 
     @staticmethod
     def _restore_perception(
@@ -640,10 +690,13 @@ class _NandaSpecialAreaRoomMatcher(NandaRoomMatcher):
         log_prefix: str,
     ) -> Tuple[np.ndarray, Mapping[str, Any]]:
         original_group = None
+        prompt_restore = None
         try:
-            original_group = self._activate_sam3_perception(
+            original_group, prompt_restore = self._activate_sam3_perception(
                 context,
                 group_name,
+                info_name=info_name,
+                expected_prompt=expected_prompt,
                 log_prefix=log_prefix,
             )
 
@@ -657,7 +710,10 @@ class _NandaSpecialAreaRoomMatcher(NandaRoomMatcher):
             )
             return captured.copy(), sam3_info
         finally:
-            self._restore_perception(context, original_group)
+            try:
+                self._restore_sam3_prompt(prompt_restore)
+            finally:
+                self._restore_perception(context, original_group)
 
     @staticmethod
     def _special_area_mask(

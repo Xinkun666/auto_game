@@ -8,7 +8,7 @@
         "area_max_ratio": 0.04,
         "acceptable_center_ratio": 0.03,
         "lateral_band_ratio": 0.05,
-        "lateral_min_duration_ms": 10,
+        "lateral_min_duration_ms": 20,
         "lateral_band_duration_ms": 30,
         "stable_required_count": 2,
         "door_segment_group": "sam3_door",

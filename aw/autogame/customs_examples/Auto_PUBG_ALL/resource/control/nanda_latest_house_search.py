@@ -103,7 +103,7 @@ class NandaLatestSettings:
     area_acceptable_max_ratio: float = 0.055
     acceptable_center_ratio: float = 0.03
     lateral_band_ratio: float = 0.05
-    lateral_min_duration_ms: int = 10
+    lateral_min_duration_ms: int = 20
     lateral_band_duration_ms: int = 30
     stable_required_count: int = 2
     max_pose_actions: int = 18
@@ -549,7 +549,7 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
         relaxed_accept = self._action_count >= self.settings.max_pose_actions
 
         # 3% 内视为精准对准；超出部分按 5%=30ms 连续缩放，
-        # 刚超出精准区时从 10ms 起步，避免固定 30ms 跨过门中心。
+        # 刚超出精准区时至少执行 20ms，避免 HOS 极短脉冲几乎不产生位移。
         if not relaxed_accept and center_error > self.settings.acceptable_center_ratio:
             band, duration = self._lateral_duration_for_error(center_error)
             side = 1 if center_delta > 0 else -1

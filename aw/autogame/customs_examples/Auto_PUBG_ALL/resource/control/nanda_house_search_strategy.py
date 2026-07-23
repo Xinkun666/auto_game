@@ -41,6 +41,10 @@ class NandaSearchStatus(str, Enum):
     ABORTED = "aborted"
 
 
+class NandaViewPreparationError(RuntimeError):
+    """door frame 取景阶段无法生成可用房屋视野。"""
+
+
 @dataclass(frozen=True)
 class NandaSearchContext:
     """开始房型匹配前，现有搜房状态机提供的门前上下文。
@@ -243,7 +247,7 @@ class NandaHouseSearchStrategy:
         if not callable(refresh_context):
             return context, NandaSearchResult(
                 NandaSearchStatus.FAILED,
-                "房型复核改变了人物位置，但当前上下文无法重新执行门前位姿校准",
+                "door frame 取景改变了人物位置，但当前上下文无法重新执行门前位姿校准",
                 room_id=match.room_id,
                 replay_path=match.replay_path,
                 metadata={"phase": "pose_restore"},
@@ -259,7 +263,8 @@ class NandaHouseSearchStrategy:
             reset_pose()
         context.worker.frame_log(
             f"[NandaPoseRestore] 房型已确定为 {match.room_id}，"
-            "后拉复核改变了回放起点；重新按入门方向、YOLO门中心和门框面积校准"
+            "door frame 取景后拉改变了回放起点；"
+            "重新按入门方向、YOLO门中心和门框面积校准"
         )
         for cycle in range(1, max_cycles + 1):
             if current_context.should_abort():
@@ -368,6 +373,15 @@ class NandaHouseSearchStrategy:
 
         try:
             match = self.matcher.match(context)
+        except NandaViewPreparationError as exc:
+            return NandaSearchResult(
+                NandaSearchStatus.FAILED,
+                f"door frame 房屋取景准备异常: {exc}",
+                metadata={
+                    "phase": "view_preparation",
+                    "exception": type(exc).__name__,
+                },
+            )
         except Exception as exc:
             return NandaSearchResult(
                 NandaSearchStatus.FAILED,
@@ -434,4 +448,5 @@ __all__ = [
     "NandaSearchContext",
     "NandaSearchResult",
     "NandaSearchStatus",
+    "NandaViewPreparationError",
 ]

@@ -1,8 +1,9 @@
 """南大最新版房型匹配与单摇杆回放的 auto_game 适配实现。
 
-房型匹配直接在当前搜房进程内执行；门前位姿只使用已有入门点方向和
-YOLO 门框，不调用 SAM3。房型配准直接消费搜房阶段
-``get_info("sam3")`` 产生的 special_area 分割结果，不再重复推理。
+门前位姿仍只使用已有入门点方向和 YOLO 门框完成。位姿稳定后，
+按需调用 ``get_info("sam3_door")`` 的 ``door frame`` 分割结果，
+只判断房屋取景是否需要后拉与抬头；取景完成后再用
+``get_info("sam3")`` 的 ``building`` 结果在当前进程执行 DINOv3/MLP 配准。
 真正的房屋回放使用当前 HOScrcpy 流的单指触控通道，只复现
 最新版房型库中唯一实际使用的 ``do_move`` 动作。
 """
@@ -35,6 +36,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_house_sea
     NandaSearchContext,
     NandaSearchResult,
     NandaSearchStatus,
+    NandaViewPreparationError,
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_room_matcher_runtime import (
     IntegratedNandaRoomMatcher,
@@ -110,13 +112,24 @@ class NandaLatestSettings:
     pose_max_duration_ms: int = 600
     pose_wait_ms: int = 500
 
-    match_backoff_duration_ms: int = 500
-    match_backoff_wait_ms: int = 500
-    mask_top_edge_ratio: float = 0.01
-    pitch_compensation: bool = True
-    pitch_height_ratio: float = 0.08
-    pitch_duration_ms: int = 320
-    pitch_wait_ms: int = 450
+    door_segment_group: str = "sam3_door"
+    door_segment_info_name: str = "sam3_door"
+    building_segment_group: str = "sam3"
+    building_segment_info_name: str = "sam3"
+    view_backoff_duration_ms: int = 600
+    view_backoff_wait_ms: int = 500
+    view_backoff_max_pulses: int = 8
+    view_backoff_stall_count: int = 2
+    view_backoff_min_area_delta: float = 0.001
+    view_backoff_min_area_ratio: float = 0.02
+    view_pitch_enabled: bool = True
+    view_pitch_reference_top_ratio: float = 0.5
+    view_pitch_time_scale: float = 2.0
+    view_pitch_min_duration_ms: int = 100
+    view_pitch_max_duration_ms: int = 800
+    view_pitch_height_ratio_per_reference: float = 0.0545
+    view_pitch_reference_duration_ms: int = 300
+    view_pitch_wait_ms: int = 450
 
     joystick_center_x_ratio: float = 0.1965
     joystick_center_y_ratio: float = 0.7563
@@ -215,44 +228,109 @@ class NandaLatestSettings:
                 1, _as_int(raw.get("pose_max_duration_ms"), cls.pose_max_duration_ms)
             ),
             pose_wait_ms=max(0, _as_int(raw.get("pose_wait_ms"), cls.pose_wait_ms)),
-            match_backoff_duration_ms=max(
+            door_segment_group=str(
+                raw.get("door_segment_group") or cls.door_segment_group
+            ).strip(),
+            door_segment_info_name=str(
+                raw.get("door_segment_info_name") or cls.door_segment_info_name
+            ).strip(),
+            building_segment_group=str(
+                raw.get("building_segment_group") or cls.building_segment_group
+            ).strip(),
+            building_segment_info_name=str(
+                raw.get("building_segment_info_name")
+                or cls.building_segment_info_name
+            ).strip(),
+            view_backoff_duration_ms=max(
                 1,
                 _as_int(
-                    raw.get("match_backoff_duration_ms"),
-                    cls.match_backoff_duration_ms,
+                    raw.get("view_backoff_duration_ms"),
+                    cls.view_backoff_duration_ms,
                 ),
             ),
-            match_backoff_wait_ms=max(
+            view_backoff_wait_ms=max(
                 0,
                 _as_int(
-                    raw.get("match_backoff_wait_ms"),
-                    cls.match_backoff_wait_ms,
+                    raw.get("view_backoff_wait_ms"), cls.view_backoff_wait_ms
                 ),
             ),
-            mask_top_edge_ratio=min(
-                0.2,
+            view_backoff_max_pulses=max(
+                0,
+                _as_int(
+                    raw.get("view_backoff_max_pulses"),
+                    cls.view_backoff_max_pulses,
+                ),
+            ),
+            view_backoff_stall_count=max(
+                1,
+                _as_int(
+                    raw.get("view_backoff_stall_count"),
+                    cls.view_backoff_stall_count,
+                ),
+            ),
+            view_backoff_min_area_delta=max(
+                0.0,
+                _as_float(
+                    raw.get("view_backoff_min_area_delta"),
+                    cls.view_backoff_min_area_delta,
+                ),
+            ),
+            view_backoff_min_area_ratio=max(
+                0.0,
+                _as_float(
+                    raw.get("view_backoff_min_area_ratio"),
+                    cls.view_backoff_min_area_ratio,
+                ),
+            ),
+            view_pitch_enabled=_as_bool(
+                raw.get("view_pitch_enabled"), cls.view_pitch_enabled
+            ),
+            view_pitch_reference_top_ratio=min(
+                1.0,
                 max(
                     0.0,
                     _as_float(
-                        raw.get("mask_top_edge_ratio"), cls.mask_top_edge_ratio
+                        raw.get("view_pitch_reference_top_ratio"),
+                        cls.view_pitch_reference_top_ratio,
                     ),
                 ),
             ),
-            pitch_compensation=_as_bool(
-                raw.get("pitch_compensation"), cls.pitch_compensation
+            view_pitch_time_scale=max(
+                0.0,
+                _as_float(raw.get("view_pitch_time_scale"), cls.view_pitch_time_scale),
             ),
-            pitch_height_ratio=min(
-                0.2,
-                max(
-                    0.001,
-                    _as_float(raw.get("pitch_height_ratio"), cls.pitch_height_ratio),
+            view_pitch_min_duration_ms=max(
+                0,
+                _as_int(
+                    raw.get("view_pitch_min_duration_ms"),
+                    cls.view_pitch_min_duration_ms,
                 ),
             ),
-            pitch_duration_ms=max(
+            view_pitch_max_duration_ms=max(
                 1,
-                _as_int(raw.get("pitch_duration_ms"), cls.pitch_duration_ms),
+                _as_int(
+                    raw.get("view_pitch_max_duration_ms"),
+                    cls.view_pitch_max_duration_ms,
+                ),
             ),
-            pitch_wait_ms=max(0, _as_int(raw.get("pitch_wait_ms"), cls.pitch_wait_ms)),
+            view_pitch_height_ratio_per_reference=max(
+                0.001,
+                _as_float(
+                    raw.get("view_pitch_height_ratio_per_reference"),
+                    cls.view_pitch_height_ratio_per_reference,
+                ),
+            ),
+            view_pitch_reference_duration_ms=max(
+                1,
+                _as_int(
+                    raw.get("view_pitch_reference_duration_ms"),
+                    cls.view_pitch_reference_duration_ms,
+                ),
+            ),
+            view_pitch_wait_ms=max(
+                0,
+                _as_int(raw.get("view_pitch_wait_ms"), cls.view_pitch_wait_ms),
+            ),
             joystick_center_x_ratio=_as_float(
                 raw.get("joystick_center_x_ratio"), cls.joystick_center_x_ratio
             ),
@@ -531,20 +609,38 @@ class _NandaSpecialAreaRoomMatcher(NandaRoomMatcher):
     """进程内匹配器共用的 SAM3 分组切换与立面重建。"""
 
     @staticmethod
-    def _read_sam3_info(context: NandaSearchContext) -> Mapping[str, Any]:
+    def _read_sam3_info(
+        context: NandaSearchContext,
+        info_name: str,
+        *,
+        expected_prompt: str,
+    ) -> Mapping[str, Any]:
         get_info = getattr(context.worker, "get_info", None)
         if not callable(get_info):
-            raise ValueError("FrameWorker 不支持 get_info('sam3')")
-        sam3_info = get_info("sam3")
+            raise ValueError(f"FrameWorker 不支持 get_info({info_name!r})")
+        sam3_info = get_info(info_name)
         if not isinstance(sam3_info, dict):
-            raise ValueError("搜房阶段未取得 sam3 special_area 结果")
+            raise ValueError(f"搜房阶段未取得 {info_name} special_area 结果")
+        actual_prompt = sam3_info.get("prompt")
+        if (
+            isinstance(actual_prompt, str)
+            and actual_prompt.strip()
+            and actual_prompt.strip().casefold() != expected_prompt.casefold()
+        ):
+            raise ValueError(
+                f"{info_name} 分割提示词错误: "
+                f"expected={expected_prompt!r}, actual={actual_prompt!r}"
+            )
         return sam3_info
 
     @staticmethod
     def _activate_sam3_perception(
         context: NandaSearchContext,
+        group_name: str,
+        *,
+        log_prefix: str,
     ) -> str:
-        """按实际导出配置启用 SAM3，返回恢复所需的原状态。
+        """按实际导出配置启用指定 SAM3 分组，返回原分组。
 
         SAM3 必须是搜房阶段内的按需分组，不能作为常态感知或独立阶段运行。
         """
@@ -556,18 +652,18 @@ class _NandaSpecialAreaRoomMatcher(NandaRoomMatcher):
         )
         original_group = str(getattr(worker, "current_group", None) or "默认")
         if not original_stage:
-            raise ValueError("启用 sam3 前无法确定当前阶段")
+            raise ValueError(f"启用 {group_name} 前无法确定当前阶段")
 
         resolver = getattr(worker, "stage_resolver", None)
         has_group = getattr(resolver, "has_group", None)
-        if not callable(has_group) or not has_group(original_stage, "sam3"):
-            raise ValueError(f"阶段 {original_stage!r} 中没有 sam3 分组")
+        if not callable(has_group) or not has_group(original_stage, group_name):
+            raise ValueError(f"阶段 {original_stage!r} 中没有 {group_name} 分组")
         change_group = getattr(worker, "change_group", None)
-        if not callable(change_group) or change_group("sam3") is not True:
-            raise ValueError("切换到 sam3 分组失败")
+        if not callable(change_group) or change_group(group_name) is not True:
+            raise ValueError(f"切换到 {group_name} 分组失败")
         worker.frame_log(
-            f"[NandaMatch] 房型匹配按需启用分组: "
-            f"{original_stage}/{original_group} -> sam3"
+            f"{log_prefix} 按需启用 SAM3 分组: "
+            f"{original_stage}/{original_group} -> {group_name}"
         )
         return original_group
 
@@ -580,76 +676,47 @@ class _NandaSpecialAreaRoomMatcher(NandaRoomMatcher):
             if context.worker.change_group(original_group) is not True:
                 raise RuntimeError(f"恢复搜房分组失败: {original_group}")
 
-    def _capture_match_frame(
+    def _capture_segment_frame(
         self,
         context: NandaSearchContext,
         *,
-        apply_pitch: bool = False,
+        group_name: str,
+        info_name: str,
+        expected_prompt: str,
+        log_prefix: str,
     ) -> Tuple[np.ndarray, Mapping[str, Any]]:
-        frame = context.frame
-        if frame is None:
-            raise ValueError("当前没有可用于房型匹配的画面")
-        pitch_bias = max(
-            1,
-            int(round(float(frame.shape[0]) * self.settings.pitch_height_ratio)),
-        )
-        pitch_applied = False
         original_group = None
         try:
-            if apply_pitch:
-                context.worker.frame_log(
-                    f"[NandaMatch] 第三阶段轻微抬头复核："
-                    f"y_bias=-{pitch_bias}，dura={self.settings.pitch_duration_ms}ms"
-                )
-                context.worker.tap_single(
-                    "视角",
-                    y_bias=-pitch_bias,
-                    dura=self.settings.pitch_duration_ms,
-                    wait=self.settings.pitch_wait_ms,
-                )
-                pitch_applied = True
-                if not context.refresh_frame("NandaMatch 轻微抬头采集房屋正面"):
-                    raise ValueError("轻微抬头后刷新画面失败")
-
-            original_group = self._activate_sam3_perception(context)
+            original_group = self._activate_sam3_perception(
+                context,
+                group_name,
+                log_prefix=log_prefix,
+            )
 
             captured = getattr(context.worker, "frame", None)
             if captured is None:
-                raise ValueError("sam3 分割后未取得匹配画面")
-            return captured.copy(), self._read_sam3_info(context)
+                raise ValueError(f"{group_name} 分割后未取得画面")
+            sam3_info = self._read_sam3_info(
+                context,
+                info_name,
+                expected_prompt=expected_prompt,
+            )
+            return captured.copy(), sam3_info
         finally:
-            restore_error = None
-            try:
-                self._restore_perception(
-                    context,
-                    original_group,
-                )
-            except Exception as exc:
-                restore_error = exc
-            if pitch_applied:
-                context.worker.tap_single(
-                    "视角",
-                    y_bias=pitch_bias,
-                    dura=self.settings.pitch_duration_ms,
-                    wait=self.settings.pitch_wait_ms,
-                )
-                if not context.refresh_frame("NandaMatch 恢复门前回放视角"):
-                    restore_error = restore_error or RuntimeError(
-                        "恢复门前视角后刷新画面失败"
-                    )
-            if restore_error is not None:
-                raise restore_error
+            self._restore_perception(context, original_group)
 
     @staticmethod
-    def _special_area_facade(
+    def _special_area_mask(
         frame: np.ndarray,
         sam3_info: Mapping[str, Any],
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Tuple[int, int, int, int]]:
+        *,
+        subject: str,
+    ) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
         if sam3_info.get("found") is False:
-            raise ValueError("sam3 special_area 未分割到房屋")
+            raise ValueError(f"sam3 special_area 未分割到{subject}")
         visuals = sam3_info.get("__visualizations__")
         if not isinstance(visuals, list):
-            raise ValueError("sam3 special_area 结果缺少可还原的 mask 轮廓")
+            raise ValueError(f"sam3 {subject}结果缺少可还原的 mask 轮廓")
 
         frame_h, frame_w = frame.shape[:2]
         best_mask = None
@@ -702,14 +769,28 @@ class _NandaSpecialAreaRoomMatcher(NandaRoomMatcher):
                 best_area = mask_area
 
         if best_mask is None or best_area <= 0:
-            raise ValueError("sam3 special_area mask 轮廓为空")
+            raise ValueError(f"sam3 {subject} mask 轮廓为空")
         nonzero_y, nonzero_x = np.nonzero(best_mask)
         x1 = int(nonzero_x.min())
         y1 = int(nonzero_y.min())
         x2 = int(nonzero_x.max()) + 1
         y2 = int(nonzero_y.max()) + 1
         if x2 - x1 < 2 or y2 - y1 < 2:
-            raise ValueError("sam3 special_area mask 裁剪范围过小")
+            raise ValueError(f"sam3 {subject} mask 范围过小")
+        return best_mask, (x1, y1, x2, y2)
+
+    @staticmethod
+    def _special_area_facade(
+        frame: np.ndarray,
+        sam3_info: Mapping[str, Any],
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Tuple[int, int, int, int]]:
+        best_mask, (x1, y1, x2, y2) = (
+            _NandaSpecialAreaRoomMatcher._special_area_mask(
+                frame,
+                sam3_info,
+                subject="房屋",
+            )
+        )
 
         cropped_bgr = np.ascontiguousarray(frame[y1:y2, x1:x2]).copy()
         cropped_mask = np.ascontiguousarray(best_mask[y1:y2, x1:x2]).copy()
@@ -762,6 +843,28 @@ class _NandaRoomMatchAttempt:
         }
 
 
+@dataclass(frozen=True)
+class _NandaDoorViewPreparation:
+    bbox_xyxy: Tuple[int, int, int, int]
+    bbox_area_ratio: float
+    door_top_ratio: float
+    door_aspect_ratio: float
+    backoff_pulses: int
+    pitch_duration_ms: int
+    pitch_bias_px: int
+
+    def metadata(self) -> Mapping[str, Any]:
+        return {
+            "door_bbox_xyxy": list(self.bbox_xyxy),
+            "door_bbox_area_ratio": self.bbox_area_ratio,
+            "door_top_ratio": self.door_top_ratio,
+            "door_aspect_ratio": self.door_aspect_ratio,
+            "backoff_pulses": self.backoff_pulses,
+            "pitch_duration_ms": self.pitch_duration_ms,
+            "pitch_bias_px": self.pitch_bias_px,
+        }
+
+
 class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
     """在当前搜房进程内直接执行 DINOv3 + MLP 房型配准。"""
 
@@ -772,9 +875,11 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
         self,
         settings: NandaLatestSettings,
         runtime_factory: Callable[..., Any] = IntegratedNandaRoomMatcher,
+        touch_controller_factory: Optional[Callable[[Any], Any]] = None,
     ):
         self.settings = settings
         self._runtime_factory = runtime_factory
+        self._touch_controller_factory = touch_controller_factory
         self._runtime = None
         self.unavailable_reason = "进程内 DINOv3/MLP 尚未检查"
 
@@ -908,20 +1013,424 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
             debug_payload={},
         )
 
+    @staticmethod
+    def _wait_control_ms(
+        context: NandaSearchContext,
+        duration_ms: int,
+    ) -> bool:
+        deadline = time.monotonic() + max(0, int(duration_ms)) / 1000.0
+        while True:
+            if context.should_abort():
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            time.sleep(min(0.05, remaining))
+
+    @staticmethod
+    def _screen_size(context: NandaSearchContext) -> Tuple[int, int]:
+        controller = getattr(context.worker, "controller", None)
+        get_resolution = getattr(controller, "_get_cached_resolution", None)
+        resolution = get_resolution() if callable(get_resolution) else None
+        if resolution and resolution[0] and resolution[1]:
+            return int(resolution[0]), int(resolution[1])
+        frame = getattr(context.worker, "frame", None)
+        if frame is None:
+            frame = context.frame
+        if frame is None:
+            raise RuntimeError("无法取得 HOS 触控坐标尺寸")
+        return int(frame.shape[1]), int(frame.shape[0])
+
+    def _control_center(
+        self,
+        context: NandaSearchContext,
+        control_name: str,
+    ) -> Tuple[int, int]:
+        controller = getattr(context.worker, "controller", None)
+        resolve_pos = getattr(controller, "_resolve_pos", None)
+        if callable(resolve_pos):
+            resolved = resolve_pos(control_name)
+            if resolved:
+                center = resolved[0]
+                return int(center[0]), int(center[1])
+        if control_name == "摇杆":
+            screen_width, screen_height = self._screen_size(context)
+            return (
+                int(round(screen_width * self.settings.joystick_center_x_ratio)),
+                int(round(screen_height * self.settings.joystick_center_y_ratio)),
+            )
+        raise RuntimeError(f"当前工程未标注触控点: {control_name}")
+
+    def _joystick_geometry(
+        self,
+        context: NandaSearchContext,
+    ) -> Tuple[Tuple[int, int], int]:
+        center = self._control_center(context, "摇杆")
+        if self.settings.joystick_radius_px > 0:
+            return center, self.settings.joystick_radius_px
+        screen_width, screen_height = self._screen_size(context)
+        reference = min(screen_width, screen_height)
+        radius = max(
+            1,
+            int(round(reference * self.settings.joystick_radius_height_ratio)),
+        )
+        return center, radius
+
+    def _make_hos_touch_controller(self, stream_client: Any):
+        if self._touch_controller_factory is not None:
+            return self._touch_controller_factory(stream_client)
+        from aw.autogame.tools.GameFrameWorker import HOSTouchController
+
+        return HOSTouchController(stream_client)
+
+    def _run_hos_touch_action(
+        self,
+        context: NandaSearchContext,
+        *,
+        label: str,
+        action: Callable[[Any], None],
+    ) -> None:
+        stream_client = getattr(context.worker, "stream_client", None)
+        if stream_client is None:
+            raise RuntimeError(f"{label}时当前 FrameWorker 没有 HOScrcpy 流")
+        begin_touch_replay = getattr(stream_client, "begin_touch_replay", None)
+        end_touch_replay = getattr(stream_client, "end_touch_replay", None)
+        guard_started = False
+        touch = None
+        try:
+            if callable(begin_touch_replay):
+                guard_started = bool(begin_touch_replay(f"NandaView {label}"))
+                if not guard_started:
+                    raise RuntimeError(f"无法为 {label} 启用 HOS 抓流保护期")
+            touch = self._make_hos_touch_controller(stream_client)
+            action(touch)
+        finally:
+            if touch is not None:
+                close = getattr(touch, "close", None)
+                if callable(close):
+                    close()
+            if guard_started and callable(end_touch_replay):
+                stream_healthy = bool(end_touch_replay())
+                context.worker.frame_log(
+                    f"[NandaView] {label} HOS 触控结束："
+                    f"fresh_stream_frame={stream_healthy}"
+                )
+
+    def _move_backward_for_view(
+        self,
+        context: NandaSearchContext,
+        *,
+        pulse_index: int,
+        area_ratio: float,
+    ) -> None:
+        center, radius = self._joystick_geometry(context)
+        target = (center[0], center[1] + radius)
+        context.worker.frame_log(
+            f"[NandaView] door frame 面积 {area_ratio:.4f} > "
+            f"{self.settings.area_max_ratio:.4f}，执行第 {pulse_index}/"
+            f"{self.settings.view_backoff_max_pulses} 次 HOS 摇杆后拉："
+            f"radius={radius}px，slide={self.settings.joystick_slide_duration_ms}ms，"
+            f"hold={self.settings.view_backoff_duration_ms}ms"
+        )
+
+        def action(touch: Any) -> None:
+            pressed = False
+            try:
+                touch.move_press(0, center)
+                pressed = True
+                touch.move_to(
+                    0,
+                    target,
+                    duration_ms=self.settings.joystick_slide_duration_ms,
+                )
+                if not self._wait_control_ms(
+                    context,
+                    self.settings.view_backoff_duration_ms,
+                ):
+                    raise RuntimeError("door frame 取景后拉时搜房阶段已中止")
+            finally:
+                if pressed:
+                    touch.move_up(0)
+
+        self._run_hos_touch_action(
+            context,
+            label=f"door frame 后拉 {pulse_index}",
+            action=action,
+        )
+
+        if not self._wait_control_ms(context, self.settings.view_backoff_wait_ms):
+            raise RuntimeError("door frame 后拉等待时搜房阶段已中止")
+        if not context.refresh_frame(
+            f"NandaView 第 {pulse_index} 次后拉后重新分割 door frame"
+        ):
+            raise RuntimeError("door frame 取景后拉后刷新画面失败")
+
+    def _move_view_for_segmentation(
+        self,
+        context: NandaSearchContext,
+        *,
+        y_bias: int,
+        duration_ms: int,
+        label: str,
+    ) -> None:
+        center = self._control_center(context, "视角")
+        target = (center[0], center[1] + int(y_bias))
+
+        def action(touch: Any) -> None:
+            pressed = False
+            try:
+                touch.move_press(0, center)
+                pressed = True
+                touch.move_to(0, target, duration_ms=duration_ms)
+            finally:
+                if pressed:
+                    touch.move_up(0)
+
+        self._run_hos_touch_action(context, label=label, action=action)
+        if not self._wait_control_ms(context, self.settings.view_pitch_wait_ms):
+            raise RuntimeError(f"{label}等待时搜房阶段已中止")
+
+    def _capture_door_frame(
+        self,
+        context: NandaSearchContext,
+    ) -> Tuple[np.ndarray, Mapping[str, Any]]:
+        return self._capture_segment_frame(
+            context,
+            group_name=self.settings.door_segment_group,
+            info_name=self.settings.door_segment_info_name,
+            expected_prompt="door frame",
+            log_prefix="[NandaView] door frame 取景",
+        )
+
+    def _door_view_geometry(
+        self,
+        frame: np.ndarray,
+        sam3_info: Mapping[str, Any],
+    ) -> Tuple[Tuple[int, int, int, int], float, float, float]:
+        _, bbox = self._special_area_mask(
+            frame,
+            sam3_info,
+            subject="门框",
+        )
+        x1, y1, x2, y2 = bbox
+        bbox_width = max(1, x2 - x1)
+        bbox_height = max(1, y2 - y1)
+        aspect_ratio = float(bbox_height) / float(bbox_width)
+        if aspect_ratio < 1.0:
+            raise ValueError(
+                f"door frame 结果不是竖直门框: "
+                f"bbox={bbox}, aspect={aspect_ratio:.3f}"
+            )
+        frame_h, frame_w = frame.shape[:2]
+        bbox_area_ratio = float(bbox_width * bbox_height) / float(frame_h * frame_w)
+        door_top_ratio = float(y1) / float(frame_h)
+        return bbox, bbox_area_ratio, door_top_ratio, aspect_ratio
+
+    def _pitch_plan(
+        self,
+        frame_height: int,
+        door_top_ratio: float,
+    ) -> Tuple[int, int]:
+        if not self.settings.view_pitch_enabled:
+            return 0, 0
+        pitch_seconds = min(
+            self.settings.view_pitch_max_duration_ms / 1000.0,
+            max(
+                0.0,
+                (
+                    self.settings.view_pitch_reference_top_ratio
+                    - float(door_top_ratio)
+                )
+                * self.settings.view_pitch_time_scale,
+            ),
+        )
+        duration_ms = int(round(pitch_seconds * 1000.0))
+        if duration_ms < self.settings.view_pitch_min_duration_ms:
+            return 0, 0
+        bias_ratio = (
+            self.settings.view_pitch_height_ratio_per_reference
+            * duration_ms
+            / self.settings.view_pitch_reference_duration_ms
+        )
+        pitch_bias = max(
+            1,
+            min(
+                int(round(frame_height * 0.2)),
+                int(round(frame_height * bias_ratio)),
+            ),
+        )
+        return duration_ms, pitch_bias
+
+    def _prepare_door_view(
+        self,
+        context: NandaSearchContext,
+    ) -> _NandaDoorViewPreparation:
+        backoff_pulses = 0
+        stalled_pulses = 0
+        previous_area_ratio: Optional[float] = None
+        latest = None
+
+        while True:
+            frame, sam3_info = self._capture_door_frame(context)
+            bbox, area_ratio, top_ratio, aspect_ratio = self._door_view_geometry(
+                frame,
+                sam3_info,
+            )
+            latest = (frame, bbox, area_ratio, top_ratio, aspect_ratio)
+            context.worker.frame_log(
+                f"[NandaView] door frame 取景判断：bbox={bbox}，"
+                f"bbox_area={area_ratio:.4f}，top={top_ratio:.4f}，"
+                f"aspect={aspect_ratio:.3f}，score={sam3_info.get('score')}，"
+                f"backoff={backoff_pulses}/{self.settings.view_backoff_max_pulses}"
+            )
+
+            if previous_area_ratio is not None:
+                area_delta = previous_area_ratio - area_ratio
+                min_effective_delta = max(
+                    self.settings.view_backoff_min_area_delta,
+                    previous_area_ratio * self.settings.view_backoff_min_area_ratio,
+                )
+                if area_delta < min_effective_delta:
+                    stalled_pulses += 1
+                else:
+                    stalled_pulses = 0
+                context.worker.frame_log(
+                    f"[NandaView] 后拉反馈：previous={previous_area_ratio:.4f}，"
+                    f"current={area_ratio:.4f}，delta={area_delta:+.4f}，"
+                    f"effective_delta={min_effective_delta:.4f}，"
+                    f"stalled={stalled_pulses}/"
+                    f"{self.settings.view_backoff_stall_count}"
+                )
+
+            if area_ratio <= self.settings.area_max_ratio:
+                if area_ratio < self.settings.area_min_ratio:
+                    context.worker.frame_log(
+                        f"[NandaView] door frame 面积 {area_ratio:.4f} < "
+                        f"{self.settings.area_min_ratio:.4f}；门前距离已由 "
+                        "入门点+YOLO 校准，取景阶段不再向前改变回放起点"
+                    )
+                break
+            if stalled_pulses >= self.settings.view_backoff_stall_count:
+                if area_ratio <= self.settings.area_acceptable_max_ratio:
+                    context.worker.frame_log(
+                        f"[NandaView] 后拉已连续无明显收益，门框面积 "
+                        f"{area_ratio:.4f} 仍在容错上限 "
+                        f"{self.settings.area_acceptable_max_ratio:.4f} 内，停止后拉"
+                    )
+                    break
+                raise RuntimeError(
+                    f"door frame 后拉连续无收益，且面积仍过大: "
+                    f"area={area_ratio:.4f}"
+                )
+            if backoff_pulses >= self.settings.view_backoff_max_pulses:
+                if area_ratio <= self.settings.area_acceptable_max_ratio:
+                    context.worker.frame_log(
+                        f"[NandaView] 已到最大后拉次数，门框面积 "
+                        f"{area_ratio:.4f} 在容错上限内，进入抬头判断"
+                    )
+                    break
+                raise RuntimeError(
+                    f"door frame 取景超过最大后拉次数，"
+                    f"area={area_ratio:.4f} > "
+                    f"acceptable={self.settings.area_acceptable_max_ratio:.4f}"
+                )
+
+            previous_area_ratio = area_ratio
+            backoff_pulses += 1
+            self._move_backward_for_view(
+                context,
+                pulse_index=backoff_pulses,
+                area_ratio=area_ratio,
+            )
+
+        if latest is None:
+            raise RuntimeError("door frame 取景未生成任何可用结果")
+        _, screen_height = self._screen_size(context)
+        frame, bbox, area_ratio, top_ratio, aspect_ratio = latest
+        pitch_duration_ms, pitch_bias_px = self._pitch_plan(
+            screen_height,
+            top_ratio,
+        )
+        context.worker.frame_log(
+            f"[NandaView] door frame 取景决策完成："
+            f"backoff_pulses={backoff_pulses}，area={area_ratio:.4f}，"
+            f"top={top_ratio:.4f}，pitch_duration={pitch_duration_ms}ms，"
+            f"pitch_bias=-{pitch_bias_px}px；下一步切换 building 做房型配准"
+        )
+        return _NandaDoorViewPreparation(
+            bbox_xyxy=bbox,
+            bbox_area_ratio=area_ratio,
+            door_top_ratio=top_ratio,
+            door_aspect_ratio=aspect_ratio,
+            backoff_pulses=backoff_pulses,
+            pitch_duration_ms=pitch_duration_ms,
+            pitch_bias_px=pitch_bias_px,
+        )
+
+    def _capture_match_frame(
+        self,
+        context: NandaSearchContext,
+        view: _NandaDoorViewPreparation,
+    ) -> Tuple[np.ndarray, Mapping[str, Any]]:
+        pitch_applied = False
+        restore_error = None
+        try:
+            if view.pitch_duration_ms > 0 and view.pitch_bias_px > 0:
+                context.worker.frame_log(
+                    f"[NandaView] 按 door_top={view.door_top_ratio:.4f} 执行动态抬头："
+                    f"y_bias=-{view.pitch_bias_px}，dura={view.pitch_duration_ms}ms"
+                )
+                self._move_view_for_segmentation(
+                    context,
+                    y_bias=-view.pitch_bias_px,
+                    duration_ms=view.pitch_duration_ms,
+                    label="door frame 动态抬头",
+                )
+                pitch_applied = True
+                if not context.refresh_frame("NandaView 抬头后采集 building"):
+                    raise RuntimeError("door frame 抬头后刷新画面失败")
+
+            return self._capture_segment_frame(
+                context,
+                group_name=self.settings.building_segment_group,
+                info_name=self.settings.building_segment_info_name,
+                expected_prompt="building",
+                log_prefix="[NandaMatch] building 房型配准",
+            )
+        finally:
+            if pitch_applied:
+                try:
+                    self._move_view_for_segmentation(
+                        context,
+                        y_bias=view.pitch_bias_px,
+                        duration_ms=view.pitch_duration_ms,
+                        label="door frame 反向恢复视角",
+                    )
+                    if not context.refresh_frame("NandaView 恢复门前回放视角"):
+                        restore_error = RuntimeError(
+                            "恢复门前回放视角后刷新画面失败"
+                        )
+                    else:
+                        context.worker.frame_log(
+                            f"[NandaView] building 采集完成，已反向恢复视角："
+                            f"y_bias=+{view.pitch_bias_px}，dura={view.pitch_duration_ms}ms"
+                        )
+                except Exception as exc:
+                    restore_error = exc
+            if restore_error is not None:
+                raise restore_error
+
     def _run_match_attempt(
         self,
         context: NandaSearchContext,
         *,
         index: int,
         label: str,
-        apply_pitch: bool = False,
+        view: _NandaDoorViewPreparation,
     ) -> _NandaRoomMatchAttempt:
         if context.should_abort():
             return self._invalid_attempt(index, label, "搜房阶段已中止")
-        frame, sam3_info = self._capture_match_frame(
-            context,
-            apply_pitch=apply_pitch,
-        )
+        frame, sam3_info = self._capture_match_frame(context, view)
         try:
             segmented_bgr, cropped_mask, cropped_bgr, crop_xyxy = (
                 self._special_area_facade(frame, sam3_info)
@@ -932,11 +1441,8 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
             )
             return self._invalid_attempt(index, label, str(exc))
 
-        top_edge_limit = max(
-            0,
-            int(round(float(frame.shape[0]) * self.settings.mask_top_edge_ratio)),
-        )
-        touches_top = int(crop_xyxy[1]) <= top_edge_limit
+        top_edge_limit = 0
+        touches_top = int(crop_xyxy[1]) <= 0
 
         context.worker.frame_log(
             f"[NandaMatch] 第{index}阶段({label}) sam3_tiny 分割完成："
@@ -997,63 +1503,6 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
             debug_payload=debug_payload,
         )
 
-    def _move_backward_for_rematch(self, context: NandaSearchContext) -> None:
-        context.worker.frame_log(
-            f"[NandaMatch] 首次结果不足以直接采信，后拉 "
-            f"{self.settings.match_backoff_duration_ms}ms 扩大房屋正面取景"
-        )
-        context.worker.tap_single(
-            "摇杆",
-            y_bias=self.settings.move_axis_bias,
-            dura=self.settings.match_backoff_duration_ms,
-            wait=self.settings.match_backoff_wait_ms,
-        )
-        if not context.refresh_frame("NandaMatch 后拉后重新采集房屋正面"):
-            raise RuntimeError("房型复核后拉后刷新画面失败")
-
-    @staticmethod
-    def _best_valid_attempt(
-        attempts: Sequence[_NandaRoomMatchAttempt],
-    ) -> Optional[_NandaRoomMatchAttempt]:
-        valid = [attempt for attempt in attempts if attempt.valid]
-        if not valid:
-            return None
-
-        def sort_key(attempt: _NandaRoomMatchAttempt) -> Tuple[float, int]:
-            score = attempt.score
-            return (
-                score if score is not None and math.isfinite(score) else float("-inf"),
-                attempt.index,
-            )
-
-        return max(valid, key=sort_key)
-
-    @classmethod
-    def _consensus_attempt(
-        cls,
-        attempts: Sequence[_NandaRoomMatchAttempt],
-    ) -> Optional[_NandaRoomMatchAttempt]:
-        by_room: Dict[str, List[_NandaRoomMatchAttempt]] = {}
-        for attempt in attempts:
-            if attempt.valid and attempt.room_id is not None:
-                by_room.setdefault(attempt.room_id, []).append(attempt)
-        repeated = [room_attempts for room_attempts in by_room.values() if len(room_attempts) >= 2]
-        if not repeated:
-            return None
-        repeated.sort(
-            key=lambda room_attempts: (
-                len(room_attempts),
-                max(
-                    attempt.score
-                    if attempt.score is not None and math.isfinite(attempt.score)
-                    else float("-inf")
-                    for attempt in room_attempts
-                ),
-            ),
-            reverse=True,
-        )
-        return cls._best_valid_attempt(repeated[0])
-
     def _build_selected_match(
         self,
         context: NandaSearchContext,
@@ -1062,6 +1511,7 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
         *,
         selection_reason: str,
         requires_pose_realign: bool,
+        view_metadata: Optional[Mapping[str, Any]] = None,
     ) -> NandaRoomMatch:
         if not selected.valid or selected.replay_path is None or selected.room_id is None:
             raise ValueError("无法从无效候选构建南大房型匹配结果")
@@ -1076,11 +1526,10 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
 
         attempt_summaries = [dict(attempt.summary()) for attempt in attempts]
         context.worker.frame_log(
-            f"[NandaMatch] 三阶段决策完成：reason={selection_reason}，"
+            f"[NandaMatch] building 房型配准完成：reason={selection_reason}，"
             f"selected_room={selected.room_id}，confidence={selected.score}，"
-            f"selected_stage={selected.index}({selected.label})，"
             f"requires_pose_realign={requires_pose_realign}，attempts={attempt_summaries}；"
-            "恢复标准门前位姿后再开始 HOS 摇杆回放"
+            "如果取景后拉改变了人物位置，先重新执行入门方向+YOLO门框校准"
         )
         return NandaRoomMatch(
             room_id=selected.room_id,
@@ -1099,111 +1548,42 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
                 "selected_attempt": selected.index,
                 "selection_reason": selection_reason,
                 "requires_pose_realign": requires_pose_realign,
+                "view_preparation": dict(view_metadata or {}),
             },
             replay_steps=replay_steps,
-        )
-
-    def _finish_attempts(
-        self,
-        context: NandaSearchContext,
-        attempts: Sequence[_NandaRoomMatchAttempt],
-        *,
-        selection_reason: str,
-        requires_pose_realign: bool,
-        prefer_consensus: bool = False,
-    ) -> Optional[NandaRoomMatch]:
-        selected = self._consensus_attempt(attempts) if prefer_consensus else None
-        resolved_reason = selection_reason
-        if selected is not None:
-            resolved_reason = "room_consensus"
-        else:
-            selected = self._best_valid_attempt(attempts)
-        if selected is None:
-            context.worker.frame_log(
-                f"[NandaMatch] 多阶段房型匹配结束仍无可用候选："
-                f"reason={selection_reason}，"
-                f"attempts={[dict(attempt.summary()) for attempt in attempts]}"
-            )
-            return None
-        return self._build_selected_match(
-            context,
-            selected,
-            attempts,
-            selection_reason=resolved_reason,
-            requires_pose_realign=requires_pose_realign,
         )
 
     def match(self, context: NandaSearchContext) -> Optional[NandaRoomMatch]:
         if context.should_abort():
             return None
 
-        attempts: List[_NandaRoomMatchAttempt] = []
-        first = self._run_match_attempt(
-            context,
-            index=1,
-            label="normal",
-        )
-        attempts.append(first)
-        if first.valid and not first.touches_top:
-            return self._finish_attempts(
-                context,
-                attempts,
-                selection_reason="first_match_complete_mask",
-                requires_pose_realign=False,
-            )
-
+        try:
+            view = self._prepare_door_view(context)
+        except NandaViewPreparationError:
+            raise
+        except Exception as exc:
+            raise NandaViewPreparationError(str(exc)) from exc
         if context.should_abort():
             return None
-        self._move_backward_for_rematch(context)
-        second = self._run_match_attempt(
+        attempt = self._run_match_attempt(
             context,
-            index=2,
-            label="backoff_500ms",
+            index=1,
+            label="door_view_prepared",
+            view=view,
         )
-        attempts.append(second)
-
-        if first.valid and second.valid and first.room_id == second.room_id:
-            return self._finish_attempts(
-                context,
-                attempts,
-                selection_reason="room_consensus",
-                requires_pose_realign=True,
-                prefer_consensus=True,
+        if not attempt.valid:
+            context.worker.frame_log(
+                f"[NandaMatch] door frame 取景完成，但 building 房型配准无可用结果："
+                f"{dict(attempt.summary())}"
             )
-
-        if second.mask_found and not second.touches_top:
-            return self._finish_attempts(
-                context,
-                attempts,
-                selection_reason="backoff_mask_complete_best_confidence",
-                requires_pose_realign=True,
-            )
-
-        if not self.settings.pitch_compensation or context.should_abort():
-            return self._finish_attempts(
-                context,
-                attempts,
-                selection_reason="pitch_disabled_best_confidence",
-                requires_pose_realign=True,
-            )
-
-        context.worker.frame_log(
-            f"[NandaMatch] 第二阶段 mask_found={second.mask_found}，"
-            f"touches_top={second.touches_top}，启动一次轻微抬头终检"
-        )
-        third = self._run_match_attempt(
+            return None
+        return self._build_selected_match(
             context,
-            index=3,
-            label="slight_pitch",
-            apply_pitch=True,
-        )
-        attempts.append(third)
-        return self._finish_attempts(
-            context,
-            attempts,
-            selection_reason="highest_confidence_after_three_attempts",
-            requires_pose_realign=True,
-            prefer_consensus=True,
+            attempt,
+            [attempt],
+            selection_reason="door_view_prepared_building_match",
+            requires_pose_realign=view.backoff_pulses > 0,
+            view_metadata=view.metadata(),
         )
 
 

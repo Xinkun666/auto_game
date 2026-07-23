@@ -485,7 +485,7 @@ class StageLogicController:
                     'type': 'special',
                     'rect': sa_data.get('rect'),
                     'area_config': sa_data,
-                    'handler_name': sa_name,
+                    'handler_name': sa_data.get('handler_name', sa_name),
                     'origin_width': origin_w,
                     'origin_height': origin_h
                 }

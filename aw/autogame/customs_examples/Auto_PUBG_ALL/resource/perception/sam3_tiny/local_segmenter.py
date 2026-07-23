@@ -232,7 +232,13 @@ class LocalSam3Segmenter:
                 result.append(points)
         return result
 
-    def _select_best_mask(self, masks: Any, scores: Any) -> Optional[Dict[str, Any]]:
+    def _select_best_mask(
+        self,
+        masks: Any,
+        scores: Any,
+        *,
+        prompt: str,
+    ) -> Optional[Dict[str, Any]]:
         score_values = _to_numpy(scores).reshape(-1)
         candidates: List[Dict[str, Any]] = []
         for index in range(min(len(score_values), len(masks))):
@@ -247,6 +253,8 @@ class LocalSam3Segmenter:
             if area_ratio < self.min_mask_area_ratio:
                 continue
             bbox = self._bbox_from_mask(mask)
+            bbox_width = max(1, bbox[2] - bbox[0])
+            bbox_height = max(1, bbox[3] - bbox[1])
             center_x = (bbox[0] + bbox[2]) / 2.0
             center_y = (bbox[1] + bbox[3]) / 2.0
             candidates.append(
@@ -256,6 +264,7 @@ class LocalSam3Segmenter:
                     "score": float(score_values[index]),
                     "area": int(mask.sum()),
                     "area_ratio": area_ratio,
+                    "aspect_ratio": float(bbox_height) / float(bbox_width),
                     "center_distance": (
                         abs(center_x - mask.shape[1] / 2.0),
                         abs(center_y - mask.shape[0] / 2.0),
@@ -265,6 +274,26 @@ class LocalSam3Segmenter:
 
         if not candidates:
             return None
+
+        if str(prompt).strip().casefold() == "door frame":
+            vertical_candidates = [
+                item for item in candidates if item["aspect_ratio"] >= 1.0
+            ]
+            if not vertical_candidates:
+                return None
+            regular_doors = [
+                item for item in vertical_candidates if item["aspect_ratio"] <= 4.0
+            ]
+            door_candidates = regular_doors or vertical_candidates
+            return min(
+                door_candidates,
+                key=lambda item: (
+                    item["center_distance"][0],
+                    item["center_distance"][1],
+                    -item["area"],
+                    -item["score"],
+                ),
+            )
 
         max_area = max(item["area"] for item in candidates)
         large_candidates = [
@@ -325,7 +354,11 @@ class LocalSam3Segmenter:
                 "__visualizations__": [],
             }
 
-        selected = self._select_best_mask(masks, scores)
+        selected = self._select_best_mask(
+            masks,
+            scores,
+            prompt=active_prompt,
+        )
         if selected is None:
             return {
                 "found": False,

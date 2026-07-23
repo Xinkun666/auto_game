@@ -4707,8 +4707,8 @@ class HouseSceneSearchManager(HouseSearchManager):
     SCENE_EXIT_SCAN_TURN_DEGREES = 60
     SCENE_EXIT_DOOR_ALIGN_TOLERANCE_PX = 120
     SCENE_EXIT_DOOR_FORWARD_Y_BIAS = -520
-    SCENE_EXIT_DOOR_FORWARD_DURA = 5000
-    SCENE_EXIT_DOOR_FORWARD_WAIT = 5200
+    SCENE_EXIT_DOOR_FORWARD_DURA = 300
+    SCENE_EXIT_DOOR_FORWARD_WAIT = 2500
     SCENE_EXIT_DOOR_WALL_SIDE_X_BIAS = 260
     SCENE_EXIT_DOOR_WALL_SIDE_Y_BIAS = -520
     SCENE_EXIT_DOOR_WALL_SIDE_DURA = 2000
@@ -7114,9 +7114,10 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _push_exit_door_and_check_out(self, w: "FrameWorker", reason: str) -> bool:
         w.frame_log(
-            f"[SceneExit] {reason}：门已对准，直推5秒出房 "
+            f"[SceneExit] {reason}：门已对准，前推出房 "
             f"y={self.SCENE_EXIT_DOOR_FORWARD_Y_BIAS}，"
-            f"dura={self.SCENE_EXIT_DOOR_FORWARD_DURA}"
+            f"dura={self.SCENE_EXIT_DOOR_FORWARD_DURA}，"
+            f"wait={self.SCENE_EXIT_DOOR_FORWARD_WAIT}"
         )
         w.tap_single(
             "摇杆",

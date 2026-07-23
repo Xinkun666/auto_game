@@ -50,26 +50,29 @@ class SPControllerBase:
     def _log_missing(self):
         self.w.frame_log("找不到SP")
 
-    def start(self, sp_area_name):
+    # 手动设置area
+    def set_area(self, sp_area, force=False):
+        if self._area is None or force:
+            self._area = sp_area
+
+    def start(self, sp_area_name=None):
         if self._is_paused:
             return self.resume()
         if self._start_time is not None and self._effective_time_at_stop is None:
             return True
-
-        # sp_area_name 只能是sp区域名。
-        sp_area = self.w.get_info(sp_area_name)
-        if sp_area:
-            result = self.w.click(sp_area)
-        else:
-            sp_area = sp_area_name
-            result = self.w.click(sp_area_name)
-
+        if sp_area_name is not None:
+            # sp_area_name 只能是sp区域名。
+            sp_area = self.w.get_info(sp_area_name)
+            if sp_area:
+                self._area = sp_area
+            else:
+                self._area = sp_area_name
+        result = self.w.click(self._area)
         if not self._control_executed(result):
             self._area = None
             self._log_missing()
             return False
 
-        self._area = sp_area
         self._start_time = time.monotonic()
         self._paused_time = 0.0
         self._pause_start = None

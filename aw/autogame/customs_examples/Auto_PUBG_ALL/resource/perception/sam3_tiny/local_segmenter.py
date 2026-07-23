@@ -377,5 +377,9 @@ def get_sam3_segmenter() -> LocalSam3Segmenter:
     return _SAM3_SEGMENTER
 
 
-def segment_sam3(image_bgr: np.ndarray) -> Dict[str, Any]:
-    return get_sam3_segmenter().infer(image_bgr)
+def segment_sam3(
+    image_bgr: np.ndarray,
+    seg_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Segment ``seg_name`` while reusing the process-wide SAM3 model."""
+    return get_sam3_segmenter().infer(image_bgr, prompt=seg_name)

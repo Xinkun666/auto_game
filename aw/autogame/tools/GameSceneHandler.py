@@ -202,7 +202,13 @@ class GameImageProcessor:
                     method = getattr(self.special_handler, handler_name, None)
                     if not method:
                         return task_id, f"Error: {handler_name} not found"
-                    raw_special_result = method(target_img)
+                    handler_kwargs = {}
+                    if 'seg_name' in area_config:
+                        seg_name = area_config.get('seg_name')
+                        if not isinstance(seg_name, str) or not seg_name.strip():
+                            return task_id, "Error: seg_name must be a non-empty string"
+                        handler_kwargs['seg_name'] = seg_name.strip()
+                    raw_special_result = method(target_img, **handler_kwargs)
                     special_result, timing_ms = self._split_special_timing_result(method, raw_special_result)
                     mapped_result = self._map_special_visualizations(
                         special_result,

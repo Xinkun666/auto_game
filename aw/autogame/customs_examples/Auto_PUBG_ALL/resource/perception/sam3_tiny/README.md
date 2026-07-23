@@ -19,11 +19,13 @@
    aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/sam3_tiny/efficientsam3_tinyvit.pt
    ```
 
-4. 在 Label 中框选一个“特殊区域”，名称填写 `sam3`。运行到对应阶段后，后台会
-   裁剪该区域并直接调用本地模型。
+4. 在 Label 中框选一个“特殊区域”，名称填写 `sam3`，并在该
+   special_area 配置中填写 `seg_name`。运行到对应阶段后，后台会裁剪
+   该区域，并将 `seg_name` 作为文本提示词传给本地模型。例如房屋使用
+   `building`，门框使用 `door frame`。
 
-默认模型参数为 TinyViT 11m、MobileCLIP-S0、context length 16，默认文本提示词
-为 `building`。如需部署时覆盖，可设置：
+默认模型参数为 TinyViT 11m、MobileCLIP-S0、context length 16。未配置
+`seg_name` 时，默认文本提示词为 `building`。如需部署时覆盖，可设置：
 
 - `AUTOGAME_SAM3_CHECKPOINT`
 - `AUTOGAME_SAM3_PROMPT`

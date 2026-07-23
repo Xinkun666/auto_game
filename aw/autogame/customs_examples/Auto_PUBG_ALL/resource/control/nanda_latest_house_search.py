@@ -979,6 +979,7 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
         self._runtime_factory = runtime_factory
         self._touch_controller_factory = touch_controller_factory
         self._runtime = None
+        self.template_structure_preflight: Optional[Mapping[str, Any]] = None
         self.unavailable_reason = "进程内 DINOv3/MLP 尚未检查"
 
     def _asset_paths(self) -> NandaMatcherAssetPaths:
@@ -1068,7 +1069,15 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
         return self._runtime
 
     def warmup(self) -> None:
-        self._ensure_runtime(LOGGER.info)
+        runtime = self._ensure_runtime(LOGGER.info)
+        prepare_structures = getattr(
+            runtime,
+            "prepare_all_template_structures",
+            None,
+        )
+        if not callable(prepare_structures):
+            raise RuntimeError("南大房型匹配运行时缺少模板门窗结构预检接口")
+        self.template_structure_preflight = prepare_structures(LOGGER.info)
 
     def _get_runtime(self, context: NandaSearchContext):
         return self._ensure_runtime(context.worker.frame_log)

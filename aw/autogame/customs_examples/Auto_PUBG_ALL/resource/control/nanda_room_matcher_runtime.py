@@ -24,7 +24,7 @@ from pathlib import Path
 import pickle
 import re
 from time import perf_counter
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -1339,6 +1339,7 @@ class IntegratedNandaRoomMatcher:
         self.templates_by_room: Dict[str, List[RoomTemplate]] = {}
         self.template_matrix: Optional[np.ndarray] = None
         self.faiss_index = None
+        self.template_structure_preflight: Optional[Dict[str, Any]] = None
         self._load_room_library()
 
     def _cache_identity(self, variant: str) -> Dict[str, Any]:
@@ -1611,6 +1612,70 @@ class IntegratedNandaRoomMatcher:
             "elapsed_ms": (perf_counter() - started) * 1000.0,
         }
 
+    def prepare_all_template_structures(
+        self,
+        emit_log: Callable[[str], None] = LOGGER.info,
+    ) -> Dict[str, Any]:
+        """Ensure every indexed template has a valid on-disk structure cache."""
+        if self.template_structure_preflight is not None:
+            emit_log(
+                "南大模板门窗结构预检已完成，直接复用："
+                f"{self.template_structure_preflight}"
+            )
+            return dict(self.template_structure_preflight)
+
+        total = len(self.templates)
+        if not self.reranker.feature_spec.uses_structure:
+            result = {
+                "template_count": total,
+                "cached_count": 0,
+                "generated_count": 0,
+                "elapsed_ms": 0.0,
+                "skipped_reason": "mlp_does_not_use_structure",
+            }
+            self.template_structure_preflight = result
+            return dict(result)
+
+        cached = sum(1 for template in self.templates if template.structure_resolved)
+        pending = total - cached
+        emit_log(
+            "南大模板门窗结构启动预检："
+            f"templates={total}，cached={cached}，pending={pending}"
+        )
+        generated = 0
+        started = perf_counter()
+        for index, template in enumerate(self.templates, start=1):
+            if template.structure_resolved:
+                continue
+            self._ensure_template_structure(template)
+            generated += 1
+            emit_log(
+                "南大模板门窗结构生成进度："
+                f"{index}/{total}，room={template.room_id}，"
+                f"template={template.template_id}，"
+                f"generated={generated}/{pending}"
+            )
+
+        unresolved = [
+            f"{template.room_id}/{template.template_id}"
+            for template in self.templates
+            if not template.structure_resolved
+        ]
+        if unresolved:
+            raise RuntimeError(
+                "南大模板门窗结构预检结束后仍有未处理模板: "
+                + ", ".join(unresolved)
+            )
+        result = {
+            "template_count": total,
+            "cached_count": cached,
+            "generated_count": generated,
+            "elapsed_ms": (perf_counter() - started) * 1000.0,
+        }
+        self.template_structure_preflight = result
+        emit_log(f"南大模板门窗结构启动预检完成：{result}")
+        return dict(result)
+
     def health_payload(self) -> Dict[str, Any]:
         return {
             "assets": self.asset_paths.to_jsonable(),
@@ -1620,6 +1685,7 @@ class IntegratedNandaRoomMatcher:
             "mlp_feature_set": self.reranker.feature_spec.feature_set,
             "mlp_feature_mode": self.reranker.feature_spec.feature_mode,
             "structure_mode": "sam3_door_window_full",
+            "template_structure_preflight": self.template_structure_preflight,
         }
 
     def _retrieve(self, query_embedding: np.ndarray) -> List[Dict[str, Any]]:

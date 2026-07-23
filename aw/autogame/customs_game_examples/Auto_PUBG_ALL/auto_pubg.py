@@ -1,3 +1,4 @@
+import logging
 import os
 import time
 from typing import TYPE_CHECKING
@@ -26,6 +27,8 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.phase_time_mana
 )
 from aw.autogame.tools.GameLaunchProfile import should_use_sp_recording_for_profile
 from aw.autogame.tools.Utils import _read_project_config
+
+LOGGER = logging.getLogger("AutoPUBG")
 
 """
 1. w.current_stage ： 当前自动化的阶段，可以参考你标注工程导出的info.py里，对应的阶段为True，即表示当前阶段
@@ -117,16 +120,23 @@ def initialize_runtime():
     driving_manager = DrivingManager()
     nanda_search_strategy = build_nanda_house_search_strategy(autogame_config)
     if nanda_search_strategy.enabled:
-        print("[NandaPreload] 功能测试启动预热 DINOv3、MLP 和房型索引...", flush=True)
+        LOGGER.info(
+            "[NandaPreload] 自动化启动前检查 DINOv3、MLP、房型索引和"
+            "全部模板门窗结构..."
+        )
         preload_error = nanda_search_strategy.validate_ready()
         if preload_error is None:
-            print("[NandaPreload] 南大房型匹配运行时预热完成，门前匹配将直接推理。", flush=True)
-        else:
-            print(
-                f"[NandaPreload] 南大房型匹配预热失败：{preload_error.message}；"
-                "进入搜房阶段后将按预检失败上报。",
-                flush=True,
+            LOGGER.info(
+                "[NandaPreload] 南大房型匹配启动预检完成；"
+                "全部模板门窗结构已在本地就绪，允许启动自动化。"
             )
+        else:
+            message = (
+                f"[NandaPreload] 南大房型匹配启动预检失败："
+                f"{preload_error.message}；自动化不会启动。"
+            )
+            LOGGER.error(message)
+            raise RuntimeError(message)
     searching_house_manager = HouseSceneSearchManager(
         nanda_search_strategy=nanda_search_strategy
     )

@@ -29,3 +29,5 @@ python -m pip install -r requirements_nanda_room_matcher.txt
 不需要启动任何 HTTP 服务。人物完成门前对准后，搜房进程会按需取得
 `building`、`door frame`、`window` 三类 `sam3_tiny` 分割结果，并在当前进程
 完成 DINOv3 + MLP 匹配。DINOv3、MLP 和房型索引只加载一次，之后持续复用。
+启动预检还会确保全部房型模板的门窗结构缓存已经写入本地；生成失败时自动化
+不会继续启动。

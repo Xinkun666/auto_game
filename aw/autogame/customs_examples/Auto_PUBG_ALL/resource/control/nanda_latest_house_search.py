@@ -96,10 +96,11 @@ class NandaLatestSettings:
     area_max_ratio: float = 0.04
     area_acceptable_min_ratio: float = 0.015
     area_acceptable_max_ratio: float = 0.055
-    acceptable_center_ratio: float = 0.03
-    lateral_band_ratio: float = 0.05
-    lateral_min_duration_ms: int = 20
-    lateral_band_duration_ms: int = 30
+    acceptable_center_ratio: float = 0.04
+    lateral_band_ratio: float = 0.01
+    lateral_move_duration_ms: int = 100
+    lateral_min_wait_ms: int = 50
+    lateral_band_wait_ms: int = 10
     stable_required_count: int = 2
     max_pose_actions: int = 18
     move_axis_bias: int = 240
@@ -190,18 +191,25 @@ class NandaLatestSettings:
                 0.001,
                 _as_float(raw.get("lateral_band_ratio"), cls.lateral_band_ratio),
             ),
-            lateral_min_duration_ms=max(
+            lateral_move_duration_ms=max(
                 1,
                 _as_int(
-                    raw.get("lateral_min_duration_ms"),
-                    cls.lateral_min_duration_ms,
+                    raw.get("lateral_move_duration_ms"),
+                    cls.lateral_move_duration_ms,
                 ),
             ),
-            lateral_band_duration_ms=max(
-                1,
+            lateral_min_wait_ms=max(
+                0,
                 _as_int(
-                    raw.get("lateral_band_duration_ms"),
-                    cls.lateral_band_duration_ms,
+                    raw.get("lateral_min_wait_ms"),
+                    cls.lateral_min_wait_ms,
+                ),
+            ),
+            lateral_band_wait_ms=max(
+                0,
+                _as_int(
+                    raw.get("lateral_band_wait_ms"),
+                    cls.lateral_band_wait_ms,
                 ),
             ),
             stable_required_count=max(
@@ -388,23 +396,24 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
         high = max(self.settings.pose_min_duration_ms, self.settings.pose_max_duration_ms)
         return int(round(low + (high - low) * ratio))
 
-    def _lateral_duration_for_error(self, center_error: float) -> Tuple[int, int]:
+    def _lateral_wait_for_error(self, center_error: float) -> Tuple[float, int]:
         segment = self.settings.lateral_band_ratio
         active_error = max(
             0.0,
             center_error - self.settings.acceptable_center_ratio,
         )
-        band = max(1, math.ceil(active_error / segment - 1e-9))
-        proportional_duration = math.ceil(
-            active_error
-            / segment
-            * self.settings.lateral_band_duration_ms
+        extra_error = max(0.0, active_error - segment)
+        wait_ms = (
+            self.settings.lateral_min_wait_ms
+            + int(
+                round(
+                    extra_error
+                    / segment
+                    * self.settings.lateral_band_wait_ms
+                )
+            )
         )
-        duration = max(
-            self.settings.lateral_min_duration_ms,
-            proportional_duration,
-        )
-        return band, min(500, duration)
+        return active_error, min(500, wait_ms)
 
     def _retry_after_action(
         self,
@@ -415,14 +424,19 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
         y_bias: int = 0,
         duration_ms: int,
         control: str = "摇杆",
+        wait_ms: Optional[int] = None,
     ) -> NandaSearchResult:
         self._action_count += 1
         self._stable_count = 0
         # HOS 的 tap_single(wait=...) 会在滑动到终点后继续按住。
-        # 门前摇杆微调必须立即松手，否则 30ms 滑动会变成额外 500ms 横移。
-        release_wait_ms = 0 if control == "摇杆" else self.settings.pose_wait_ms
+        # 门中心左右对准显式传入 wait；其他摇杆动作默认立即松手。
+        if wait_ms is not None:
+            release_wait_ms = max(0, int(wait_ms))
+        else:
+            release_wait_ms = 0 if control == "摇杆" else self.settings.pose_wait_ms
         context.worker.frame_log(
-            f"[NandaPose] {message}，终点按住={release_wait_ms}ms"
+            f"[NandaPose] {message}，dura={duration_ms}ms，"
+            f"终点按住={release_wait_ms}ms"
         )
         context.worker.tap_single(
             control,
@@ -502,17 +516,18 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
             return timeout_result
         relaxed_accept = self._action_count >= self.settings.max_pose_actions
 
-        # 3% 内视为精准对准；超出部分按 5%=30ms 连续缩放，
-        # 刚超出精准区时至少执行 20ms，避免 HOS 极短脉冲几乎不产生位移。
+        # 4% 内视为精准对准；左右滑动 dura 固定 100ms。
+        # 4%-5% 终点按住 50ms，超过 5% 后偏差每增加 1%，wait 增加 10ms。
         if not relaxed_accept and center_error > self.settings.acceptable_center_ratio:
-            band, duration = self._lateral_duration_for_error(center_error)
+            excess_ratio, wait_ms = self._lateral_wait_for_error(center_error)
             side = 1 if center_delta > 0 else -1
             return self._retry_after_action(
                 context,
                 f"门中心偏差 {center_delta:+.3f}({center_error:.1%})，"
-                f"第 {band} 档连续微调 {duration}ms",
+                f"超出4%中心容差 {excess_ratio:.1%}",
                 x_bias=side * self.settings.move_axis_bias,
-                duration_ms=duration,
+                duration_ms=self.settings.lateral_move_duration_ms,
+                wait_ms=wait_ms,
             )
 
         if not relaxed_accept and area_ratio < self.settings.area_min_ratio:

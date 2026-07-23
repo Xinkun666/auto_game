@@ -98,11 +98,11 @@ class NandaLatestSettings:
     area_max_ratio: float = 0.04
     area_acceptable_min_ratio: float = 0.015
     area_acceptable_max_ratio: float = 0.055
-    acceptable_center_ratio: float = 0.04
+    acceptable_center_ratio: float = 0.03
     lateral_band_ratio: float = 0.01
     lateral_move_duration_ms: int = 100
     lateral_min_wait_ms: int = 50
-    lateral_band_wait_ms: int = 10
+    lateral_band_wait_ms: int = 20
     stable_required_count: int = 2
     max_pose_actions: int = 18
     move_axis_bias: int = 240
@@ -534,15 +534,16 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
             return timeout_result
         relaxed_accept = self._action_count >= self.settings.max_pose_actions
 
-        # 4% 内视为精准对准；左右滑动 dura 固定 100ms。
-        # 4%-5% 终点按住 50ms，超过 5% 后偏差每增加 1%，wait 增加 10ms。
+        # 3% 内视为精准对准；左右滑动 dura 固定 100ms。
+        # 3%-4% 终点按住 50ms，超过 4% 后偏差每增加 1%，wait 增加 20ms。
         if not relaxed_accept and center_error > self.settings.acceptable_center_ratio:
             excess_ratio, wait_ms = self._lateral_wait_for_error(center_error)
             side = 1 if center_delta > 0 else -1
             return self._retry_after_action(
                 context,
                 f"门中心偏差 {center_delta:+.3f}({center_error:.1%})，"
-                f"超出4%中心容差 {excess_ratio:.1%}",
+                f"超出{self.settings.acceptable_center_ratio:.0%}中心容差 "
+                f"{excess_ratio:.1%}",
                 x_bias=side * self.settings.move_axis_bias,
                 duration_ms=self.settings.lateral_move_duration_ms,
                 wait_ms=wait_ms,

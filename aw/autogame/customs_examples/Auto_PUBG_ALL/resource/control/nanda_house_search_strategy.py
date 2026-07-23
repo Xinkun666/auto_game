@@ -1,7 +1,7 @@
 """南大房型匹配/回放方案的稳定接入协议。
 
-当前搜房状态机负责把人物送到入门点附近，并提供入门方向、门检测框和
-当前画面。本模块定义四个边界：
+当前搜房状态机负责把人物送到入门点附近，使用现有 uinput 方向模块完成
+入门方向校准，再提供门检测框和当前画面。本模块定义四个边界：
 
 1. ``NandaEntryPosePreparer`` 把人物收敛到统一的门前位姿；
 2. ``NandaRoomMatcher`` 把标准门前画面匹配到房型和回放记录；
@@ -131,14 +131,14 @@ class NandaRoomMatcher(ABC):
 
 
 class NandaEntryPosePreparer(ABC):
-    """门前距离、入门方向和门中心位置的收敛接口。"""
+    """门前距离和门中心位置的收敛接口；入门方向由现有导航模块负责。"""
 
     @abstractmethod
     def prepare(self, context: NandaSearchContext) -> Optional[NandaSearchResult]:
         """
         已达到标准位姿时返回 ``None``。
 
-        本轮已做横移/前后/方向校正、需等待新帧时返回 ``RETRY``；
+        本轮已做横移/前后校正、需等待新帧时返回 ``RETRY``；
         位姿无法收敛时返回 ``FAILED``。
         """
 
@@ -264,7 +264,7 @@ class NandaHouseSearchStrategy:
         context.worker.frame_log(
             f"[NandaPoseRestore] 房型已确定为 {match.room_id}，"
             "door frame 取景后拉改变了回放起点；"
-            "重新按入门方向、YOLO门中心和门框面积校准"
+            "只重新按YOLO门中心和门框面积校准，方向不由南大模块控制"
         )
         for cycle in range(1, max_cycles + 1):
             if current_context.should_abort():

@@ -200,10 +200,6 @@ class HouseSearchManager:
     ENTRY_NEAR_LATERAL_CORRECT_WAIT = 320
     ENTRY_NEAR_ALIGN_TOLERANCE = 5
     ENTRY_NEAR_ALIGN_MAX_STEPS = 2
-    ENTRY_NEAR_ALIGN_MIN_DURA = 300
-    ENTRY_NEAR_ALIGN_MAX_DURA = 300
-    ENTRY_NEAR_ALIGN_MAX_BIAS = 120
-    ENTRY_NEAR_ALIGN_WAIT = 100
     ENTRY_WALL_BACKOFF_DURA = 520
     ENTRY_WALL_BACKOFF_WAIT = 900
     EXCLUDED_ENTRY_LOCATIONS = {
@@ -2070,17 +2066,29 @@ class HouseSearchManager:
         return aligned
 
     def _align_near_entry_direction(self, w: 'FrameWorker', ideal_angle) -> bool:
-        return execute_view_turn(
+        current_direction = w.get_info('direction')
+        tolerance = getattr(
+            self,
+            'ENTRY_DIRECTION_ALIGN_TOLERANCE',
+            self.ENTRY_NEAR_ALIGN_TOLERANCE,
+        )
+        max_steps = getattr(
+            self,
+            'ENTRY_DIRECTION_ALIGN_MAX_STEPS',
+            self.ENTRY_NEAR_ALIGN_MAX_STEPS,
+        )
+        w.frame_log(
+            f"[EntryNearAlign] 使用uinput完整角度模型校准入门方向："
+            f"current={current_direction}，target={ideal_angle}，"
+            f"tolerance={tolerance}°"
+        )
+        return self.align_direction_blocking(
             w,
-            w.get_info('direction'),
+            current_direction,
             ideal_angle,
-            threshold=getattr(self, 'ENTRY_DIRECTION_ALIGN_TOLERANCE', self.ENTRY_NEAR_ALIGN_TOLERANCE),
-            max_steps=getattr(self, 'ENTRY_DIRECTION_ALIGN_MAX_STEPS', self.ENTRY_NEAR_ALIGN_MAX_STEPS),
-            wait=self.ENTRY_NEAR_ALIGN_WAIT,
-            min_dura=self.ENTRY_NEAR_ALIGN_MIN_DURA,
-            max_dura=self.ENTRY_NEAR_ALIGN_MAX_DURA,
-            max_px=self.ENTRY_NEAR_ALIGN_MAX_BIAS,
-            log_prefix="[EntryNearAlign]",
+            threshold=tolerance,
+            max_steps=max_steps,
+            use_uinput=True,
         )
 
     @staticmethod
@@ -3680,6 +3688,7 @@ class HouseSearchManager:
         max_steps=10,
         wait=None,
         min_dura=None,
+        use_uinput=False,
     ):
         w.frame_log('[Action] 阻塞式调整视角')
         return execute_view_turn(
@@ -3693,6 +3702,7 @@ class HouseSearchManager:
             max_dura=self.ALIGN_MAX_DURA,
             max_px=self.ALIGN_MAX_BIAS,
             log_prefix="[NavAlign]",
+            use_uinput=use_uinput,
         )
 
     def align_direction(self, w, tar_loc, threshold=8, max_steps=1, wait=None):

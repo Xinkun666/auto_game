@@ -630,6 +630,7 @@ def execute_view_turn(
     max_dura=None,
     max_px=None,
     log_prefix="[Turn]",
+    use_uinput=False,
 ):
     for _ in range(max_steps):
         motion = plan_view_turn_motion(
@@ -650,9 +651,11 @@ def execute_view_turn(
         print(
             f"{log_prefix} current={current_angle}, target={target_angle}, "
             f"diff={motion['diff']:.1f}, bin={motion['angle_key']}, "
-            f"x_bias={motion['x_bias']}, dura={motion['dura']}"
+            f"x_bias={motion['x_bias']}, dura={motion['dura']}, "
+            f"control={'uinput' if use_uinput else 'default'}"
         )
-        w.tap_single("视角", x_bias=motion["x_bias"], dura=motion["dura"], wait=wait)
+        turn_action = w.uinput_tap_single if use_uinput else w.tap_single
+        turn_action("视角", x_bias=motion["x_bias"], dura=motion["dura"], wait=wait)
         w.refresh_frame()
         current_angle = w.get_info("direction")
         if current_angle is None:

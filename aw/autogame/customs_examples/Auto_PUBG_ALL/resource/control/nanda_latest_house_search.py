@@ -42,11 +42,6 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_room_matc
     IntegratedNandaRoomMatcher,
     NandaMatcherAssetPaths,
 )
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import (
-    plan_view_turn_motion,
-)
-
-
 LOGGER = logging.getLogger("NandaLatestHouseSearch")
 
 
@@ -96,7 +91,6 @@ class NandaLatestSettings:
     matcher_device: str = ""
 
     max_entry_distance: float = 2.5
-    direction_tolerance_degrees: float = 3.0
     area_min_ratio: float = 0.02
     area_max_ratio: float = 0.04
     area_acceptable_min_ratio: float = 0.015
@@ -172,13 +166,6 @@ class NandaLatestSettings:
             ).strip(),
             max_entry_distance=max(
                 0.1, _as_float(raw.get("max_entry_distance"), cls.max_entry_distance)
-            ),
-            direction_tolerance_degrees=max(
-                0.1,
-                _as_float(
-                    raw.get("direction_tolerance_degrees"),
-                    cls.direction_tolerance_degrees,
-                ),
             ),
             area_min_ratio=max(0.0, _as_float(raw.get("area_min_ratio"), cls.area_min_ratio)),
             area_max_ratio=max(0.0, _as_float(raw.get("area_max_ratio"), cls.area_max_ratio)),
@@ -367,7 +354,7 @@ class NandaLatestSettings:
 
 
 class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
-    """只用入门点方向和现有 YOLO 门框收敛南大回放门前位姿。"""
+    """方向由现有导航模块校准；这里只用 YOLO 门框收敛回放位姿。"""
 
     def __init__(self, settings: NandaLatestSettings):
         self.settings = settings
@@ -379,12 +366,6 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
         self._pose_key = None
         self._action_count = 0
         self._stable_count = 0
-
-    @staticmethod
-    def _angular_error(current: Optional[float], target: Optional[float]) -> Optional[float]:
-        if current is None or target is None:
-            return None
-        return abs((float(target) - float(current) + 540.0) % 360.0 - 180.0)
 
     @staticmethod
     def _screen_width(context: NandaSearchContext) -> Optional[float]:
@@ -504,34 +485,6 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
                 metadata={"phase": "pose"},
             )
 
-        direction_error = self._angular_error(
-            context.current_direction,
-            context.entry_direction,
-        )
-        if direction_error is not None and (
-            direction_error > self.settings.direction_tolerance_degrees
-        ):
-            motion = plan_view_turn_motion(
-                context.current_direction,
-                context.entry_direction,
-                min_dura=self.settings.pose_min_duration_ms,
-                max_dura=self.settings.pose_max_duration_ms,
-                max_px=400,
-            )
-            if motion is None:
-                return NandaSearchResult(
-                    NandaSearchStatus.NO_MATCH,
-                    "无法计算入门方向校准动作，退回原搜房策略",
-                    metadata={"phase": "pose"},
-                )
-            return self._retry_after_action(
-                context,
-                f"入门方向误差 {direction_error:.1f}°，先恢复门的垂直观察方向",
-                x_bias=int(motion["x_bias"]),
-                duration_ms=int(motion["dura"]),
-                control="视角",
-            )
-
         screen_width = self._screen_width(context)
         if not screen_width or context.door_center_offset_px is None:
             return NandaSearchResult(
@@ -595,8 +548,9 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
                 metadata={"phase": "pose", "stable_count": self._stable_count},
             )
         context.worker.frame_log(
-            f"[NandaPose] 入门方向+YOLO门框位姿完成：center={center_delta:+.3f}，"
-            f"area={area_ratio:.3f}，stable={self._stable_count}"
+            f"[NandaPose] YOLO门框位姿完成（入门方向已由导航模块使用uinput校准）："
+            f"center={center_delta:+.3f}，area={area_ratio:.3f}，"
+            f"stable={self._stable_count}"
         )
         return None
 
@@ -1529,7 +1483,7 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
             f"[NandaMatch] building 房型配准完成：reason={selection_reason}，"
             f"selected_room={selected.room_id}，confidence={selected.score}，"
             f"requires_pose_realign={requires_pose_realign}，attempts={attempt_summaries}；"
-            "如果取景后拉改变了人物位置，先重新执行入门方向+YOLO门框校准"
+            "如果取景后拉改变了人物位置，只重新执行YOLO门中心和门框面积校准"
         )
         return NandaRoomMatch(
             room_id=selected.room_id,

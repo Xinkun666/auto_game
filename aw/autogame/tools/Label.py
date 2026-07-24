@@ -40,6 +40,23 @@ SYSTEM_SCENE_GROUP_NAMES = (
     DEFAULT_ALL_SCENE_GROUP_NAME,
 )
 GROUPABLE_ITEM_TYPES = ("area", "special_area")
+SPECIAL_SCENE_HANDLER_TEMPLATE = '''# -*- coding: utf-8 -*-
+import time
+from functools import wraps
+
+
+def special_timing(func):
+    """统计 special 方法的执行耗时。"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        result = func(*args, **kwargs)
+        elapsed_ms = round((time.perf_counter() - start) * 1000.0, 3)
+        return result, elapsed_ms
+
+    wrapper.__special_timing_enabled__ = True
+    return wrapper
+'''
 EDITOR_STATE_FILENAME = ".label_project_state.json"
 EDITOR_STATE_VERSION = 1
 INFO_EDITOR_STATE_NAME = "LABEL_EDITOR_STATE"
@@ -4883,11 +4900,15 @@ class AutoStudioWindow(QMainWindow):
         os.makedirs(resource_dir, exist_ok=True)
         handler_path = os.path.join(resource_dir, "SpecialSceneHandler.py")
         base_content = ""
+        generated_base_content = False
         if preserved_content is not None:
             base_content = preserved_content
         elif os.path.exists(handler_path):
             with open(handler_path, "r", encoding="utf-8") as f:
                 base_content = f.read()
+        if not base_content.strip():
+            base_content = SPECIAL_SCENE_HANDLER_TEMPLATE
+            generated_base_content = True
         normalized_names = sorted({name for name in special_area_names if isinstance(name, str) and name.strip()})
         func_name_map = {}
         used_func_names = set()
@@ -4915,12 +4936,7 @@ class AutoStudioWindow(QMainWindow):
             except SyntaxError:
                 existing_funcs = set(re.findall(r"^\s*def\s+([A-Za-z_]\w*)\s*\(", base_content, flags=re.MULTILINE))
         missing_funcs = [func_name for func_name in required_funcs if func_name not in existing_funcs]
-        if not base_content.strip() and not required_funcs:
-            if not os.path.exists(handler_path):
-                with open(handler_path, "w", encoding="utf-8") as f:
-                    f.write("# -*- coding: utf-8 -*-\n")
-            return
-        if not missing_funcs and preserved_content is None:
+        if not missing_funcs and preserved_content is None and not generated_base_content:
             return
         final_content = base_content
         if missing_funcs:

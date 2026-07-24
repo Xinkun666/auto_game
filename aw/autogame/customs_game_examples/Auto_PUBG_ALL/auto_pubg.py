@@ -54,6 +54,12 @@ PHASE_STAGE_MAP = {
 
 DROP_TARGET_R_CITY = (990, 757)
 DROP_TARGET_R_CITY_SEARCH_START = (986, 759)
+DROP_TARGET_R_CITY_HOUSE = (1042, 748)
+DROP_TARGET_M_CITY_HOUSE = (1526, 1218)
+DROP_TARGETS_BY_CITY = {
+    "R城": DROP_TARGET_R_CITY_HOUSE,
+    "M城": DROP_TARGET_M_CITY_HOUSE,
+}
 DROP_TARGET_GARAGE = DROP_TARGET_R_CITY
 DROP_TARGET_CENTER = DROP_TARGET_R_CITY
 DROP_TARGET_RUNNING_AFTER_SEARCH = (1094, 790)
@@ -101,6 +107,13 @@ phase_reporter = None
 _runtime_initialized = False
 
 
+def handle_parachute_target_selected(region_name, target):
+    if searching_house_manager is None:
+        return
+    searching_house_manager.configure_house_region(region_name, target)
+    searching_house_manager.configure_r_city_landing_target(target)
+
+
 def initialize_runtime():
     global SP_RECORDING_ENABLED, PHASE_DURATIONS, _runtime_initialized
     global parachute_manager, running_manager, driving_manager
@@ -140,6 +153,7 @@ def initialize_runtime():
     searching_house_manager = HouseSceneSearchManager(
         nanda_search_strategy=nanda_search_strategy
     )
+    parachute_manager.target_selected_callback = handle_parachute_target_selected
     searching_house_manager.configure_r_city_landing_target(DROP_TARGET_R_CITY)
     searching_house_manager.configure_r_city_pre_search_target(
         DROP_TARGET_R_CITY_SEARCH_START,
@@ -201,12 +215,18 @@ def prepare_round(w: "FrameWorker" = None):
     need_searching = not phase_timer.is_completed(PHASE_SEARCHING)
     landing_stage = "搜房阶段" if need_searching else "跑图阶段"
     if need_searching:
-        drop_target = DROP_TARGET_GARAGE if need_drive else DROP_TARGET_CENTER
+        drop_target = None
+        drop_target_candidates = DROP_TARGETS_BY_CITY
     else:
         drop_target = DROP_TARGET_RUNNING_AFTER_SEARCH
+        drop_target_candidates = None
 
     parachute_manager.reset()
-    parachute_manager.configure(target_pos=drop_target, landing_stage=landing_stage)
+    parachute_manager.configure(
+        target_pos=drop_target,
+        target_candidates=drop_target_candidates,
+        landing_stage=landing_stage,
+    )
 
     running_manager.reset(finding_car=need_drive)
 
@@ -215,9 +235,14 @@ def prepare_round(w: "FrameWorker" = None):
     house_exit_manager.reset()
 
     if w is not None:
+        drop_target_text = (
+            f"候选={drop_target_candidates}"
+            if drop_target_candidates
+            else f"落点={drop_target}"
+        )
         w.frame_log(
             f"本轮配置：需要开车={need_drive}，需要搜房={need_searching}，"
-            f"落点={drop_target}，落地后进入={landing_stage}"
+            f"{drop_target_text}，落地后进入={landing_stage}"
         )
 
 

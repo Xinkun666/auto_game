@@ -1,471 +1,776 @@
 {
-    "10": [
-        {
-            "image": "frame_00651.jpg",
-            "direction": 255,
-            "location": [
-                1001,
-                748
-            ]
-        },
-        {
-            "image": "frame_00673.jpg",
-            "direction": 350,
-            "location": [
-                998,
-                751
-            ]
-        }
-    ],
-    "11": [
-        {
-            "image": "frame_00714.jpg",
-            "direction": 85,
-            "location": [
-                1003,
-                750
-            ]
-        }
-    ],
-    "12": [
-        {
-            "image": "frame_00747.jpg",
-            "direction": 355,
-            "location": [
-                1011,
-                753
-            ]
-        },
-        {
-            "image": "frame_00978.jpg",
-            "direction": 270,
-            "location": [
-                1013,
-                751
-            ]
-        }
-    ],
-    "13": [
-        {
-            "image": "frame_00791.jpg",
-            "direction": 350,
-            "location": [
-                1012,
-                745
-            ]
-        },
-        {
-            "image": "frame_00837.jpg",
-            "direction": 1,
-            "location": [
-                1012,
-                738
-            ]
-        }
-    ],
-    "14": [
-        {
-            "image": "frame_00887.jpg",
-            "direction": 80,
-            "location": [
-                1016,
-                747
-            ]
-        },
-        {
-            "image": "frame_00914.jpg",
-            "direction": 350,
-            "location": [
-                1019,
-                750
-            ]
-        }
-    ],
-    "15": [
-        {
-            "image": "frame_01041.jpg",
-            "direction": 85,
-            "location": [
-                1026,
-                742
-            ]
-        },
-        {
-            "image": "frame_01113.jpg",
-            "direction": 355,
-            "location": [
-                1031,
-                744
-            ]
-        }
-    ],
-    "16": [
-        {
-            "image": "frame_01062.jpg",
-            "direction": 90,
-            "location": [
-                1026,
-                747
-            ]
-        },
-        {
-            "image": "frame_01085.jpg",
-            "direction": 355,
-            "location": [
-                1028,
-                750
-            ]
-        }
-    ],
-    "17": [
-        {
-            "image": "frame_01113.jpg",
-            "direction": 355,
-            "location": [
-                1031,
-                744
-            ]
-        }
-    ],
-    "18": [
-        {
-            "image": "frame_01195.jpg",
-            "direction": 115,
-            "location": [
-                1042,
-                743
-            ]
-        }
-    ],
-    "19": [
-        {
-            "image": "frame_01223.jpg",
-            "direction": 55,
-            "location": [
-                1045,
-                743
-            ]
-        },
-        {
-            "image": "frame_01248.jpg",
-            "direction": 300,
-            "location": [
-                1047,
-                740
-            ]
-        }
-    ],
-    "20": [
-        {
-            "image": "frame_01281.jpg",
-            "direction": 355,
-            "location": [
-                1042,
-                737
-            ]
-        }
-    ],
-    "21": [
-        {
-            "image": "frame_01309.jpg",
-            "direction": 0,
-            "location": [
-                1038,
-                733
-            ]
-        }
-    ],
-    "22": [
-        {
-            "image": "frame_01340.jpg",
-            "direction": 355,
-            "location": [
-                1033,
-                734
-            ]
-        },
-        {
-            "image": "frame_01360.jpg",
-            "direction": 85,
-            "location": [
-                1030,
-                731
-            ]
-        }
-    ],
-    "23": [
-        {
-            "image": "frame_01395.jpg",
-            "direction": 265,
-            "location": [
-                1035,
-                724
-            ]
-        },
-        {
-            "image": "frame_01427.jpg",
-            "direction": 95,
-            "location": [
-                1030,
-                724
-            ]
-        }
-    ],
-    "24": [
-        {
-            "image": "frame_01464.jpg",
-            "direction": 90,
-            "location": [
-                1035,
-                729
-            ]
-        },
-        {
-            "image": "frame_01551.jpg",
-            "direction": 0,
-            "location": [
-                1038,
-                733
-            ]
-        }
-    ],
-    "25": [
-        {
-            "image": "frame_01695.jpg",
-            "direction": 0,
-            "location": [
-                1039,
-                725
-            ]
-        },
-        {
-            "image": "frame_01718.jpg",
-            "direction": 80,
-            "location": [
-                1037,
-                721
-            ]
-        }
-    ],
-    "26": [
-        {
-            "image": "frame_01779.jpg",
-            "direction": 265,
-            "location": [
-                1035,
-                724
-            ]
-        },
-        {
-            "image": "frame_01809.jpg",
-            "direction": 90,
-            "location": [
-                1030,
-                724
-            ]
-        }
-    ],
-    "27": [
-        {
-            "image": "frame_01851.jpg",
-            "direction": 175,
-            "location": [
-                1021,
-                721
-            ]
-        },
-        {
-            "image": "frame_01876.jpg",
-            "direction": 85,
-            "location": [
-                1017,
-                724
-            ]
-        }
-    ],
-    "28": [
-        {
-            "image": "frame_01924.jpg",
-            "direction": 355,
-            "location": [
-                1015,
-                729
-            ]
-        },
-        {
-            "image": "frame_01974.jpg",
-            "direction": 180,
-            "location": [
-                1014,
-                724
-            ]
-        }
-    ],
-    "29": [
-        {
-            "image": "frame_01991.jpg",
-            "direction": 95,
-            "location": [
-                1017,
-                724
-            ]
-        }
-    ],
-    "3": [
-        {
-            "image": "frame_00196.jpg",
-            "direction": 265,
-            "location": [
-                998,
-                714
-            ]
-        }
-    ],
-    "30": [
-        {
-            "image": "frame_02161.jpg",
-            "direction": 140,
-            "location": [
-                1052,
-                740
-            ]
-        },
-        {
-            "image": "frame_02184.jpg",
-            "direction": 40,
-            "location": [
-                1051,
-                745
-            ]
-        }
-    ],
-    "31": [
-        {
-            "image": "frame_02240.jpg",
-            "direction": 105,
-            "location": [
-                1053,
-                752
-            ]
-        }
-    ],
-    "32": [
-        {
-            "image": "frame_02306.jpg",
-            "direction": 100,
-            "location": [
-                1071,
-                756
-            ]
-        },
-        {
-            "image": "frame_02330.jpg",
-            "direction": 10,
-            "location": [
-                1074,
-                759
-            ]
-        }
-    ],
-    "33": [
-        {
-            "image": "frame_02392.jpg",
-            "direction": 180,
-            "location": [
-                1080,
-                750
-            ]
-        },
-        {
-            "image": "frame_02411.jpg",
-            "direction": 95,
-            "location": [
-                1076,
-                751
-            ]
-        }
-    ],
-    "4": [
-        {
-            "image": "frame_00273.jpg",
-            "direction": 170,
-            "location": [
-                1010,
-                705
-            ]
-        }
-    ],
-    "5": [
-        {
-            "image": "frame_00352.jpg",
-            "direction": 175,
-            "location": [
-                1001,
-                726
-            ]
-        },
-        {
-            "image": "frame_00388.jpg",
-            "direction": 345,
-            "location": [
-                1001,
-                732
-            ]
-        }
-    ],
-    "6": [],
-    "7": [
-        {
-            "image": "frame_00411.jpg",
-            "direction": 350,
-            "location": [
-                996,
-                733
-            ]
-        },
-        {
-            "image": "frame_00518.jpg",
-            "direction": 165,
-            "location": [
-                995,
-                726
-            ]
-        }
-    ],
-    "8": [
-        {
-            "image": "frame_00445.jpg",
-            "direction": 350,
-            "location": [
-                989,
-                734
-            ]
-        },
-        {
-            "image": "frame_00471.jpg",
-            "direction": 70,
-            "location": [
-                986,
-                730
-            ]
-        }
-    ],
-    "9": [
-        {
-            "image": "frame_00606.jpg",
-            "direction": 80,
-            "location": [
-                1000,
-                744
-            ]
-        },
-        {
-            "image": "frame_00633.jpg",
-            "direction": 355,
-            "location": [
-                1004,
-                746
-            ]
-        }
-    ]
+  "M城_1": [
+    {
+      "image": "20260623102831-182.png",
+      "direction": 215,
+      "location": [
+        1496,
+        1217
+      ]
+    },
+    {
+      "image": "20260623102837-716.png",
+      "direction": 305,
+      "location": [
+        1496,
+        1221
+      ]
+    }
+  ],
+  "M城_2": [
+    {
+      "image": "20260623102847-021.png",
+      "direction": 220,
+      "location": [
+        1501,
+        1220
+      ]
+    },
+    {
+      "image": "20260623102853-704.png",
+      "direction": 305,
+      "location": [
+        1502,
+        1224
+      ]
+    }
+  ],
+  "M城_3": [
+    {
+      "image": "20260623102909-638.png",
+      "direction": 125,
+      "location": [
+        1499,
+        1233
+      ]
+    }
+  ],
+  "M城_4": [
+    {
+      "image": "20260623102916-284.png",
+      "direction": 220,
+      "location": [
+        1503,
+        1239
+      ]
+    }
+  ],
+  "M城_5": [
+    {
+      "image": "20260623102930-893.png",
+      "direction": 35,
+      "location": [
+        1507,
+        1248
+      ]
+    },
+    {
+      "image": "20260623102938-787.png",
+      "direction": 305,
+      "location": [
+        1509,
+        1247
+      ]
+    }
+  ],
+  "M城_6": [
+    {
+      "image": "20260623102949-256.png",
+      "direction": 305,
+      "location": [
+        1517,
+        1240
+      ]
+    },
+    {
+      "image": "20260623102958-500.png",
+      "direction": 210,
+      "location": [
+        1511,
+        1239
+      ]
+    }
+  ],
+  "M城_7": [
+    {
+      "image": "20260623103017-014.png",
+      "direction": 210,
+      "location": [
+        1516,
+        1235
+      ]
+    }
+  ],
+  "M城_8": [
+    {
+      "image": "20260623103022-341.png",
+      "direction": 300,
+      "location": [
+        1515,
+        1232
+      ]
+    },
+    {
+      "image": "20260623103034-368.png",
+      "direction": 120,
+      "location": [
+        1510,
+        1229
+      ]
+    }
+  ],
+  "M城_9": [
+    {
+      "image": "20260623103051-601.png",
+      "direction": 120,
+      "location": [
+        1525,
+        1234
+      ]
+    },
+    {
+      "image": "20260623103103-607.png",
+      "direction": 215,
+      "location": [
+        1528,
+        1234
+      ]
+    }
+  ],
+  "M城_10": [
+    {
+      "image": "20260623103112-839.png",
+      "direction": 210,
+      "location": [
+        1525,
+        1237
+      ]
+    },
+    {
+      "image": "20260623103120-733.png",
+      "direction": 120,
+      "location": [
+        1522,
+        1239
+      ]
+    }
+  ],
+  "M城_11": [
+    {
+      "image": "20260623103139-301.png",
+      "direction": 120,
+      "location": [
+        1528,
+        1243
+      ]
+    },
+    {
+      "image": "20260623103144-646.png",
+      "direction": 215,
+      "location": [
+        1530,
+        1242
+      ]
+    }
+  ],
+  "M城_12": [
+    {
+      "image": "20260623103155-276.png",
+      "direction": 25,
+      "location": [
+        1532,
+        1237
+      ]
+    },
+    {
+      "image": "20260623103204-462.png",
+      "direction": 125,
+      "location": [
+        1531,
+        1234
+      ]
+    }
+  ],
+  "M城_13": [
+    {
+      "image": "20260623103219-021.png",
+      "direction": 35,
+      "location": [
+        1537,
+        1240
+      ]
+    },
+    {
+      "image": "20260623103233-562.png",
+      "direction": 210,
+      "location": [
+        1540,
+        1235
+      ]
+    }
+  ],
+  "M城_14": [
+    {
+      "image": "20260623103249-310.png",
+      "direction": 210,
+      "location": [
+        1539,
+        1240
+      ]
+    },
+    {
+      "image": "20260623103254-494.png",
+      "direction": 310,
+      "location": [
+        1540,
+        1244
+      ]
+    }
+  ],
+  "M城_15": [
+    {
+      "image": "20260623103315-814.png",
+      "direction": 15,
+      "location": [
+        1550,
+        1229
+      ]
+    },
+    {
+      "image": "20260623103325-045.png",
+      "direction": 110,
+      "location": [
+        1548,
+        1226
+      ]
+    }
+  ],
+  "M城_16": [
+    {
+      "image": "20260623103337-150.png",
+      "direction": 195,
+      "location": [
+        1545,
+        1223
+      ]
+    }
+  ],
+  "M城_17": [
+    {
+      "image": "20260623103349-138.png",
+      "direction": 290,
+      "location": [
+        1543,
+        1226
+      ]
+    },
+    {
+      "image": "20260623103354-433.png",
+      "direction": 25,
+      "location": [
+        1540,
+        1227
+      ]
+    }
+  ],
+  "M城_18": [
+    {
+      "image": "20260623103403-769.png",
+      "direction": 205,
+      "location": [
+        1537,
+        1219
+      ]
+    }
+  ],
+  "M城_19": [
+    {
+      "image": "20260623103411-704.png",
+      "direction": 300,
+      "location": [
+        1536,
+        1219
+      ]
+    }
+  ],
+  "M城_20": [
+    {
+      "image": "20260623103423-732.png",
+      "direction": 305,
+      "location": [
+        1530,
+        1221
+      ]
+    },
+    {
+      "image": "20260623103433-154.png",
+      "direction": 125,
+      "location": [
+        1526,
+        1218
+      ]
+    }
+  ],
+  "M城_21": [
+    {
+      "image": "20260623103450-437.png",
+      "direction": 125,
+      "location": [
+        1517,
+        1214
+      ]
+    }
+  ],
+  "M城_22": [
+    {
+      "image": "20260623103458-456.png",
+      "direction": 120,
+      "location": [
+        1519,
+        1208
+      ]
+    }
+  ],
+  "M城_23": [
+    {
+      "image": "20260623103515-693.png",
+      "direction": 30,
+      "location": [
+        1520,
+        1202
+      ]
+    },
+    {
+      "image": "20260623103523-639.png",
+      "direction": 125,
+      "location": [
+        1519,
+        1198
+      ]
+    }
+  ],
+  "M城_24": [
+    {
+      "image": "20260623103531-679.png",
+      "direction": 120,
+      "location": [
+        1518,
+        1202
+      ]
+    },
+    {
+      "image": "20260623103536-930.png",
+      "direction": 210,
+      "location": [
+        1521,
+        1201
+      ]
+    }
+  ],
+  "M城_25": [
+    {
+      "image": "20260623103546-295.png",
+      "direction": 295,
+      "location": [
+        1514,
+        1198
+      ]
+    },
+    {
+      "image": "20260623103550-333.png",
+      "direction": 35,
+      "location": [
+        1510,
+        1199
+      ]
+    }
+  ],
+  "M城_26": [
+    {
+      "image": "20260623103602-329.png",
+      "direction": 295,
+      "location": [
+        1512,
+        1195
+      ]
+    }
+  ],
+  "R城_1": [
+    {
+      "image": "20260623101155-385.png",
+      "direction": 350,
+      "location": [
+        1000,
+        750
+      ]
+    },
+    {
+      "image": "20260623101200-634.png",
+      "direction": 260,
+      "location": [
+        1003,
+        747
+      ]
+    }
+  ],
+  "R城_2": [
+    {
+      "image": "20260623101208-673.png",
+      "direction": 85,
+      "location": [
+        1001,
+        742
+      ]
+    },
+    {
+      "image": "20260623101216-518.png",
+      "direction": 355,
+      "location": [
+        1006,
+        746
+      ]
+    }
+  ],
+  "R城_3": [
+    {
+      "image": "20260623101221-988.png",
+      "direction": 85,
+      "location": [
+        1005,
+        749
+      ]
+    }
+  ],
+  "R城_4": [
+    {
+      "image": "20260623101231-360.png",
+      "direction": 0,
+      "location": [
+        1012,
+        753
+      ]
+    }
+  ],
+  "R城_5": [
+    {
+      "image": "20260623101240-579.png",
+      "direction": 0,
+      "location": [
+        1013,
+        745
+      ]
+    },
+    {
+      "image": "20260623101251-216.png",
+      "direction": 175,
+      "location": [
+        1013,
+        738
+      ]
+    }
+  ],
+  "R城_6": [
+    {
+      "image": "20260623101301-729.png",
+      "direction": 85,
+      "location": [
+        1017,
+        746
+      ]
+    },
+    {
+      "image": "20260623101309-725.png",
+      "direction": 0,
+      "location": [
+        1019,
+        749
+      ]
+    }
+  ],
+  "R城_7": [
+    {
+      "image": "20260623101322-972.png",
+      "direction": 85,
+      "location": [
+        1027,
+        741
+      ]
+    },
+    {
+      "image": "20260623101328-231.png",
+      "direction": 350,
+      "location": [
+        1032,
+        744
+      ]
+    }
+  ],
+  "R城_8": [
+    {
+      "image": "20260623101344-064.png",
+      "direction": 310,
+      "location": [
+        1042,
+        748
+      ]
+    }
+  ],
+  "R城_9": [
+    {
+      "image": "20260623101353-507.png",
+      "direction": 35,
+      "location": [
+        1044,
+        746
+      ]
+    }
+  ],
+  "R城_10": [
+    {
+      "image": "20260623101406-774.png",
+      "direction": 30,
+      "location": [
+        1046,
+        743
+      ]
+    },
+    {
+      "image": "20260623101412-066.png",
+      "direction": 305,
+      "location": [
+        1048,
+        739
+      ]
+    }
+  ],
+  "R城_11": [
+    {
+      "image": "20260623101427-912.png",
+      "direction": 235,
+      "location": [
+        1059,
+        736
+      ]
+    },
+    {
+      "image": "20260623101433-191.png",
+      "direction": 325,
+      "location": [
+        1058,
+        740
+      ]
+    }
+  ],
+  "R城_12": [
+    {
+      "image": "20260623101451-796.png",
+      "direction": 285,
+      "location": [
+        1069,
+        738
+      ]
+    }
+  ],
+  "R城_13": [
+    {
+      "image": "20260623101458-352.png",
+      "direction": 10,
+      "location": [
+        1073,
+        736
+      ]
+    },
+    {
+      "image": "20260623101510-222.png",
+      "direction": 195,
+      "location": [
+        1074,
+        729
+      ]
+    }
+  ],
+  "R城_14": [
+    {
+      "image": "20260623101522-247.png",
+      "direction": 105,
+      "location": [
+        1076,
+        740
+      ]
+    }
+  ],
+  "R城_15": [
+    {
+      "image": "20260623101536-793.png",
+      "direction": 195,
+      "location": [
+        1081,
+        748
+      ]
+    },
+    {
+      "image": "20260623101543-392.png",
+      "direction": 100,
+      "location": [
+        1077,
+        751
+      ]
+    }
+  ],
+  "R城_16": [
+    {
+      "image": "20260623101559-364.png",
+      "direction": 105,
+      "location": [
+        1072,
+        755
+      ]
+    },
+    {
+      "image": "20260623101607-353.png",
+      "direction": 10,
+      "location": [
+        1076,
+        759
+      ]
+    }
+  ],
+  "R城_17": [
+    {
+      "image": "20260623101636-750.png",
+      "direction": 220,
+      "location": [
+        1048,
+        765
+      ]
+    },
+    {
+      "image": "20260623101644-647.png",
+      "direction": 310,
+      "location": [
+        1048,
+        769
+      ]
+    }
+  ],
+  "R城_18": [
+    {
+      "image": "20260623101651-279.png",
+      "direction": 275,
+      "location": [
+        1044,
+        770
+      ]
+    }
+  ],
+  "R城_19": [
+    {
+      "image": "20260623101703-323.png",
+      "direction": 270,
+      "location": [
+        1040,
+        767
+      ]
+    },
+    {
+      "image": "20260623101716-632.png",
+      "direction": 185,
+      "location": [
+        1038,
+        763
+      ]
+    }
+  ],
+  "R城_20": [
+    {
+      "image": "20260623101731-202.png",
+      "direction": 5,
+      "location": [
+        1031,
+        767
+      ]
+    },
+    {
+      "image": "20260623101739-135.png",
+      "direction": 95,
+      "location": [
+        1027,
+        764
+      ]
+    }
+  ],
+  "R城_21": [
+    {
+      "image": "20260623101747-095.png",
+      "direction": 270,
+      "location": [
+        1027,
+        765
+      ]
+    }
+  ],
+  "R城_22": [
+    {
+      "image": "20260623101814-985.png",
+      "direction": 180,
+      "location": [
+        1021,
+        767
+      ]
+    },
+    {
+      "image": "20260623101821-525.png",
+      "direction": 270,
+      "location": [
+        1024,
+        770
+      ]
+    }
+  ],
+  "R城_23": [
+    {
+      "image": "20260623101832-171.png",
+      "direction": 0,
+      "location": [
+        1017,
+        773
+      ]
+    },
+    {
+      "image": "20260623101838-797.png",
+      "direction": 85,
+      "location": [
+        1014,
+        770
+      ]
+    }
+  ],
+  "R城_24": [
+    {
+      "image": "20260623101846-668.png",
+      "direction": 275,
+      "location": [
+        1016,
+        768
+      ]
+    },
+    {
+      "image": "20260623101904-036.png",
+      "direction": 185,
+      "location": [
+        1013,
+        764
+      ]
+    }
+  ],
+  "R城_25": [
+    {
+      "image": "20260623101910-626.png",
+      "direction": 275,
+      "location": [
+        1010,
+        764
+      ]
+    }
+  ]
 }

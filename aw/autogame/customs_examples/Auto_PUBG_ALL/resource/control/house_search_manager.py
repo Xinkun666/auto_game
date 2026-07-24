@@ -4759,6 +4759,7 @@ class HouseSceneSearchManager(HouseSearchManager):
     def __init__(self, nanda_search_strategy=None):
         super().__init__(nanda_search_strategy=nanda_search_strategy)
         self.r_city_config = {}
+        self.house_region = None
         self.r_city_center = self._load_r_city_center()
         self.r_city_landing_target = self._load_r_city_landing_target()
         self.r_city_near_distance = max(
@@ -5147,6 +5148,21 @@ class HouseSceneSearchManager(HouseSearchManager):
         if loc is not None:
             self.r_city_landing_target = loc
 
+    def configure_house_region(self, region_name, region_center=None):
+        normalized = str(region_name or "").strip()
+        self.house_region = normalized or None
+        center = self._location_tuple(region_center)
+        if center is not None:
+            self.r_city_center = center
+        self.r_city_targets = self._build_r_city_targets()
+        self._reset_r_city_runtime()
+        if getattr(self, "_frame_worker", None) is not None:
+            self._frame_worker.frame_log(
+                f"[Searching] 已按跳伞目标切换房点区域: "
+                f"region={self.house_region or '全部'}, "
+                f"targets={len(self.r_city_targets)}"
+            )
+
     def configure_r_city_pre_search_target(
         self,
         target,
@@ -5172,6 +5188,9 @@ class HouseSceneSearchManager(HouseSearchManager):
     def _build_r_city_targets(self):
         targets = []
         for house_id in sorted(self.house_data, key=lambda value: int(value) if str(value).isdigit() else str(value)):
+            active_region = getattr(self, "house_region", None)
+            if active_region and not str(house_id).startswith(f"{active_region}_"):
+                continue
             entries = self.house_data.get(house_id) or []
             for entry_index, entry in enumerate(entries, start=1):
                 loc = self._entry_location_tuple(entry)

@@ -106,6 +106,18 @@ def forward_scene(img):
     return global_res
 
 
+def forward_scene_detect(img):
+    """将当前帧按年月日时分秒命名并保存到本地目录。"""
+    output_dir = TEMP_DIR / "forward_scene_detect"
+    output_path = output_dir / f"{time.strftime('%Y%m%d%H%M%S')}.png"
+    image_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+    if not write_image_unicode(output_path, image_bgr):
+        raise IOError(f"保存当前帧失败: {output_path}")
+
+    return str(output_path)
+
+
 def white_angle(img):
     return tracker.get_angle(img)
 

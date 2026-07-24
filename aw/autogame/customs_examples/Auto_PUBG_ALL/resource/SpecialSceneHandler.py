@@ -106,9 +106,9 @@ def forward_scene(img):
     return global_res
 
 
-def forward_scene_detect(img):
-    """将当前帧按年月日时分秒命名并保存到本地目录。"""
-    output_dir = TEMP_DIR / "forward_scene_detect"
+def forward_scene_detect(img, path=None):
+    """将当前帧按年月日时分秒命名并保存到指定目录。"""
+    output_dir = Path(path).expanduser() if path else TEMP_DIR / "forward_scene_detect"
     output_path = output_dir / f"{time.strftime('%Y%m%d%H%M%S')}.png"
     image_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 

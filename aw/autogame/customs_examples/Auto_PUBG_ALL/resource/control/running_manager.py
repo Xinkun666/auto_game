@@ -573,10 +573,20 @@ class RunningManager:
     REGION_PRIORITY_CAR_SEARCH_ANCHORS = {
         "G镇": ((572, 1127), (850, 979)),
         "M城": ((1109, 792),),
+        "L城": ((1333, 959),),
     }
-    M_CITY_ROAD_START_SEGMENT = ((1572, 1237), (1483, 1186))
-    M_CITY_CAR_SEARCH_END = (1109, 792)
-    M_CITY_ROAD_POINT_INTERVAL = 2.0
+    DENSE_ROAD_CAR_SEARCH_CONFIG = {
+        "M城": {
+            "start_segment": ((1572, 1237), (1483, 1186)),
+            "end": (1109, 792),
+            "interval": 2.0,
+        },
+        "L城": {
+            "start_segment": ((1768, 803), (1801, 866)),
+            "end": (1333, 959),
+            "interval": 2.0,
+        },
+    }
     RUNNING_ROUTE_CIRCLE = "circle"
     RUNNING_ROUTE_PATROL = "patrol"
     RUNNING_ROUTE_RANDOM_AROUND_CIRCLE = "random_around_circle"
@@ -1863,9 +1873,9 @@ class RunningManager:
             self.road_list = []
             return True
 
-        if self.car_search_region == "M城":
+        if self.car_search_region in self.DENSE_ROAD_CAR_SEARCH_CONFIG:
             route, start_road_point, start_road_dist = (
-                self._plan_m_city_priority_car_search_path(location)
+                self._plan_dense_road_priority_car_search_path(location)
             )
         else:
             route, start_road_point, start_road_dist = self.road_helper.plan_priority_road_path(
@@ -1875,7 +1885,7 @@ class RunningManager:
         if (
             not route
             and self.car_search_region in self.REGION_PRIORITY_CAR_SEARCH_ANCHORS
-            and self.car_search_region != "M城"
+            and self.car_search_region not in self.DENSE_ROAD_CAR_SEARCH_CONFIG
         ):
             route = self._plan_region_priority_car_search_path(location, remaining_points)
             start_road_point = remaining_points[0]
@@ -1906,20 +1916,27 @@ class RunningManager:
             )
         return True
 
-    def _plan_m_city_priority_car_search_path(
+    def _plan_dense_road_priority_car_search_path(
         self,
         location: Tuple[int, int],
     ) -> Tuple[List[Tuple[int, int]], Optional[Tuple[int, int]], float]:
-        segment_start, segment_end = self.M_CITY_ROAD_START_SEGMENT
+        region = self.car_search_region or ""
+        config = self.DENSE_ROAD_CAR_SEARCH_CONFIG.get(region)
+        if config is None:
+            return [], None, float("inf")
+
+        segment_start, segment_end = config["start_segment"]
+        car_search_end = config["end"]
+        sample_interval = float(config["interval"])
         candidate_points, _, _ = self.road_helper.plan_road_path(
             segment_start,
             segment_end,
-            sample_interval=self.M_CITY_ROAD_POINT_INTERVAL,
+            sample_interval=sample_interval,
         )
         if not candidate_points:
             if getattr(self, "_frame_worker", None) is not None:
                 self._frame_worker.frame_log(
-                    f"[Running] M城道路起点候选生成失败: "
+                    f"[Running] {region}道路起点候选生成失败: "
                     f"{segment_start} -> {segment_end}"
                 )
             return [], None, float("inf")
@@ -1930,21 +1947,21 @@ class RunningManager:
         )
         route, snapped_start, snapped_end = self.road_helper.plan_road_path(
             nearest_start,
-            self.M_CITY_CAR_SEARCH_END,
+            car_search_end,
             sample_interval=RoadRouteHelper.PATH_SAMPLE_INTERVAL,
         )
         if not route or snapped_start is None or snapped_end is None:
             if getattr(self, "_frame_worker", None) is not None:
                 self._frame_worker.frame_log(
-                    f"[Running] M城寻车路线规划失败: "
-                    f"{nearest_start} -> {self.M_CITY_CAR_SEARCH_END}"
+                    f"[Running] {region}寻车路线规划失败: "
+                    f"{nearest_start} -> {car_search_end}"
                 )
             return [], nearest_start, get_distance(location, nearest_start)
 
         self.priority_car_search_road_points = [tuple(map(int, snapped_end))]
         if getattr(self, "_frame_worker", None) is not None:
             self._frame_worker.frame_log(
-                f"[Running] M城寻车道路起点已选择: current={location}, "
+                f"[Running] {region}寻车道路起点已选择: current={location}, "
                 f"candidates={len(candidate_points)}, start={snapped_start}, "
                 f"player_to_start={get_distance(location, snapped_start):.2f}, "
                 f"end={snapped_end}"

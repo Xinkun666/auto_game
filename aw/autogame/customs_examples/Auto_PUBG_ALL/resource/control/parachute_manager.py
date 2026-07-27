@@ -30,6 +30,8 @@ class ParachuteManager:
     ROUTE_MIN_STEP: float = 1.0  # 两个航线采样点之间至少要有可辨识位移
     PLANNED_DIRECTION_TOLERANCE: int = 5  # 提前对准计划跳伞方向的允许误差
     PLANNED_DIRECTION_MAX_STEPS: int = 2  # 每帧最多执行的方向校准步数
+    PLANNED_JUMP_POINT_TOLERANCE: float = 15.0  # 靠近计划航线交点时的允许误差
+    PLANNED_JUMP_TARGET_DIST_TOLERANCE: float = 5.0  # 圆线交点取整后的距离误差
 
     def __init__(self):
         self._frame_worker = None
@@ -49,9 +51,13 @@ class ParachuteManager:
         self.dynamic_target_selection = False
         self.route_samples: List[Tuple[int, int]] = []
         self.route_unit: Optional[Tuple[float, float]] = None
+        self.route_origin: Optional[Tuple[int, int]] = None
         self.selected_target_name: Optional[str] = None
         self.planned_jump_position: Optional[Tuple[int, int]] = None
         self.planned_jump_direction: Optional[int] = None
+        self.planned_jump_progress: Optional[float] = None
+        self.planned_exit_progress: Optional[float] = None
+        self.last_route_progress: Optional[float] = None
         self.direction_prepared = False
         self.target_selected_callback = None
 
@@ -72,9 +78,13 @@ class ParachuteManager:
         self.dynamic_target_selection = False
         self.route_samples = []
         self.route_unit = None
+        self.route_origin = None
         self.selected_target_name = None
         self.planned_jump_position = None
         self.planned_jump_direction = None
+        self.planned_jump_progress = None
+        self.planned_exit_progress = None
+        self.last_route_progress = None
         self.direction_prepared = False
         if getattr(self, "_frame_worker", None) is not None:
             self._frame_worker.frame_log('[Parachute] 状态已重置')
@@ -100,9 +110,13 @@ class ParachuteManager:
         self.dynamic_target_selection = bool(normalized_candidates)
         self.route_samples = []
         self.route_unit = None
+        self.route_origin = None
         self.selected_target_name = None
         self.planned_jump_position = None
         self.planned_jump_direction = None
+        self.planned_jump_progress = None
+        self.planned_exit_progress = None
+        self.last_route_progress = None
         self.direction_prepared = False
         if self.dynamic_target_selection:
             self.target_pos = self.TARGET_POS
@@ -152,9 +166,9 @@ class ParachuteManager:
             target_distance_sq - along_distance * along_distance,
         )
         cross_distance = math.sqrt(cross_distance_sq)
-        if cross_distance > self.TRIGGER_DIST:
+        if cross_distance >= self.TRIGGER_DIST:
             return None, (
-                f"垂直距离={cross_distance:.2f} > {self.TRIGGER_DIST}"
+                f"垂直距离={cross_distance:.2f} >= {self.TRIGGER_DIST}"
             )
 
         half_chord = math.sqrt(
@@ -167,9 +181,8 @@ class ParachuteManager:
                 f"目标470范围已在飞机后方 exit={exit_distance:.2f}"
             )
 
-        travel_distance = max(0.0, entry_distance)
-        jump_x = route_origin[0] + ux * travel_distance
-        jump_y = route_origin[1] + uy * travel_distance
+        jump_x = route_origin[0] + ux * entry_distance
+        jump_y = route_origin[1] + uy * entry_distance
         jump_position = (int(round(jump_x)), int(round(jump_y)))
         jump_direction = calculate_angle(jump_position, target_pos)
         if jump_direction is None:
@@ -180,7 +193,8 @@ class ParachuteManager:
             "target": target_pos,
             "jump_position": jump_position,
             "jump_direction": int(jump_direction),
-            "travel_distance": travel_distance,
+            "entry_distance": entry_distance,
+            "exit_distance": exit_distance,
             "cross_distance": cross_distance,
         }, None
 
@@ -213,6 +227,8 @@ class ParachuteManager:
         ux = (location[0] - previous[0]) / step
         uy = (location[1] - previous[1]) / step
         self.route_unit = (ux, uy)
+        self.route_origin = previous
+        current_progress = step
         w.frame_log(
             f"[Parachute] 两点确认航线: {previous} -> {location}, "
             f"step={step:.2f}, unit=({ux:.4f},{uy:.4f})"
@@ -221,7 +237,7 @@ class ParachuteManager:
         plans = []
         for target_name, target_pos in self.target_candidates.items():
             plan, reason = self._plan_target_on_route(
-                location,
+                self.route_origin,
                 self.route_unit,
                 target_name,
                 target_pos,
@@ -232,11 +248,24 @@ class ParachuteManager:
                     f"原因={reason}"
                 )
                 continue
+            if plan["entry_distance"] <= current_progress:
+                w.frame_log(
+                    f"[Parachute] 航线目标入口跳点已飞过: "
+                    f"{target_name}={target_pos}, "
+                    f"entry={plan['entry_distance']:.2f}, "
+                    f"current_progress={current_progress:.2f}"
+                )
+                continue
+            plan["travel_distance"] = (
+                plan["entry_distance"] - current_progress
+            )
             plans.append(plan)
             w.frame_log(
                 f"[Parachute] 航线目标可达: {target_name}={target_pos}, "
                 f"沿航线还需={plan['travel_distance']:.2f}, "
                 f"垂直距离={plan['cross_distance']:.2f}, "
+                f"入口={plan['entry_distance']:.2f}, "
+                f"出口={plan['exit_distance']:.2f}, "
                 f"计划跳点={plan['jump_position']}, "
                 f"计划方向={plan['jump_direction']}°"
             )
@@ -244,11 +273,11 @@ class ParachuteManager:
         if not plans:
             return self._restart_match_for_unreachable_targets(w)
 
-        selected = min(
+        selected = max(
             plans,
             key=lambda item: (
                 item["travel_distance"],
-                item["cross_distance"],
+                -item["cross_distance"],
                 item["name"],
             ),
         )
@@ -256,12 +285,17 @@ class ParachuteManager:
         self.target_pos = selected["target"]
         self.planned_jump_position = selected["jump_position"]
         self.planned_jump_direction = selected["jump_direction"]
+        self.planned_jump_progress = selected["entry_distance"]
+        self.planned_exit_progress = selected["exit_distance"]
+        self.last_route_progress = current_progress
         self.direction_prepared = False
         w.frame_log(
-            f"[Parachute] 选择航线上最先可跳目标: {self.selected_target_name}, "
+            f"[Parachute] 选择航线上最远可跳目标: {self.selected_target_name}, "
             f"target={self.target_pos}, jump_at={self.planned_jump_position}, "
             f"direction={self.planned_jump_direction}°, "
-            f"along={selected['travel_distance']:.2f}"
+            f"remaining={selected['travel_distance']:.2f}, "
+            f"entry={self.planned_jump_progress:.2f}, "
+            f"exit={self.planned_exit_progress:.2f}"
         )
 
         callback = self.target_selected_callback
@@ -274,6 +308,92 @@ class ParachuteManager:
                 )
 
         self._prepare_planned_direction(w)
+        return {}
+
+    def _get_route_progress(
+        self,
+        location: Tuple[int, int],
+    ) -> Optional[float]:
+        if self.route_origin is None or self.route_unit is None:
+            return None
+        ux, uy = self.route_unit
+        return (
+            (float(location[0]) - self.route_origin[0]) * ux
+            + (float(location[1]) - self.route_origin[1]) * uy
+        )
+
+    def _handle_planned_jump_progress(
+        self,
+        location: Tuple[int, int],
+        current_dist: float,
+        w: 'FrameWorker',
+    ):
+        current_progress = self._get_route_progress(location)
+        if (
+            current_progress is None
+            or self.planned_jump_progress is None
+        ):
+            w.frame_log(
+                "[Parachute] 计划跳点进度无效，等待重新取得航线位置"
+            )
+            return {}
+
+        previous_progress = self.last_route_progress
+        progress_step = (
+            current_progress - previous_progress
+            if previous_progress is not None
+            else None
+        )
+        remaining = self.planned_jump_progress - current_progress
+        near_jump_point = abs(remaining) <= self.PLANNED_JUMP_POINT_TOLERANCE
+        crossed_jump_point = (
+            previous_progress is not None
+            and previous_progress < self.planned_jump_progress <= current_progress
+            and progress_step is not None
+            and 0 <= progress_step <= self.JUMP_LOCATION_CONTINUITY_MAX_STEP
+        )
+        within_target_circle = (
+            current_dist
+            <= self.TRIGGER_DIST + self.PLANNED_JUMP_TARGET_DIST_TOLERANCE
+        )
+
+        w.frame_log(
+            f"[ParachutePlan] city={self.selected_target_name}, "
+            f"progress={current_progress:.2f}, "
+            f"planned={self.planned_jump_progress:.2f}, "
+            f"remaining={remaining:.2f}, "
+            f"direction_ready={self.direction_prepared}, "
+            f"target_dist={current_dist:.2f}"
+        )
+
+        if (
+            self.direction_prepared
+            and within_target_circle
+            and (near_jump_point or crossed_jump_point)
+        ):
+            w.frame_log(
+                f"[Parachute] 已逼近{self.selected_target_name}计划跳点: "
+                f"current={location}, planned={self.planned_jump_position}, "
+                f"remaining={remaining:.2f}, "
+                f"target_dist={current_dist:.2f}；立即跳伞"
+            )
+            return self._perform_jump_sequence(w)
+
+        if (
+            current_progress
+            > self.planned_jump_progress + self.PLANNED_JUMP_POINT_TOLERANCE
+        ):
+            w.frame_log(
+                f"[Parachute] 已错过{self.selected_target_name}计划跳点: "
+                f"current={location}, planned={self.planned_jump_position}, "
+                f"progress={current_progress:.2f} > "
+                f"{self.planned_jump_progress:.2f}, "
+                f"direction_ready={self.direction_prepared}, "
+                f"target_dist={current_dist:.2f}"
+            )
+            return self._restart_match_for_bad_route(w)
+
+        self.last_route_progress = current_progress
         return {}
 
     def _prepare_planned_direction(self, w: 'FrameWorker') -> bool:
@@ -345,7 +465,9 @@ class ParachuteManager:
                 return self._select_target_from_route(location, w)
             if not self.direction_prepared:
                 self._prepare_planned_direction(w)
-                return {}
+                refreshed_location = self._extract_location(w)
+                if refreshed_location is not None:
+                    location = refreshed_location
         else:
             # 固定落点兼容路径：继续按当前坐标持续对准目标。
             align_direction(w, self.target_pos)
@@ -375,18 +497,12 @@ class ParachuteManager:
         if self._check_flight_path(current_dist, location, w):
             return self._restart_match_for_bad_route(w)
 
-        if (
-            self.dynamic_target_selection
-            and self.direction_prepared
-            and current_dist <= self.TRIGGER_DIST
-        ):
-            w.frame_log(
-                f"[Parachute] 已到{self.selected_target_name}计划跳点附近: "
-                f"current={location}, planned={self.planned_jump_position}, "
-                f"target_dist={current_dist:.2f} <= {self.TRIGGER_DIST}, "
-                f"direction={self.planned_jump_direction}°；立即跳伞"
+        if self.dynamic_target_selection:
+            return self._handle_planned_jump_progress(
+                location,
+                current_dist,
+                w,
             )
-            return self._perform_jump_sequence(w)
 
         # 6. 判定是否到达跳伞点：用前后各一帧确认，避免单帧误判导致误跳伞
         if self._confirm_jump_window(current_dist, location, w):

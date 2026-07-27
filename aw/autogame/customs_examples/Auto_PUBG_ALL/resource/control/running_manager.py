@@ -192,21 +192,10 @@ class RoadRouteHelper:
         segment_start = tuple(map(int, start_road_point))
         for road_point in road_points:
             road_point = tuple(map(int, road_point))
-            if get_distance(segment_start, road_point) <= 1.0:
-                full_path = self._merge_dedupe_paths(full_path, [road_point])
-                segment_start = road_point
-                continue
-
-            dest_key = self._find_topo_node_key(topo, road_point)
-            if dest_key is None:
-                if getattr(self, "_frame_worker", None) is not None:
-                    self._frame_worker.frame_log(f'[RoadRoute] 指定寻车点 {road_point} 不是 road_topology 红色节点')
-                return [], segment_start, start_dist
-
             result = topo.shortest_path_from_point(
                 int(segment_start[0]),
                 int(segment_start[1]),
-                int(dest_key[1:]) - 1,
+                road_point,
             )
             if not result or len(result) < 3 or not result[2]:
                 if getattr(self, "_frame_worker", None) is not None:
@@ -218,9 +207,7 @@ class RoadRouteHelper:
             if getattr(self, "_frame_worker", None) is not None:
                 self._frame_worker.frame_log(f'[RoadRoute] 指定寻车路段 {segment_start} -> {road_point}: raw={len(raw_segment)}, sampled={len(sampled_segment)}, interval={self.PATH_SAMPLE_INTERVAL:.0f}')
             full_path = self._merge_dedupe_paths(full_path, sampled_segment)
-            if not full_path or full_path[-1] != road_point:
-                full_path = self._merge_dedupe_paths(full_path, [road_point])
-            segment_start = road_point
+            segment_start = raw_segment[-1]
 
         return full_path, tuple(map(int, start_road_point)), float(start_dist)
 
@@ -1825,15 +1812,14 @@ class RunningManager:
             self.road_list = []
             return True
 
-        if self.car_search_region in self.REGION_PRIORITY_CAR_SEARCH_ANCHORS:
+        route, start_road_point, start_road_dist = self.road_helper.plan_priority_road_path(
+            location,
+            remaining_points,
+        )
+        if not route and self.car_search_region in self.REGION_PRIORITY_CAR_SEARCH_ANCHORS:
             route = self._plan_region_priority_car_search_path(location, remaining_points)
             start_road_point = remaining_points[0]
             start_road_dist = get_distance(location, start_road_point)
-        else:
-            route, start_road_point, start_road_dist = self.road_helper.plan_priority_road_path(
-                location,
-                remaining_points,
-            )
         if not route:
             if getattr(self, "_frame_worker", None) is not None:
                 self._frame_worker.frame_log('[Running] 指定寻车路线规划失败，等待下一帧重试')

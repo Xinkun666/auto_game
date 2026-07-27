@@ -245,7 +245,125 @@ class RoadTopo():
             path_nodes.reverse()
         return dist[end] + len(path_nodes), path_nodes
 
-    def shortest_path_from_point(self,px, py, dest):
+    @staticmethod
+    def _merge_pixel_paths(*paths):
+        merged = []
+        for path in paths:
+            for point in path or []:
+                normalized = [int(point[0]), int(point[1])]
+                if not merged or merged[-1] != normalized:
+                    merged.append(normalized)
+        return merged
+
+    def _iter_road_segments(self):
+        """遍历无向道路路段，返回包含两端红色节点的完整像素路径。"""
+        n = len(self.M)
+        for i in range(n):
+            for j in range(i + 1, n):
+                routes = self.M[i][j]
+                reverse_routes = False
+                if routes == math.inf or not routes:
+                    routes = self.M[j][i]
+                    reverse_routes = True
+                if routes == math.inf or not routes:
+                    continue
+
+                for route_index, (_, route_path) in enumerate(routes):
+                    normalized_path = self._normalize_path(route_path)
+                    if reverse_routes:
+                        normalized_path.reverse()
+                    full_path = self._merge_pixel_paths(
+                        [self.node_data[i]],
+                        normalized_path,
+                        [self.node_data[j]],
+                    )
+                    yield (i, j, route_index), i, j, full_path
+
+    def _locate_road_point(self, point):
+        """找到道路像素所在路段，以及它到路段两端节点的局部路径。"""
+        normalized = [int(point[0]), int(point[1])]
+        connections = []
+        memberships = {}
+
+        for node_index, node in enumerate(self.node_data):
+            if normalized == [int(node[0]), int(node[1])]:
+                connections.append((node_index, [normalized]))
+
+        for segment_key, start_node, end_node, full_path in self._iter_road_segments():
+            if normalized not in full_path:
+                continue
+            point_index = full_path.index(normalized)
+            memberships[segment_key] = (full_path, point_index)
+            connections.append((start_node, full_path[point_index::-1]))
+            connections.append((end_node, full_path[point_index:]))
+
+        unique_connections = []
+        seen = set()
+        for node_index, path_to_node in connections:
+            key = (node_index, tuple(tuple(item) for item in path_to_node))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_connections.append((node_index, path_to_node))
+        return unique_connections, memberships
+
+    def _shortest_path_between_road_points(self, start, end):
+        start = [int(start[0]), int(start[1])]
+        end = [int(end[0]), int(end[1])]
+        if start == end:
+            return [], 0, [start]
+
+        start_connections, start_memberships = self._locate_road_point(start)
+        end_connections, end_memberships = self._locate_road_point(end)
+        if not start_connections:
+            print(f"起点 {start} 不在 road_topology 道路上！")
+            return None
+        if not end_connections:
+            print(f"终点 {end} 不在 road_topology 道路上！")
+            return None
+
+        candidates = []
+
+        # 两点位于同一条具体路段时，允许不经过红色节点直接沿路段行走。
+        for segment_key in set(start_memberships) & set(end_memberships):
+            full_path, start_index = start_memberships[segment_key]
+            _, end_index = end_memberships[segment_key]
+            if start_index <= end_index:
+                pixel_path = full_path[start_index:end_index + 1]
+            else:
+                pixel_path = full_path[end_index:start_index + 1][::-1]
+            candidates.append((len(pixel_path) - 1, [], pixel_path))
+
+        # 不同路段之间，比较起点路段两端 × 终点路段两端的全部组合。
+        for start_node, start_to_node in start_connections:
+            for end_node, end_to_node in end_connections:
+                if start_node == end_node:
+                    path_nodes = [start_node]
+                    middle_path = [self.node_data[start_node]]
+                else:
+                    _, path_nodes = self.dijkstra(start_node, end_node)
+                    if not path_nodes:
+                        continue
+                    middle_path = self.build_pixel_path(path_nodes)
+
+                pixel_path = self._merge_pixel_paths(
+                    start_to_node,
+                    middle_path,
+                    list(reversed(end_to_node)),
+                )
+                if not pixel_path or pixel_path[0] != start or pixel_path[-1] != end:
+                    continue
+                node_path = [f"c{node_index + 1}" for node_index in path_nodes]
+                candidates.append((len(pixel_path) - 1, node_path, pixel_path))
+
+        if not candidates:
+            print(f"road_topology 无法规划道路点 {start} -> {end}")
+            return None
+
+        distance, node_path, pixel_path = min(candidates, key=lambda item: item[0])
+        return node_path, distance, pixel_path
+
+    def _shortest_path_to_node(self, px, py, dest):
         for i, (x, y) in enumerate(self.intersections.values()):
             if (px, py) == (x, y):
                 # 已在交点
@@ -291,6 +409,24 @@ class RoadTopo():
             pixel_path = path[idx:]  # 起点到cj
             pixel_path += self.build_pixel_path(path_j)
         return node_path, total_dist, pixel_path
+
+    def shortest_path_from_point(self, px, py, dest):
+        """规划道路路径。
+
+        ``dest`` 为整数时保持旧行为，表示红色道路节点下标。
+        ``dest`` 为 ``(x, y)`` 时，起点和终点都会先吸附到最近道路像素，
+        再规划任意道路点到任意道路点的最短路径。
+        """
+        if isinstance(dest, (int, np.integer)):
+            return self._shortest_path_to_node(int(px), int(py), int(dest))
+        if not self._is_point(dest):
+            raise TypeError("dest 必须是道路节点下标或 (x, y) 坐标")
+
+        start, _ = self.find_nearest_point_from_mask(px, py)
+        end, _ = self.find_nearest_point_from_mask(dest[0], dest[1])
+        if start is None or end is None:
+            return None
+        return self._shortest_path_between_road_points(start, end)
 
     def build_pixel_path(self,path_nodes):
         pixels = []

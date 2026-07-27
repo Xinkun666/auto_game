@@ -211,6 +211,41 @@ class RoadRouteHelper:
 
         return full_path, tuple(map(int, start_road_point)), float(start_dist)
 
+    def plan_road_path(
+        self,
+        start: Tuple[int, int],
+        end: Tuple[int, int],
+        sample_interval: Optional[float] = None,
+    ) -> Tuple[
+        List[Tuple[int, int]],
+        Optional[Tuple[int, int]],
+        Optional[Tuple[int, int]],
+    ]:
+        """规划任意坐标之间的道路拓扑路径，并返回吸附后的起终点。"""
+        topo = self._get_topo()
+        if topo is None:
+            return [], None, None
+
+        try:
+            result = topo.shortest_path_from_point(
+                int(start[0]),
+                int(start[1]),
+                tuple(map(int, end)),
+            )
+        except Exception as exc:
+            if getattr(self, "_frame_worker", None) is not None:
+                self._frame_worker.frame_log(
+                    f'[RoadRoute] road_topology 规划失败: {start} -> {end}, err={exc}'
+                )
+            return [], None, None
+
+        if not result or len(result) < 3 or not result[2]:
+            return [], None, None
+
+        raw_path = self._dedupe_path(result[2])
+        sampled_path = self._sample_path(raw_path, sample_interval=sample_interval)
+        return sampled_path, raw_path[0], raw_path[-1]
+
     def _try_topo_path(self, start: Tuple[int, int], node: Tuple[int, int]) -> List[Tuple[int, int]]:
         topo = self._get_topo()
         if topo is None:
@@ -291,8 +326,20 @@ class RoadRouteHelper:
                 merged.append(point)
         return merged
 
-    def _sample_path(self, path: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    def _sample_path(
+        self,
+        path: List[Tuple[int, int]],
+        sample_interval: Optional[float] = None,
+    ) -> List[Tuple[int, int]]:
         if len(path) <= 2:
+            return path
+
+        interval = (
+            self.PATH_SAMPLE_INTERVAL
+            if sample_interval is None
+            else max(0.0, float(sample_interval))
+        )
+        if interval <= 0:
             return path
 
         sampled = [path[0]]
@@ -301,7 +348,7 @@ class RoadRouteHelper:
 
         for point in path[1:-1]:
             distance_since_last += get_distance(prev, point)
-            if distance_since_last >= self.PATH_SAMPLE_INTERVAL:
+            if distance_since_last >= interval:
                 sampled.append(point)
                 distance_since_last = 0.0
             prev = point
@@ -525,7 +572,11 @@ class RunningManager:
     PRIORITY_CAR_SEARCH_ANCHORS = ((1109, 792), (1189, 783), (1322, 960))
     REGION_PRIORITY_CAR_SEARCH_ANCHORS = {
         "G镇": ((572, 1127), (850, 979)),
+        "M城": ((1109, 792),),
     }
+    M_CITY_ROAD_START_SEGMENT = ((1572, 1237), (1483, 1186))
+    M_CITY_CAR_SEARCH_END = (1109, 792)
+    M_CITY_ROAD_POINT_INTERVAL = 2.0
     RUNNING_ROUTE_CIRCLE = "circle"
     RUNNING_ROUTE_PATROL = "patrol"
     RUNNING_ROUTE_RANDOM_AROUND_CIRCLE = "random_around_circle"
@@ -1812,11 +1863,20 @@ class RunningManager:
             self.road_list = []
             return True
 
-        route, start_road_point, start_road_dist = self.road_helper.plan_priority_road_path(
-            location,
-            remaining_points,
-        )
-        if not route and self.car_search_region in self.REGION_PRIORITY_CAR_SEARCH_ANCHORS:
+        if self.car_search_region == "M城":
+            route, start_road_point, start_road_dist = (
+                self._plan_m_city_priority_car_search_path(location)
+            )
+        else:
+            route, start_road_point, start_road_dist = self.road_helper.plan_priority_road_path(
+                location,
+                remaining_points,
+            )
+        if (
+            not route
+            and self.car_search_region in self.REGION_PRIORITY_CAR_SEARCH_ANCHORS
+            and self.car_search_region != "M城"
+        ):
             route = self._plan_region_priority_car_search_path(location, remaining_points)
             start_road_point = remaining_points[0]
             start_road_dist = get_distance(location, start_road_point)
@@ -1845,6 +1905,51 @@ class RunningManager:
                 f"end={self.road_list[-1] if self.road_list else None}"
             )
         return True
+
+    def _plan_m_city_priority_car_search_path(
+        self,
+        location: Tuple[int, int],
+    ) -> Tuple[List[Tuple[int, int]], Optional[Tuple[int, int]], float]:
+        segment_start, segment_end = self.M_CITY_ROAD_START_SEGMENT
+        candidate_points, _, _ = self.road_helper.plan_road_path(
+            segment_start,
+            segment_end,
+            sample_interval=self.M_CITY_ROAD_POINT_INTERVAL,
+        )
+        if not candidate_points:
+            if getattr(self, "_frame_worker", None) is not None:
+                self._frame_worker.frame_log(
+                    f"[Running] M城道路起点候选生成失败: "
+                    f"{segment_start} -> {segment_end}"
+                )
+            return [], None, float("inf")
+
+        nearest_start = min(
+            candidate_points,
+            key=lambda point: get_distance(location, point),
+        )
+        route, snapped_start, snapped_end = self.road_helper.plan_road_path(
+            nearest_start,
+            self.M_CITY_CAR_SEARCH_END,
+            sample_interval=RoadRouteHelper.PATH_SAMPLE_INTERVAL,
+        )
+        if not route or snapped_start is None or snapped_end is None:
+            if getattr(self, "_frame_worker", None) is not None:
+                self._frame_worker.frame_log(
+                    f"[Running] M城寻车路线规划失败: "
+                    f"{nearest_start} -> {self.M_CITY_CAR_SEARCH_END}"
+                )
+            return [], nearest_start, get_distance(location, nearest_start)
+
+        self.priority_car_search_road_points = [tuple(map(int, snapped_end))]
+        if getattr(self, "_frame_worker", None) is not None:
+            self._frame_worker.frame_log(
+                f"[Running] M城寻车道路起点已选择: current={location}, "
+                f"candidates={len(candidate_points)}, start={snapped_start}, "
+                f"player_to_start={get_distance(location, snapped_start):.2f}, "
+                f"end={snapped_end}"
+            )
+        return route, snapped_start, get_distance(location, snapped_start)
 
     def _plan_region_priority_car_search_path(
         self,

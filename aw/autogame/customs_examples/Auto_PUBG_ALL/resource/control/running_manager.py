@@ -533,6 +533,9 @@ class RunningManager:
     CAR_SEARCH_GARAGE = "garage"
     CAR_SEARCH_ROADSIDE = "roadside"
     PRIORITY_CAR_SEARCH_ANCHORS = ((1109, 792), (1189, 783), (1322, 960))
+    REGION_PRIORITY_CAR_SEARCH_ANCHORS = {
+        "G镇": ((572, 1127), (850, 979)),
+    }
     RUNNING_ROUTE_CIRCLE = "circle"
     RUNNING_ROUTE_PATROL = "patrol"
     RUNNING_ROUTE_RANDOM_AROUND_CIRCLE = "random_around_circle"
@@ -601,6 +604,7 @@ class RunningManager:
         self.priority_car_search_finished = False
         self.priority_car_search_next_index = 0
         self.priority_car_search_road_points: List[Tuple[int, int]] = []
+        self.car_search_region: Optional[str] = None
         self.water_exit_last_location: Optional[Tuple[int, int]] = None
         self.water_exit_stuck_frames = 0
         self.water_exit_side_sign = 1
@@ -672,6 +676,7 @@ class RunningManager:
         self.priority_car_search_finished = False
         self.priority_car_search_next_index = 0
         self.priority_car_search_road_points = []
+        self.car_search_region = None
         self.water_exit_last_location = None
         self.water_exit_stuck_frames = 0
         self.water_exit_clock.reset()
@@ -1346,9 +1351,15 @@ class RunningManager:
         if getattr(self, "_frame_worker", None) is not None:
             self._frame_worker.frame_log(f"[Running] 收到下车通知，载具交互保护期 {cooldown:.1f}s，后续模式={('继续寻车' if self.finding_car else '纯跑图')}")
 
-    def notify_searching_exit(self, finding_car: bool = True):
+    def notify_searching_exit(
+        self,
+        finding_car: bool = True,
+        search_region: Optional[str] = None,
+    ):
         self.drive_required = bool(finding_car)
         self.finding_car = bool(finding_car)
+        normalized_region = str(search_region or "").strip()
+        self.car_search_region = normalized_region or None
         if self.finding_car:
             self.car_search_timer.start()
         else:
@@ -1796,25 +1807,33 @@ class RunningManager:
         ):
             return False
 
-        if getattr(self, "_frame_worker", None) is not None:
-            self._frame_worker.frame_log(f'[Running] {reason}: anchors={len(self.PRIORITY_CAR_SEARCH_ANCHORS)}, 'f'end={self.PRIORITY_CAR_SEARCH_ANCHORS[-1]}')
-
         self._sync_priority_car_route_progress(location)
         route_points = self._get_priority_car_search_road_points()
         remaining_points = route_points[self.priority_car_search_next_index:]
+        if getattr(self, "_frame_worker", None) is not None:
+            self._frame_worker.frame_log(
+                f"[Running] {reason}: region={self.car_search_region or '默认'}, "
+                f"anchors={len(route_points)}, "
+                f"end={route_points[-1] if route_points else None}"
+            )
         if not remaining_points:
             self.priority_car_search_finished = True
             self.current_running_route_kind = self.RUNNING_ROUTE_PRIORITY_CAR_SEARCH
             self.road_list = []
             return True
 
-        route, start_road_point, start_road_dist = self.road_helper.plan_priority_road_path(
-            location,
-            remaining_points,
-        )
+        if self.car_search_region in self.REGION_PRIORITY_CAR_SEARCH_ANCHORS:
+            route = self._plan_region_priority_car_search_path(location, remaining_points)
+            start_road_point = remaining_points[0]
+            start_road_dist = get_distance(location, start_road_point)
+        else:
+            route, start_road_point, start_road_dist = self.road_helper.plan_priority_road_path(
+                location,
+                remaining_points,
+            )
         if not route:
             if getattr(self, "_frame_worker", None) is not None:
-                self._frame_worker.frame_log('[Running] road_topology 指定寻车路线规划失败，等待下一帧重试')
+                self._frame_worker.frame_log('[Running] 指定寻车路线规划失败，等待下一帧重试')
             self.road_list = []
             self.current_running_route_kind = self.RUNNING_ROUTE_PRIORITY_CAR_SEARCH
             return False
@@ -1837,6 +1856,29 @@ class RunningManager:
                 f"end={self.road_list[-1] if self.road_list else None}"
             )
         return True
+
+    def _plan_region_priority_car_search_path(
+        self,
+        location: Tuple[int, int],
+        road_points: List[Tuple[int, int]],
+    ) -> List[Tuple[int, int]]:
+        route: List[Tuple[int, int]] = []
+        segment_start = tuple(map(int, location))
+        for raw_target in road_points:
+            target = tuple(map(int, raw_target))
+            segment = self._plan_path(segment_start, target)
+            if not segment:
+                if getattr(self, "_frame_worker", None) is not None:
+                    self._frame_worker.frame_log(
+                        f"[Running] 城区指定寻车路段规划失败: "
+                        f"{segment_start} -> {target}"
+                    )
+                return []
+            route = self._merge_paths(route, segment)
+            if not route or route[-1] != target:
+                route.append(target)
+            segment_start = target
+        return route
 
     def _is_priority_route_segment_reasonable(
         self,
@@ -1868,9 +1910,13 @@ class RunningManager:
         if self.priority_car_search_road_points:
             return self.priority_car_search_road_points
 
+        configured_points = self.REGION_PRIORITY_CAR_SEARCH_ANCHORS.get(
+            self.car_search_region,
+            self.PRIORITY_CAR_SEARCH_ANCHORS,
+        )
         self.priority_car_search_road_points = [
             tuple(map(int, point))
-            for point in self.PRIORITY_CAR_SEARCH_ANCHORS
+            for point in configured_points
         ]
         if getattr(self, "_frame_worker", None) is not None:
             self._frame_worker.frame_log(f'[Running] 指定寻车精确道路节点: {self.priority_car_search_road_points}')

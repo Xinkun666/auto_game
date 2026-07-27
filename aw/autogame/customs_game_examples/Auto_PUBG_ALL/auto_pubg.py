@@ -519,7 +519,11 @@ def finish_searching_and_enter_running(w: "FrameWorker", reason: str):
         searching_exit_retry_count = 0
 
     finding_car = _should_find_car_after_searching()
-    running_manager.notify_searching_exit(finding_car=finding_car)
+    search_region = getattr(searching_house_manager, "house_region", None)
+    running_manager.notify_searching_exit(
+        finding_car=finding_car,
+        search_region=search_region,
+    )
     running_manager.set_drive_required(finding_car)
     if phase_timer.start_game_time is not None:
         running_manager.set_game_time(phase_timer.start_game_time)
@@ -718,7 +722,10 @@ def on_stage(w: "FrameWorker"):
             searching_to_running_notified = False
         else:
             w.frame_log("当前观察到搜房阶段切到跑图阶段，所以通知跑图模块接管寻车/进圈目标")
-            running_manager.notify_searching_exit(finding_car=_should_find_car_after_searching())
+            running_manager.notify_searching_exit(
+                finding_car=_should_find_car_after_searching(),
+                search_region=getattr(searching_house_manager, "house_region", None),
+            )
 
     if "landed" in stage_events and not phase_timer.all_done():
         w.frame_log("[Flow] 当前人物已经落地，接下来同步落地后的搜房/跑图/开车目标")

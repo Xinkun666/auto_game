@@ -571,12 +571,17 @@ class RunningManager:
     CAR_SEARCH_ROADSIDE = "roadside"
     PRIORITY_CAR_SEARCH_ANCHORS = ((1109, 792), (1189, 783), (1322, 960))
     REGION_PRIORITY_CAR_SEARCH_ANCHORS = {
-        "G镇": ((572, 1127), (850, 979)),
+        "G镇": ((804, 970),),
         "R城": ((1356, 961),),
         "M城": ((1109, 792),),
         "L城": ((1333, 959),),
     }
     DENSE_ROAD_CAR_SEARCH_CONFIG = {
+        "G镇": {
+            "start_segment": ((564, 1134), (604, 1117)),
+            "end": (804, 970),
+            "interval": 2.0,
+        },
         "R城": {
             "start_segment": ((985, 758), (1070, 767)),
             "end": (1356, 961),

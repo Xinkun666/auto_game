@@ -3,6 +3,7 @@ import cv2
 import json
 import math
 import heapq
+from collections import deque
 import numpy as np
 
 def save_color_coords(mask_path, save_json, color='red'):
@@ -35,7 +36,8 @@ def save_color_coords(mask_path, save_json, color='red'):
 
 def build_road_matrix(mask_path, json_path, save_path):
     img = cv2.imread(mask_path, cv2.IMREAD_COLOR)
-    h, w, _ = img.shape
+    if img is None:
+        raise FileNotFoundError(f"无法读取道路 mask: {mask_path}")
 
     WHITE = (255, 255, 255)
     RED = (0, 0, 255)  # BGR
@@ -45,66 +47,181 @@ def build_road_matrix(mask_path, json_path, save_path):
     with open(json_path, "r", encoding="utf-8") as f:
         intersections = json.load(f)
 
-    nodes = {key: tuple(value) for key, value in intersections.items()}
+    nodes = {
+        key: (int(value[0]), int(value[1]))
+        for key, value in intersections.items()
+    }
     node_list = list(nodes.keys())
-    node_index = {node: idx for idx, node in enumerate(node_list)}
     n = len(node_list)
+    if n == 0:
+        raise ValueError("红色道路节点为空，无法生成 road_matrix")
+
+    road_mask = (
+        np.all(img == WHITE, axis=2)
+        | np.all(img == RED, axis=2)
+        | np.all(img == BLUE, axis=2)
+    )
+    try:
+        from skimage.morphology import skeletonize
+    except ImportError as exc:
+        raise RuntimeError("生成 road_matrix 需要 scikit-image 的 skeletonize") from exc
+
+    skeleton = skeletonize(road_mask)
+    ys, xs = np.where(skeleton)
+    if len(xs) == 0:
+        raise ValueError("道路 mask 中没有可用道路像素")
+
+    skeleton_points = np.column_stack((xs, ys)).astype(np.int32)
+    mapped_nodes = []
+    for node_name in node_list:
+        node = np.array(nodes[node_name], dtype=np.int32)
+        deltas = skeleton_points - node
+        distances_sq = np.sum(deltas * deltas, axis=1)
+        nearest_index = int(np.argmin(distances_sq))
+        nearest_distance = math.sqrt(float(distances_sq[nearest_index]))
+        if nearest_distance > 6:
+            raise ValueError(
+                f"道路节点 {node_name}={nodes[node_name]} 距离道路骨架过远: "
+                f"{nearest_distance:.2f}"
+            )
+        mapped_nodes.append(tuple(map(int, skeleton_points[nearest_index])))
+
+    if len(set(mapped_nodes)) != len(mapped_nodes):
+        raise ValueError("多个红色道路节点吸附到了同一个道路骨架像素")
+
+    h, w = skeleton.shape
+    node_points = np.asarray(mapped_nodes, dtype=np.int32)
+    nearest_node_dist_sq = np.full(len(skeleton_points), np.iinfo(np.int32).max, dtype=np.int32)
+    nearest_node_index = np.full(len(skeleton_points), -1, dtype=np.int16)
+    for node_index, node in enumerate(node_points):
+        deltas = skeleton_points - node
+        distances_sq = np.sum(deltas * deltas, axis=1)
+        update = distances_sq < nearest_node_dist_sq
+        nearest_node_dist_sq[update] = distances_sq[update]
+        nearest_node_index[update] = node_index
+
+    # 节点周围使用吸收区，避免骨架在较宽交叉口附近绕过节点。
+    node_zone = np.full((h, w), -1, dtype=np.int16)
+    in_node_zone = nearest_node_dist_sq <= 16
+    zone_points = skeleton_points[in_node_zone]
+    node_zone[zone_points[:, 1], zone_points[:, 0]] = nearest_node_index[in_node_zone]
+
+    def neighbors(point):
+        x, y = point
+        for dx, dy in [
+            (-1, 0), (1, 0), (0, -1), (0, 1),
+            (-1, -1), (1, -1), (-1, 1), (1, 1),
+        ]:
+            nx, ny = x + dx, y + dy
+            if not (0 <= nx < w and 0 <= ny < h and skeleton[ny, nx]):
+                continue
+            # 避免直角转弯处额外产生对角捷径和微小环路。
+            if dx != 0 and dy != 0 and (skeleton[y, nx] or skeleton[ny, x]):
+                continue
+            yield (nx, ny)
+
+    # 移除节点吸收区后，每个连通分量就是一条实际道路段。
+    # 同一对节点之间可以存在多个分量，必须全部保留。
+    road_segments = []
+    visited_pixels = set()
+    for point in map(tuple, skeleton_points):
+        if int(node_zone[point[1], point[0]]) >= 0 or point in visited_pixels:
+            continue
+
+        queue = deque([point])
+        visited_pixels.add(point)
+        component = set()
+        touching_nodes = set()
+        while queue:
+            current = queue.popleft()
+            component.add(current)
+            for next_point in neighbors(current):
+                zone_index = int(node_zone[next_point[1], next_point[0]])
+                if zone_index >= 0:
+                    touching_nodes.add(zone_index)
+                    continue
+                if next_point in visited_pixels:
+                    continue
+                visited_pixels.add(next_point)
+                queue.append(next_point)
+
+        if len(touching_nodes) != 2:
+            names = [node_list[index] for index in sorted(touching_nodes)]
+            raise ValueError(
+                f"道路骨架分量必须连接两个节点，实际连接 {len(touching_nodes)} 个: {names}"
+            )
+        start_index, end_index = sorted(touching_nodes)
+        road_segments.append((start_index, end_index, component))
+
+    if not road_segments:
+        raise ValueError("没有从道路 mask 中识别到节点间道路")
+
+    def shortest_skeleton_path(start_index, end_index, component):
+        start = mapped_nodes[start_index]
+        end = mapped_nodes[end_index]
+        allowed = set(component)
+        zone_pixels = skeleton_points[
+            (nearest_node_index == start_index) | (nearest_node_index == end_index)
+        ]
+        for point in map(tuple, zone_pixels):
+            if int(node_zone[point[1], point[0]]) in (start_index, end_index):
+                allowed.add(point)
+
+        queue = deque([start])
+        parent = {start: None}
+        while queue:
+            current = queue.popleft()
+            if current == end:
+                path = []
+                while current is not None:
+                    path.append(current)
+                    current = parent[current]
+                path.reverse()
+                return path
+
+            for next_point in neighbors(current):
+                if next_point in parent or next_point not in allowed:
+                    continue
+                parent[next_point] = current
+                queue.append(next_point)
+        return None
 
     M = [[[] for _ in range(n)] for _ in range(n)]
+    graph = [[] for _ in range(n)]
+    for start_index, end_index, component in sorted(
+        road_segments,
+        key=lambda item: (item[0], item[1], min(item[2])),
+    ):
+        skeleton_path = shortest_skeleton_path(start_index, end_index, component)
+        if not skeleton_path:
+            raise ValueError(
+                f"无法生成道路节点 {node_list[start_index]} -> {node_list[end_index]} 的路径"
+            )
 
-    def is_white(px):
-        return (px == WHITE).all()
-    def is_red(px):
-        return (px == RED).all()
-    def is_blue(px):
-        return (px == BLUE).all()
-    def is_node(x, y):
-        return any((x, y) == tuple(coord) for coord in nodes.values())
-    def neighbors(x, y):
-        """返回 (x,y) 的上下左右邻居坐标"""
-        for dx, dy in [(-1,0),(1,0),(0,-1),(0,1)]:
-            nx, ny = x + dx, y + dy
-            if 0 <= nx < w and 0 <= ny < h:
-                if is_white(img[ny, nx]) or is_red(img[ny, nx]) or is_blue(img[ny, nx]):
-                    yield (nx, ny)
+        route_path = [list(point) for point in skeleton_path]
+        if route_path and route_path[0] == list(nodes[node_list[start_index]]):
+            route_path.pop(0)
+        if route_path and route_path[-1] == list(nodes[node_list[end_index]]):
+            route_path.pop()
 
-    for i, node in enumerate(node_list):
-        sx, sy = nodes[node]
+        route_length = len(route_path)
+        M[start_index][end_index].append([route_length, route_path])
+        M[end_index][start_index].append([route_length, list(reversed(route_path))])
+        graph[start_index].append(end_index)
+        graph[end_index].append(start_index)
 
-        for nx, ny in neighbors(sx, sy):
-            if (nx, ny) == (sx, sy):
+    visited_nodes = {0}
+    queue = deque([0])
+    while queue:
+        current = queue.popleft()
+        for next_node in graph[current]:
+            if next_node in visited_nodes:
                 continue
-            path = []
-            prev = (sx, sy)
-            curr = (nx, ny)
-
-            while True:
-                if is_node(*curr) and curr != (sx, sy):
-                    # 遇到下一个交点
-                    j = [k for k,v in nodes.items() if tuple(v) == curr][0]
-                    j_idx = node_index[j]
-                    if len(path) > 0:
-                        if len(M[i][j_idx]) == 0:
-                            M[i][j_idx].append([len(path), path.copy()])
-                            rev_path = [p for p in reversed(path)]
-                            M[j_idx][i].append([len(path),rev_path])
-                        elif len(M[i][j_idx]) > 0:
-                            path_len_list = [M[i][j_idx][path_i][0] for path_i in range(len(M[i][j_idx]))]
-                            if len(path) not in path_len_list:
-                                M[i][j_idx].append([len(path),path.copy()])
-                                rev_path = [p for p in reversed(path)]
-                                M[j_idx][i].append([len(path), rev_path])
-                    break
-
-                # 否则继续走
-                path.append(curr)
-                next_candidates = [p for p in neighbors(*curr) if p != prev]
-
-                if not next_candidates:
-                    print(f'出现死路,{curr} 点没有邻居！')
-                    break  # 理论上不会出现死路
-
-                prev, curr = curr, next_candidates[0]
+            visited_nodes.add(next_node)
+            queue.append(next_node)
+    if len(visited_nodes) != n:
+        missing = [node_list[index] for index in range(n) if index not in visited_nodes]
+        raise ValueError(f"生成的道路拓扑不连通，缺少节点: {missing}")
 
     # 对角线设置为 "inf"
     for i in range(n):
@@ -119,6 +236,7 @@ def build_road_matrix(mask_path, json_path, save_path):
 
     with open(save_path, "w", encoding="utf-8") as f:
         json.dump(M_dict, f, indent=4, ensure_ascii=False)
+    return M_dict
 
 
 class RoadTopo():
@@ -452,19 +570,35 @@ class RoadTopo():
 
     def find_nearest_point_from_mask(self, px, py):
         if self._road_pixel_coords is None:
-            img = cv2.imread(self.mask_path, cv2.IMREAD_COLOR)
-            if img is None:
-                print(f"错误：无法读取道路 mask {self.mask_path}")
-                return None, math.inf
+            topology_points = []
+            topology_points.extend(self.node_data or [])
+            for i in range(len(self.M)):
+                for j in range(i + 1, len(self.M)):
+                    routes = self.M[i][j]
+                    if routes == math.inf or not routes:
+                        continue
+                    for _, route_path in routes:
+                        topology_points.extend(route_path)
 
-            white = np.all(img == (255, 255, 255), axis=2)
-            red = np.all(img == (0, 0, 255), axis=2)
-            blue = np.all(img == (255, 0, 0), axis=2)
-            ys, xs = np.where(white | red | blue)
-            if len(xs) == 0:
-                print("道路 mask 中没有可用道路像素")
-                return None, math.inf
-            self._road_pixel_coords = np.column_stack((xs, ys)).astype(np.int32)
+            if topology_points:
+                self._road_pixel_coords = np.unique(
+                    np.asarray(topology_points, dtype=np.int32),
+                    axis=0,
+                )
+            else:
+                img = cv2.imread(self.mask_path, cv2.IMREAD_COLOR)
+                if img is None:
+                    print(f"错误：无法读取道路 mask {self.mask_path}")
+                    return None, math.inf
+
+                white = np.all(img == (255, 255, 255), axis=2)
+                red = np.all(img == (0, 0, 255), axis=2)
+                blue = np.all(img == (255, 0, 0), axis=2)
+                ys, xs = np.where(white | red | blue)
+                if len(xs) == 0:
+                    print("道路 mask 中没有可用道路像素")
+                    return None, math.inf
+                self._road_pixel_coords = np.column_stack((xs, ys)).astype(np.int32)
 
         try:
             point = np.array([int(round(float(px))), int(round(float(py)))], dtype=np.int32)

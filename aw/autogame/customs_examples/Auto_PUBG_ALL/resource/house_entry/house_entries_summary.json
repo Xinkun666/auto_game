@@ -774,3 +774,438 @@
     }
   ]
 }
+
+{
+  "G镇_0": [
+    {
+      "image": "frame_00002.png",
+      "direction": 185,
+      "location": [
+        570,
+        999
+      ]
+    },
+    {
+      "image": "frame_00009.png",
+      "direction": 90,
+      "location": [
+        567,
+        1001
+      ]
+    }
+  ],
+  "G镇_1": [
+    {
+      "image": "frame_00014.png",
+      "direction": 185,
+      "location": [
+        568,
+        1002
+      ]
+    },
+    {
+      "image": "frame_00020.png",
+      "direction": 90,
+      "location": [
+        564,
+        1005
+      ]
+    }
+  ],
+  "G镇_2": [
+    {
+      "image": "frame_00027.png",
+      "direction": 180,
+      "location": [
+        562,
+        1004
+      ]
+    },
+    {
+      "image": "frame_00042.png",
+      "direction": 5,
+      "location": [
+        561,
+        1011
+      ]
+    }
+  ],
+  "G镇_3": [
+    {
+      "image": "frame_00033.png",
+      "direction": 185,
+      "location": [
+        558,
+        1005
+      ]
+    }
+  ],
+  "G镇_4": [
+    {
+      "image": "frame_00049.png",
+      "direction": 0,
+      "location": [
+        555,
+        1011
+      ]
+    },
+    {
+      "image": "frame_00058.png",
+      "direction": 180,
+      "location": [
+        555,
+        1004
+      ]
+    }
+  ],
+  "G镇_5": [
+    {
+      "image": "frame_00064.png",
+      "direction": 265,
+      "location": [
+        551,
+        1007
+      ]
+    },
+    {
+      "image": "frame_00073.png",
+      "direction": 185,
+      "location": [
+        547,
+        1004
+      ]
+    }
+  ],
+  "G镇_6": [
+    {
+      "image": "frame_00081.png",
+      "direction": 0,
+      "location": [
+        549,
+        1003
+      ]
+    }
+  ],
+  "G镇_7": [
+    {
+      "image": "frame_00097.png",
+      "direction": 0,
+      "location": [
+        553,
+        1000
+      ]
+    },
+    {
+      "image": "frame_00101.png",
+      "direction": 270,
+      "location": [
+        556,
+        996
+      ]
+    }
+  ],
+  "G镇_8": [
+    {
+      "image": "frame_00132.png",
+      "direction": 5,
+      "location": [
+        556,
+        1003
+      ]
+    },
+    {
+      "image": "frame_00139.png",
+      "direction": 270,
+      "location": [
+        562,
+        999
+      ]
+    }
+  ],
+  "G镇_9": [
+    {
+      "image": "frame_00144.png",
+      "direction": 95,
+      "location": [
+        561,
+        996
+      ]
+    },
+    {
+      "image": "frame_00153.png",
+      "direction": 270,
+      "location": [
+        567,
+        998
+      ]
+    }
+  ],
+  "L城_0": [
+    {
+      "image": "frame_00003.png",
+      "direction": 180,
+      "location": [
+        1785,
+        805
+      ]
+    },
+    {
+      "image": "frame_00015.png",
+      "direction": 265,
+      "location": [
+        1788,
+        812
+      ]
+    }
+  ],
+  "L城_1": [
+    {
+      "image": "frame_00022.png",
+      "direction": 100,
+      "location": [
+        1785,
+        814
+      ]
+    }
+  ],
+  "L城_10": [
+    {
+      "image": "frame_00162.png",
+      "direction": 135,
+      "location": [
+        1812,
+        839
+      ]
+    },
+    {
+      "image": "frame_00172.png",
+      "direction": 45,
+      "location": [
+        1815,
+        842
+      ]
+    }
+  ],
+  "L城_11": [
+    {
+      "image": "frame_00181.png",
+      "direction": 135,
+      "location": [
+        1826,
+        842
+      ]
+    }
+  ],
+  "L城_12": [
+    {
+      "image": "frame_00188.png",
+      "direction": 135,
+      "location": [
+        1824,
+        844
+      ]
+    }
+  ],
+  "L城_13": [
+    {
+      "image": "frame_00195.png",
+      "direction": 135,
+      "location": [
+        1819,
+        849
+      ]
+    },
+    {
+      "image": "frame_00204.png",
+      "direction": 315,
+      "location": [
+        1825,
+        854
+      ]
+    }
+  ],
+  "L城_14": [
+    {
+      "image": "frame_00210.png",
+      "direction": 315,
+      "location": [
+        1821,
+        857
+      ]
+    },
+    {
+      "image": "frame_00221.png",
+      "direction": 225,
+      "location": [
+        1818,
+        854
+      ]
+    }
+  ],
+  "L城_15": [
+    {
+      "image": "frame_00229.png",
+      "direction": 135,
+      "location": [
+        1811,
+        858
+      ]
+    },
+    {
+      "image": "frame_00237.png",
+      "direction": 320,
+      "location": [
+        1815,
+        863
+      ]
+    }
+  ],
+  "L城_16": [
+    {
+      "image": "frame_00243.png",
+      "direction": 315,
+      "location": [
+        1813,
+        865
+      ]
+    },
+    {
+      "image": "frame_00252.png",
+      "direction": 140,
+      "location": [
+        1809,
+        860
+      ]
+    }
+  ],
+  "L城_17": [
+    {
+      "image": "frame_00262.png",
+      "direction": 315,
+      "location": [
+        1800,
+        863
+      ]
+    },
+    {
+      "image": "frame_00269.png",
+      "direction": 45,
+      "location": [
+        1795,
+        862
+      ]
+    }
+  ],
+  "L城_2": [
+    {
+      "image": "frame_00029.png",
+      "direction": 20,
+      "location": [
+        1789,
+        816
+      ]
+    },
+    {
+      "image": "frame_00041.png",
+      "direction": 15,
+      "location": [
+        1789,
+        811
+      ]
+    }
+  ],
+  "L城_3": [
+    {
+      "image": "frame_00056.png",
+      "direction": 110,
+      "location": [
+        1793,
+        812
+      ]
+    },
+    {
+      "image": "frame_00064.png",
+      "direction": 20,
+      "location": [
+        1794,
+        817
+      ]
+    }
+  ],
+  "L城_4": [
+    {
+      "image": "frame_00076.png",
+      "direction": 35,
+      "location": [
+        1802,
+        820
+      ]
+    },
+    {
+      "image": "frame_00086.png",
+      "direction": 220,
+      "location": [
+        1817,
+        817
+      ]
+    }
+  ],
+  "L城_5": [
+    {
+      "image": "frame_00097.png",
+      "direction": 315,
+      "location": [
+        1811,
+        819
+      ]
+    }
+  ],
+  "L城_6": [
+    {
+      "image": "frame_00115.png",
+      "direction": 310,
+      "location": [
+        1809,
+        825
+      ]
+    }
+  ],
+  "L城_7": [
+    {
+      "image": "frame_00123.png",
+      "direction": 130,
+      "location": [
+        1812,
+        828
+      ]
+    },
+    {
+      "image": "frame_00132.png",
+      "direction": 225,
+      "location": [
+        1816,
+        824
+      ]
+    }
+  ],
+  "L城_8": [
+    {
+      "image": "frame_00139.png",
+      "direction": 125,
+      "location": [
+        1817,
+        830
+      ]
+    }
+  ],
+  "L城_9": [
+    {
+      "image": "frame_00147.png",
+      "direction": 35,
+      "location": [
+        1817,
+        833
+      ]
+    }
+  ]
+}

@@ -131,6 +131,47 @@ def get_distance(coord1, coord2):
         return -1
     return math.hypot(coord1[0] - coord2[0], coord1[1] - coord2[1])
 
+
+def find_nearest_point(points, point):
+    if not points:
+        raise ValueError("points 列表为空")
+    point_array = np.asarray(points)
+    distance_squared = (
+        (point_array[:, 0] - point[0]) ** 2
+        + (point_array[:, 1] - point[1]) ** 2
+    )
+    return tuple(point_array[np.argmin(distance_squared)])
+
+
+def get_relative_sector(base_dir: float, dir_angle: float, delta: int = 5):
+    """Return the target's left/right sector relative to the current heading."""
+    difference = (dir_angle - base_dir + 180) % 360 - 180
+    if delta <= difference < 30:
+        return 1
+    if 30 <= difference < 90:
+        return 2
+    if 90 <= difference <= 180:
+        return 3
+    if -30 < difference <= -delta:
+        return 4
+    if -90 < difference <= -30:
+        return 5
+    if -180 <= difference <= -90:
+        return 6
+    return None
+
+
+def analyze_distance(distances):
+    if len(distances) <= 1:
+        return 1
+    if distances[-1] == -1:
+        return 1
+    return 0 if distances[-1] <= 3 else 1
+
+
+def extract_keys(source, keys):
+    return {key: source[key] for key in keys if key in source}
+
 def check_location(location):
     # 1. 首先排除最基本的 None（比如获取不到信息的情况）
     if location is None:
@@ -1094,6 +1135,20 @@ def align_direction(w, tar_loc, threshold=5):
         fallback_dura=800,
         log_prefix="[Align]",
     )
+
+def stable_angle(angle_list, eps_angle=3):
+    valid_angles = [angle for angle in angle_list if angle is not None]
+    if len(valid_angles) < 3:
+        return None
+
+    angles = np.asarray(valid_angles).reshape(-1, 1)
+    labels = DBSCAN(eps=eps_angle, min_samples=1).fit(angles).labels_
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    best_label = unique_labels[np.argmax(counts)]
+    if counts[np.argmax(counts)] <= 20:
+        return None
+    return float(np.mean(angles[labels == best_label].flatten()))
+
 
 def is_location_stagnant(history_points):
     """

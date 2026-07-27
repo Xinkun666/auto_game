@@ -4,7 +4,6 @@ import time
 import math
 import subprocess
 
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_path_utils import *
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import *
 from typing import Tuple, Dict, Any, Optional, List
 from typing import TYPE_CHECKING

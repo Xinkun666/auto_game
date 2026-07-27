@@ -16,6 +16,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_g
     is_location_stagnant,
     load_adaptive_motion_section,
     persist_adaptive_motion_section,
+    stable_angle,
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import Cooldown, Stopwatch
 
@@ -1831,8 +1832,6 @@ class DrivingManager:
         if len(self.circle_angles) < 30:
             self.stable_circle_angle = None
             return
-
-        from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_path_utils import stable_angle
 
         self.stable_circle_angle = stable_angle(self.circle_angles)
         if self.stable_circle_angle is None:

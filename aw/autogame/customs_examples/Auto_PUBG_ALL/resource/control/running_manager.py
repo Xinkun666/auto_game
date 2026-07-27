@@ -5,6 +5,9 @@ import time
 from typing import Callable, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_manager import HouseExitManager
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.car_route_utils import (
+    find_path,
+)
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_navigation import (
     MapNavigator,
     save_route_image_for_log,
@@ -20,13 +23,13 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_g
     is_location_stagnant,
     update_adaptive_forward_motion,
 )
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.map_path_utils import find_path, get_resolution
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import (
     ActiveWindow,
     Cooldown,
     Stopwatch,
     TimeoutTracker,
 )
+from aw.autogame.tools.Utils import get_resolution
 if TYPE_CHECKING:
     from aw.autogame.tools.GameFrameWorker import FrameWorker
 

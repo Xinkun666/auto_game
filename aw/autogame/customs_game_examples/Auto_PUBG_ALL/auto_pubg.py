@@ -64,9 +64,18 @@ DROP_TARGETS_BY_CITY = {
     "L城": DROP_TARGET_L_CITY_HOUSE,
     "G镇": DROP_TARGET_G_TOWN_HOUSE,
 }
+DROP_TARGET_R_CITY_CAR_SEARCH = (1104, 790)
+DROP_TARGET_L_CITY_CAR_SEARCH = (1731, 910)
+DROP_TARGET_M_CITY_CAR_SEARCH = (1477, 1171)
+DROP_TARGET_G_TOWN_CAR_SEARCH = (576, 1127)
+DROP_CAR_SEARCH_TARGETS_BY_CITY = {
+    "R城": DROP_TARGET_R_CITY_CAR_SEARCH,
+    "L城": DROP_TARGET_L_CITY_CAR_SEARCH,
+    "M城": DROP_TARGET_M_CITY_CAR_SEARCH,
+    "G镇": DROP_TARGET_G_TOWN_CAR_SEARCH,
+}
 DROP_TARGET_GARAGE = DROP_TARGET_R_CITY
 DROP_TARGET_CENTER = DROP_TARGET_R_CITY
-DROP_TARGET_RUNNING_AFTER_SEARCH = (1094, 790)
 STAGE_PRIORITY_JUMP_FORWARD_Y_BIAS = -400
 STAGE_PRIORITY_JUMP_FORWARD_DURA = 100
 STAGE_PRIORITY_JUMP_FORWARD_WAIT = 300
@@ -112,6 +121,23 @@ _runtime_initialized = False
 
 
 def handle_parachute_target_selected(region_name, target):
+    if (
+        parachute_manager is not None
+        and parachute_manager.landing_stage == "跑图阶段"
+    ):
+        if running_manager is None:
+            return
+        finding_car = (
+            phase_timer.need_drive()
+            if phase_timer is not None
+            else True
+        )
+        running_manager.notify_searching_exit(
+            finding_car=finding_car,
+            search_region=region_name,
+        )
+        return
+
     if searching_house_manager is None:
         return
     searching_house_manager.configure_house_region(region_name, target)
@@ -222,8 +248,8 @@ def prepare_round(w: "FrameWorker" = None):
         drop_target = None
         drop_target_candidates = DROP_TARGETS_BY_CITY
     else:
-        drop_target = DROP_TARGET_RUNNING_AFTER_SEARCH
-        drop_target_candidates = None
+        drop_target = None
+        drop_target_candidates = DROP_CAR_SEARCH_TARGETS_BY_CITY
 
     parachute_manager.reset()
     parachute_manager.configure(

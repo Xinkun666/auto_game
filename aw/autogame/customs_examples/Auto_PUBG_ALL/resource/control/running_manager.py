@@ -1956,8 +1956,46 @@ class RunningManager:
             candidate_points,
             key=lambda point: get_distance(location, point),
         )
-        route, snapped_start, snapped_end = self.road_helper.plan_road_path(
+        dense_route, _, dense_end = self.road_helper.plan_road_path(
             nearest_start,
+            car_search_end,
+            sample_interval=sample_interval,
+        )
+        if not dense_route or dense_end is None:
+            if getattr(self, "_frame_worker", None) is not None:
+                self._frame_worker.frame_log(
+                    f"[Running] {region}完整密集寻车路线生成失败: "
+                    f"{nearest_start} -> {car_search_end}"
+                )
+            return [], nearest_start, get_distance(location, nearest_start)
+
+        forward_x = float(car_search_end[0] - location[0])
+        forward_y = float(car_search_end[1] - location[1])
+        if forward_x == 0 and forward_y == 0:
+            forward_points = dense_route
+        else:
+            forward_points = [
+                point
+                for point in dense_route
+                if (
+                    (point[0] - location[0]) * forward_x
+                    + (point[1] - location[1]) * forward_y
+                ) >= 0
+            ]
+        if not forward_points:
+            if getattr(self, "_frame_worker", None) is not None:
+                self._frame_worker.frame_log(
+                    f"[Running] {region}完整路线中没有人物前方道路点: "
+                    f"current={location}, end={car_search_end}"
+                )
+            return [], None, float("inf")
+
+        forward_start = min(
+            forward_points,
+            key=lambda point: get_distance(location, point),
+        )
+        route, snapped_start, snapped_end = self.road_helper.plan_road_path(
+            forward_start,
             car_search_end,
             sample_interval=RoadRouteHelper.PATH_SAMPLE_INTERVAL,
         )
@@ -1965,15 +2003,18 @@ class RunningManager:
             if getattr(self, "_frame_worker", None) is not None:
                 self._frame_worker.frame_log(
                     f"[Running] {region}寻车路线规划失败: "
-                    f"{nearest_start} -> {car_search_end}"
+                    f"{forward_start} -> {car_search_end}"
                 )
-            return [], nearest_start, get_distance(location, nearest_start)
+            return [], forward_start, get_distance(location, forward_start)
 
         self.priority_car_search_road_points = [tuple(map(int, snapped_end))]
         if getattr(self, "_frame_worker", None) is not None:
             self._frame_worker.frame_log(
                 f"[Running] {region}寻车道路起点已选择: current={location}, "
-                f"candidates={len(candidate_points)}, start={snapped_start}, "
+                f"segment_candidates={len(candidate_points)}, "
+                f"dense_route_points={len(dense_route)}, "
+                f"segment_nearest={nearest_start}, "
+                f"forward_start={snapped_start}, "
                 f"player_to_start={get_distance(location, snapped_start):.2f}, "
                 f"end={snapped_end}"
             )

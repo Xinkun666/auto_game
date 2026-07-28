@@ -131,6 +131,6 @@ def house_scene(img):
 
 
 @special_timing
-def sam3(img, seg_name=None):
-    """在 Label 标注的 SAM3 特殊区域内执行本地 EfficientSAM3 推理。"""
-    return segment_sam3(img, seg_name=seg_name)
+def sam3(img, seg_name=None, version=0):
+    """按 version 选择本地 EfficientSAM3 实现。"""
+    return segment_sam3(img, seg_name=seg_name, version=version)

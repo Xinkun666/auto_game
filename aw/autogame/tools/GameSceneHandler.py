@@ -208,6 +208,15 @@ class GameImageProcessor:
                         if not isinstance(seg_name, str) or not seg_name.strip():
                             return task_id, "Error: seg_name must be a non-empty string"
                         handler_kwargs['seg_name'] = seg_name.strip()
+                    if handler_name == 'sam3' and 'version' in area_config:
+                        version = area_config.get('version')
+                        if (
+                            isinstance(version, bool)
+                            or not isinstance(version, int)
+                            or version not in (0, 1)
+                        ):
+                            return task_id, "Error: sam3 version must be integer 0 or 1"
+                        handler_kwargs['version'] = version
                     raw_special_result = method(target_img, **handler_kwargs)
                     special_result, timing_ms = self._split_special_timing_result(method, raw_special_result)
                     mapped_result = self._map_special_visualizations(

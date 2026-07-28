@@ -26,8 +26,15 @@ DEFAULT_CHECKPOINT_PATH = (
     / "sam3_tiny"
     / "efficientsam3_tinyvit.pt"
 )
+EFFICIENTVIT_CHECKPOINT_PATH = (
+    SAM3_DIR.parent.parent
+    / "weights"
+    / "sam3_tiny"
+    / "efficientsam3_efficientvit.pt"
+)
 DEFAULT_BPE_PATH = RUNTIME_DIR / "assets" / "bpe_simple_vocab_16e6.txt.gz"
 MINIMUM_PYTHON_VERSION = (3, 10)
+SUPPORTED_SAM3_VERSIONS = (0, 1)
 
 
 def _read_float_env(name: str, default: float) -> float:
@@ -53,6 +60,13 @@ def _to_numpy(value: Any) -> np.ndarray:
 class LocalSam3Segmenter:
     """Owns one EfficientSAM3 model and performs serialized local inference."""
 
+    implementation_version = 0
+    checkpoint_env_name = "AUTOGAME_SAM3_CHECKPOINT"
+    default_checkpoint_path = DEFAULT_CHECKPOINT_PATH
+    backbone_type = "tinyvit"
+    model_name = "11m"
+    model_variant = "TV-M"
+
     def __init__(
         self,
         checkpoint_path: Optional[Path] = None,
@@ -63,9 +77,9 @@ class LocalSam3Segmenter:
         device: Optional[str] = None,
         runtime_loader: Optional[Callable[[], Tuple[Any, str]]] = None,
     ) -> None:
-        configured_checkpoint = os.environ.get("AUTOGAME_SAM3_CHECKPOINT", "").strip()
+        configured_checkpoint = os.environ.get(self.checkpoint_env_name, "").strip()
         self.checkpoint_path = Path(
-            configured_checkpoint or checkpoint_path or DEFAULT_CHECKPOINT_PATH
+            configured_checkpoint or checkpoint_path or self.default_checkpoint_path
         ).expanduser()
         self.prompt = (prompt or os.environ.get("AUTOGAME_SAM3_PROMPT", "building")).strip()
         self.confidence_threshold = (
@@ -140,7 +154,8 @@ class LocalSam3Segmenter:
             )
         if not self.checkpoint_path.is_file():
             raise FileNotFoundError(
-                "SAM3 权重不存在，请将 efficientsam3_tinyvit.pt 放到: "
+                f"SAM3 version={self.implementation_version}（{self.model_variant}）"
+                "权重不存在，请将权重放到: "
                 f"{self.checkpoint_path}"
             )
         if not DEFAULT_BPE_PATH.is_file():
@@ -166,8 +181,8 @@ class LocalSam3Segmenter:
             enable_segmentation=True,
             enable_inst_interactivity=False,
             compile=False,
-            backbone_type="tinyvit",
-            model_name="11m",
+            backbone_type=self.backbone_type,
+            model_name=self.model_name,
             text_encoder_type="MobileCLIP-S0",
             text_encoder_context_length=16,
         )
@@ -472,22 +487,57 @@ class LocalSam3Segmenter:
         }
 
 
+class LocalSam3EfficientVitSegmenter(LocalSam3Segmenter):
+    """Alternative EfficientSAM3 EV-M implementation selected by version=1."""
+
+    implementation_version = 1
+    checkpoint_env_name = "AUTOGAME_SAM3_V1_CHECKPOINT"
+    default_checkpoint_path = EFFICIENTVIT_CHECKPOINT_PATH
+    backbone_type = "efficientvit"
+    model_name = "b1"
+    model_variant = "EV-M"
+
+
 _SAM3_SEGMENTER: Optional[LocalSam3Segmenter] = None
+_SAM3_V1_SEGMENTER: Optional[LocalSam3EfficientVitSegmenter] = None
 _SAM3_SINGLETON_LOCK = threading.Lock()
 
 
-def get_sam3_segmenter() -> LocalSam3Segmenter:
-    global _SAM3_SEGMENTER
-    if _SAM3_SEGMENTER is None:
+def _normalize_sam3_version(version: int) -> int:
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ValueError(
+            "SAM3 version 必须是整数 0 或 1，"
+            f"当前值为 {version!r}"
+        )
+    if version not in SUPPORTED_SAM3_VERSIONS:
+        raise ValueError(
+            f"不支持的 SAM3 version={version}，"
+            f"可选值为 {SUPPORTED_SAM3_VERSIONS}"
+        )
+    return version
+
+
+def get_sam3_segmenter(version: int = 0) -> LocalSam3Segmenter:
+    global _SAM3_SEGMENTER, _SAM3_V1_SEGMENTER
+    normalized_version = _normalize_sam3_version(version)
+    if normalized_version == 0:
+        if _SAM3_SEGMENTER is None:
+            with _SAM3_SINGLETON_LOCK:
+                if _SAM3_SEGMENTER is None:
+                    _SAM3_SEGMENTER = LocalSam3Segmenter()
+        return _SAM3_SEGMENTER
+
+    if _SAM3_V1_SEGMENTER is None:
         with _SAM3_SINGLETON_LOCK:
-            if _SAM3_SEGMENTER is None:
-                _SAM3_SEGMENTER = LocalSam3Segmenter()
-    return _SAM3_SEGMENTER
+            if _SAM3_V1_SEGMENTER is None:
+                _SAM3_V1_SEGMENTER = LocalSam3EfficientVitSegmenter()
+    return _SAM3_V1_SEGMENTER
 
 
 def segment_sam3(
     image_bgr: np.ndarray,
     seg_name: Optional[str] = None,
+    version: int = 0,
 ) -> Dict[str, Any]:
-    """Segment ``seg_name`` while reusing the process-wide SAM3 model."""
-    return get_sam3_segmenter().infer(image_bgr, prompt=seg_name)
+    """Segment ``seg_name`` with the process-wide model selected by ``version``."""
+    return get_sam3_segmenter(version=version).infer(image_bgr, prompt=seg_name)

@@ -479,6 +479,9 @@ def build_frame_log_payload(
     info_keys = _non_empty_info_keys(safe_info)
     runtime_logs = runtime_logs if isinstance(runtime_logs, dict) else {}
     frame_logs = _normalize_plain_frame_logs(runtime_logs.get("frame_logs"))
+    frame_log_entries = _normalize_frame_log_entries(
+        runtime_logs.get("frame_log_entries")
+    )
     code_branch = _select_frame_code_branch(runtime_logs)
     next_action = _select_next_action(runtime_logs, code_branch)
     semantic_log = _build_semantic_frame_log(
@@ -492,6 +495,7 @@ def build_frame_log_payload(
     )
     semantic_log["frame_logs"] = list(frame_logs)
     semantic_log["frame_log"] = frame_logs[-1] if frame_logs else ""
+    semantic_log["frame_log_entries"] = list(frame_log_entries)
     frame_name = frame_name or f"frame_{int(index):05d}.jpg"
 
     frame_payload = {
@@ -528,6 +532,7 @@ def build_frame_log_payload(
         "recent_logs": _normalize_frame_log_entries(runtime_logs.get("recent_logs")),
         "frame_logs": frame_logs,
         "frame_log": frame_logs[-1] if frame_logs else "",
+        "frame_log_entries": frame_log_entries,
         "code_branch": code_branch,
         "next_action": next_action,
         "semantic_log": semantic_log,
@@ -1490,6 +1495,9 @@ def visualizer_process(queue, visual=True):
             runtime_logs = frame_meta.get("runtime_logs")
             runtime_logs = dict(runtime_logs) if isinstance(runtime_logs, dict) else {}
             runtime_logs["frame_logs"] = _normalize_plain_frame_logs(frame_meta.get("frame_logs"))
+            runtime_logs["frame_log_entries"] = _normalize_frame_log_entries(
+                frame_meta.get("frame_log_entries")
+            )
             payload = build_frame_log_payload(
                 stage,
                 info,

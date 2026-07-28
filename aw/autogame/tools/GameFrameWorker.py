@@ -19,6 +19,12 @@ from aw.autogame.common.SPController.SPArea import SPControllerBase
 from aw.autogame.tools.Utils import *
 from aw.autogame.tools.Utils import _parse_display_rotation
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
+from aw.autogame.tools.FrameLog import (
+    DEFAULT_FRAME_LOG_TYPE,
+    FrameLogType,
+    build_frame_log_entry,
+    encode_frame_log_transport,
+)
 from aw.autogame.tools.GameSceneHandler import DEFAULT_GROUP_NAME, StageLogicController
 from aw.autogame.tools.ProcessUtils import hdc_command_args, hidden_subprocess_kwargs
 
@@ -2165,6 +2171,7 @@ class FrameWorker(threading.Thread):
         self.current_group = DEFAULT_GROUP_NAME
         self.frame = None
         self.current_frame_logs = []
+        self.current_frame_log_entries = []
         self.current_frame_flushed = False
         self.last_gc_time = time.time()
 
@@ -2180,6 +2187,7 @@ class FrameWorker(threading.Thread):
 
     def _begin_frame_log_context(self):
         self.current_frame_logs = []
+        self.current_frame_log_entries = []
         self.current_frame_flushed = False
 
     def _queue_visual_frame(self):
@@ -2201,6 +2209,7 @@ class FrameWorker(threading.Thread):
         frame_meta = {
             "group_name": self.current_group,
             "frame_logs": list(self.current_frame_logs),
+            "frame_log_entries": list(self.current_frame_log_entries),
             "screen_size": screen_size,
         }
         self.viz_queue.put((self.frame.copy(), self.current_stage, self.stage_info, self.frame_index, frame_meta))
@@ -2488,8 +2497,8 @@ class FrameWorker(threading.Thread):
             detail_parts.append(f"end={end_pos}")
         detail_parts.extend(self._format_control_log_params(params, duration))
         if detail_parts:
-            return f"控制信息：{verb}{target}: {', '.join(detail_parts)}"
-        return f"控制信息：{verb}{target}"
+            return f"{verb}{target}: {', '.join(detail_parts)}"
+        return f"{verb}{target}"
 
     @staticmethod
     def _normalize_control_trace(trace_result):
@@ -2525,18 +2534,30 @@ class FrameWorker(threading.Thread):
             "args": [str(arg) for arg in args[:3]],
             "kwargs": {str(key): str(value) for key, value in kwargs.items()},
         }
-        self.frame_log(self._format_control_frame_log(frame_action))
+        self.frame_log(
+            self._format_control_frame_log(frame_action),
+            log_type=FrameLogType.UI_CONTROL,
+        )
 
-    def frame_log(self, message, target=None):
+    def frame_log(self, message, log_type=DEFAULT_FRAME_LOG_TYPE):
         text = str(message or "").strip()
         if not text:
             return False
 
-        print(text)
+        entry = build_frame_log_entry(text, log_type)
+        output_text = (
+            encode_frame_log_transport(text, entry["category"])
+            if self._is_launcher_mode()
+            else text
+        )
+        logging.info(output_text)
 
         existing_logs = list(getattr(self, "current_frame_logs", []))
         existing_logs.append(text)
         self.current_frame_logs = existing_logs
+        existing_entries = list(getattr(self, "current_frame_log_entries", []))
+        existing_entries.append(entry)
+        self.current_frame_log_entries = existing_entries
         return True
 
     def mark_failed(self, code, reason, **details):

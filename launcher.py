@@ -45,6 +45,7 @@ from PyQt6.QtWidgets import (
 
 from aw.autogame.tools.ProcessUtils import hidden_subprocess_context, hidden_subprocess_kwargs, install_hidden_subprocess_patch, resolve_hdc_executable, start_hidden_subprocess_window_suppressor
 from aw.autogame.tools.GameLaunchProfile import DEFAULT_SP_PACKAGE, should_use_sp_recording_for_profile
+from aw.autogame.tools.FrameLog import FrameLogType, parse_frame_log_transport
 from aw.autogame.tools.Utils import archive_run_artifacts, get_display_rotation, get_resolution, get_screen_mode, resolve_run_archive_dir, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 
@@ -138,9 +139,9 @@ STREAM_DISCONNECT_PATTERNS = (
     "[HOS] Runtime Error:",
 )
 SP_RECORD_EVER_STARTED_MARKERS = (
-    "[Timer] sp 记录已开始",
-    "[Timer] sp 记录已停止",
-    "[Timer] sp 数据已保存",
+    "sp 记录已开始",
+    "sp 记录已停止",
+    "sp 数据已保存",
 )
 LAUNCHER_FAILURE_SIGNAL_FILE = "launcher_failure_signal.json"
 DISMISS_REBOOT_PROMPT_ENV = "AUTOGAME_DISMISS_REBOOT_PROMPT"
@@ -155,12 +156,12 @@ STREAM_DISCONNECT_POLICY_STREAM_ONLY = "stream_only"
 PUBG_CASE_TARGET_CASE = "auto_pubg"
 PUBG_CASE_DEFAULT_LOOP_COUNT = 2
 PUBG_CASE_RUNTIME_DESCRIPTION = "和平精英用例默认10分钟搜房、10分钟开车、10分钟跑图，总测试时长60分钟，要循环2次。"
-LOG_FILTER_ALL = "总的"
-LOG_CATEGORY_SYSTEM = "系统日志"
-LOG_CATEGORY_TIME = "时间日志"
-LOG_CATEGORY_LOGIC = "逻辑日志"
-LOG_CATEGORY_UI = "UI和控点日志"
-LOG_CATEGORY_OTHER = "其他日志"
+LOG_FILTER_ALL = FrameLogType.ALL.value
+LOG_CATEGORY_SYSTEM = FrameLogType.SYSTEM.value
+LOG_CATEGORY_TIME = FrameLogType.TIME.value
+LOG_CATEGORY_LOGIC = FrameLogType.LOGIC.value
+LOG_CATEGORY_UI = FrameLogType.UI_CONTROL.value
+LOG_CATEGORY_OTHER = FrameLogType.OTHER.value
 LOG_FILTERS = (
     LOG_FILTER_ALL,
     LOG_CATEGORY_SYSTEM,
@@ -263,6 +264,10 @@ def classify_output_line(line: str) -> str:
     if not text:
         return LOG_CATEGORY_OTHER
 
+    frame_log_entry = parse_frame_log_transport(text)
+    if frame_log_entry:
+        return frame_log_entry["category"]
+
     structured_match = STRUCTURED_LOG_RE.match(text)
     if structured_match:
         category = structured_match.group("category")
@@ -281,14 +286,38 @@ def classify_output_line(line: str) -> str:
     return LOG_CATEGORY_OTHER
 
 
-def filter_output_text(text: str, selected_filter: str) -> str:
-    if selected_filter == LOG_FILTER_ALL:
-        return text
+def decode_output_line(line: str) -> tuple[str, str]:
+    raw_line = str(line or "")
+    frame_log_entry = parse_frame_log_transport(raw_line)
+    if not frame_log_entry:
+        return classify_output_line(raw_line), raw_line
 
+    if raw_line.endswith("\r\n"):
+        line_ending = "\r\n"
+    elif raw_line.endswith("\n"):
+        line_ending = "\n"
+    elif raw_line.endswith("\r"):
+        line_ending = "\r"
+    else:
+        line_ending = ""
+    return (
+        frame_log_entry["category"],
+        frame_log_entry["message"] + line_ending,
+    )
+
+
+def decode_output_text(text: str) -> list[tuple[str, str]]:
+    return [
+        decode_output_line(line)
+        for line in str(text or "").splitlines(keepends=True)
+    ]
+
+
+def filter_output_text(text: str, selected_filter: str) -> str:
     return "".join(
         line
-        for line in str(text or "").splitlines(keepends=True)
-        if classify_output_line(line) == selected_filter
+        for category, line in decode_output_text(text)
+        if selected_filter == LOG_FILTER_ALL or category == selected_filter
     )
 
 
@@ -1813,6 +1842,25 @@ def _split_history_control_logs(frame_log: str, frame_logs: list) -> tuple[str, 
     return plain_log, [], []
 
 
+def _split_history_typed_logs(frame_log_entries: list) -> tuple[list[str], list[str]]:
+    logic_logs = []
+    control_logs = []
+    if not isinstance(frame_log_entries, list):
+        return logic_logs, control_logs
+
+    for entry in frame_log_entries:
+        if not isinstance(entry, dict):
+            continue
+        message = _clean_history_text(entry.get("message"), "")
+        if not message:
+            continue
+        if entry.get("category") == LOG_CATEGORY_UI:
+            control_logs.append(message)
+        else:
+            logic_logs.append(message)
+    return logic_logs, control_logs
+
+
 def _format_control_frame_logs(control_logs: list[str]) -> list[str]:
     lines = []
     for item in control_logs:
@@ -1970,7 +2018,24 @@ def format_history_frame_details(frame_record: dict) -> str:
         or payload.get("frame_logs")
         or []
     )
-    logic_frame_log, logic_frame_logs, control_frame_logs = _split_history_control_logs(frame_log, frame_logs)
+    frame_log_entries = (
+        decision_payload.get("frame_log_entries")
+        or semantic_log.get("frame_log_entries")
+        or payload.get("frame_log_entries")
+        or []
+    )
+    typed_logic_logs, typed_control_logs = _split_history_typed_logs(
+        frame_log_entries
+    )
+    if typed_logic_logs or typed_control_logs:
+        logic_frame_log = ""
+        logic_frame_logs = typed_logic_logs
+        control_frame_logs = typed_control_logs
+    else:
+        logic_frame_log, logic_frame_logs, control_frame_logs = _split_history_control_logs(
+            frame_log,
+            frame_logs,
+        )
 
     lines.extend([
         "",
@@ -2403,6 +2468,7 @@ class LauncherWindow(QWidget):
         self.current_plan: Optional[dict] = None
         self.current_run_timed_out = False
         self.current_run_output_start = 0
+        self.process_output_buffer = ""
         self.current_run_stream_started = False
         self.current_run_stream_disconnected = False
         self.current_run_stream_disconnect_startup = False
@@ -3747,8 +3813,9 @@ class LauncherWindow(QWidget):
         QApplication.processEvents()
 
     def _record_output_text(self, text: str):
-        for line in str(text or "").splitlines(keepends=True):
-            self.output_log_entries.append((classify_output_line(line), line))
+        entries = decode_output_text(text)
+        self.output_log_entries.extend(entries)
+        return entries
 
     def _all_output_text(self) -> str:
         return "".join(line for _, line in self.output_log_entries)
@@ -3780,8 +3847,13 @@ class LauncherWindow(QWidget):
         if not text:
             return
 
-        self._record_output_text(text)
-        visible_text = filter_output_text(text, self.output_log_filter)
+        entries = self._record_output_text(text)
+        visible_text = "".join(
+            line
+            for category, line in entries
+            if self.output_log_filter == LOG_FILTER_ALL
+            or category == self.output_log_filter
+        )
         if visible_text:
             self._insert_output_text(visible_text)
 
@@ -5124,6 +5196,7 @@ class LauncherWindow(QWidget):
         self.current_run_inactivity_preserved = False
         self.current_run_start_timestamp = time.strftime("%Y%m%d%H%M%S")
         self.current_run_archive_dir = None
+        self.process_output_buffer = ""
         self._clear_preview_files()
         self.current_run_output_start = len(self._all_output_text())
 
@@ -6201,10 +6274,37 @@ class LauncherWindow(QWidget):
     def _read_process_output(self):
         if self.process is None:
             return
-        text = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        raw_text = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        text = self._take_complete_process_output(raw_text)
+        if not text:
+            return
         self._append_output(text)
         self._handle_stream_output(text)
-        stripped = text.strip()
+        stripped = "".join(line for _, line in decode_output_text(text)).strip()
+        if stripped:
+            LOGGER.info("child_output: %s", stripped)
+
+    def _take_complete_process_output(self, text: str, flush: bool = False) -> str:
+        combined = self.process_output_buffer + str(text or "")
+        if flush:
+            self.process_output_buffer = ""
+            return combined
+
+        newline_index = max(combined.rfind("\n"), combined.rfind("\r"))
+        if newline_index < 0:
+            self.process_output_buffer = combined
+            return ""
+
+        self.process_output_buffer = combined[newline_index + 1:]
+        return combined[:newline_index + 1]
+
+    def _flush_process_output_buffer(self):
+        text = self._take_complete_process_output("", flush=True)
+        if not text:
+            return
+        self._append_output(text)
+        self._handle_stream_output(text)
+        stripped = "".join(line for _, line in decode_output_text(text)).strip()
         if stripped:
             LOGGER.info("child_output: %s", stripped)
 
@@ -6237,7 +6337,8 @@ class LauncherWindow(QWidget):
         self._mark_stream_disconnected(message, "stdout")
 
     def _handle_sp_output(self, text: str):
-        if any(marker in text for marker in SP_RECORD_EVER_STARTED_MARKERS):
+        decoded_text = "".join(line for _, line in decode_output_text(text))
+        if any(marker in decoded_text for marker in SP_RECORD_EVER_STARTED_MARKERS):
             self._mark_current_run_sp_started("stdout")
 
     def _extract_stream_disconnect_line(self, text: str, matched_pattern: str) -> str:
@@ -6411,6 +6512,7 @@ class LauncherWindow(QWidget):
             self.current_run_index,
             self.current_run_timed_out,
         )
+        self._flush_process_output_buffer()
         self.run_timeout_timer.stop()
         self.stream_disconnect_signal_timer.stop()
         if not self.current_run_stream_disconnected:

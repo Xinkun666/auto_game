@@ -26,6 +26,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.phase_time_mana
     parse_case_loop_count,
 )
 from aw.autogame.tools.GameLaunchProfile import should_use_sp_recording_for_profile
+from aw.autogame.tools.FrameLog import FrameLogType
 from aw.autogame.tools.Utils import _read_project_config
 
 LOGGER = logging.getLogger("AutoPUBG")
@@ -272,7 +273,8 @@ def prepare_round(w: "FrameWorker" = None):
         )
         w.frame_log(
             f"本轮配置：需要开车={need_drive}，需要搜房={need_searching}，"
-            f"{drop_target_text}，落地后进入={landing_stage}"
+            f"{drop_target_text}，落地后进入={landing_stage}",
+            log_type=FrameLogType.LOGIC,
         )
 
 
@@ -282,7 +284,7 @@ def handle_sp_start(w: "FrameWorker"):
         return
     if not phase_timer.should_start_sp():
         return
-    w.frame_log("[SP] 开始录制")
+    w.frame_log("开始 sp 录制", log_type=FrameLogType.TIME)
     if phase_timer.start_game_time is not None:
         running_manager.set_game_time(phase_timer.start_game_time)
         driving_manager.set_game_time(phase_timer.start_game_time)
@@ -297,7 +299,7 @@ def handle_sp_stop(w: "FrameWorker"):
         return
     if not phase_timer.sp_recording:
         return
-    w.frame_log("[SP] 停止录制")
+    w.frame_log("停止 sp 录制", log_type=FrameLogType.TIME)
     w.click("sp")
     time.sleep(0.5)
     phase_timer.mark_sp_stopped()
@@ -328,7 +330,10 @@ def handle_terminal_state(w: "FrameWorker", context: str = "阶段入口") -> bo
 
     _require_runtime()
     if _has_rank_finish_info(w):
-        w.frame_log(f"[Terminal] {context} 检测到个人排名或队伍排名，进入结束阶段")
+        w.frame_log(
+            f"{context}检测到个人排名或队伍排名，进入结束阶段",
+            log_type=FrameLogType.LOGIC,
+        )
         rank_finish_pending = True
         searching_phase_finishing = False
         _stop_active_motion(w)
@@ -337,7 +342,10 @@ def handle_terminal_state(w: "FrameWorker", context: str = "阶段入口") -> bo
         return True
 
     if _has_death_finish_info(w):
-        w.frame_log(f"[Terminal] {context} 检测到死亡界面，进入结束阶段")
+        w.frame_log(
+            f"{context}检测到死亡界面，进入结束阶段",
+            log_type=FrameLogType.LOGIC,
+        )
         searching_phase_finishing = False
         _stop_active_motion(w)
         handle_sp_stop(w)
@@ -360,8 +368,9 @@ def should_abort_searching(w: "FrameWorker"):
 
     if phase_timer.is_completed(PHASE_SEARCHING):
         w.frame_log(
-            f"[Timer] 搜房阶段 {phase_timer.get_duration_minutes_label(PHASE_SEARCHING)} 分钟已用完，"
-            "强制切换到跑图阶段"
+            f"搜房阶段 {phase_timer.get_duration_minutes_label(PHASE_SEARCHING)} 分钟已用完，"
+            "强制切换到跑图阶段",
+            log_type=FrameLogType.TIME,
         )
         finish_searching_and_enter_running(w, "搜房阶段计时已用完")
         return True
@@ -375,8 +384,9 @@ def recover_bad_landing_to_r_city(w: "FrameWorker", target, reason: str):
     _require_runtime()
     route_target = tuple(target or DROP_TARGET_R_CITY)
     w.frame_log(
-        f"[Flow] 搜房落点异常，切到跑图阶段恢复到R城: "
-        f"reason={reason}, target={route_target}"
+        f"搜房落点异常，切到跑图阶段恢复到R城: "
+        f"reason={reason}, target={route_target}",
+        log_type=FrameLogType.LOGIC,
     )
     searching_house_manager.stop_auto_forward(w)
     running_manager.start_forced_route(
@@ -403,8 +413,9 @@ def route_to_r_city_search_start(
     _require_runtime()
     route_target = tuple(target or DROP_TARGET_R_CITY_SEARCH_START)
     w.frame_log(
-        f"[Flow] 搜房前置跑图，先到R城搜房起点: "
-        f"reason={reason}, target={route_target}, arrival={arrival_distance:.1f}"
+        f"搜房前置跑图，先到R城搜房起点: "
+        f"reason={reason}, target={route_target}, arrival={arrival_distance:.1f}",
+        log_type=FrameLogType.LOGIC,
     )
     searching_house_manager.stop_auto_forward(w)
     running_manager.start_forced_route(
@@ -432,8 +443,9 @@ def route_to_r_city_entry_point(
     _require_runtime()
     route_target = tuple(target or DROP_TARGET_R_CITY_SEARCH_START)
     w.frame_log(
-        f"[Flow] 落地后最近入门点仍较远，先按跑图阶段冲到入门点附近: "
-        f"reason={reason}, target={route_target}, arrival={arrival_distance:.1f}"
+        f"落地后最近入门点仍较远，先按跑图阶段冲到入门点附近: "
+        f"reason={reason}, target={route_target}, arrival={arrival_distance:.1f}",
+        log_type=FrameLogType.LOGIC,
     )
     searching_house_manager.stop_auto_forward(w)
     running_manager.start_forced_route(
@@ -469,10 +481,11 @@ def finish_searching_and_enter_running(w: "FrameWorker", reason: str):
 
     searching_phase_finishing = True
     w.frame_log(
-        f"[Flow] 搜房结束: {reason} | "
+        f"搜房结束: {reason} | "
         f"searching_remaining={phase_timer.get_remaining(PHASE_SEARCHING):.2f}s, "
         f"running_remaining={phase_timer.get_remaining(PHASE_RUNNING):.2f}s, "
-        f"driving_remaining={phase_timer.get_remaining(PHASE_DRIVING):.2f}s"
+        f"driving_remaining={phase_timer.get_remaining(PHASE_DRIVING):.2f}s",
+        log_type=FrameLogType.LOGIC,
     )
 
     searching_house_manager.stop_auto_forward(w)
@@ -481,8 +494,9 @@ def finish_searching_and_enter_running(w: "FrameWorker", reason: str):
     if house_scene == searching_house_manager.HOUSE_INDOOR:
         searching_exit_retry_count += 1
         w.frame_log(
-            f"[Flow] 搜房结束时仍在屋内，先执行搜房出房策略，再切跑图 "
-            f"(retry={searching_exit_retry_count})"
+            f"搜房结束时仍在屋内，先执行搜房出房策略，再切跑图 "
+            f"(retry={searching_exit_retry_count})",
+            log_type=FrameLogType.LOGIC,
         )
         exit_ok = searching_house_manager._exit_house(w)
         if w.current_stage != "搜房阶段":
@@ -490,7 +504,10 @@ def finish_searching_and_enter_running(w: "FrameWorker", reason: str):
             return True
         w.refresh_frame()
         if not exit_ok and searching_house_manager._get_house_scene(w) == searching_house_manager.HOUSE_INDOOR:
-            w.frame_log("[Flow] 搜房结束出房未确认，保留搜房阶段并继续出房")
+            w.frame_log(
+                "搜房结束出房未确认，保留搜房阶段并继续出房",
+                log_type=FrameLogType.LOGIC,
+            )
             searching_phase_finishing = False
             return True
     else:
@@ -518,7 +535,10 @@ def finalize_automation(w: "FrameWorker"):
     global final_shutdown_pending
 
     _require_runtime()
-    w.frame_log("[Flow] 当前用例及全部循环已完成，进入结束阶段")
+    w.frame_log(
+        "当前用例及全部循环已完成，进入结束阶段",
+        log_type=FrameLogType.LOGIC,
+    )
     if w.current_stage == "跑图阶段":
         running_manager.stop_auto_forward(w)
 
@@ -546,7 +566,11 @@ def finish_case_loop_or_finalize(w: "FrameWorker"):
         if SP_RECORDING_ENABLED
         else "返回大厅后继续下一次循环"
     )
-    w.frame_log(f"[Timer] 第 {phase_timer.case_loop_index}/{phase_timer.case_loop_count} 次循环已完成，{next_loop_message}")
+    w.frame_log(
+        f"第 {phase_timer.case_loop_index}/{phase_timer.case_loop_count} 次循环已完成，"
+        f"{next_loop_message}",
+        log_type=FrameLogType.TIME,
+    )
     handle_sp_stop(w)
     phase_timer.advance_case_loop()
     w.change_stage("结束阶段")
@@ -579,7 +603,10 @@ def click_popup_info_if_visible(w: "FrameWorker", info_name: str, click_target=N
     if not target:
         return False
     control_target = click_target or target
-    w.frame_log(f"[Popup] 关闭{info_name}弹窗，点击={click_target or info_name}")
+    w.frame_log(
+        f"关闭{info_name}弹窗，点击={click_target or info_name}",
+        log_type=FrameLogType.UI_CONTROL,
+    )
     click_popup_and_refresh(w, control_target)
     return True
 
@@ -599,18 +626,27 @@ def confirm_lobby_after_popups(w: "FrameWorker") -> bool:
 
     if has_close_popup_info(w):
         if lobby_house_confirm_count:
-            w.frame_log("[Popup] 大厅确认过程中又检测到弹窗，取消本次房子图标确认")
+            w.frame_log(
+                "大厅确认过程中又检测到弹窗，取消本次房子图标确认",
+                log_type=FrameLogType.UI_CONTROL,
+            )
         reset_lobby_confirm()
         return False
 
     if not w.get_info("房子"):
         if lobby_house_confirm_count:
-            w.frame_log("[Popup] 房子图标未连续稳定出现，取消本次大厅确认")
+            w.frame_log(
+                "房子图标未连续稳定出现，取消本次大厅确认",
+                log_type=FrameLogType.UI_CONTROL,
+            )
         reset_lobby_confirm()
         return False
 
     lobby_house_confirm_count += 1
-    w.frame_log(f"[Popup] 房子图标稳定确认 {lobby_house_confirm_count}/{LOBBY_CONFIRM_REQUIRED}")
+    w.frame_log(
+        f"房子图标稳定确认 {lobby_house_confirm_count}/{LOBBY_CONFIRM_REQUIRED}",
+        log_type=FrameLogType.UI_CONTROL,
+    )
     return lobby_house_confirm_count >= LOBBY_CONFIRM_REQUIRED
 
 
@@ -620,7 +656,10 @@ def prepare_rank_finish_for_lobby(w: "FrameWorker"):
     if not rank_finish_pending and not _has_rank_finish_info(w):
         return
 
-    w.frame_log("[End] 检测到排名界面，等待2s后点击观战对手再返回大厅")
+    w.frame_log(
+        "检测到排名界面，等待2s后点击观战对手再返回大厅",
+        log_type=FrameLogType.LOGIC,
+    )
     time.sleep(RANK_FINISH_SPECTATE_WAIT_SECONDS)
     w.click("观战对手")
     w.refresh_frame()
@@ -641,7 +680,10 @@ def handle_priority_stage_jump_forward(w: "FrameWorker", stage_label: str) -> bo
     if not w.get_info("跳跃"):
         return False
 
-    w.frame_log(f"[Jump] {stage_label} 检测到跳跃按钮，点击跳跃并前推")
+    w.frame_log(
+        f"{stage_label}检测到跳跃按钮，点击跳跃并前推",
+        log_type=FrameLogType.LOGIC,
+    )
     searching_house_manager.stop_auto_forward(w)
     running_manager.stop_auto_forward(w)
     w.click("跳跃")
@@ -669,7 +711,10 @@ def on_stage(w: "FrameWorker"):
     stage_events |= phase_timer.refresh()
 
     if previous_stage == "开车阶段" and w.current_stage == "跑图阶段":
-        w.frame_log("[Flow] 开车阶段切回跑图阶段，同步下车后的寻车状态")
+        w.frame_log(
+            "开车阶段切回跑图阶段，同步下车后的寻车状态",
+            log_type=FrameLogType.LOGIC,
+        )
         finding_car = driving_manager.consume_running_transition_finding_car(
             default=phase_timer.need_drive()
         )
@@ -677,17 +722,26 @@ def on_stage(w: "FrameWorker"):
 
     if previous_stage == "搜房阶段" and w.current_stage == "跑图阶段":
         if searching_to_running_notified:
-            w.frame_log("[Flow] 搜房模块已完成跑图交接，清理交接标记")
+            w.frame_log(
+                "搜房模块已完成跑图交接，清理交接标记",
+                log_type=FrameLogType.LOGIC,
+            )
             searching_to_running_notified = False
         else:
-            w.frame_log("[Flow] 搜房阶段切到跑图阶段，初始化寻车状态")
+            w.frame_log(
+                "搜房阶段切到跑图阶段，初始化寻车状态",
+                log_type=FrameLogType.LOGIC,
+            )
             running_manager.notify_searching_exit(
                 finding_car=_should_find_car_after_searching(),
                 search_region=getattr(searching_house_manager, "house_region", None),
             )
 
     if "landed" in stage_events and not phase_timer.all_done():
-        w.frame_log("[Flow] 人物已落地，同步搜房、跑图和开车计时")
+        w.frame_log(
+            "人物已落地，同步搜房、跑图和开车计时",
+            log_type=FrameLogType.LOGIC,
+        )
         if phase_timer.start_game_time is not None:
             running_manager.set_game_time(phase_timer.start_game_time)
             driving_manager.set_game_time(phase_timer.start_game_time)
@@ -698,7 +752,10 @@ def on_stage(w: "FrameWorker"):
         maybe_report_phase_remaining()
 
     if w.current_stage == "关闭弹窗阶段":
-        w.frame_log("[Popup] 检查可关闭弹窗")
+        w.frame_log(
+            "检查可关闭弹窗",
+            log_type=FrameLogType.UI_CONTROL,
+        )
         if click_popup_info_if_visible(w, "关闭公告"):
             return
 
@@ -734,16 +791,25 @@ def on_stage(w: "FrameWorker"):
 
         if confirm_lobby_after_popups(w):
             if final_shutdown_pending:
-                w.frame_log("[Flow] 大厅确认完成，停止本轮自动化")
+                w.frame_log(
+                    "大厅确认完成，停止本轮自动化",
+                    log_type=FrameLogType.LOGIC,
+                )
                 finalize_after_lobby(w)
                 return
-            w.frame_log("[Flow] 大厅确认完成，进入选择地图阶段")
+            w.frame_log(
+                "大厅确认完成，进入选择地图阶段",
+                log_type=FrameLogType.LOGIC,
+            )
             reset_lobby_confirm()
             w.change_stage("选择地图阶段")
             return
 
     if w.current_stage == "选择地图阶段":
-        w.frame_log("[Map] 打开地图选择面板")
+        w.frame_log(
+            "打开地图选择面板",
+            log_type=FrameLogType.UI_CONTROL,
+        )
         w.click("地图")
         time.sleep(2)
         w.click("经典模式")
@@ -753,16 +819,25 @@ def on_stage(w: "FrameWorker"):
         w.refresh_frame()
 
         if w.get_info("对号"):
-            w.frame_log("[Map] 清理已有地图选择")
+            w.frame_log(
+                "清理已有地图选择",
+                log_type=FrameLogType.UI_CONTROL,
+            )
             w.click(w.get_info("对号"))
             time.sleep(2)
 
-        w.frame_log("[Map] 选择海岛地图")
+        w.frame_log(
+            "选择海岛地图",
+            log_type=FrameLogType.UI_CONTROL,
+        )
         w.click("海岛")
         time.sleep(1)
         w.refresh_frame()
         if w.get_info('自动匹配'):
-            w.frame_log("[Map] 调整自动匹配选项")
+            w.frame_log(
+                "调整自动匹配选项",
+                log_type=FrameLogType.UI_CONTROL,
+            )
             w.click(w.get_info('自动匹配'))
         time.sleep(1)
         w.click("确定")
@@ -771,36 +846,54 @@ def on_stage(w: "FrameWorker"):
 
     if w.current_stage == "开始游戏阶段":
         if w.get_info("加速礼包"):
-            w.frame_log("[StartGame] 关闭加速礼包弹窗")
+            w.frame_log(
+                "关闭加速礼包弹窗",
+                log_type=FrameLogType.UI_CONTROL,
+            )
             w.click("放弃")
             w.refresh_frame()
 
         if start_game and start_game_click_time is not None:
             if time.time() - start_game_click_time >= START_GAME_VERIFY_DELAY:
                 if w.get_info("开始游戏"):
-                    w.frame_log("[StartGame] 开始游戏点击未生效，重置点击状态")
+                    w.frame_log(
+                        "开始游戏点击未生效，重置点击状态",
+                        log_type=FrameLogType.UI_CONTROL,
+                    )
                     start_game = False
                     start_game_click_time = None
 
         if w.get_info("房子"):
             if not start_game:
-                w.frame_log("[StartGame] 点击开始游戏")
+                w.frame_log(
+                    "点击开始游戏",
+                    log_type=FrameLogType.UI_CONTROL,
+                )
                 w.click("开始游戏")
                 start_game = True
                 start_game_click_time = time.time()
             else:
-                w.frame_log("[StartGame] 等待进入出生岛")
+                w.frame_log(
+                    "等待进入出生岛",
+                    log_type=FrameLogType.LOGIC,
+                )
             w.refresh_frame()
 
         if w.get_info("提示"):
-            w.frame_log("[StartGame] 关闭匹配提示弹窗")
+            w.frame_log(
+                "关闭匹配提示弹窗",
+                log_type=FrameLogType.UI_CONTROL,
+            )
             w.click("不提示")
             time.sleep(1)
             w.click("不需要")
             time.sleep(1)
 
         if w.get_info("拳头"):
-            w.frame_log("[StartGame] 已进入出生岛，初始化本轮并进入跳伞阶段")
+            w.frame_log(
+                "已进入出生岛，初始化本轮并进入跳伞阶段",
+                log_type=FrameLogType.LOGIC,
+            )
             prepare_round(w)
             w.change_stage("跳伞阶段")
             start_game = False
@@ -825,14 +918,20 @@ def on_stage(w: "FrameWorker"):
 
     if w.current_stage == "跑图阶段":
         if searching_view_synced:
-            w.frame_log("[Running] 恢复第一人称视角")
+            w.frame_log(
+                "恢复第一人称视角",
+                log_type=FrameLogType.LOGIC,
+            )
             running_manager.set_view_mode(RunningManager.VIEW_MODE_FIRST)
             searching_view_synced = False
 
         handle_sp_start(w)
 
         if phase_timer.all_done():
-            w.frame_log("[Flow] 搜房、跑图和开车任务均已完成")
+            w.frame_log(
+                "搜房、跑图和开车任务均已完成",
+                log_type=FrameLogType.LOGIC,
+            )
             finish_case_loop_or_finalize(w)
             return
 
@@ -847,14 +946,20 @@ def on_stage(w: "FrameWorker"):
         driving_manager.set_running_fallback_enabled(not phase_timer.is_completed(PHASE_RUNNING))
 
         if "enter_开车" in stage_events:
-            w.frame_log("[Driving] 初始化驾驶阶段状态")
+            w.frame_log(
+                "初始化驾驶阶段状态",
+                log_type=FrameLogType.LOGIC,
+            )
             driving_manager.set_remaining_drive_time(phase_timer.get_remaining(PHASE_DRIVING))
             entry_source = running_manager.consume_vehicle_entry_source()
             if entry_source == RunningManager.VEHICLE_ENTRY_ROADSIDE:
                 driving_manager.skip_initial_exit_garage("roadside vehicle")
 
         if phase_timer.is_completed(PHASE_DRIVING):
-            w.frame_log("[Driving] 驾驶计时完成")
+            w.frame_log(
+                "驾驶计时完成",
+                log_type=FrameLogType.TIME,
+            )
             driving_manager.set_remaining_drive_time(0)
 
         driving_manager.process(w)
@@ -862,7 +967,10 @@ def on_stage(w: "FrameWorker"):
 
     if w.current_stage == "结束阶段":
         if final_shutdown_pending:
-            w.frame_log("[End] 返回大厅并完成本轮")
+            w.frame_log(
+                "返回大厅并完成本轮",
+                log_type=FrameLogType.LOGIC,
+            )
             handle_sp_stop(w)
             prepare_rank_finish_for_lobby(w)
             w.click("设置")
@@ -874,7 +982,10 @@ def on_stage(w: "FrameWorker"):
             w.change_stage("关闭弹窗阶段")
             return
 
-        w.frame_log("[End] 返回大厅并准备下一轮")
+        w.frame_log(
+            "返回大厅并准备下一轮",
+            log_type=FrameLogType.LOGIC,
+        )
         handle_sp_stop(w)
         prepare_rank_finish_for_lobby(w)
 

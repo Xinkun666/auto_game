@@ -12,6 +12,11 @@ aw/autogame/customs_examples/Auto_PUBG_ALL/resource/navigation/adaptive_motion_t
 aw/autogame/customs_examples/Auto_PUBG_ALL/resource/control/driving_turn_calibration.json
 aw/autogame/customs_examples/Auto_PUBG_ALL/resource/control/driving_turn_calibration.json.tmp
 
+# 本地地图与道路测试资产；服务器使用原始资源，不从 Git 覆盖。
+aw/autogame/customs_examples/Auto_PUBG_ALL/resource/map/hpjy.png
+aw/autogame/customs_examples/Auto_PUBG_ALL/resource/road/road_mask.png
+aw/autogame/customs_examples/Auto_PUBG_ALL/resource/road/*.json
+
 # Auto_PUBG_ALL local SAM3 weights are deployed separately on the server.
 aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/sam3_tiny/*.pt
 

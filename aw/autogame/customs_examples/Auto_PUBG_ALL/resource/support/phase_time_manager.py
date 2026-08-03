@@ -290,9 +290,12 @@ class PhaseTimeManager:
     def has_next_case_loop(self) -> bool:
         return self.case_loop_index < self.case_loop_count
 
-    def advance_case_loop(self) -> bool:
-        if not self.has_next_case_loop():
+    def advance_case_loop(self, allow_extend: bool = False) -> bool:
+        if not self.has_next_case_loop() and not allow_extend:
             return False
+
+        if allow_extend and not self.has_next_case_loop():
+            self.case_loop_count = self.case_loop_index + 1
 
         self._reset_phase_progress()
         self.case_loop_index += 1

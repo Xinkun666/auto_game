@@ -82,7 +82,6 @@ STAGE_PRIORITY_JUMP_FORWARD_DURA = 100
 STAGE_PRIORITY_JUMP_FORWARD_WAIT = 300
 STAGE_PRIORITY_JUMP_SETTLE_SECONDS = 0.2
 RANK_FINISH_SPECTATE_WAIT_SECONDS = 2.0
-SP_SAVE_LONG_PRESS_MS = 3000
 SP_RECORDING_ENABLED = False
 START_GAME_VERIFY_DELAY = 5.0
 CLOSE_POPUP_SETTLE_DELAY = 1.0
@@ -225,9 +224,9 @@ def pause_sp_after_death(w: "FrameWorker"):
     _require_runtime()
     if not SP_RECORDING_ENABLED:
         return
-    w.click("sp")
-    time.sleep(0.5)
-    phase_timer.mark_sp_stopped()
+    if w.sp_controller.pause():
+        time.sleep(0.5)
+        phase_timer.mark_sp_stopped()
 
 
 def prepare_round(w: "FrameWorker" = None):
@@ -289,9 +288,15 @@ def handle_sp_start(w: "FrameWorker"):
     if phase_timer.start_game_time is not None:
         running_manager.set_game_time(phase_timer.start_game_time)
         driving_manager.set_game_time(phase_timer.start_game_time)
-    w.click("sp")
-    time.sleep(0.5)
-    phase_timer.mark_sp_started()
+    if w.sp_controller.start("sp"):
+        time.sleep(0.5)
+        phase_timer.mark_sp_started()
+        if w.sp_controller.marathon_enabled:
+            w.frame_log(
+                f"马拉松 SP 目标 {w.sp_controller.target_duration_seconds / 60:g} 分钟，"
+                f"当前有效时间 {w.sp_controller.effective_time / 60:.1f} 分钟",
+                log_type=FrameLogType.TIME,
+            )
 
 
 def handle_sp_stop(w: "FrameWorker"):
@@ -301,9 +306,9 @@ def handle_sp_stop(w: "FrameWorker"):
     if not phase_timer.sp_recording:
         return
     w.frame_log("停止 sp 录制", log_type=FrameLogType.TIME)
-    w.click("sp")
-    time.sleep(0.5)
-    phase_timer.mark_sp_stopped()
+    if w.sp_controller.pause():
+        time.sleep(0.5)
+        phase_timer.mark_sp_stopped()
 
 
 def _has_rank_finish_info(w: "FrameWorker") -> bool:
@@ -314,7 +319,7 @@ def _has_death_finish_info(w: "FrameWorker") -> bool:
     return bool(w.get_info("变身")) or bool(w.get_info("红色血条"))
 
 
-def _stop_active_motion(w: "FrameWorker"):
+def _stop_active_motion(w: "FrameWorker", reason: str = "检测到死亡或排名界面"):
     _require_runtime()
     for manager in (searching_house_manager, running_manager):
         stop_func = getattr(manager, "stop_auto_forward", None)
@@ -323,7 +328,25 @@ def _stop_active_motion(w: "FrameWorker"):
 
     cancel_drive = getattr(driving_manager, "_cancel_drive_auto_forward", None)
     if callable(cancel_drive):
-        cancel_drive(w, "检测到死亡或排名界面，取消车辆自动前进")
+        cancel_drive(w, f"{reason}，取消车辆自动前进")
+
+
+def finalize_marathon_if_target_reached(w: "FrameWorker") -> bool:
+    _require_runtime()
+    if not SP_RECORDING_ENABLED or not w.sp_controller.marathon_enabled:
+        return False
+    if not phase_timer.sp_recording or not w.sp_controller.target_reached:
+        return False
+
+    w.frame_log(
+        f"马拉松 SP 有效时间已达到 "
+        f"{w.sp_controller.effective_time / 60:.1f}/"
+        f"{w.sp_controller.target_duration_seconds / 60:g} 分钟，结束当前动作并长按保存",
+        log_type=FrameLogType.TIME,
+    )
+    _stop_active_motion(w, "马拉松 SP 有效时间已达标")
+    finalize_automation(w)
+    return True
 
 
 def handle_terminal_state(w: "FrameWorker", context: str = "阶段入口") -> bool:
@@ -549,10 +572,10 @@ def finalize_automation(w: "FrameWorker"):
         running_manager.stop_auto_forward(w)
 
     if SP_RECORDING_ENABLED and not phase_timer.sp_saved:
-        w.click_down("sp", dura=SP_SAVE_LONG_PRESS_MS)
-        time.sleep(1)
-        phase_timer.mark_sp_stopped()
-        phase_timer.mark_sp_saved()
+        if w.sp_controller.stop():
+            time.sleep(1)
+            phase_timer.mark_sp_stopped()
+            phase_timer.mark_sp_saved()
 
     final_shutdown_pending = True
     w.change_stage("结束阶段")
@@ -560,25 +583,44 @@ def finalize_automation(w: "FrameWorker"):
 
 def finish_case_loop_or_finalize(w: "FrameWorker"):
     _require_runtime()
-    if not phase_timer.has_next_case_loop():
+    marathon_enabled = SP_RECORDING_ENABLED and w.sp_controller.marathon_enabled
+    if marathon_enabled:
+        if w.sp_controller.target_reached:
+            w.frame_log(
+                f"马拉松 SP 有效时间已达到 "
+                f"{w.sp_controller.effective_time / 60:.1f}/"
+                f"{w.sp_controller.target_duration_seconds / 60:g} 分钟，准备长按保存",
+                log_type=FrameLogType.TIME,
+            )
+            finalize_automation(w)
+            return
+    elif not phase_timer.has_next_case_loop():
         finalize_automation(w)
         return
 
     if w.current_stage == "跑图阶段":
         running_manager.stop_auto_forward(w)
 
-    next_loop_message = (
-        "暂停 sp，返回大厅后继续下一次循环"
-        if SP_RECORDING_ENABLED
-        else "返回大厅后继续下一次循环"
-    )
+    if marathon_enabled:
+        next_loop_message = (
+            f"马拉松 SP 有效时间 "
+            f"{w.sp_controller.effective_time / 60:.1f}/"
+            f"{w.sp_controller.target_duration_seconds / 60:g} 分钟，"
+            "暂停 sp 并返回大厅继续下一次循环"
+        )
+    else:
+        next_loop_message = (
+            "暂停 sp，返回大厅后继续下一次循环"
+            if SP_RECORDING_ENABLED
+            else "返回大厅后继续下一次循环"
+        )
     w.frame_log(
         f"第 {phase_timer.case_loop_index}/{phase_timer.case_loop_count} 次循环已完成，"
         f"{next_loop_message}",
         log_type=FrameLogType.TIME,
     )
     handle_sp_stop(w)
-    phase_timer.advance_case_loop()
+    phase_timer.advance_case_loop(allow_extend=marathon_enabled)
     w.change_stage("结束阶段")
 
 
@@ -754,6 +796,8 @@ def on_stage(w: "FrameWorker"):
 
     if w.current_stage in {"搜房阶段", "跑图阶段", "开车阶段"}:
         if handle_terminal_state(w, f"{w.current_stage}入口"):
+            return
+        if finalize_marathon_if_target_reached(w):
             return
         maybe_report_phase_remaining()
 

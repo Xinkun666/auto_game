@@ -588,10 +588,15 @@ def build_launcher_plan_env_values(plan: Optional[dict]) -> dict[str, str]:
         plan.get("screen_mode") or resolve_screen_mode_for_test_profile(test_profile, target_case)
     )
     case_loop_count = int(plan.get("case_loop_count") or 1)
+    marathon_duration_minutes = max(
+        0.0,
+        float(plan.get("marathon_duration_minutes") or 0.0),
+    )
     env_values = {
         "AUTOGAME_TEST_PROFILE": test_profile,
         "AUTOGAME_SCREEN_MODE": screen_mode,
         "AUTOGAME_SINGLE_CASE_LOOPS": str(max(1, case_loop_count)),
+        "AUTOGAME_MARATHON_DURATION_MINUTES": str(marathon_duration_minutes),
         "AUTOGAME_SP_RECORDING_ENABLED": "1" if should_use_sp_recording_for_profile(test_profile) else "0",
         "AUTOGAME_PRESERVE_GAME_PROCESS": (
             "1" if should_preserve_game_process_for_plan(plan) else "0"
@@ -612,6 +617,14 @@ def build_launcher_plan_env_values(plan: Optional[dict]) -> dict[str, str]:
 def should_preserve_game_process_for_plan(plan: Optional[dict]) -> bool:
     plan = plan or {}
     return bool(plan.get("preserve_game_process"))
+
+
+def is_marathon_plan(plan: Optional[dict]) -> bool:
+    plan = plan or {}
+    try:
+        return float(plan.get("marathon_duration_minutes") or 0.0) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _decode_process_output(output) -> str:
@@ -1576,6 +1589,7 @@ def discover_history_outputs(temp_dir: Path = TEMP_DIR) -> list[dict]:
             "testcase_label": metadata.get("testcase_label", ""),
             "exit_code": metadata.get("exit_code", ""),
             "timed_out": metadata.get("timed_out", ""),
+            "marathon_duration_minutes": metadata.get("marathon_duration_minutes", ""),
             "stream_disconnected": metadata.get("stream_disconnected", ""),
             "stream_disconnect_startup": metadata.get("stream_disconnect_startup", ""),
             "archive_metadata": metadata,
@@ -1612,6 +1626,7 @@ def format_history_record_summary(record: dict) -> str:
         f"testcase_label: {value('testcase_label')}",
         f"exit_code: {value('exit_code')}",
         f"timed_out: {value('timed_out')}",
+        f"marathon_duration_minutes: {value('marathon_duration_minutes')}",
         f"stream_disconnected: {value('stream_disconnected')}",
         f"stream_disconnect_startup: {value('stream_disconnect_startup')}",
         f"log_file_count: {value('log_file_count', '0')}",
@@ -2646,6 +2661,21 @@ class LauncherWindow(QWidget):
             suffix="秒",
         )
 
+        self.marathon_duration_spin = QDoubleSpinBox()
+        self.marathon_duration_spin.setRange(0.0, 10000.0)
+        self.marathon_duration_spin.setDecimals(1)
+        self.marathon_duration_spin.setSingleStep(10.0)
+        self.marathon_duration_spin.setValue(0.0)
+        self.marathon_duration_spin.setSuffix(" 分钟")
+        self.marathon_duration_spin.setToolTip(
+            "0 表示普通模式；大于 0 时按 SP 有效录制时间循环运行，达到目标后长按 SP 保存"
+        )
+        self.marathon_duration_field = self._create_spin_with_presets(
+            self.marathon_duration_spin,
+            [0, 30, 60, 120, 180],
+            suffix="分",
+        )
+
         self.start_button = QPushButton("启动")
         self.start_button.setProperty("primaryButton", True)
         self.stream_verify_button = QPushButton("验证流")
@@ -3501,6 +3531,7 @@ class LauncherWindow(QWidget):
                 "测试与归档",
                 (
                     ("测试类型", self.test_profile_field, 170),
+                    ("SP运行时长", self.marathon_duration_field, 150),
                     ("视频归档", self.generate_preview_video_button, 150),
                     ("回放录像时长", self.power_collection_duration_field, 150),
                 ),
@@ -4552,6 +4583,7 @@ class LauncherWindow(QWidget):
         self.safe_time_spin.setEnabled(enabled)
         self.inactivity_timeout_spin.setEnabled(enabled)
         self.power_collection_duration_spin.setEnabled(enabled)
+        self.marathon_duration_spin.setEnabled(enabled)
         self.generate_preview_video_button.setEnabled(enabled)
         self._sync_game_process_policy_ui()
         for button in self.preset_buttons:
@@ -4974,6 +5006,13 @@ class LauncherWindow(QWidget):
             self.power_test_radio.isChecked(),
             self.function_test_radio.isChecked(),
         )
+        marathon_duration_minutes = float(self.marathon_duration_spin.value())
+        if marathon_duration_minutes > 0 and not should_use_sp_recording_for_profile(test_profile):
+            issues.add_error(
+                "马拉松模式需要 SP",
+                "SP 运行时长大于 0 时请选择功耗测试；功能测试不会启动 SP 录制。",
+            )
+            return None
         if not should_use_sp_recording_for_profile(test_profile):
             cleanup_apps.discard(DEFAULT_SP_PACKAGE)
         try:
@@ -4998,6 +5037,7 @@ class LauncherWindow(QWidget):
             "safe_minutes": float(self.safe_time_spin.value()),
             "inactivity_timeout_minutes": float(self.inactivity_timeout_spin.value()),
             "power_collection_duration_seconds": float(self.power_collection_duration_spin.value()),
+            "marathon_duration_minutes": marathon_duration_minutes,
             "generate_preview_video": bool(self.generate_preview_video_button.isChecked()),
             "preserve_game_process": not self.game_process_policy_button.isChecked(),
             "cleanup_apps": sorted(cleanup_apps),
@@ -5035,8 +5075,15 @@ class LauncherWindow(QWidget):
         self.stream_verify_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self._set_inputs_enabled(False)
-        self._set_status("已开始批量执行，准备进行安全检查。")
-        self._set_runtime(f"运行信息：共 {plan['run_count']} 次，等待第 1 次启动。")
+        marathon_minutes = float(plan.get("marathon_duration_minutes") or 0.0)
+        if marathon_minutes > 0:
+            self._set_status("已开始马拉松执行，将跳过每轮温度和电量检查。")
+            self._set_runtime(
+                f"运行信息：SP 有效时长目标 {marathon_minutes:g} 分钟，等待第 1 次启动。"
+            )
+        else:
+            self._set_status("已开始批量执行，准备进行安全检查。")
+            self._set_runtime(f"运行信息：共 {plan['run_count']} 次，等待第 1 次启动。")
         trace_label = f"{plan['mode']}:{plan['project_case']}:{plan['target_case']}"
         trace_path = self.process_launch_tracer.start(trace_label)
         self._log_message(
@@ -5048,11 +5095,17 @@ class LauncherWindow(QWidget):
             f"preserve_game_process={plan['preserve_game_process']}, "
             f"safe_temp={plan['safe_temp']}°C, safe_battery={plan['safe_battery']}%, "
             f"safe_time={plan['safe_minutes']}分钟, inactivity_timeout={plan['inactivity_timeout_minutes']}分钟, "
+            f"marathon_duration={marathon_minutes}分钟, "
             f"power_collection_duration={plan['power_collection_duration_seconds']}秒, "
             f"cleanup_apps={plan['cleanup_apps']}\n"
         )
         if plan.get("runtime_description"):
             self._log_message(f"[Launcher] {plan['runtime_description']}\n")
+        if marathon_minutes > 0:
+            self._log_message(
+                "[Launcher] 马拉松模式已启用：运行期间不做温度/电量门禁检查，"
+                "用例循环和最终长按保存由 SP 有效时间控制。\n"
+            )
         if plan.get("capture_preflight_message"):
             self._log_message(f"[Launcher] 截图流预检：{plan['capture_preflight_message']}\n")
         if trace_path is not None:
@@ -5154,6 +5207,16 @@ class LauncherWindow(QWidget):
             return
 
         run_no = self.current_run_index + 1
+        if is_marathon_plan(self.current_plan):
+            self.safety_timer.stop()
+            self._log_message(
+                f"[Launcher] 第 {run_no}/{self.current_plan['run_count']} 次为马拉松模式，"
+                "跳过启动前温度和电量检查。\n"
+            )
+            self._cleanup_apps_between_runs("马拉松启动前清理")
+            self._launch_iteration(run_no, None, None)
+            return
+
         temperature = get_battery_temperature_c()
         battery = get_battery_capacity()
         LOGGER.info(
@@ -5206,7 +5269,12 @@ class LauncherWindow(QWidget):
         self._cleanup_apps_between_runs("启动前清理")
         self._launch_iteration(run_no, temperature, battery)
 
-    def _launch_iteration(self, run_no: int, temperature: float, battery: int):
+    def _launch_iteration(
+        self,
+        run_no: int,
+        temperature: Optional[float],
+        battery: Optional[int],
+    ):
         if self.current_plan is None:
             return
 
@@ -5264,15 +5332,22 @@ class LauncherWindow(QWidget):
                 f"project_case={project_case}, target_case={target_case}\n"
             )
 
-        self._set_runtime(
-            self._format_runtime_text(
-                run_no,
-                self.current_plan["run_count"],
-                temperature,
-                battery,
-                "安全检查通过，正在启动。",
+        if is_marathon_plan(self.current_plan):
+            marathon_minutes = float(self.current_plan["marathon_duration_minutes"])
+            self._set_runtime(
+                f"运行信息：第 {run_no}/{self.current_plan['run_count']} 次马拉松，"
+                f"SP 有效时长目标 {marathon_minutes:g} 分钟，正在启动。"
             )
-        )
+        else:
+            self._set_runtime(
+                self._format_runtime_text(
+                    run_no,
+                    self.current_plan["run_count"],
+                    temperature,
+                    battery,
+                    "安全检查通过，正在启动。",
+                )
+            )
 
         self.process.setArguments(args)
         LOGGER.info(
@@ -5313,7 +5388,7 @@ class LauncherWindow(QWidget):
 
         self.preview_timer.start()
         safe_minutes = self.current_plan["safe_minutes"]
-        if safe_minutes > 0:
+        if safe_minutes > 0 and not is_marathon_plan(self.current_plan):
             self.run_timeout_timer.start(int(safe_minutes * 60 * 1000))
         if self._stream_disconnect_recovery_enabled():
             self.stream_disconnect_signal_timer.start()
@@ -5487,13 +5562,30 @@ class LauncherWindow(QWidget):
             return
 
         state_path = archive_dir / "sp_recording_state.json"
-        if not state_path.exists():
-            return
-
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-        except Exception:
-            log_exception(f"read sp recording state failed: state_path={state_path}")
+        controller_state_path = archive_dir / "sp_controller_state.json"
+        state = {}
+        if state_path.exists():
+            try:
+                payload = json.loads(state_path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    state.update(payload)
+            except Exception:
+                log_exception(f"read sp recording state failed: state_path={state_path}")
+        if controller_state_path.exists():
+            try:
+                controller_state = json.loads(
+                    controller_state_path.read_text(encoding="utf-8")
+                )
+                if isinstance(controller_state, dict):
+                    state["controller"] = controller_state
+                    for flag_name in ("sp_started_ever", "sp_recording", "sp_saved"):
+                        if controller_state.get(flag_name):
+                            state[flag_name] = True
+            except Exception:
+                log_exception(
+                    f"read sp controller state failed: state_path={controller_state_path}"
+                )
+        if not state:
             return
 
         self.current_run_sp_state = state
@@ -5960,6 +6052,9 @@ class LauncherWindow(QWidget):
                     "batch_start_timestamp": self.current_batch_start_timestamp,
                     "run_start_timestamp": self.current_run_start_timestamp,
                     "inactivity_timeout_minutes": self.current_plan["inactivity_timeout_minutes"],
+                    "marathon_duration_minutes": float(
+                        self.current_plan.get("marathon_duration_minutes") or 0.0
+                    ),
                     "generate_preview_video": bool(self.current_plan.get("generate_preview_video")),
                 },
                 reuse_existing=True,
@@ -6582,6 +6677,7 @@ class LauncherWindow(QWidget):
             finish_prefix = "进程已手动停止"
         self._log_message(f"\n[Launcher] {finish_prefix}，exit_code={exit_code}\n")
         self._poll_preview_frame()
+        self._refresh_current_run_sp_state()
         self._refresh_current_run_failure_signal()
         if self._current_run_failed_by_inactivity_timeout():
             self._log_message(

@@ -9,8 +9,9 @@
 4. ``NandaHouseSearchStrategy`` 组合三者，并用统一结果协议回传给现有状态机。
 
 未配置南大方案时，策略返回 ``DISABLED``，现有搜房流程保持不变；生产
-配置启用南大方案后使用 ``exclusive`` 模式，接管后任何异常都应
-终止当前用例并上报，不再回退原室内搜房逻辑。
+配置启用南大方案后使用 ``exclusive`` 模式，不再回退原室内
+搜房逻辑。但门框取景或房型匹配没有可信结果属于业务上的
+``NO_MATCH``，只跳过当前入门点；依赖、程序或回放异常才终止当前用例。
 """
 
 from __future__ import annotations
@@ -429,11 +430,12 @@ class NandaHouseSearchStrategy:
             if aborted is not None:
                 return aborted
             return NandaSearchResult(
-                NandaSearchStatus.FAILED,
-                f"door frame 房屋取景准备异常: {exc}",
+                NandaSearchStatus.NO_MATCH,
+                f"door frame 取景结果无效，跳过当前入门点: {exc}",
                 metadata={
                     "phase": "view_preparation",
                     "exception": type(exc).__name__,
+                    "recoverable": True,
                 },
             )
         except Exception as exc:

@@ -99,11 +99,11 @@ class NandaLatestSettings:
     area_acceptable_min_ratio: float = 0.015
     area_acceptable_max_ratio: float = 0.055
     acceptable_center_ratio: float = 0.03
+    lateral_center_ratio: float = 0.07
     lateral_band_ratio: float = 0.01
     lateral_move_duration_ms: int = 100
     lateral_min_wait_ms: int = 50
     lateral_band_wait_ms: int = 20
-    stable_required_count: int = 2
     max_pose_actions: int = 18
     move_axis_bias: int = 240
     pose_min_duration_ms: int = 60
@@ -191,6 +191,10 @@ class NandaLatestSettings:
                 0.001,
                 _as_float(raw.get("acceptable_center_ratio"), cls.acceptable_center_ratio),
             ),
+            lateral_center_ratio=max(
+                0.001,
+                _as_float(raw.get("lateral_center_ratio"), cls.lateral_center_ratio),
+            ),
             lateral_band_ratio=max(
                 0.001,
                 _as_float(raw.get("lateral_band_ratio"), cls.lateral_band_ratio),
@@ -215,9 +219,6 @@ class NandaLatestSettings:
                     raw.get("lateral_band_wait_ms"),
                     cls.lateral_band_wait_ms,
                 ),
-            ),
-            stable_required_count=max(
-                1, _as_int(raw.get("stable_required_count"), cls.stable_required_count)
             ),
             max_pose_actions=max(1, _as_int(raw.get("max_pose_actions"), cls.max_pose_actions)),
             move_axis_bias=max(1, _as_int(raw.get("move_axis_bias"), cls.move_axis_bias)),
@@ -381,18 +382,16 @@ class NandaLatestSettings:
 
 
 class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
-    """方向由现有导航模块校准；这里只用 YOLO 门框收敛回放位姿。"""
+    """入门方向锁定后，只按 YOLO 门中心偏差收敛回放位姿。"""
 
     def __init__(self, settings: NandaLatestSettings):
         self.settings = settings
         self._pose_key = None
         self._action_count = 0
-        self._stable_count = 0
 
     def reset(self) -> None:
         self._pose_key = None
         self._action_count = 0
-        self._stable_count = 0
 
     @staticmethod
     def _screen_width(context: NandaSearchContext) -> Optional[float]:
@@ -418,14 +417,13 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
         segment = self.settings.lateral_band_ratio
         active_error = max(
             0.0,
-            center_error - self.settings.acceptable_center_ratio,
+            center_error - self.settings.lateral_center_ratio,
         )
-        extra_error = max(0.0, active_error - segment)
         wait_ms = (
             self.settings.lateral_min_wait_ms
             + int(
                 round(
-                    extra_error
+                    active_error
                     / segment
                     * self.settings.lateral_band_wait_ms
                 )
@@ -445,7 +443,6 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
         wait_ms: Optional[int] = None,
     ) -> NandaSearchResult:
         self._action_count += 1
-        self._stable_count = 0
         # HOS 的 tap_single(wait=...) 会在滑动到终点后继续按住。
         # 门中心左右对准显式传入 wait；其他摇杆动作默认立即松手。
         if wait_ms is not None:
@@ -473,26 +470,18 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
     def _pose_timeout_result(
         self,
         center_error: float,
-        area_ratio: float,
     ) -> Optional[NandaSearchResult]:
         if self._action_count < self.settings.max_pose_actions:
             return None
-        acceptable = (
-            center_error <= self.settings.acceptable_center_ratio
-            and self.settings.area_acceptable_min_ratio
-            <= area_ratio
-            <= self.settings.area_acceptable_max_ratio
-        )
-        if acceptable:
+        if center_error <= self.settings.acceptable_center_ratio:
             return None
         return NandaSearchResult(
             NandaSearchStatus.NO_MATCH,
-            "门前位姿多次调整仍未进入南大方案可接受范围",
+            "门中心多次调整仍未进入 3% 容差",
             metadata={
                 "phase": "pose",
                 "action_count": self._action_count,
                 "center_error": center_error,
-                "door_area_ratio": area_ratio,
             },
         )
 
@@ -501,7 +490,6 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
         if pose_key != self._pose_key:
             self._pose_key = pose_key
             self._action_count = 0
-            self._stable_count = 0
 
         if context.distance_to_entry is None or (
             context.distance_to_entry > self.settings.max_entry_distance
@@ -511,7 +499,7 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
                 f"距离入门点尚未进入 {self.settings.max_entry_distance:g} 范围",
                 metadata={"phase": "pose"},
             )
-        if context.door_box is None or context.door_area_ratio is None:
+        if context.door_box is None:
             return NandaSearchResult(
                 NandaSearchStatus.NO_MATCH,
                 "门检测框无效，退回原搜房策略",
@@ -527,65 +515,53 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
             )
         center_delta = float(context.door_center_offset_px) / screen_width
         center_error = abs(center_delta)
-        area_ratio = float(context.door_area_ratio)
 
-        timeout_result = self._pose_timeout_result(center_error, area_ratio)
+        timeout_result = self._pose_timeout_result(center_error)
         if timeout_result is not None:
             return timeout_result
-        relaxed_accept = self._action_count >= self.settings.max_pose_actions
 
-        # 3% 内视为精准对准；左右滑动 dura 固定 100ms。
-        # 3%-4% 终点按住 50ms，超过 4% 后偏差每增加 1%，wait 增加 20ms。
-        if not relaxed_accept and center_error > self.settings.acceptable_center_ratio:
+        # 大偏差先用摇杆横移人物，避免大幅转动视角。
+        if center_error > self.settings.lateral_center_ratio:
             excess_ratio, wait_ms = self._lateral_wait_for_error(center_error)
             side = 1 if center_delta > 0 else -1
             return self._retry_after_action(
                 context,
                 f"门中心偏差 {center_delta:+.3f}({center_error:.1%})，"
-                f"超出{self.settings.acceptable_center_ratio:.0%}中心容差 "
+                f"超出{self.settings.lateral_center_ratio:.0%}横移阈值 "
                 f"{excess_ratio:.1%}",
                 x_bias=side * self.settings.move_axis_bias,
                 duration_ms=self.settings.lateral_move_duration_ms,
                 wait_ms=wait_ms,
             )
 
-        if not relaxed_accept and area_ratio < self.settings.area_min_ratio:
+        # 3%-7% 只轻微调整视角；入门方向已锁定，下一帧不再回拉。
+        if center_error > self.settings.acceptable_center_ratio:
+            offset_px = float(context.door_center_offset_px)
+            view_bias = int(round(offset_px * 0.33))
+            view_bias = max(
+                -self.settings.move_axis_bias,
+                min(self.settings.move_axis_bias, view_bias),
+            )
+            if view_bias == 0:
+                view_bias = 1 if center_delta > 0 else -1
             duration = self._duration_for_error(
-                self.settings.area_min_ratio - area_ratio,
-                0.0,
-                0.03,
+                center_error,
+                self.settings.acceptable_center_ratio,
+                self.settings.lateral_center_ratio,
             )
             return self._retry_after_action(
                 context,
-                f"门框面积 {area_ratio:.3f} 偏小，向前靠近标准回放距离",
-                y_bias=-self.settings.move_axis_bias,
+                f"门中心偏差 {center_delta:+.3f}({center_error:.1%})，"
+                f"位于{self.settings.acceptable_center_ratio:.0%}-"
+                f"{self.settings.lateral_center_ratio:.0%}，轻微调整视角",
+                x_bias=view_bias,
                 duration_ms=duration,
-            )
-        if not relaxed_accept and area_ratio > self.settings.area_max_ratio:
-            duration = self._duration_for_error(
-                area_ratio - self.settings.area_max_ratio,
-                0.0,
-                0.04,
-            )
-            return self._retry_after_action(
-                context,
-                f"门框面积 {area_ratio:.3f} 偏大，向后退到标准回放距离",
-                y_bias=self.settings.move_axis_bias,
-                duration_ms=duration,
+                control="视角",
             )
 
-        self._stable_count += 1
-        if self._stable_count < self.settings.stable_required_count:
-            return NandaSearchResult(
-                NandaSearchStatus.RETRY,
-                f"门前位姿已达标，等待稳定帧 {self._stable_count}/"
-                f"{self.settings.stable_required_count}",
-                metadata={"phase": "pose", "stable_count": self._stable_count},
-            )
         context.worker.frame_log(
-            f"[NandaPose] YOLO门框位姿完成（入门方向已由导航模块使用uinput校准）："
-            f"center={center_delta:+.3f}，area={area_ratio:.3f}，"
-            f"stable={self._stable_count}"
+            f"[NandaPose] 门中心已对齐：center={center_delta:+.3f} "
+            f"<= {self.settings.acceptable_center_ratio:.0%}，直接进入南大房型匹配"
         )
         return None
 

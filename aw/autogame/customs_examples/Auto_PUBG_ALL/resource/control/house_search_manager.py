@@ -303,6 +303,7 @@ class HouseSearchManager:
         self.route_stuck_bypass_attempts = 0
         self.house_bypass_unstuck_pause_until = 0.0
         self.entry_near_micro_adjust_attempts = 0
+        self.entry_direction_aligned_key = None
         self.entry_door_last_area_ratio = None
         self._entry_door_force_strict_align_once = False
         self._jump_forward_guard = False
@@ -403,6 +404,7 @@ class HouseSearchManager:
         self.route_stuck_bypass_attempts = 0
         self.house_bypass_unstuck_pause_until = 0.0
         self.entry_near_micro_adjust_attempts = 0
+        self.entry_direction_aligned_key = None
         self._jump_forward_guard = False
         self._jump_forward_wait_until_hidden = False
         self._nanda_preflight_passed = False
@@ -2055,6 +2057,19 @@ class HouseSearchManager:
         if ideal_angle is None:
             return True
 
+        entry_loc = self._entry_location_tuple(self.active_entry)
+        alignment_key = (
+            self.current_house_id,
+            entry_loc,
+            self._nanda_optional_float(ideal_angle),
+        )
+        if getattr(self, "entry_direction_aligned_key", None) == alignment_key:
+            w.frame_log(
+                f"[{phase_label}] 入门方向已锁定，不再回拉预设角度，"
+                "继续按门中心偏差对齐"
+            )
+            return True
+
         current_dir = w.get_info('direction')
         w.frame_log(
             f"[{phase_label}] 当前已在入门点附近，入门方向应为 {ideal_angle}，"
@@ -2062,6 +2077,17 @@ class HouseSearchManager:
         )
         aligned = self._align_near_entry_direction(w, ideal_angle)
         if aligned:
+            self.entry_direction_aligned_key = alignment_key
+            tolerance = getattr(
+                self,
+                'ENTRY_DIRECTION_ALIGN_TOLERANCE',
+                self.ENTRY_NEAR_ALIGN_TOLERANCE,
+            )
+            w.frame_log(
+                f"[{phase_label}] 入门方向已进入±"
+                f"{tolerance}°容差并锁定，"
+                "后续只做门中心对齐"
+            )
             self._refresh_frame_and_handle_jump(w)
         return aligned
 

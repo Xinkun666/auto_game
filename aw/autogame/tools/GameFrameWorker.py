@@ -1499,6 +1499,36 @@ class Controller:
         os.environ.get("AUTOGAME_TOUCH_HDC_TIMEOUT_SECONDS", "10")
     )
 
+    @staticmethod
+    def _expected_hdc_touch_duration_seconds(cmd):
+        """从 uinput 命令中提取已声明的触控执行时长。"""
+        command = str(cmd or "")
+        expected_ms = 0.0
+
+        keep_match = re.search(
+            r"(?:^|\s)-k\s+([0-9]+(?:\.[0-9]+)?)\s+([0-9]+(?:\.[0-9]+)?)",
+            command,
+        )
+        if keep_match:
+            expected_ms += float(keep_match.group(1)) + float(keep_match.group(2))
+
+        interval_match = re.search(
+            r"(?:^|\s)-i\s+([0-9]+(?:\.[0-9]+)?)",
+            command,
+        )
+        if interval_match:
+            expected_ms += float(interval_match.group(1))
+
+        return expected_ms / 1000.0
+
+    def _resolve_hdc_command_timeout_seconds(self, cmd):
+        # HDC 的 wait/dura 是业务指令的合法执行时间，不能计入卡死时间。
+        # 配置值仅作为指令声明时长之外的超时余量。
+        return (
+            max(0.1, float(self.HDC_COMMAND_TIMEOUT_SECONDS))
+            + self._expected_hdc_touch_duration_seconds(cmd)
+        )
+
     def __init__(self, driver, worker, stage_info_raw, backend="uinput", backend_options=None):
         self.buttons = extract_absolute_points(stage_info_raw)
         self.driver = driver
@@ -1521,6 +1551,7 @@ class Controller:
 
     def _run_hdc(self, cmd):
         hdc_args = hdc_command_args(cmd)
+        timeout_seconds = self._resolve_hdc_command_timeout_seconds(cmd)
         proc = subprocess.Popen(
             hdc_args or cmd,
             shell=hdc_args is None,
@@ -1529,7 +1560,7 @@ class Controller:
             **hidden_subprocess_kwargs(),
         )
         try:
-            proc.wait(timeout=self.HDC_COMMAND_TIMEOUT_SECONDS)
+            proc.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired as exc:
             try:
                 proc.kill()
@@ -1537,7 +1568,7 @@ class Controller:
             except Exception:
                 pass
             raise RuntimeError(
-                f"hdc command timed out after {self.HDC_COMMAND_TIMEOUT_SECONDS:.1f}s: {cmd}"
+                f"hdc command timed out after {timeout_seconds:.1f}s: {cmd}"
             ) from exc
 
     def _require_continuous_touch_backend(self):

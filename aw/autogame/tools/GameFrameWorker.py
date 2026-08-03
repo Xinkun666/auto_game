@@ -2141,6 +2141,7 @@ class FrameWorker(threading.Thread):
     STREAM_RECOVERY_WAIT_LOG_INTERVAL_SECONDS = 15.0
     STREAM_RECOVERY_MAX_WAIT_SECONDS = 120.0
     LOGIC_THREAD_STOP_TIMEOUT_SECONDS = 6.0
+    BATTERY_CUTOFF_SHUTDOWN_DELAY_SECONDS = 60.0
 
     def __init__(
         self,
@@ -2855,9 +2856,35 @@ class FrameWorker(threading.Thread):
             return None
         return self._wait_for_stream_recovery_frame(purpose)
 
+    def _handle_marathon_battery_stop(self):
+        percent = self.sp_controller.last_battery_percent
+        threshold = self.sp_controller.end_battery_percent
+        self.frame_log(
+            f"马拉松电量已达结束条件：当前 {percent}% <= 结束电量 {threshold}%，"
+            "正在长按 SP 保存。"
+        )
+        saved = self.sp_controller.stop()
+        if saved:
+            self.frame_log(
+                f"SP 已保存，等待 {self.BATTERY_CUTOFF_SHUTDOWN_DELAY_SECONDS:g} 秒后"
+                "结束自动化工程。"
+            )
+        else:
+            self.frame_log(
+                f"SP 长按保存未确认执行，仍将等待 "
+                f"{self.BATTERY_CUTOFF_SHUTDOWN_DELAY_SECONDS:g} 秒后结束自动化工程。"
+            )
+        self._flush_current_frame_log()
+        time.sleep(self.BATTERY_CUTOFF_SHUTDOWN_DELAY_SECONDS)
+        self.stop()
+
     def loop(self):
         print("GameFrameWorker 引擎已启动")
         while self.running:
+            if self.sp_controller.battery_stop_requested:
+                self._begin_frame_log_context()
+                self._handle_marathon_battery_stop()
+                continue
             if self.paused:
                 pause_wait_event = getattr(self, "_pause_wait_event", None)
                 if pause_wait_event is not None:
@@ -2904,6 +2931,7 @@ class FrameWorker(threading.Thread):
         self.last_control_action_time = time.monotonic()
         self._post_control_refresh_ready_at = 0.0
         self._stream_recovery_waiting = False
+        self.sp_controller.start_battery_monitor()
         self.thread = threading.Thread(target=self.loop, daemon=True)
         self.thread.start()
 
@@ -2926,6 +2954,9 @@ class FrameWorker(threading.Thread):
         self.running = False
         self.finished = True
         self._watchdog_stop_event.set()
+        sp_controller = getattr(self, "sp_controller", None)
+        if sp_controller is not None:
+            sp_controller.shutdown()
         pause_wait_event = getattr(self, "_pause_wait_event", None)
         if pause_wait_event is not None:
             pause_wait_event.set()

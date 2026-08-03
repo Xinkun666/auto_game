@@ -592,11 +592,16 @@ def build_launcher_plan_env_values(plan: Optional[dict]) -> dict[str, str]:
         0.0,
         float(plan.get("marathon_duration_minutes") or 0.0),
     )
+    marathon_end_battery_percent = max(
+        0,
+        min(100, int(plan.get("marathon_end_battery_percent") or 0)),
+    )
     env_values = {
         "AUTOGAME_TEST_PROFILE": test_profile,
         "AUTOGAME_SCREEN_MODE": screen_mode,
         "AUTOGAME_SINGLE_CASE_LOOPS": str(max(1, case_loop_count)),
         "AUTOGAME_MARATHON_DURATION_MINUTES": str(marathon_duration_minutes),
+        "AUTOGAME_MARATHON_END_BATTERY_PERCENT": str(marathon_end_battery_percent),
         "AUTOGAME_SP_RECORDING_ENABLED": "1" if should_use_sp_recording_for_profile(test_profile) else "0",
         "AUTOGAME_PRESERVE_GAME_PROCESS": (
             "1" if should_preserve_game_process_for_plan(plan) else "0"
@@ -1590,6 +1595,8 @@ def discover_history_outputs(temp_dir: Path = TEMP_DIR) -> list[dict]:
             "exit_code": metadata.get("exit_code", ""),
             "timed_out": metadata.get("timed_out", ""),
             "marathon_duration_minutes": metadata.get("marathon_duration_minutes", ""),
+            "marathon_end_battery_percent": metadata.get("marathon_end_battery_percent", ""),
+            "battery_stop_requested": metadata.get("battery_stop_requested", ""),
             "stream_disconnected": metadata.get("stream_disconnected", ""),
             "stream_disconnect_startup": metadata.get("stream_disconnect_startup", ""),
             "archive_metadata": metadata,
@@ -1627,6 +1634,8 @@ def format_history_record_summary(record: dict) -> str:
         f"exit_code: {value('exit_code')}",
         f"timed_out: {value('timed_out')}",
         f"marathon_duration_minutes: {value('marathon_duration_minutes')}",
+        f"marathon_end_battery_percent: {value('marathon_end_battery_percent')}",
+        f"battery_stop_requested: {value('battery_stop_requested')}",
         f"stream_disconnected: {value('stream_disconnected')}",
         f"stream_disconnect_startup: {value('stream_disconnect_startup')}",
         f"log_file_count: {value('log_file_count', '0')}",
@@ -2676,6 +2685,19 @@ class LauncherWindow(QWidget):
             suffix="分",
         )
 
+        self.marathon_end_battery_spin = QSpinBox()
+        self.marathon_end_battery_spin.setRange(0, 100)
+        self.marathon_end_battery_spin.setValue(0)
+        self.marathon_end_battery_spin.setSuffix(" %")
+        self.marathon_end_battery_spin.setToolTip(
+            "0 表示不按电量提前结束；马拉松中电量小于等于该值时长按 SP 保存"
+        )
+        self.marathon_end_battery_field = self._create_spin_with_presets(
+            self.marathon_end_battery_spin,
+            [0, 5, 10, 15, 20],
+            suffix="%",
+        )
+
         self.start_button = QPushButton("启动")
         self.start_button.setProperty("primaryButton", True)
         self.stream_verify_button = QPushButton("验证流")
@@ -3464,7 +3486,12 @@ class LauncherWindow(QWidget):
         config_layout.setContentsMargins(0, 0, 0, 0)
         config_layout.setSpacing(10)
 
-        def create_config_item(label_text: str, widget: QWidget, field_width: int = 150) -> QWidget:
+        def create_config_item(
+            label_text: str,
+            widget: QWidget,
+            field_width: int = 150,
+            item_height: int = 32,
+        ) -> QWidget:
             item = QWidget()
             item.setObjectName("configItem")
             item.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -3477,7 +3504,7 @@ class LauncherWindow(QWidget):
             label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             label.setFixedWidth(96)
             widget.setFixedWidth(field_width)
-            widget.setFixedHeight(32)
+            widget.setFixedHeight(item_height)
 
             item_layout.addStretch(1)
             item_layout.addWidget(label)
@@ -3499,15 +3526,20 @@ class LauncherWindow(QWidget):
             title_label.setObjectName("configSectionTitle")
             title_label.setFixedHeight(18)
             section_layout.addWidget(title_label)
+            item_height = 26 if len(items) > 4 else 32
             for label_text, widget, field_width in items:
                 section_layout.addWidget(
-                    create_config_item(label_text, widget, field_width),
+                    create_config_item(
+                        label_text,
+                        widget,
+                        field_width,
+                        item_height=item_height,
+                    ),
                 )
             section_layout.addStretch(1)
             return section
 
         # 按用途分成三个等宽区块，每项始终是“标签 + 短控件”。
-        # 11 项的 4 / 4 / 3 数量差由分组语义吸收，不再产生单独的半行。
         config_sections = (
             create_config_section(
                 "用例与运行",
@@ -3532,6 +3564,7 @@ class LauncherWindow(QWidget):
                 (
                     ("测试类型", self.test_profile_field, 170),
                     ("SP运行时长", self.marathon_duration_field, 150),
+                    ("结束电量", self.marathon_end_battery_field, 150),
                     ("视频归档", self.generate_preview_video_button, 150),
                     ("回放录像时长", self.power_collection_duration_field, 150),
                 ),
@@ -4499,6 +4532,7 @@ class LauncherWindow(QWidget):
             )
             self.current_run_archive_dir = run_archive_dir
             env.insert("AUTOGAME_RUN_ARCHIVE_DIR", str(run_archive_dir))
+            env.insert("AUTOGAME_BATCH_ARCHIVE_DIR", str(run_archive_dir.parent))
         except Exception:
             log_exception(f"resolve run archive dir failed: run_no={run_no}")
         if self.current_plan is not None:
@@ -4584,6 +4618,7 @@ class LauncherWindow(QWidget):
         self.inactivity_timeout_spin.setEnabled(enabled)
         self.power_collection_duration_spin.setEnabled(enabled)
         self.marathon_duration_spin.setEnabled(enabled)
+        self.marathon_end_battery_spin.setEnabled(enabled)
         self.generate_preview_video_button.setEnabled(enabled)
         self._sync_game_process_policy_ui()
         for button in self.preset_buttons:
@@ -5007,10 +5042,17 @@ class LauncherWindow(QWidget):
             self.function_test_radio.isChecked(),
         )
         marathon_duration_minutes = float(self.marathon_duration_spin.value())
+        marathon_end_battery_percent = int(self.marathon_end_battery_spin.value())
         if marathon_duration_minutes > 0 and not should_use_sp_recording_for_profile(test_profile):
             issues.add_error(
                 "马拉松模式需要 SP",
                 "SP 运行时长大于 0 时请选择功耗测试；功能测试不会启动 SP 录制。",
+            )
+            return None
+        if marathon_end_battery_percent > 0 and marathon_duration_minutes <= 0:
+            issues.add_error(
+                "结束电量需要马拉松模式",
+                "设置结束电量前，请先将 SP 运行时长设置为大于 0 的分钟数。",
             )
             return None
         if not should_use_sp_recording_for_profile(test_profile):
@@ -5038,6 +5080,7 @@ class LauncherWindow(QWidget):
             "inactivity_timeout_minutes": float(self.inactivity_timeout_spin.value()),
             "power_collection_duration_seconds": float(self.power_collection_duration_spin.value()),
             "marathon_duration_minutes": marathon_duration_minutes,
+            "marathon_end_battery_percent": marathon_end_battery_percent,
             "generate_preview_video": bool(self.generate_preview_video_button.isChecked()),
             "preserve_game_process": not self.game_process_policy_button.isChecked(),
             "cleanup_apps": sorted(cleanup_apps),
@@ -5076,6 +5119,7 @@ class LauncherWindow(QWidget):
         self.stop_button.setEnabled(True)
         self._set_inputs_enabled(False)
         marathon_minutes = float(plan.get("marathon_duration_minutes") or 0.0)
+        marathon_end_battery = int(plan.get("marathon_end_battery_percent") or 0)
         if marathon_minutes > 0:
             self._set_status("已开始马拉松执行，将跳过每轮温度和电量检查。")
             self._set_runtime(
@@ -5096,6 +5140,7 @@ class LauncherWindow(QWidget):
             f"safe_temp={plan['safe_temp']}°C, safe_battery={plan['safe_battery']}%, "
             f"safe_time={plan['safe_minutes']}分钟, inactivity_timeout={plan['inactivity_timeout_minutes']}分钟, "
             f"marathon_duration={marathon_minutes}分钟, "
+            f"marathon_end_battery={marathon_end_battery}%, "
             f"power_collection_duration={plan['power_collection_duration_seconds']}秒, "
             f"cleanup_apps={plan['cleanup_apps']}\n"
         )
@@ -5105,6 +5150,11 @@ class LauncherWindow(QWidget):
             self._log_message(
                 "[Launcher] 马拉松模式已启用：运行期间不做温度/电量门禁检查，"
                 "用例循环和最终长按保存由 SP 有效时间控制。\n"
+            )
+            self._log_message(
+                f"[Launcher] 马拉松电量监控：结束电量="
+                f"{marathon_end_battery if marathon_end_battery > 0 else '关闭'}，"
+                "battery.log 写入本批次各次运行目录的外层。\n"
             )
         if plan.get("capture_preflight_message"):
             self._log_message(f"[Launcher] 截图流预检：{plan['capture_preflight_message']}\n")
@@ -5579,8 +5629,8 @@ class LauncherWindow(QWidget):
                 if isinstance(controller_state, dict):
                     state["controller"] = controller_state
                     for flag_name in ("sp_started_ever", "sp_recording", "sp_saved"):
-                        if controller_state.get(flag_name):
-                            state[flag_name] = True
+                        if flag_name in controller_state:
+                            state[flag_name] = bool(controller_state.get(flag_name))
             except Exception:
                 log_exception(
                     f"read sp controller state failed: state_path={controller_state_path}"
@@ -5631,6 +5681,12 @@ class LauncherWindow(QWidget):
 
     def _current_run_failed_by_inactivity_timeout(self) -> bool:
         return self.current_run_failure_code == "launcher_inactivity_timeout"
+
+    def _current_run_stopped_by_marathon_battery(self) -> bool:
+        controller_state = self.current_run_sp_state.get("controller")
+        if not isinstance(controller_state, dict):
+            return False
+        return bool(controller_state.get("battery_stop_requested"))
 
     def _current_plan_uses_sp_recording(self) -> bool:
         if self.current_plan is None:
@@ -6045,6 +6101,7 @@ class LauncherWindow(QWidget):
                     "stream_started": self.current_run_stream_started,
                     "sp_started": self.current_run_sp_started,
                     "sp_state": self.current_run_sp_state,
+                    "battery_stop_requested": self._current_run_stopped_by_marathon_battery(),
                     "failure_code": self.current_run_failure_code,
                     "failure_reason": self.current_run_failure_reason,
                     "failure_details": self.current_run_failure_details,
@@ -6055,6 +6112,12 @@ class LauncherWindow(QWidget):
                     "marathon_duration_minutes": float(
                         self.current_plan.get("marathon_duration_minutes") or 0.0
                     ),
+                    "marathon_end_battery_percent": int(
+                        self.current_plan.get("marathon_end_battery_percent") or 0
+                    ),
+                    "battery_log": str(
+                        self.current_run_archive_dir.parent / "battery.log"
+                    ) if self.current_run_archive_dir is not None else None,
                     "generate_preview_video": bool(self.current_plan.get("generate_preview_video")),
                 },
                 reuse_existing=True,
@@ -6706,6 +6769,20 @@ class LauncherWindow(QWidget):
         if self.stop_requested:
             self._cleanup_apps_between_runs("停止后清理")
             self._finish_batch("任务已停止。")
+            return
+
+        if self._current_run_stopped_by_marathon_battery():
+            controller_state = self.current_run_sp_state.get("controller", {})
+            battery = controller_state.get("last_battery_percent")
+            threshold = controller_state.get("end_battery_percent")
+            self._log_message(
+                f"[Launcher] 马拉松因电量 {battery}% <= 结束电量 {threshold}% 已保存 SP，"
+                "停止整个批次，不再启动后续运行。\n"
+            )
+            self._cleanup_apps_between_runs("马拉松低电量结束后清理")
+            self._finish_batch(
+                f"马拉松已因电量 {battery}% 达到结束电量 {threshold}% 而结束。"
+            )
             return
 
         if self.current_run_stream_disconnected:

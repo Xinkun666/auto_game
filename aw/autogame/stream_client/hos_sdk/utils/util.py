@@ -86,14 +86,25 @@ def exec_cmd(command, timeout=5 * 60, error_print=True, join_result=False, redir
         else:
             return err if err else out
 
-    except (TimeoutError, KeyboardInterrupt, AttributeError, ValueError,  # pylint:disable=undefined-variable
+    except (subprocess.TimeoutExpired, TimeoutError, KeyboardInterrupt, AttributeError, ValueError,
             EOFError, IOError) as _:
         sys_type = platform.system()
-        if sys_type == "Linux" or sys_type == "Darwin":
-            os.killpg(proc.pid, signal.SIGTERM)
-        else:
-            os.kill(proc.pid, signal.SIGINT)
+        try:
+            if sys_type == "Linux" or sys_type == "Darwin":
+                os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait(timeout=1)
+            else:
+                proc.kill()
+                proc.wait(timeout=1)
+        except Exception:
+            logger.warning("failed to terminate timed-out command: %s", cmd)
         raise
+    finally:
+        out_temp.close()
 
 
 def get_process_pid(process_name, device):

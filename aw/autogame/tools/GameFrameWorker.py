@@ -10,6 +10,7 @@ import subprocess
 import threading
 import importlib
 import multiprocessing as mp
+import queue
 from dataclasses import dataclass
 from typing import Dict, Tuple
 
@@ -17,7 +18,7 @@ import numpy as np
 
 from aw.autogame.common.SPController.SPArea import SPControllerBase
 from aw.autogame.tools.Utils import *
-from aw.autogame.tools.Utils import _parse_display_rotation
+from aw.autogame.tools.Utils import _parse_display_rotation, _read_autogame_config
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 from aw.autogame.tools.FrameLog import (
     DEFAULT_FRAME_LOG_TYPE,
@@ -1494,6 +1495,9 @@ class HOSTouchController:
 
 class Controller:
     """操作层：负责绝对坐标换算，并根据后端发送触控指令。"""
+    HDC_COMMAND_TIMEOUT_SECONDS = float(
+        os.environ.get("AUTOGAME_TOUCH_HDC_TIMEOUT_SECONDS", "10")
+    )
 
     def __init__(self, driver, worker, stage_info_raw, backend="uinput", backend_options=None):
         self.buttons = extract_absolute_points(stage_info_raw)
@@ -1524,7 +1528,17 @@ class Controller:
             stderr=subprocess.DEVNULL,
             **hidden_subprocess_kwargs(),
         )
-        proc.wait()
+        try:
+            proc.wait(timeout=self.HDC_COMMAND_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            try:
+                proc.kill()
+                proc.wait(timeout=1.0)
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"hdc command timed out after {self.HDC_COMMAND_TIMEOUT_SECONDS:.1f}s: {cmd}"
+            ) from exc
 
     def _require_continuous_touch_backend(self):
         if self.backend not in {"sendevent", "hos"} or self.touch_backend is None:
@@ -2094,6 +2108,8 @@ class FrameWorker(threading.Thread):
     POST_CONTROL_REFRESH_SETTLE_SECONDS = 0.5
     STREAM_RECOVERY_WAIT_POLL_SECONDS = 5.0
     STREAM_RECOVERY_WAIT_LOG_INTERVAL_SECONDS = 15.0
+    STREAM_RECOVERY_MAX_WAIT_SECONDS = 120.0
+    LOGIC_THREAD_STOP_TIMEOUT_SECONDS = 6.0
 
     def __init__(
         self,
@@ -2149,6 +2165,7 @@ class FrameWorker(threading.Thread):
         self.wait_for_stream_recovery = self._resolve_wait_for_stream_recovery()
         self.stream_recovery_wait_poll_seconds = self._resolve_stream_recovery_wait_poll_seconds()
         self.stream_recovery_wait_log_interval_seconds = self._resolve_stream_recovery_wait_log_interval_seconds()
+        self.stream_recovery_max_wait_seconds = self._resolve_stream_recovery_max_wait_seconds()
         self._stream_recovery_waiting = False
         self.launcher_watchdog_enabled = self._is_launcher_mode()
         self.launcher_inactivity_timeout_seconds = self._resolve_launcher_inactivity_timeout_seconds()
@@ -2191,7 +2208,7 @@ class FrameWorker(threading.Thread):
         self.current_frame_flushed = False
 
     def _queue_visual_frame(self):
-        if self.frame is None or not self.viz_proc or self.viz_queue.full():
+        if self.frame is None or not self.viz_proc:
             return False
         stage_resolver = getattr(self, "stage_resolver", None)
         processor = getattr(stage_resolver, "processor", None)
@@ -2212,7 +2229,12 @@ class FrameWorker(threading.Thread):
             "frame_log_entries": list(self.current_frame_log_entries),
             "screen_size": screen_size,
         }
-        self.viz_queue.put((self.frame.copy(), self.current_stage, self.stage_info, self.frame_index, frame_meta))
+        try:
+            self.viz_queue.put_nowait(
+                (self.frame.copy(), self.current_stage, self.stage_info, self.frame_index, frame_meta)
+            )
+        except queue.Full:
+            return False
         self.frame_index += 1
         return True
 
@@ -2293,6 +2315,18 @@ class FrameWorker(threading.Thread):
             return max(0.0, float(raw_value))
         except ValueError:
             return float(self.STREAM_RECOVERY_WAIT_LOG_INTERVAL_SECONDS)
+
+    def _resolve_stream_recovery_max_wait_seconds(self):
+        raw_value = os.environ.get("AUTOGAME_STREAM_RECOVERY_MAX_WAIT_SECONDS", "").strip()
+        if not raw_value:
+            config = _read_autogame_config()
+            raw_value = str(config.get("stream_recovery_max_wait_seconds", "")).strip()
+        if not raw_value:
+            return float(self.STREAM_RECOVERY_MAX_WAIT_SECONDS)
+        try:
+            return max(0.0, float(raw_value))
+        except ValueError:
+            return float(self.STREAM_RECOVERY_MAX_WAIT_SECONDS)
 
     def _wrap_control_action(self, action_name, action):
         def _wrapped(*args, **kwargs):
@@ -2742,6 +2776,11 @@ class FrameWorker(threading.Thread):
             "stream_recovery_wait_log_interval_seconds",
             self.STREAM_RECOVERY_WAIT_LOG_INTERVAL_SECONDS,
         ))
+        max_wait_seconds = float(getattr(
+            self,
+            "stream_recovery_max_wait_seconds",
+            self.STREAM_RECOVERY_MAX_WAIT_SECONDS,
+        ))
         wait_started_at = time.monotonic()
         last_log_at = wait_started_at - log_interval
         purpose_text = f"({purpose})" if purpose else ""
@@ -2749,6 +2788,21 @@ class FrameWorker(threading.Thread):
         try:
             while getattr(self, "running", True):
                 now = time.monotonic()
+                if max_wait_seconds > 0 and now - wait_started_at >= max_wait_seconds:
+                    reason = (
+                        f"HOScrcpy 流连续 {max_wait_seconds:.1f}s 无新帧{purpose_text}，"
+                        "已超过恢复等待上限并结束当前用例。"
+                    )
+                    self.mark_failed(
+                        "stream_recovery_timeout",
+                        reason,
+                        waited_seconds=max_wait_seconds,
+                        purpose=purpose,
+                    )
+                    self.running = False
+                    self.finished = True
+                    print(f"[FrameWorker] {reason}")
+                    return None
                 if log_interval <= 0 or now - last_log_at >= log_interval:
                     waited = int(max(0.0, now - wait_started_at))
                     print(f"[FrameWorker] HOScrcpy 流暂无新帧{purpose_text}，用例暂停等待流恢复，已等待 {waited}s。")
@@ -2844,6 +2898,19 @@ class FrameWorker(threading.Thread):
         pause_wait_event = getattr(self, "_pause_wait_event", None)
         if pause_wait_event is not None:
             pause_wait_event.set()
+
+        logic_thread = getattr(self, "thread", None)
+        if (
+            logic_thread is not None
+            and logic_thread.is_alive()
+            and threading.current_thread() is not logic_thread
+        ):
+            logic_thread.join(timeout=self.LOGIC_THREAD_STOP_TIMEOUT_SECONDS)
+            if logic_thread.is_alive():
+                print(
+                    "[FrameWorker] 逻辑线程未在 "
+                    f"{self.LOGIC_THREAD_STOP_TIMEOUT_SECONDS:.1f}s 内退出，继续执行底层资源清理。"
+                )
         self._flush_current_frame_log()
 
         if self._watchdog_thread and threading.current_thread() is not self._watchdog_thread:

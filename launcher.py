@@ -131,6 +131,7 @@ STREAM_DISCONNECT_SP_LONG_PRESS_MS = 3000
 STREAM_DISCONNECT_SP_NORM_POS = (0.048, 0.295)
 STREAM_DISCONNECT_GRACEFUL_STOP_TIMEOUT_MS = 60000
 STREAM_DISCONNECT_FORCE_KILL_TIMEOUT_MS = 5000
+RUN_STOP_FORCE_KILL_TIMEOUT_MS = 15000
 STREAM_DISCONNECT_PATTERNS = (
     "[Stream] Channel ready timeout.",
     "[Stream] Receive loop ended unexpectedly.",
@@ -1321,6 +1322,18 @@ class HiddenSubprocess(QObject):
             return
 
         if os.name == "nt":
+            if not force:
+                ctrl_break_event = getattr(signal, "CTRL_BREAK_EVENT", None)
+                if ctrl_break_event is not None:
+                    try:
+                        proc.send_signal(ctrl_break_event)
+                        return
+                    except Exception:
+                        LOGGER.debug(
+                            "graceful CTRL_BREAK_EVENT failed, fallback to taskkill: pid=%s",
+                            proc.pid,
+                            exc_info=True,
+                        )
             command = ["taskkill", "/PID", str(int(proc.pid)), "/T"]
             if force:
                 command.append("/F")
@@ -2276,7 +2289,11 @@ def install_helper_signal_handlers():
         LOGGER.warning("helper process received signal=%s, exiting gracefully", signum)
         raise SystemExit(128 + int(signum))
 
-    for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)):
+    for sig in (
+        getattr(signal, "SIGTERM", None),
+        getattr(signal, "SIGINT", None),
+        getattr(signal, "SIGBREAK", None),
+    ):
         if sig is None:
             continue
         try:
@@ -2463,6 +2480,7 @@ class LauncherWindow(QWidget):
 
         self.batch_active = False
         self.stop_requested = False
+        self._close_after_stop = False
         self.current_run_index = 0
         self.total_runs = 1
         self.current_plan: Optional[dict] = None
@@ -3958,6 +3976,12 @@ class LauncherWindow(QWidget):
 
     def closeEvent(self, event):
         self._stop_stream_verification("")
+        if self.batch_active or self.process is not None:
+            self._close_after_stop = True
+            self._stop_run()
+            event.ignore()
+            return
+        self.process_launch_tracer.stop()
         super().closeEvent(event)
 
     def _sync_mode_ui(self):
@@ -5040,6 +5064,11 @@ class LauncherWindow(QWidget):
 
     def _finish_batch(self, message: str):
         LOGGER.info("finish_batch: %s", message)
+        restore_hiz = bool(
+            self.stop_requested
+            or self.current_run_timed_out
+            or getattr(self, "_close_after_stop", False)
+        )
         trace_path = self.process_launch_tracer.stop()
         if trace_path is not None:
             LOGGER.info("process launch trace log available: %s", trace_path)
@@ -5074,6 +5103,12 @@ class LauncherWindow(QWidget):
         self.stream_disconnect_signal_timer.stop()
         self._set_status(message)
         self._set_runtime(message)
+        if restore_hiz:
+            self._log_message("[Launcher] 异常/手动停止后由 Launcher 兜底关闭 HIZ 并恢复充电。\n")
+            set_hiz_mode(False)
+        if getattr(self, "_close_after_stop", False):
+            self._close_after_stop = False
+            QTimer.singleShot(0, self.close)
 
     def _cleanup_apps_between_runs(self, reason: str):
         if self.current_plan is None:
@@ -5976,7 +6011,32 @@ class LauncherWindow(QWidget):
             f"{self.current_plan['safe_minutes']} 分钟，正在停止本次用例。\n"
         )
         self._set_status("当前用例超过安全时间，正在停止本次运行。")
-        self.process.kill()
+        self._request_current_process_shutdown("超过安全时间")
+
+    def _request_current_process_shutdown(self, reason: str):
+        process = self.process
+        if process is None or process.state() == QProcess.ProcessState.NotRunning:
+            return
+        self._log_message(
+            f"[Launcher] {reason}：先发送终止信号，"
+            f"{RUN_STOP_FORCE_KILL_TIMEOUT_MS // 1000}s 后仍未退出再强制结束。\n"
+        )
+        process.terminate()
+        QTimer.singleShot(
+            RUN_STOP_FORCE_KILL_TIMEOUT_MS,
+            lambda target=process: self._force_kill_requested_process_if_running(target),
+        )
+
+    def _force_kill_requested_process_if_running(self, target_process):
+        if (
+            self.process is target_process
+            and target_process.state() != QProcess.ProcessState.NotRunning
+        ):
+            self._log_message(
+                "[Launcher] 子进程未在宽限时间内退出，执行强制结束。\n",
+                level=logging.WARNING,
+            )
+            target_process.kill()
 
     def _prepare_capture_mode_for_plan(self, plan: dict, issues: ValidationIssues) -> bool:
         screen_mode = normalize_launcher_screen_mode(plan.get("screen_mode") or "2")
@@ -6688,7 +6748,7 @@ class LauncherWindow(QWidget):
 
         self._log_message("\n[Launcher] 正在停止当前子进程，并取消后续运行...\n")
         self.preview_timer.stop()
-        self.process.kill()
+        self._request_current_process_shutdown("手动停止")
 
 
 def _run_helper_command(args: argparse.Namespace) -> int:

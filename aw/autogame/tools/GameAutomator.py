@@ -64,6 +64,10 @@ class GameAutomator:
             stream_client=self.client,
         )
         self.is_cleaned_up = False
+        self._cleanup_lock = threading.Lock()
+        self._client_stop_lock = threading.Lock()
+        self._monitor_stop_event = threading.Event()
+        self._monitor_thread = None
 
         atexit.register(self.cleanup)
 
@@ -129,15 +133,34 @@ class GameAutomator:
 
     def cleanup(self, app_list = ()):
         """彻底清理：恢复硬件模式并关闭所有应用。通常在所有测试结束后手动调用。"""
-        if self.is_cleaned_up: return
-        self.is_cleaned_up = True
+        cleanup_lock = getattr(self, "_cleanup_lock", None)
+        if cleanup_lock is None:
+            cleanup_lock = threading.Lock()
+            self._cleanup_lock = cleanup_lock
+        with cleanup_lock:
+            if self.is_cleaned_up:
+                return
+            self.is_cleaned_up = True
 
         print("\n>>> 开始执行深度清理程序...")
+        monitor_stop_event = getattr(self, "_monitor_stop_event", None)
+        if monitor_stop_event is not None:
+            monitor_stop_event.set()
+
         try:
             self.processor.stop()
-            self.client.stop()
-        except:
-            pass
+        except Exception as exc:
+            print(f"[Cleanup] FrameWorker 停止失败: {exc}")
+
+        self._stop_client("Cleanup")
+
+        monitor_thread = getattr(self, "_monitor_thread", None)
+        if (
+            monitor_thread is not None
+            and monitor_thread.is_alive()
+            and threading.current_thread() is not monitor_thread
+        ):
+            monitor_thread.join(timeout=1.0)
 
         self._set_hiz_mode(False)
 
@@ -153,15 +176,32 @@ class GameAutomator:
             pass
         print(">>> 环境已恢复。")
 
+    def _stop_client(self, source):
+        client_stop_lock = getattr(self, "_client_stop_lock", None)
+        if client_stop_lock is None:
+            client_stop_lock = threading.Lock()
+            self._client_stop_lock = client_stop_lock
+        with client_stop_lock:
+            try:
+                self.client.stop()
+                return True
+            except Exception as exc:
+                print(f"[{source}] 视频流停止失败: {exc}")
+                return False
+
     def _monitor_worker(self):
         print("[监控] 任务状态监控已启动...")
-        while True:
+        stop_event = getattr(self, "_monitor_stop_event", None)
+        while stop_event is None or not stop_event.is_set():
             # 只要 processor 停了，不管是 finished 还是意外中断
             if getattr(self.processor, 'finished', False) or not self.processor.running:
                 print("\n[业务通知] 流程结束，正在中断流连接...")
-                self.client.stop()
+                self._stop_client("监控")
                 break
-            time.sleep(0.5)
+            if stop_event is not None:
+                stop_event.wait(0.5)
+            else:
+                time.sleep(0.5)
 
     def start(self):
         try:
@@ -169,8 +209,13 @@ class GameAutomator:
 
             self.processor.start()
 
-            monitor_thread = threading.Thread(target=self._monitor_worker, daemon=True)
-            monitor_thread.start()
+            self._monitor_stop_event.clear()
+            self._monitor_thread = threading.Thread(
+                target=self._monitor_worker,
+                daemon=True,
+                name="GameAutomatorMonitor",
+            )
+            self._monitor_thread.start()
 
             print(">>> 正在启动视频流服务（阻塞中）...")
             if self.screen_mode == "0":

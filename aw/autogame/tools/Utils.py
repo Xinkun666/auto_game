@@ -819,8 +819,10 @@ def find_template_center_multiscale(target_img, template_input, threshold=0.7, m
         return best_match[1]
     return None
 
-def run_shell(cmd: str, r = False):
+def run_shell(cmd: str, r=False, timeout=None):
     try:
+        if timeout is None:
+            timeout = float(os.environ.get("AUTOGAME_HDC_COMMAND_TIMEOUT_SECONDS", "10"))
         hdc_args = hdc_command_args(cmd)
         if r:
             result = subprocess.run(
@@ -832,6 +834,7 @@ def run_shell(cmd: str, r = False):
                 text=True,
                 encoding="utf-8",
                 errors="ignore",
+                timeout=timeout,
                 **hidden_subprocess_kwargs(),
             )
             output = "\n".join(
@@ -849,10 +852,17 @@ def run_shell(cmd: str, r = False):
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                timeout=timeout,
                 **hidden_subprocess_kwargs(),
             )
             return None
-        subprocess.run(cmd, shell=True, check=True, **hidden_subprocess_kwargs())
+        subprocess.run(
+            cmd,
+            shell=True,
+            check=True,
+            timeout=timeout,
+            **hidden_subprocess_kwargs(),
+        )
     except Exception as e:
         print(f"命令执行失败: {cmd}\n{e}")
         if r:

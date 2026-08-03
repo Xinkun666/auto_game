@@ -43,6 +43,7 @@ def resolve_first_frame_timeout():
 
 
 class RpcManager(object):
+    STOP_RPC_TIMEOUT_SECONDS = 2.0
 
     def __init__(self, host: str, port: int, on_first_frame_timeout=None) -> None:
         logger.info("RpcManager port: %s", port)
@@ -56,6 +57,8 @@ class RpcManager(object):
         self._timeout_timer = None
         self._first_frame_timeout_triggered = False
         self._rpc_call = None
+        self._stop_lock = threading.Lock()
+        self._stopped = False
 
     def _on_first_frame_timeout(self):
         """首帧超时回调，取消gRPC流"""
@@ -106,12 +109,34 @@ class RpcManager(object):
         """
         stop screen copy
         """
-        if self._timeout_timer:
-            self._timeout_timer.cancel()
-            self._timeout_timer = None
+        with self._stop_lock:
+            if self._stopped:
+                return
+            self._stopped = True
+            if self._timeout_timer:
+                self._timeout_timer.cancel()
+                self._timeout_timer = None
+            rpc_call = self._rpc_call
+            self._rpc_call = None
+
+        if rpc_call is not None:
+            try:
+                rpc_call.cancel()
+            except Exception as e:
+                logger.warning("cancel scrcpy stream warning: %s", e)
         try:
-            self.stub.onEnd(scrcpy_pb2.Empty())
+            self.stub.onEnd(
+                scrcpy_pb2.Empty(),
+                timeout=self.STOP_RPC_TIMEOUT_SECONDS,
+            )
         except grpc.RpcError as e:
             logger.error("stop scrcpy error: %s", e)
             if self.screenCapCallback is not None:
                 self.screenCapCallback.on_exception(e)
+        except Exception as e:
+            logger.error("stop scrcpy unexpected error: %s", e)
+        finally:
+            try:
+                self.channel.close()
+            except Exception as e:
+                logger.warning("close scrcpy grpc channel warning: %s", e)

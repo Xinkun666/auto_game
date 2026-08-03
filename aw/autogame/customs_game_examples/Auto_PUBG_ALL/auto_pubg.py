@@ -200,6 +200,7 @@ def initialize_runtime():
     running_manager.pause_sp_callback = pause_sp_after_death
     driving_manager.pause_sp_callback = pause_sp_after_death
     searching_house_manager.abort_callback = should_abort_searching
+    searching_house_manager.replay_abort_callback = should_abort_nanda_replay
     searching_house_manager.can_finish_callback = lambda w: phase_timer.is_completed(PHASE_SEARCHING)
     running_manager.terminal_state_callback = handle_terminal_state
     driving_manager.terminal_state_callback = handle_terminal_state
@@ -367,15 +368,20 @@ def should_abort_searching(w: "FrameWorker"):
         return False
 
     if phase_timer.is_completed(PHASE_SEARCHING):
-        w.frame_log(
-            f"搜房阶段 {phase_timer.get_duration_minutes_label(PHASE_SEARCHING)} 分钟已用完，"
-            "强制切换到跑图阶段",
-            log_type=FrameLogType.TIME,
-        )
-        finish_searching_and_enter_running(w, "搜房阶段计时已用完")
         return True
 
     return False
+
+
+def should_abort_nanda_replay(w: "FrameWorker"):
+    """回放已开始后不再因搜房计时到期中断。
+
+    死亡、用例结束或外部已切走搜房阶段仍属于必须立即中止的情况。
+    """
+    _require_runtime()
+    if w.current_stage != "搜房阶段":
+        return True
+    return handle_terminal_state(w, "南大回放")
 
 
 def recover_bad_landing_to_r_city(w: "FrameWorker", target, reason: str):
@@ -907,6 +913,21 @@ def on_stage(w: "FrameWorker"):
     if w.current_stage == "搜房阶段":
         handle_sp_start(w)
         if should_abort_searching(w):
+            # 南大取景/匹配也会调用 should_abort_searching。计时到期时，
+            # 内层只返回中止信号，等触控和感知分组清理完成后，
+            # 再由这个最外层阶段入口统一执行出房与跑图交接。
+            # 已经开始的南大回放使用独立的中止回调，会先完整回放。
+            if (
+                w.current_stage == "搜房阶段"
+                and phase_timer.is_completed(PHASE_SEARCHING)
+            ):
+                w.frame_log(
+                    f"搜房阶段 "
+                    f"{phase_timer.get_duration_minutes_label(PHASE_SEARCHING)} "
+                    "分钟已用完，安全结束当前搜房动作后切换到跑图阶段",
+                    log_type=FrameLogType.TIME,
+                )
+                finish_searching_and_enter_running(w, "搜房阶段计时已用完")
             return
 
         if handle_priority_stage_jump_forward(w, "搜房阶段"):

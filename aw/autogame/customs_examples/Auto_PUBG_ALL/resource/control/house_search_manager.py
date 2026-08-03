@@ -289,6 +289,7 @@ class HouseSearchManager:
             monotonic=True,
         )
         self.abort_callback = None
+        self.replay_abort_callback = None
         self.can_finish_callback = None
         self.finish_callback = None
         self.avoid_angle_ref = None
@@ -543,6 +544,16 @@ class HouseSearchManager:
             return bool(callback(w))
         except Exception as exc:
             w.frame_log(f"[Searching] 中断检查失败: {exc}")
+            return False
+
+    def _should_abort_nanda_replay(self, w: 'FrameWorker'):
+        callback = getattr(self, "replay_abort_callback", None)
+        if callback is None:
+            return self._should_abort(w)
+        try:
+            return bool(callback(w))
+        except Exception as exc:
+            w.frame_log(f"[NandaReplay] 回放中断检查失败: {exc}")
             return False
 
     def _can_finish_searching(self, w: 'FrameWorker'):
@@ -2257,6 +2268,7 @@ class HouseSearchManager:
             phase_label=str(phase_label),
             refresh_frame=lambda reason='': self._refresh_frame_and_handle_jump(w, reason),
             should_abort=lambda: self._should_abort(w),
+            should_abort_replay=lambda: self._should_abort_nanda_replay(w),
             is_outside=lambda: self._get_house_scene(w)
             in {self.HOUSE_OUTDOOR, self.HOUSE_ROOFTOP},
             refresh_context=lambda reason='': self._refresh_nanda_search_context(

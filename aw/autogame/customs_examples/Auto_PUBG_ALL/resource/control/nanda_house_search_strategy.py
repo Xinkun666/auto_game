@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Callable, Mapping, Optional, Sequence, Tuple, TYPE_CHECKING
 
@@ -70,6 +70,7 @@ class NandaSearchContext:
     refresh_frame: Callable[[str], bool]
     should_abort: Callable[[], bool]
     is_outside: Callable[[], bool]
+    should_abort_replay: Optional[Callable[[], bool]] = None
     refresh_context: Optional[
         Callable[[str], Optional["NandaSearchContext"]]
     ] = None
@@ -192,6 +193,30 @@ class NandaHouseSearchStrategy:
             if callable(reset):
                 reset()
 
+    @staticmethod
+    def _abort_result_after_exception(
+        context: NandaSearchContext,
+        message: str,
+        *,
+        match: Optional[NandaRoomMatch] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> Optional[NandaSearchResult]:
+        """将阶段结束引起的清理异常视为正常中止。
+
+        南大取景、匹配和回放在持续操作中会轮询 should_abort。
+        搜房计时到期后，这些操作会先抬指/恢复感知分组再退出；
+        退出过程中报出的“搜房阶段已中止”不应进入独占模式失败分支。
+        """
+        if not context.should_abort():
+            return None
+        return NandaSearchResult(
+            NandaSearchStatus.ABORTED,
+            message,
+            room_id=None if match is None else match.room_id,
+            replay_path=None if match is None else match.replay_path,
+            metadata=dict(metadata or {}),
+        )
+
     def validate_ready(self) -> Optional[NandaSearchResult]:
         """在人物移动前检查南大管线的本地资产与依赖。"""
         if self._ready_checked:
@@ -299,6 +324,18 @@ class NandaHouseSearchStrategy:
             try:
                 pose_result = self.pose_preparer.prepare(current_context)
             except Exception as exc:
+                aborted = self._abort_result_after_exception(
+                    current_context,
+                    f"恢复标准门前回放位姿时搜房阶段已中止: {exc}",
+                    match=match,
+                    metadata={
+                        "phase": "pose_restore",
+                        "cycle": cycle,
+                        "exception": type(exc).__name__,
+                    },
+                )
+                if aborted is not None:
+                    return current_context, aborted
                 return current_context, NandaSearchResult(
                     NandaSearchStatus.FAILED,
                     f"恢复标准门前回放位姿异常: {exc}",
@@ -357,6 +394,13 @@ class NandaHouseSearchStrategy:
         try:
             pose_result = self.pose_preparer.prepare(context)
         except Exception as exc:
+            aborted = self._abort_result_after_exception(
+                context,
+                f"门前位姿标准化时搜房阶段已中止: {exc}",
+                metadata={"phase": "pose", "exception": type(exc).__name__},
+            )
+            if aborted is not None:
+                return aborted
             return NandaSearchResult(
                 NandaSearchStatus.FAILED,
                 f"门前位姿标准化异常: {exc}",
@@ -374,6 +418,16 @@ class NandaHouseSearchStrategy:
         try:
             match = self.matcher.match(context)
         except NandaViewPreparationError as exc:
+            aborted = self._abort_result_after_exception(
+                context,
+                f"door frame 取景时搜房阶段已中止: {exc}",
+                metadata={
+                    "phase": "view_preparation",
+                    "exception": type(exc).__name__,
+                },
+            )
+            if aborted is not None:
+                return aborted
             return NandaSearchResult(
                 NandaSearchStatus.FAILED,
                 f"door frame 房屋取景准备异常: {exc}",
@@ -383,6 +437,13 @@ class NandaHouseSearchStrategy:
                 },
             )
         except Exception as exc:
+            aborted = self._abort_result_after_exception(
+                context,
+                f"房型匹配时搜房阶段已中止: {exc}",
+                metadata={"phase": "match", "exception": type(exc).__name__},
+            )
+            if aborted is not None:
+                return aborted
             return NandaSearchResult(
                 NandaSearchStatus.FAILED,
                 f"房型匹配异常: {exc}",
@@ -390,6 +451,12 @@ class NandaHouseSearchStrategy:
             )
 
         if match is None:
+            if context.should_abort():
+                return NandaSearchResult(
+                    NandaSearchStatus.ABORTED,
+                    "房型匹配期间搜房阶段已中止",
+                    metadata={"phase": "match"},
+                )
             return NandaSearchResult(
                 NandaSearchStatus.NO_MATCH,
                 "未匹配到可用回放房型",
@@ -409,10 +476,34 @@ class NandaHouseSearchStrategy:
         )
         if pose_restore_result is not None:
             return pose_restore_result
+        if replay_context.should_abort():
+            return NandaSearchResult(
+                NandaSearchStatus.ABORTED,
+                "南大回放开始前搜房阶段已中止",
+                room_id=match.room_id,
+                replay_path=match.replay_path,
+                metadata={"phase": "replay"},
+            )
+
+        # 回放正式开始后，搜房计时到期只记录待交接状态，
+        # 不打断当前 DSL。死亡/结束/外部切阶段由独立回调仍可立即中止。
+        if callable(replay_context.should_abort_replay):
+            replay_context = replace(
+                replay_context,
+                should_abort=replay_context.should_abort_replay,
+            )
 
         try:
             result = self.replay_executor.replay(replay_context, match)
         except Exception as exc:
+            aborted = self._abort_result_after_exception(
+                replay_context,
+                f"回放时搜房阶段已中止: {exc}",
+                match=match,
+                metadata={"phase": "replay", "exception": type(exc).__name__},
+            )
+            if aborted is not None:
+                return aborted
             return NandaSearchResult(
                 NandaSearchStatus.FAILED,
                 f"回放执行异常: {exc}",

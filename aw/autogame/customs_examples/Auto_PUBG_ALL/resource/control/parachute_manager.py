@@ -141,15 +141,22 @@ class ParachuteManager:
     @staticmethod
     def _extract_location(w: 'FrameWorker') -> Optional[Tuple[int, int]]:
         raw_location = w.get_info('location')
-        if isinstance(raw_location, (list, tuple)) and len(raw_location) == 1:
-            raw_location = raw_location[0]
-        try:
-            x, y = raw_location[0], raw_location[1]
-            if x is None or y is None:
+        # location 特殊处理器在真实运行时返回 ((x, y), mode)，
+        # 而部分调用和旧测试会直接返回 (x, y) 或 [(x, y)]。
+        # 逐层取第一项，直到找到可转换的坐标对。
+        for _ in range(3):
+            if not isinstance(raw_location, (list, tuple)) or not raw_location:
                 return None
-            return int(round(float(x))), int(round(float(y)))
-        except (TypeError, ValueError, IndexError):
-            return None
+            if len(raw_location) >= 2:
+                x, y = raw_location[0], raw_location[1]
+                if x is None or y is None:
+                    return None
+                try:
+                    return int(round(float(x))), int(round(float(y)))
+                except (TypeError, ValueError):
+                    pass
+            raw_location = raw_location[0]
+        return None
 
     def _plan_target_on_route(
         self,

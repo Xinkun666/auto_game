@@ -104,6 +104,10 @@ class SPControllerBase:
         return self._is_paused
 
     @property
+    def is_stoped(self):
+        return self._effective_time_at_stop is not None
+
+    @property
     def has_started(self):
         return self._started_ever
 
@@ -318,8 +322,11 @@ class SPControllerBase:
     def start(self, sp_area_name=None):
         if self._is_paused:
             return self.resume()
-        if self._start_time is not None and self._effective_time_at_stop is None:
+        if self._start_time is not None:  # 已经启动过就不再启动
             return True
+        if self._effective_time_at_stop is not None:  # 已经停止后sp就退出了，需要直接返回
+            self._log_missing()
+            return False
         if sp_area_name is not None:
             # sp_area_name 只能是sp区域名。
             sp_area = self.w.get_info(sp_area_name)

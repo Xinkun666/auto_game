@@ -28,6 +28,8 @@ class ParachuteManager:
     ROUTE_MISS_CONFIRM_TOLERANCE: int = 35  # 航线错过目标时，后一帧需要明显远离才确认重开
     SUSTAINED_ROUTE_MISS_INCREASE_FRAMES: int = 3  # 错过最近点后，连续递增多少帧才确认重开
     ROUTE_MIN_STEP: float = 1.0  # 两个航线采样点之间至少要有可辨识位移
+    ROUTE_SAMPLE_MAX_STEP: float = 20.0  # 航线取点只接受小于 20 像素的连续位移
+    ROUTE_SEGMENT_ANGLE_TOLERANCE: float = 15.0  # 相邻两段近似共线的最大夹角
     PLANNED_DIRECTION_TOLERANCE: int = 5  # 提前对准计划跳伞方向的允许误差
     PLANNED_DIRECTION_MAX_STEPS: int = 2  # 每帧最多执行的方向校准步数
     PLANNED_JUMP_POINT_TOLERANCE: float = 15.0  # 靠近计划航线交点时的允许误差
@@ -202,36 +204,67 @@ class ParachuteManager:
         if not self.route_samples:
             self.route_samples = [location]
             w.frame_log(
-                f"[Parachute] 已取得第1个航线点 {location}，等待连续第2个移动点"
+                f"[Parachute] 已取得第1个航线点 {location}，等待第2个连续点"
             )
             return {}
 
         previous = self.route_samples[-1]
         step = get_distance(previous, location)
-        if (
-            not self._is_valid_distance(step)
-            or step < self.ROUTE_MIN_STEP
-            or step > self.JUMP_LOCATION_CONTINUITY_MAX_STEP
-        ):
-            if self._is_valid_distance(step) and step >= self.ROUTE_MIN_STEP:
+        if not self._is_valid_distance(step) or step >= self.ROUTE_SAMPLE_MAX_STEP:
+            if self._is_valid_distance(step) and step >= self.ROUTE_SAMPLE_MAX_STEP:
                 self.route_samples = [location]
             w.frame_log(
-                f"[Parachute] 第2个航线点暂不可用: prev={previous}, "
+                f"[Parachute] 航线点位移过大: prev={previous}, "
                 f"current={location}, step={step:.2f}, "
-                f"有效范围={self.ROUTE_MIN_STEP:.1f}-"
-                f"{self.JUMP_LOCATION_CONTINUITY_MAX_STEP}；继续取点"
+                f"需要 step < {self.ROUTE_SAMPLE_MAX_STEP:.1f}；从当前点重新取样"
             )
             return {}
 
-        self.route_samples = [previous, location]
-        ux = (location[0] - previous[0]) / step
-        uy = (location[1] - previous[1]) / step
+        if step < self.ROUTE_MIN_STEP:
+            w.frame_log(
+                f"[Parachute] 航线点位移不足: prev={previous}, "
+                f"current={location}, step={step:.2f}, "
+                f"需要 step >= {self.ROUTE_MIN_STEP:.1f}；保留原线段继续取点"
+            )
+            return {}
+
+        if len(self.route_samples) == 1:
+            self.route_samples.append(location)
+            w.frame_log(
+                f"[Parachute] 已取得第2个航线点 {location}, "
+                f"P1->P2 step={step:.2f}，等待第3个连续点"
+            )
+            return {}
+
+        first, second = self.route_samples[-2:]
+        first_dx = float(second[0] - first[0])
+        first_dy = float(second[1] - first[1])
+        second_dx = float(location[0] - second[0])
+        second_dy = float(location[1] - second[1])
+        dot = first_dx * second_dx + first_dy * second_dy
+        cross = first_dx * second_dy - first_dy * second_dx
+        angle_delta = math.degrees(math.atan2(abs(cross), dot))
+        if angle_delta > self.ROUTE_SEGMENT_ANGLE_TOLERANCE:
+            self.route_samples = [second, location]
+            w.frame_log(
+                f"[Parachute] 相邻航线段未匹配: {first}->{second} 与 "
+                f"{second}->{location}, angle={angle_delta:.2f}° > "
+                f"{self.ROUTE_SEGMENT_ANGLE_TOLERANCE:.1f}°；滚动保留后一段"
+            )
+            return {}
+
+        self.route_samples = [first, second, location]
+        route_span = get_distance(first, location)
+        ux = (location[0] - first[0]) / route_span
+        uy = (location[1] - first[1]) / route_span
         self.route_unit = (ux, uy)
-        self.route_origin = previous
-        current_progress = step
+        self.route_origin = first
+        current_progress = route_span
         w.frame_log(
-            f"[Parachute] 两点确认航线: {previous} -> {location}, "
-            f"step={step:.2f}, unit=({ux:.4f},{uy:.4f})"
+            f"[Parachute] 三点两段一次确认航线: "
+            f"{first}->{second}->{location}, "
+            f"steps=({get_distance(first, second):.2f},{step:.2f}), "
+            f"angle={angle_delta:.2f}°, unit=({ux:.4f},{uy:.4f})"
         )
 
         plans = []
@@ -737,7 +770,7 @@ class ParachuteManager:
 
     def _restart_match_for_unreachable_targets(self, w: 'FrameWorker'):
         w.frame_log(
-            f"[Parachute] 两点航线确认后所有目标均不可达: "
+            f"[Parachute] 三点两段航线确认后所有目标均不可达: "
             f"route={self.route_samples}, candidates={self.target_candidates}, "
             f"threshold={self.TRIGGER_DIST}；切换结束阶段开始下一把"
         )

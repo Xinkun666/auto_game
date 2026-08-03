@@ -224,9 +224,8 @@ def pause_sp_after_death(w: "FrameWorker"):
     _require_runtime()
     if not SP_RECORDING_ENABLED:
         return
-    if w.sp_controller.pause():
+    if w.sp_controller.is_recording and w.sp_controller.pause():
         time.sleep(0.5)
-        phase_timer.mark_sp_stopped()
 
 
 def prepare_round(w: "FrameWorker" = None):
@@ -282,15 +281,15 @@ def handle_sp_start(w: "FrameWorker"):
     _require_runtime()
     if not SP_RECORDING_ENABLED:
         return
-    if not phase_timer.should_start_sp():
+    if not phase_timer.landed:
         return
-    w.frame_log("开始 sp 录制", log_type=FrameLogType.TIME)
+    if w.sp_controller.is_recording or w.sp_controller.is_saved:
+        return
     if phase_timer.start_game_time is not None:
         running_manager.set_game_time(phase_timer.start_game_time)
         driving_manager.set_game_time(phase_timer.start_game_time)
     if w.sp_controller.start("sp"):
         time.sleep(0.5)
-        phase_timer.mark_sp_started()
         if w.sp_controller.marathon_enabled:
             w.frame_log(
                 f"马拉松 SP 目标 {w.sp_controller.target_duration_seconds / 60:g} 分钟，"
@@ -303,12 +302,10 @@ def handle_sp_stop(w: "FrameWorker"):
     _require_runtime()
     if not SP_RECORDING_ENABLED:
         return
-    if not phase_timer.sp_recording:
+    if not w.sp_controller.is_recording:
         return
-    w.frame_log("停止 sp 录制", log_type=FrameLogType.TIME)
     if w.sp_controller.pause():
         time.sleep(0.5)
-        phase_timer.mark_sp_stopped()
 
 
 def _has_rank_finish_info(w: "FrameWorker") -> bool:
@@ -335,7 +332,7 @@ def finalize_marathon_if_target_reached(w: "FrameWorker") -> bool:
     _require_runtime()
     if not SP_RECORDING_ENABLED or not w.sp_controller.marathon_enabled:
         return False
-    if not phase_timer.sp_recording or not w.sp_controller.target_reached:
+    if not w.sp_controller.is_recording or not w.sp_controller.target_reached:
         return False
 
     w.frame_log(
@@ -571,11 +568,9 @@ def finalize_automation(w: "FrameWorker"):
     if w.current_stage == "跑图阶段":
         running_manager.stop_auto_forward(w)
 
-    if SP_RECORDING_ENABLED and not phase_timer.sp_saved:
+    if SP_RECORDING_ENABLED and not w.sp_controller.is_saved:
         if w.sp_controller.stop():
             time.sleep(1)
-            phase_timer.mark_sp_stopped()
-            phase_timer.mark_sp_saved()
 
     final_shutdown_pending = True
     w.change_stage("结束阶段")

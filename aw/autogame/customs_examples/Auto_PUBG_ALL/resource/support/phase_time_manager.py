@@ -1,5 +1,3 @@
-import json
-import os
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Set
@@ -88,9 +86,6 @@ class PhaseTimeManager:
         self.round_index = 0
         self.landed = False
         self.start_game_time: Optional[float] = None
-        self.sp_started_ever = False
-        self.sp_recording = False
-        self.sp_saved = False
         self.case_loop_count = 1
         self.case_loop_index = 1
         self.frame_logger = None
@@ -141,31 +136,6 @@ class PhaseTimeManager:
             f"{self._format_phase_minutes(state.duration)} 分钟"
         )
         return True
-
-    def _write_sp_state(self, event_name: str):
-        archive_dir = os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()
-        if not archive_dir:
-            return
-
-        try:
-            os.makedirs(archive_dir, exist_ok=True)
-            payload = {
-                "event": event_name,
-                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "round_index": self.round_index,
-                "sp_started_ever": self.sp_started_ever,
-                "sp_recording": self.sp_recording,
-                "sp_saved": self.sp_saved,
-                "last_stage": self.last_stage,
-                "active_phase": self.active_phase,
-            }
-            signal_path = os.path.join(archive_dir, "sp_recording_state.json")
-            tmp_path = signal_path + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, signal_path)
-        except Exception as exc:
-            self._frame_log(f"写入 sp 状态失败: {exc}")
 
     def _phase_for_stage(self, stage_name: Optional[str]) -> Optional[str]:
         return self.stage_phase_map.get(stage_name)
@@ -299,12 +269,9 @@ class PhaseTimeManager:
 
         self._reset_phase_progress()
         self.case_loop_index += 1
-        self.sp_recording = False
-        self.sp_saved = False
         self._frame_log(
             f"准备进入第 {self.case_loop_index}/{self.case_loop_count} 次循环"
         )
-        self._write_sp_state("case_loop_advanced")
         return True
 
     def get_remaining(self, phase_name: str) -> float:
@@ -330,31 +297,10 @@ class PhaseTimeManager:
     def need_drive(self) -> bool:
         return not self.is_completed(PHASE_DRIVING)
 
-    def should_start_sp(self) -> bool:
-        return self.landed and not self.sp_recording and not self.sp_saved
-
     def get_match_elapsed(self) -> float:
         if self.start_game_time is None:
             return 0.0
         return max(0.0, time.time() - self.start_game_time)
-
-    def mark_sp_started(self):
-        self.sp_started_ever = True
-        self.sp_recording = True
-        self._frame_log("sp 记录已开始")
-        self._write_sp_state("sp_started")
-
-    def mark_sp_stopped(self):
-        if self.sp_recording:
-            self._frame_log("sp 记录已停止")
-        self.sp_recording = False
-        self._write_sp_state("sp_stopped")
-
-    def mark_sp_saved(self):
-        self.sp_saved = True
-        self._frame_log("sp 数据已保存")
-        self._write_sp_state("sp_saved")
-
 
 def format_phase_seconds(seconds: float) -> str:
     seconds = max(0, int(round(seconds)))

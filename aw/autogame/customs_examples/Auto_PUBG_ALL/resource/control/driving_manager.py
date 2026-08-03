@@ -1813,9 +1813,9 @@ class DrivingManager:
         if callable(self.pause_sp_callback):
             self.pause_sp_callback(w)
         else:
-            self._frame_action_executed = True
-            w.click("sp")
-            time.sleep(0.5)
+            if w.sp_controller.is_recording and w.sp_controller.pause():
+                self._frame_action_executed = True
+                time.sleep(0.5)
         time.sleep(2)
         self._frame_action_executed = True
         w.click("观战对手")

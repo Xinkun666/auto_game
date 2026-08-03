@@ -48,6 +48,7 @@ from aw.autogame.tools.GameLaunchProfile import DEFAULT_SP_PACKAGE, should_use_s
 from aw.autogame.tools.FrameLog import FrameLogType, parse_frame_log_transport
 from aw.autogame.tools.Utils import archive_run_artifacts, get_display_rotation, get_resolution, get_screen_mode, resolve_run_archive_dir, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
+from aw.autogame.common.SPController.SPArea import build_sp_save_shell_command
 
 class AppPaths(NamedTuple):
     app_dir: Path
@@ -127,8 +128,6 @@ STREAM_CONNECTED_MARKERS = (
     "[HDC] First frame received.",
 )
 REBOOT_RELAUNCH_DELAY_SECONDS = 80
-STREAM_DISCONNECT_SP_LONG_PRESS_MS = 3000
-STREAM_DISCONNECT_SP_NORM_POS = (0.048, 0.295)
 STREAM_DISCONNECT_GRACEFUL_STOP_TIMEOUT_MS = 60000
 STREAM_DISCONNECT_FORCE_KILL_TIMEOUT_MS = 5000
 RUN_STOP_FORCE_KILL_TIMEOUT_MS = 15000
@@ -141,7 +140,8 @@ STREAM_DISCONNECT_PATTERNS = (
 )
 SP_RECORD_EVER_STARTED_MARKERS = (
     "sp 记录已开始",
-    "sp 记录已停止",
+    "sp 记录已暂停",
+    "sp 记录已恢复",
     "sp 数据已保存",
 )
 LAUNCHER_FAILURE_SIGNAL_FILE = "launcher_failure_signal.json"
@@ -5779,13 +5779,11 @@ class LauncherWindow(QWidget):
         else:
             screen_w, screen_h = 2832, 1316
 
-        x = int(round(screen_w * STREAM_DISCONNECT_SP_NORM_POS[0]))
-        y = int(round(screen_h * STREAM_DISCONNECT_SP_NORM_POS[1]))
-        command = f"uinput -T -d {x} {y} -i {STREAM_DISCONNECT_SP_LONG_PRESS_MS} -u {x} {y}"
+        command, x, y, duration_ms = build_sp_save_shell_command(screen_w, screen_h)
         label = str(reason_label or "SP保全").strip() or "SP保全"
 
         self._log_message(
-            f"[Launcher] {label}：尝试长按 SP 保存，pos=({x},{y}), duration={STREAM_DISCONNECT_SP_LONG_PRESS_MS}ms。\n"
+            f"[Launcher] {label}：尝试长按 SP 保存，pos=({x},{y}), duration={duration_ms}ms。\n"
         )
         result = run_hdc_shell(command)
         ok = result is not None

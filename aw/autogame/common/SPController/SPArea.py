@@ -5,11 +5,14 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
+from aw.autogame.tools.FrameLog import FrameLogType
+
 if TYPE_CHECKING:
     from aw.autogame.tools.GameFrameWorker import FrameWorker
 
 
 SP_SAVE_LONG_PRESS_MS = 3000
+SP_DEFAULT_NORM_POSITION = (0.048, 0.295)
 MARATHON_DURATION_ENV = "AUTOGAME_MARATHON_DURATION_MINUTES"
 MARATHON_END_BATTERY_ENV = "AUTOGAME_MARATHON_END_BATTERY_PERCENT"
 SP_CONTROLLER_STATE_FILE = "sp_controller_state.json"
@@ -38,6 +41,19 @@ def parse_battery_percent(value: Any) -> Optional[int]:
 def parse_marathon_end_battery_percent(value: Any) -> int:
     percent = parse_battery_percent(value)
     return percent if percent is not None and percent > 0 else 0
+
+
+def build_sp_save_shell_command(
+    screen_width: int,
+    screen_height: int,
+    norm_position=SP_DEFAULT_NORM_POSITION,
+    duration_ms: int = SP_SAVE_LONG_PRESS_MS,
+):
+    x = int(round(int(screen_width) * float(norm_position[0])))
+    y = int(round(int(screen_height) * float(norm_position[1])))
+    duration_ms = max(1, int(duration_ms))
+    command = f"uinput -T -d {x} {y} -i {duration_ms} -u {x} {y}"
+    return command, x, y, duration_ms
 
 
 class SPControllerBase:
@@ -86,6 +102,22 @@ class SPControllerBase:
     @property
     def is_paused(self):
         return self._is_paused
+
+    @property
+    def has_started(self):
+        return self._started_ever
+
+    @property
+    def is_recording(self):
+        return (
+            self._start_time is not None
+            and self._effective_time_at_stop is None
+            and not self._is_paused
+        )
+
+    @property
+    def is_saved(self):
+        return self._effective_time_at_stop is not None
 
     @property
     def marathon_enabled(self):
@@ -137,7 +169,15 @@ class SPControllerBase:
         return str(result.get("executed", "True")).strip().lower() != "false"
 
     def _log_missing(self):
-        self.w.frame_log("找不到SP")
+        self._frame_log("找不到SP")
+
+    def _frame_log(self, message: str):
+        try:
+            self.w.frame_log(message, log_type=FrameLogType.TIME)
+        except TypeError as exc:
+            if "log_type" not in str(exc) and "keyword" not in str(exc):
+                raise
+            self.w.frame_log(message)
 
     def snapshot(self, event_name: str = "snapshot"):
         stopped = self._effective_time_at_stop is not None
@@ -145,10 +185,10 @@ class SPControllerBase:
         return {
             "event": event_name,
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "sp_started_ever": self._started_ever,
-            "sp_recording": started and not stopped and not self._is_paused,
+            "sp_started_ever": self.has_started,
+            "sp_recording": self.is_recording,
             "sp_paused": started and not stopped and self._is_paused,
-            "sp_saved": stopped,
+            "sp_saved": self.is_saved,
             "marathon_enabled": self.marathon_enabled,
             "target_duration_seconds": self.target_duration_seconds,
             "effective_time_seconds": self.effective_time,
@@ -299,7 +339,7 @@ class SPControllerBase:
         self._is_paused = False
         self._effective_time_at_stop = None
         self._started_ever = True
-        self.w.frame_log("sp start")
+        self._frame_log("sp 记录已开始")
         self._write_state("sp_started")
         self.start_battery_monitor()
         if (
@@ -324,7 +364,7 @@ class SPControllerBase:
 
         self._is_paused = True
         self._pause_start = time.monotonic()
-        self.w.frame_log("sp paused")
+        self._frame_log("sp 记录已暂停")
         self._write_state("sp_paused")
         return True
 
@@ -342,7 +382,7 @@ class SPControllerBase:
             self._paused_time += now - self._pause_start
         self._is_paused = False
         self._pause_start = None
-        self.w.frame_log("sp resumed")
+        self._frame_log("sp 记录已恢复")
         self._write_state("sp_resumed")
         return True
 
@@ -362,7 +402,7 @@ class SPControllerBase:
         self._effective_time_at_stop = self.effective_time
         self._is_paused = False
         self._pause_start = None
-        self.w.frame_log("sp end")
+        self._frame_log("sp 数据已保存")
         self._write_state("sp_saved")
         self.shutdown()
         return True

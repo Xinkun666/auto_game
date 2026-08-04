@@ -154,6 +154,15 @@ DISMISS_REBOOT_PROMPT_ENV = "AUTOGAME_DISMISS_REBOOT_PROMPT"
 DEVICE_LOG_SETTLE_TIMEOUT_SECONDS = 3.0
 DEVICE_LOG_SETTLE_INTERVAL_SECONDS = 0.2
 HDC_SHELL_TIMEOUT_SECONDS = float(os.environ.get("AUTOGAME_HDC_SHELL_TIMEOUT_SECONDS", "5"))
+SP_ARTIFACT_PULL_TIMEOUT_SECONDS = float(
+    os.environ.get("AUTOGAME_SP_ARTIFACT_PULL_TIMEOUT_SECONDS", "120")
+)
+SP_ARTIFACT_REMOTE_PATHS = (
+    ("db", "/data/app/el2/100/database/com.huawei.hmsapp.hismartperf/entry/rdb/"),
+    ("data", "/data/app/el2/100/base/com.huawei.hmsapp.hismartperf/files"),
+    ("daemon", "/data/local/tmp/smartperf"),
+    ("daemon", "/data/local/tmp/smartperfDevice"),
+)
 STREAM_DISCONNECT_POLICY_PRESERVE = "preserve"
 STREAM_DISCONNECT_POLICY_DISABLED = "disabled"
 STREAM_DISCONNECT_POLICY_STOP_ONLY = "stop_only"
@@ -677,6 +686,50 @@ def _completed_process_text(result: subprocess.CompletedProcess) -> str:
     stderr = _decode_process_output(result.stderr)
     text = (stdout + stderr).strip()
     return text[:500]
+
+
+def pull_saved_sp_artifacts(
+    run_archive_dir: Path,
+    run_index: int,
+    hdc_executable: Optional[str] = None,
+    run_command=subprocess.run,
+) -> tuple[Path, list[dict]]:
+    batch_dir = Path(run_archive_dir).parent
+    record_dir = batch_dir / f"第{max(1, int(run_index))}次sp记录"
+    for local_name in ("db", "data", "daemon"):
+        (record_dir / local_name).mkdir(parents=True, exist_ok=True)
+
+    hdc = hdc_executable or resolve_hdc_executable()
+    results = []
+    for local_name, remote_path in SP_ARTIFACT_REMOTE_PATHS:
+        local_path = record_dir / local_name
+        command = [hdc, "file", "recv", remote_path, str(local_path)]
+        try:
+            completed = run_command(
+                command,
+                cwd=str(APP_DIR),
+                capture_output=True,
+                timeout=SP_ARTIFACT_PULL_TIMEOUT_SECONDS,
+                **hidden_subprocess_kwargs(),
+            )
+            results.append(
+                {
+                    "remote_path": remote_path,
+                    "local_path": str(local_path),
+                    "ok": completed.returncode == 0,
+                    "detail": _completed_process_text(completed),
+                }
+            )
+        except Exception as exc:
+            results.append(
+                {
+                    "remote_path": remote_path,
+                    "local_path": str(local_path),
+                    "ok": False,
+                    "detail": str(exc),
+                }
+            )
+    return record_dir, results
 
 
 def check_capture_stream_for_screen_mode(
@@ -6127,6 +6180,53 @@ class LauncherWindow(QWidget):
             log_exception(f"archive_run_outputs failed: run_no={run_no}")
             self._log_message("[Launcher] 运行产物归档失败，请查看 launcher_debug.log。\n", level=logging.ERROR)
 
+    def _pull_current_run_sp_artifacts(self, run_no: int) -> bool:
+        if not self._current_plan_uses_sp_recording():
+            return False
+
+        controller_state = self.current_run_sp_state.get("controller")
+        controller_saved = (
+            bool(controller_state.get("sp_saved"))
+            if isinstance(controller_state, dict)
+            else False
+        )
+        if not self.current_run_sp_state.get("sp_saved") and not controller_saved:
+            self._log_message(
+                f"[Launcher] 第 {run_no} 次未确认 SP 已保存，跳过手机端 SP 文件拉取。\n"
+            )
+            return False
+
+        archive_dir = self._resolve_current_run_archive_dir()
+        if archive_dir is None:
+            self._log_message(
+                f"[Launcher] 第 {run_no} 次 SP 已保存，但无法确定 game_cases 目录。\n",
+                level=logging.ERROR,
+            )
+            return False
+
+        self._set_status(f"SP 已保存，正在拉取第{run_no}次sp记录。")
+        QApplication.processEvents()
+        record_dir, results = pull_saved_sp_artifacts(archive_dir, run_no)
+        failed = [item for item in results if not item["ok"]]
+        for item in results:
+            level = logging.INFO if item["ok"] else logging.ERROR
+            result_text = "成功" if item["ok"] else "失败"
+            detail = f"，detail={item['detail']}" if item["detail"] else ""
+            self._log_message(
+                f"[Launcher] SP文件拉取{result_text}："
+                f"{item['remote_path']} -> {item['local_path']}{detail}\n",
+                level=level,
+            )
+
+        if failed:
+            self._set_status(
+                f"第{run_no}次 SP 记录部分拉取失败，请查看 Launcher 日志。"
+            )
+            return False
+
+        self._log_message(f"[Launcher] 第 {run_no} 次 SP 记录已保存到：{record_dir}\n")
+        return True
+
     def _discard_startup_disconnect_archive_dir(self):
         archive_dir = self.current_run_archive_dir
         if archive_dir is None or not archive_dir.exists():
@@ -6751,6 +6851,7 @@ class LauncherWindow(QWidget):
             self._discard_startup_disconnect_archive_dir()
         else:
             self._archive_run_outputs(run_no, exit_code)
+            self._pull_current_run_sp_artifacts(run_no)
         self.preview_timer.stop()
         if self.process is not None:
             self.process.deleteLater()

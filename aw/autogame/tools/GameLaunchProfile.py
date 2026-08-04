@@ -4,8 +4,17 @@ import os
 TEST_PROFILE_POWER = "power"
 TEST_PROFILE_FUNCTION = "function"
 TEST_PROFILE_MARATHON = "marathon"
+TEST_TYPE_POWER = "功耗测试"
+TEST_TYPE_FUNCTION = "功能测试"
+TEST_TYPE_MARATHON = "马拉松测试"
 DEFAULT_PUBG_GAME_PACKAGE = "com.tencent.tmgp.pubgmhd.hw"
 DEFAULT_SP_PACKAGE = "com.huawei.hmsapp.hismartperf"
+
+_TEST_TYPE_BY_PROFILE = {
+    TEST_PROFILE_POWER: TEST_TYPE_POWER,
+    TEST_PROFILE_FUNCTION: TEST_TYPE_FUNCTION,
+    TEST_PROFILE_MARATHON: TEST_TYPE_MARATHON,
+}
 
 
 def normalize_test_profile(profile) -> str:
@@ -15,6 +24,11 @@ def normalize_test_profile(profile) -> str:
     if value == TEST_PROFILE_MARATHON:
         return TEST_PROFILE_MARATHON
     return TEST_PROFILE_POWER
+
+
+def resolve_test_type(profile) -> str:
+    """Return the worker-facing test type for a Launcher test profile."""
+    return _TEST_TYPE_BY_PROFILE[normalize_test_profile(profile)]
 
 
 def should_use_sp_recording_for_profile(profile) -> bool:

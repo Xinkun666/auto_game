@@ -27,6 +27,7 @@ from aw.autogame.tools.FrameLog import (
     encode_frame_log_transport,
 )
 from aw.autogame.tools.GameSceneHandler import DEFAULT_GROUP_NAME, StageLogicController
+from aw.autogame.tools.GameLaunchProfile import normalize_test_profile, resolve_test_type
 from aw.autogame.tools.ProcessUtils import hdc_command_args, hidden_subprocess_kwargs
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -2182,6 +2183,10 @@ class FrameWorker(threading.Thread):
         self.stream_client = stream_client
         self.driver = driver
         self.logger = logger
+        self.test_profile = normalize_test_profile(
+            os.environ.get("AUTOGAME_TEST_PROFILE")
+        )
+        self.test_type = resolve_test_type(self.test_profile)
         self.running = False
         self.finished = False
         self.failed = False

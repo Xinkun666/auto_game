@@ -3558,14 +3558,17 @@ class LauncherWindow(QWidget):
             section_layout.addWidget(title_label)
             item_height = 26 if len(items) > 4 else 32
             for label_text, widget, field_width in items:
-                section_layout.addWidget(
-                    create_config_item(
-                        label_text,
-                        widget,
-                        field_width,
-                        item_height=item_height,
-                    ),
+                config_item = create_config_item(
+                    label_text,
+                    widget,
+                    field_width,
+                    item_height=item_height,
                 )
+                if widget is self.marathon_duration_field:
+                    self.marathon_duration_item = config_item
+                elif widget is self.marathon_end_battery_field:
+                    self.marathon_end_battery_item = config_item
+                section_layout.addWidget(config_item)
             section_layout.addStretch(1)
             return section
 
@@ -4051,6 +4054,8 @@ class LauncherWindow(QWidget):
     def _sync_test_profile_ui(self, _checked: bool = False):
         marathon_selected = self.marathon_test_radio.isChecked()
         editable = self.inputs_enabled
+        self.marathon_duration_item.setVisible(marathon_selected)
+        self.marathon_end_battery_item.setVisible(marathon_selected)
         self.marathon_duration_spin.setEnabled(editable and marathon_selected)
         self.marathon_end_battery_spin.setEnabled(editable and marathon_selected)
         self.run_count_spin.setEnabled(editable and not marathon_selected)

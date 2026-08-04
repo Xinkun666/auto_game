@@ -44,7 +44,12 @@ from PyQt6.QtWidgets import (
 )
 
 from aw.autogame.tools.ProcessUtils import hidden_subprocess_context, hidden_subprocess_kwargs, install_hidden_subprocess_patch, resolve_hdc_executable, start_hidden_subprocess_window_suppressor
-from aw.autogame.tools.GameLaunchProfile import DEFAULT_SP_PACKAGE, should_use_sp_recording_for_profile
+from aw.autogame.tools.GameLaunchProfile import (
+    DEFAULT_PUBG_GAME_PACKAGE,
+    DEFAULT_SP_PACKAGE,
+    TEST_PROFILE_MARATHON,
+    should_use_sp_recording_for_profile,
+)
 from aw.autogame.tools.FrameLog import FrameLogType, parse_frame_log_transport
 from aw.autogame.tools.Utils import archive_run_artifacts, get_display_rotation, get_resolution, get_screen_mode, resolve_run_archive_dir, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
@@ -494,7 +499,13 @@ def resolve_screen_mode_for_test_profile(
     return read_screen_mode_config(config_path)
 
 
-def resolve_test_profile_from_radio_selection(power_checked: bool, function_checked: bool) -> str:
+def resolve_test_profile_from_radio_selection(
+    power_checked: bool,
+    function_checked: bool,
+    marathon_checked: bool = False,
+) -> str:
+    if marathon_checked:
+        return TEST_PROFILE_MARATHON
     if function_checked:
         return "function"
     return "power"
@@ -621,15 +632,30 @@ def build_launcher_plan_env_values(plan: Optional[dict]) -> dict[str, str]:
 
 def should_preserve_game_process_for_plan(plan: Optional[dict]) -> bool:
     plan = plan or {}
+    if is_marathon_plan(plan):
+        return False
     return bool(plan.get("preserve_game_process"))
 
 
 def is_marathon_plan(plan: Optional[dict]) -> bool:
     plan = plan or {}
+    if str(plan.get("test_profile") or "").strip().lower() == TEST_PROFILE_MARATHON:
+        return True
     try:
         return float(plan.get("marathon_duration_minutes") or 0.0) > 0
     except (TypeError, ValueError):
         return False
+
+
+def has_reached_plan_run_limit(plan: Optional[dict], completed_runs: int) -> bool:
+    plan = plan or {}
+    if is_marathon_plan(plan):
+        return False
+    try:
+        run_count = max(1, int(plan.get("run_count") or 1))
+    except (TypeError, ValueError):
+        run_count = 1
+    return max(0, int(completed_runs)) >= run_count
 
 
 def _decode_process_output(output) -> str:
@@ -2595,13 +2621,16 @@ class LauncherWindow(QWidget):
         self.test_profile_layout.setSpacing(4)
         self.power_test_radio = QRadioButton("功耗测试")
         self.function_test_radio = QRadioButton("功能测试")
+        self.marathon_test_radio = QRadioButton("马拉松")
         self.power_test_radio.setChecked(True)
         self.test_profile_button_group = QButtonGroup(self)
         self.test_profile_button_group.setExclusive(True)
         self.test_profile_button_group.addButton(self.power_test_radio)
         self.test_profile_button_group.addButton(self.function_test_radio)
+        self.test_profile_button_group.addButton(self.marathon_test_radio)
         self.test_profile_layout.addWidget(self.power_test_radio)
         self.test_profile_layout.addWidget(self.function_test_radio)
+        self.test_profile_layout.addWidget(self.marathon_test_radio)
         self.test_profile_layout.addStretch(1)
 
         self.case_loop_count_spin = QSpinBox()
@@ -2674,10 +2703,10 @@ class LauncherWindow(QWidget):
         self.marathon_duration_spin.setRange(0.0, 10000.0)
         self.marathon_duration_spin.setDecimals(1)
         self.marathon_duration_spin.setSingleStep(10.0)
-        self.marathon_duration_spin.setValue(0.0)
+        self.marathon_duration_spin.setValue(60.0)
         self.marathon_duration_spin.setSuffix(" 分钟")
         self.marathon_duration_spin.setToolTip(
-            "0 表示普通模式；大于 0 时按 SP 有效录制时间循环运行，达到目标后长按 SP 保存"
+            "马拉松每轮按 SP 有效录制时间运行；每满该时长保存 SP 并重启下一轮"
         )
         self.marathon_duration_field = self._create_spin_with_presets(
             self.marathon_duration_spin,
@@ -2687,10 +2716,10 @@ class LauncherWindow(QWidget):
 
         self.marathon_end_battery_spin = QSpinBox()
         self.marathon_end_battery_spin.setRange(0, 100)
-        self.marathon_end_battery_spin.setValue(0)
+        self.marathon_end_battery_spin.setValue(5)
         self.marathon_end_battery_spin.setSuffix(" %")
         self.marathon_end_battery_spin.setToolTip(
-            "0 表示不按电量提前结束；马拉松中电量小于等于该值时长按 SP 保存"
+            "马拉松中电量小于等于该值时长按 SP 保存，并停止整个自动化"
         )
         self.marathon_end_battery_field = self._create_spin_with_presets(
             self.marathon_end_battery_spin,
@@ -2738,7 +2767,7 @@ class LauncherWindow(QWidget):
         self.game_process_policy_button.setChecked(True)
         self.game_process_policy_button.setProperty("toggleButton", True)
         self.game_process_policy_button.setToolTip(
-            "功耗测试和功能测试均默认关闭进程；点击后切换为绿色保留进程"
+            "功耗测试和功能测试可切换进程策略；马拉松每轮强制关闭游戏和 SP 进程"
         )
         self.generate_preview_video_button = QPushButton("生成视频：关")
         self.generate_preview_video_button.setObjectName("generatePreviewVideoButton")
@@ -2800,6 +2829,7 @@ class LauncherWindow(QWidget):
         self._bind_signals()
         self._load_project_cases()
         self._sync_mode_ui()
+        self._sync_test_profile_ui()
         self._sync_game_process_policy_ui()
         self._log_message(
             f"[Launcher] 启动器已初始化，日志文件：{LAUNCHER_LOG_FILE}\n",
@@ -3844,6 +3874,7 @@ class LauncherWindow(QWidget):
 
     def _bind_signals(self):
         self.mode_testcase.toggled.connect(self._sync_mode_ui)
+        self.marathon_test_radio.toggled.connect(self._sync_test_profile_ui)
         self.browse_button.clicked.connect(self._choose_testcase_file)
         self.clear_button.clicked.connect(self._reselect_testcase_file)
         self.open_label_tool_button.clicked.connect(self._open_label_tool_for_selected_case)
@@ -4017,14 +4048,32 @@ class LauncherWindow(QWidget):
             "close" if close_process else "preserve",
         )
 
+    def _sync_test_profile_ui(self, _checked: bool = False):
+        marathon_selected = self.marathon_test_radio.isChecked()
+        editable = self.inputs_enabled
+        self.marathon_duration_spin.setEnabled(editable and marathon_selected)
+        self.marathon_end_battery_spin.setEnabled(editable and marathon_selected)
+        self.run_count_spin.setEnabled(editable and not marathon_selected)
+        self.safe_temp_spin.setEnabled(editable and not marathon_selected)
+        self.safe_battery_spin.setEnabled(editable and not marathon_selected)
+        self.inactivity_timeout_spin.setEnabled(editable and not marathon_selected)
+        if marathon_selected:
+            self.game_process_policy_button.setChecked(True)
+        self._sync_game_process_policy_ui()
+
     def _sync_game_process_policy_ui(self):
-        close_process = self.game_process_policy_button.isChecked()
+        marathon_selected = self.marathon_test_radio.isChecked()
+        close_process = self.game_process_policy_button.isChecked() or marathon_selected
         self.game_process_policy_button.setText(
             "关闭进程" if close_process else "保留进程"
         )
-        self.game_process_policy_button.setEnabled(self.inputs_enabled)
+        self.game_process_policy_button.setEnabled(
+            self.inputs_enabled and not marathon_selected
+        )
         self.game_process_policy_button.setToolTip(
-            "当前为关闭进程：功耗测试和功能测试在启动、手动停止、自动结束时都会关闭相关应用"
+            "马拉松每轮结束后固定关闭游戏和 SP 进程"
+            if marathon_selected
+            else "当前为关闭进程：功耗测试和功能测试在启动、手动停止、自动结束时都会关闭相关应用"
             if close_process
             else "当前为保留进程：功耗测试和功能测试在启动、手动停止、自动结束时都不关闭相关应用"
         )
@@ -4620,7 +4669,7 @@ class LauncherWindow(QWidget):
         self.marathon_duration_spin.setEnabled(enabled)
         self.marathon_end_battery_spin.setEnabled(enabled)
         self.generate_preview_video_button.setEnabled(enabled)
-        self._sync_game_process_policy_ui()
+        self._sync_test_profile_ui()
         for button in self.preset_buttons:
             button.setEnabled(enabled)
         self._sync_testcase_controls_state()
@@ -5040,21 +5089,20 @@ class LauncherWindow(QWidget):
         test_profile = resolve_test_profile_from_radio_selection(
             self.power_test_radio.isChecked(),
             self.function_test_radio.isChecked(),
+            self.marathon_test_radio.isChecked(),
         )
-        marathon_duration_minutes = float(self.marathon_duration_spin.value())
-        marathon_end_battery_percent = int(self.marathon_end_battery_spin.value())
-        if marathon_duration_minutes > 0 and not should_use_sp_recording_for_profile(test_profile):
-            issues.add_error(
-                "马拉松模式需要 SP",
-                "SP 运行时长大于 0 时请选择功耗测试；功能测试不会启动 SP 录制。",
-            )
+        marathon_selected = test_profile == TEST_PROFILE_MARATHON
+        marathon_duration_minutes = (
+            float(self.marathon_duration_spin.value()) if marathon_selected else 0.0
+        )
+        marathon_end_battery_percent = (
+            int(self.marathon_end_battery_spin.value()) if marathon_selected else 0
+        )
+        if marathon_selected and marathon_duration_minutes <= 0:
+            issues.add_error("马拉松时长无效", "马拉松模式的 SP 运行时长必须大于 0 分钟。")
             return None
-        if marathon_end_battery_percent > 0 and marathon_duration_minutes <= 0:
-            issues.add_error(
-                "结束电量需要马拉松模式",
-                "设置结束电量前，请先将 SP 运行时长设置为大于 0 的分钟数。",
-            )
-            return None
+        if marathon_selected:
+            cleanup_apps.update((DEFAULT_PUBG_GAME_PACKAGE, DEFAULT_SP_PACKAGE))
         if not should_use_sp_recording_for_profile(test_profile):
             cleanup_apps.discard(DEFAULT_SP_PACKAGE)
         try:
@@ -5077,12 +5125,20 @@ class LauncherWindow(QWidget):
             "safe_temp": float(self.safe_temp_spin.value()),
             "safe_battery": int(self.safe_battery_spin.value()),
             "safe_minutes": float(self.safe_time_spin.value()),
-            "inactivity_timeout_minutes": float(self.inactivity_timeout_spin.value()),
+            "inactivity_timeout_minutes": (
+                0.0
+                if marathon_selected
+                else float(self.inactivity_timeout_spin.value())
+            ),
             "power_collection_duration_seconds": float(self.power_collection_duration_spin.value()),
             "marathon_duration_minutes": marathon_duration_minutes,
             "marathon_end_battery_percent": marathon_end_battery_percent,
             "generate_preview_video": bool(self.generate_preview_video_button.isChecked()),
-            "preserve_game_process": not self.game_process_policy_button.isChecked(),
+            "preserve_game_process": (
+                False
+                if marathon_selected
+                else not self.game_process_policy_button.isChecked()
+            ),
             "cleanup_apps": sorted(cleanup_apps),
             "runtime_description": runtime_description,
         }
@@ -5121,17 +5177,18 @@ class LauncherWindow(QWidget):
         marathon_minutes = float(plan.get("marathon_duration_minutes") or 0.0)
         marathon_end_battery = int(plan.get("marathon_end_battery_percent") or 0)
         if marathon_minutes > 0:
-            self._set_status("已开始马拉松执行，将跳过每轮温度和电量检查。")
+            self._set_status("已开始连续马拉松；每轮保存后关闭游戏/SP，再启动下一轮。")
             self._set_runtime(
-                f"运行信息：SP 有效时长目标 {marathon_minutes:g} 分钟，等待第 1 次启动。"
+                f"运行信息：每轮 SP 有效时长 {marathon_minutes:g} 分钟，等待第 1 轮启动。"
             )
         else:
             self._set_status("已开始批量执行，准备进行安全检查。")
             self._set_runtime(f"运行信息：共 {plan['run_count']} 次，等待第 1 次启动。")
         trace_label = f"{plan['mode']}:{plan['project_case']}:{plan['target_case']}"
         trace_path = self.process_launch_tracer.start(trace_label)
+        run_limit_text = "continuous_until_battery_cutoff" if marathon_minutes > 0 else plan["run_count"]
         self._log_message(
-            f"[Launcher] 批量运行开始，mode={plan['mode']}, runs={plan['run_count']}, "
+            f"[Launcher] 批量运行开始，mode={plan['mode']}, runs={run_limit_text}, "
             f"test_profile={plan['test_profile']}, screen_mode={plan['screen_mode']}, "
             f"screen_size={screen_width}x{screen_height}, "
             f"case_loops={plan['case_loop_count']}, "
@@ -5149,7 +5206,8 @@ class LauncherWindow(QWidget):
         if marathon_minutes > 0:
             self._log_message(
                 "[Launcher] 马拉松模式已启用：运行期间不做温度/电量门禁检查，"
-                "用例循环和最终长按保存由 SP 有效时间控制。\n"
+                "每轮仅在 SP 有效时间达标或电量到达结束阈值时长按保存；"
+                "正常达标后关闭游戏/SP 进程并自动开始下一轮。\n"
             )
             self._log_message(
                 f"[Launcher] 马拉松电量监控：结束电量="
@@ -5252,7 +5310,7 @@ class LauncherWindow(QWidget):
         if self.stop_requested:
             self._finish_batch("任务已停止。")
             return
-        if self.current_run_index >= self.current_plan["run_count"]:
+        if has_reached_plan_run_limit(self.current_plan, self.current_run_index):
             self._finish_batch("所有运行次数已完成。")
             return
 
@@ -5260,8 +5318,7 @@ class LauncherWindow(QWidget):
         if is_marathon_plan(self.current_plan):
             self.safety_timer.stop()
             self._log_message(
-                f"[Launcher] 第 {run_no}/{self.current_plan['run_count']} 次为马拉松模式，"
-                "跳过启动前温度和电量检查。\n"
+                f"[Launcher] 马拉松第 {run_no} 轮跳过启动前温度和电量检查。\n"
             )
             self._cleanup_apps_between_runs("马拉松启动前清理")
             self._launch_iteration(run_no, None, None)
@@ -5368,24 +5425,32 @@ class LauncherWindow(QWidget):
         if self.current_plan["mode"] == "testcase":
             testcase_label = self.current_plan["testcase_label"]
             args = build_launcher_process_args("--run-testcase", testcase_label)
-            self._set_status(
-                f"第 {run_no}/{self.current_plan['run_count']} 次启动：{testcase_label}"
+            run_label = (
+                f"马拉松第 {run_no} 轮"
+                if is_marathon_plan(self.current_plan)
+                else f"第 {run_no}/{self.current_plan['run_count']} 次"
             )
-            self._log_message(f"\n[Launcher] 第 {run_no}/{self.current_plan['run_count']} 次：通过 testcase 启动 {testcase_label}\n")
+            self._set_status(f"{run_label}启动：{testcase_label}")
+            self._log_message(
+                f"\n[Launcher] {run_label}：通过 testcase 启动 {testcase_label}\n"
+            )
         else:
             args = build_launcher_process_args("--run-direct", project_case, target_case)
-            self._set_status(
-                f"第 {run_no}/{self.current_plan['run_count']} 次启动：project_case={project_case}, target_case={target_case}"
+            run_label = (
+                f"马拉松第 {run_no} 轮"
+                if is_marathon_plan(self.current_plan)
+                else f"第 {run_no}/{self.current_plan['run_count']} 次"
             )
+            self._set_status(f"{run_label}启动：project_case={project_case}, target_case={target_case}")
             self._log_message(
-                f"\n[Launcher] 第 {run_no}/{self.current_plan['run_count']} 次：直接启动 "
+                f"\n[Launcher] {run_label}：直接启动 "
                 f"project_case={project_case}, target_case={target_case}\n"
             )
 
         if is_marathon_plan(self.current_plan):
             marathon_minutes = float(self.current_plan["marathon_duration_minutes"])
             self._set_runtime(
-                f"运行信息：第 {run_no}/{self.current_plan['run_count']} 次马拉松，"
+                f"运行信息：马拉松第 {run_no} 轮，"
                 f"SP 有效时长目标 {marathon_minutes:g} 分钟，正在启动。"
             )
         else:
@@ -5815,13 +5880,20 @@ class LauncherWindow(QWidget):
             "screenshot_path": None,
             "sp_save_attempted": False,
             "sp_save_ok": False,
+            "sp_save_skipped_reason": "",
         }
 
         if archive_dir is not None:
             screenshot_path = self._capture_stream_disconnect_screenshot(archive_dir)
             preserve_result["screenshot_path"] = str(screenshot_path) if screenshot_path else None
 
-        if not self.current_run_stream_disconnect_startup and self._current_plan_uses_sp_recording():
+        if is_marathon_plan(self.current_plan):
+            preserve_result["sp_save_skipped_reason"] = "marathon_waits_for_duration_or_battery"
+            self._log_message(
+                "[Launcher] 马拉松断流保全：本轮未达到 SP 有效时长且未触发结束电量，"
+                "跳过长按保存。\n"
+            )
+        elif not self.current_run_stream_disconnect_startup and self._current_plan_uses_sp_recording():
             preserve_result["sp_save_attempted"] = True
             preserve_result["sp_save_ok"] = self._save_sp_on_stream_disconnect()
 
@@ -5859,7 +5931,13 @@ class LauncherWindow(QWidget):
             "sp_save_skipped_reason": "",
         }
 
-        if not self._current_plan_uses_sp_recording():
+        if is_marathon_plan(self.current_plan):
+            preserve_result["sp_save_skipped_reason"] = "marathon_waits_for_duration_or_battery"
+            self._log_message(
+                "[Launcher] 马拉松无操作保全：仅允许在 SP 时长达标或结束电量触发时保存，"
+                "跳过额外长按。\n"
+            )
+        elif not self._current_plan_uses_sp_recording():
             preserve_result["sp_save_skipped_reason"] = "sp_recording_disabled"
         elif self.current_run_sp_state.get("sp_saved"):
             preserve_result["sp_save_skipped_reason"] = "sp_already_saved"
@@ -6087,6 +6165,7 @@ class LauncherWindow(QWidget):
                     "project_case": self.current_plan["project_case"],
                     "target_case": self.current_plan["target_case"],
                     "testcase_label": self.current_plan["testcase_label"],
+                    "test_profile": self.current_plan["test_profile"],
                     "exit_code": exit_code,
                     "timed_out": self.current_run_timed_out,
                     "stream_disconnected": self.current_run_stream_disconnected,
@@ -6205,7 +6284,11 @@ class LauncherWindow(QWidget):
             issues.add_error("截图模式配置失败", f"写入 screen_mode={screen_mode} 失败：{exc}")
             return False
 
-        profile_text = "功耗测试" if test_profile == "power" else "功能测试"
+        profile_text = {
+            "power": "功耗测试",
+            "function": "功能测试",
+            TEST_PROFILE_MARATHON: "马拉松",
+        }.get(test_profile, test_profile)
         self._log_message(
             f"[Launcher] 已切换为{profile_text}，screen_mode={screen_mode}。\n"
         )
@@ -6831,13 +6914,19 @@ class LauncherWindow(QWidget):
                     self.safety_timer.start()
                 return
 
-            self._log_message(
-                "[Launcher] 本次断流发生在 SP 记录开始后，结果已归档并写入 stream_disconnected 标志；"
-                "当前用例计为完成。\n"
-            )
+            if is_marathon_plan(self.current_plan):
+                self._log_message(
+                    "[Launcher] 马拉松本轮在 SP 时长达标前发生断流，按规则不长按保存；"
+                    "中断状态已归档，清理进程后继续下一轮。\n"
+                )
+            else:
+                self._log_message(
+                    "[Launcher] 本次断流发生在 SP 记录开始后，结果已归档并写入 stream_disconnected 标志；"
+                    "当前用例计为完成。\n"
+                )
 
             self.current_run_index += 1
-            if self.current_run_index >= self.current_plan["run_count"]:
+            if has_reached_plan_run_limit(self.current_plan, self.current_run_index):
                 self._log_message(
                     "[Launcher] 本次中途断流发生在最后一轮，已保存 SP 并归档本轮状态，跳过手机重启。\n"
                 )
@@ -6886,13 +6975,22 @@ class LauncherWindow(QWidget):
         if self.current_run_timed_out:
             self._log_message("[Launcher] 本次用例因超过安全时间被停止，计入已执行次数。\n")
 
-        if self.current_run_index >= self.current_plan["run_count"]:
+        if has_reached_plan_run_limit(self.current_plan, self.current_run_index):
             self._finish_batch("所有运行次数已完成。")
             return
 
         next_run = self.current_run_index + 1
-        self._set_status(f"第 {self.current_run_index}/{self.current_plan['run_count']} 次已结束，检查第 {next_run} 次启动条件。")
-        self._set_runtime(f"运行信息：已完成 {self.current_run_index}/{self.current_plan['run_count']} 次，准备下一次安全检查。")
+        if is_marathon_plan(self.current_plan):
+            self._set_status(
+                f"马拉松第 {self.current_run_index} 轮已保存 SP 并关闭游戏/SP 进程，"
+                f"准备启动第 {next_run} 轮。"
+            )
+            self._set_runtime(
+                f"运行信息：已完成 {self.current_run_index} 轮马拉松，准备下一轮。"
+            )
+        else:
+            self._set_status(f"第 {self.current_run_index}/{self.current_plan['run_count']} 次已结束，检查第 {next_run} 次启动条件。")
+            self._set_runtime(f"运行信息：已完成 {self.current_run_index}/{self.current_plan['run_count']} 次，准备下一次安全检查。")
         self._check_and_start_if_safe()
         if self.batch_active and self.process is None and not self.safety_timer.isActive():
             self.safety_timer.start()

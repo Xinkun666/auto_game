@@ -3,6 +3,7 @@ import os
 
 TEST_PROFILE_POWER = "power"
 TEST_PROFILE_FUNCTION = "function"
+TEST_PROFILE_MARATHON = "marathon"
 DEFAULT_PUBG_GAME_PACKAGE = "com.tencent.tmgp.pubgmhd.hw"
 DEFAULT_SP_PACKAGE = "com.huawei.hmsapp.hismartperf"
 
@@ -11,6 +12,8 @@ def normalize_test_profile(profile) -> str:
     value = str(profile or "").strip().lower()
     if value == TEST_PROFILE_FUNCTION:
         return TEST_PROFILE_FUNCTION
+    if value == TEST_PROFILE_MARATHON:
+        return TEST_PROFILE_MARATHON
     return TEST_PROFILE_POWER
 
 

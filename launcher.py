@@ -51,7 +51,7 @@ from aw.autogame.tools.GameLaunchProfile import (
     should_use_sp_recording_for_profile,
 )
 from aw.autogame.tools.FrameLog import FrameLogType, parse_frame_log_transport
-from aw.autogame.tools.Utils import archive_run_artifacts, get_display_rotation, get_resolution, get_screen_mode, resolve_run_archive_dir, select_scene_resolution
+from aw.autogame.tools.Utils import archive_run_artifacts, get_display_rotation, get_resolution, get_screen_mode, prune_run_archive_artifacts, resolve_run_archive_dir, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 from aw.autogame.common.SPController.SPArea import build_sp_save_shell_command
 
@@ -153,7 +153,6 @@ LAUNCHER_FAILURE_SIGNAL_FILE = "launcher_failure_signal.json"
 DISMISS_REBOOT_PROMPT_ENV = "AUTOGAME_DISMISS_REBOOT_PROMPT"
 DEVICE_LOG_SETTLE_TIMEOUT_SECONDS = 3.0
 DEVICE_LOG_SETTLE_INTERVAL_SECONDS = 0.2
-DEVICE_LOG_STOP_WAIT_TIMEOUT_SECONDS = 15.0
 HDC_SHELL_TIMEOUT_SECONDS = float(os.environ.get("AUTOGAME_HDC_SHELL_TIMEOUT_SECONDS", "5"))
 STREAM_DISCONNECT_POLICY_PRESERVE = "preserve"
 STREAM_DISCONNECT_POLICY_DISABLED = "disabled"
@@ -619,7 +618,7 @@ def build_launcher_plan_env_values(plan: Optional[dict]) -> dict[str, str]:
         ),
         "AUTOGAME_LOG_DIR": str(LOG_DIR),
         "AUTOGAME_PREVIEW_DIR": str(PREVIEW_DIR),
-        "AUTOGAME_SAVE_FRAMES_DIR": str(LOG_DIR / "process_save_frames"),
+        "AUTOGAME_DISABLE_SAVE_FRAMES": "1",
         "AUTOGAME_TMP_FRAMES_DIR": str(TEMP_DIR / "tmp_frames"),
     }
     screen_width = _positive_int(plan.get("screen_width"))
@@ -1607,6 +1606,8 @@ def discover_history_outputs(temp_dir: Path = TEMP_DIR) -> list[dict]:
             launcher_output = _read_history_text(logs_dir / "launcher_output_partial.txt")
 
         preview_video = archive_dir / "preview_10fps.mp4"
+        hilog_path = logs_dir / "hilog.txt"
+        battery_log_path = archive_dir.parent / "battery.log"
         mtime_path = info_path or archive_dir
         record = {
             "archive_dir": archive_dir,
@@ -1627,6 +1628,10 @@ def discover_history_outputs(temp_dir: Path = TEMP_DIR) -> list[dict]:
             "stream_disconnect_startup": metadata.get("stream_disconnect_startup", ""),
             "archive_metadata": metadata,
             "launcher_output": launcher_output,
+            "hilog_path": hilog_path,
+            "hilog_exists": hilog_path.exists() and hilog_path.is_file(),
+            "battery_log_path": battery_log_path,
+            "battery_log_exists": battery_log_path.exists() and battery_log_path.is_file(),
             "log_file_count": _count_files(logs_dir),
             "process_temp_file_count": _count_files(archive_dir / "process_temp_logs"),
             "process_save_frame_count": _count_files(archive_dir / "process_save_frames"),
@@ -1642,34 +1647,17 @@ def discover_history_outputs(temp_dir: Path = TEMP_DIR) -> list[dict]:
 
 
 def format_history_record_summary(record: dict) -> str:
-    def value(name: str, fallback: str = "-") -> str:
-        current = record.get(name)
-        if current is None or current == "":
-            return fallback
-        return str(current)
-
     archive_dir = record.get("archive_dir")
     preview_text = "有" if record.get("preview_video_exists") else "无"
+    launcher_text = "有" if str(record.get("launcher_output") or "").strip() else "无"
+    hilog_text = "有" if record.get("hilog_exists") else "无"
+    battery_text = "有" if record.get("battery_log_exists") else "无"
     lines = [
-        f"archive_time: {value('archive_time')}",
-        f"run_index: {value('run_index')}",
-        f"mode: {value('mode')}",
-        f"project_case: {value('project_case')}",
-        f"target_case: {value('target_case')}",
-        f"testcase_label: {value('testcase_label')}",
-        f"exit_code: {value('exit_code')}",
-        f"timed_out: {value('timed_out')}",
-        f"marathon_duration_minutes: {value('marathon_duration_minutes')}",
-        f"marathon_end_battery_percent: {value('marathon_end_battery_percent')}",
-        f"battery_stop_requested: {value('battery_stop_requested')}",
-        f"stream_disconnected: {value('stream_disconnected')}",
-        f"stream_disconnect_startup: {value('stream_disconnect_startup')}",
-        f"log_file_count: {value('log_file_count', '0')}",
-        f"process_temp_file_count: {value('process_temp_file_count', '0')}",
-        f"process_save_frame_count: {value('process_save_frame_count', '0')}",
-        f"frame_log_count: {value('frame_log_count', '0')}",
-        f"preview_10fps.mp4: {preview_text}",
-        f"archive_dir: {archive_dir}",
+        f"Launcher 运行日志: {launcher_text}",
+        f"hilog 日志: {hilog_text}",
+        f"battery.log: {battery_text}",
+        f"预览视频: {preview_text}",
+        f"归档目录: {archive_dir}",
     ]
     return "\n".join(lines)
 
@@ -2774,7 +2762,9 @@ class LauncherWindow(QWidget):
         self.generate_preview_video_button.setCheckable(True)
         self.generate_preview_video_button.setChecked(False)
         self.generate_preview_video_button.setProperty("toggleButton", True)
-        self.generate_preview_video_button.setToolTip("关闭时只归档日志和图片，不生成预览视频")
+        self.generate_preview_video_button.setToolTip(
+            "关闭时只归档 Launcher 运行日志和 hilog，不生成预览视频"
+        )
         self.preview_overlay_button = QPushButton("显示标注")
         self.preview_overlay_button.setCheckable(True)
         self.preview_overlay_button.setChecked(False)
@@ -4376,10 +4366,13 @@ class LauncherWindow(QWidget):
         self.history_next_frame_button.setEnabled(has_frame and self.history_frame_index < frame_count - 1)
 
         if not has_frame:
-            self.history_frame_counter_label.setText("未找到逐帧日志")
+            self.history_frame_counter_label.setText("未保留逐帧日志")
             self.history_frame_image_label.setPixmap(QPixmap())
-            self.history_frame_image_label.setText("未找到 process_temp_logs/frame_*.jpg")
-            self.history_frame_log_edit.setPlainText("未找到逐帧 JSON。请确认本次运行已生成 process_temp_logs/frame_*.json。")
+            self.history_frame_image_label.setText("当前归档策略不保留运行帧")
+            self.history_frame_log_edit.setPlainText(
+                "每轮只保留 Launcher 运行日志、hilog，"
+                "以及可选的预览视频。"
+            )
             return
 
         frame_record = self.history_frame_records[self.history_frame_index]
@@ -5421,6 +5414,10 @@ class LauncherWindow(QWidget):
 
         project_case = self.current_plan["project_case"]
         target_case = self.current_plan["target_case"]
+        try:
+            (LOG_DIR / f"{target_case}.txt").unlink(missing_ok=True)
+        except OSError:
+            log_exception(f"clear previous hilog failed: target_case={target_case}")
 
         self.process = HiddenSubprocess(self)
         self.process.setProgram(sys.executable)
@@ -5554,30 +5551,6 @@ class LauncherWindow(QWidget):
 
         return log_path.exists() and log_path.is_file()
 
-    def _wait_for_device_log_stopped_signal(self) -> Optional[dict]:
-        archive_dir = self.current_run_archive_dir
-        if archive_dir is None:
-            return None
-
-        signal_path = archive_dir / "device_log_state.json"
-        deadline = time.time() + DEVICE_LOG_STOP_WAIT_TIMEOUT_SECONDS
-        last_payload = None
-
-        while time.time() < deadline:
-            QApplication.processEvents()
-            if signal_path.exists():
-                try:
-                    payload = json.loads(signal_path.read_text(encoding="utf-8"))
-                    last_payload = payload
-                    if payload.get("event") == "device_log_stopped":
-                        return payload
-                except Exception:
-                    log_exception(f"read device log state failed: signal_path={signal_path}")
-                    return last_payload
-            time.sleep(DEVICE_LOG_SETTLE_INTERVAL_SECONDS)
-
-        return last_payload
-
     def _append_stream_disconnect_notice_to_device_log(self, log_path: Path, exit_code: int) -> bool:
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5594,25 +5567,6 @@ class LauncherWindow(QWidget):
         except Exception:
             log_exception(f"append stream disconnect notice failed: log_path={log_path}")
             return False
-
-    def _build_stream_disconnect_notice(self, device_log_path: Optional[Path], archived_log_name: Optional[str]) -> str:
-        uses_sp_recording = self._current_plan_uses_sp_recording()
-        if self.current_run_stream_disconnect_startup:
-            phase_text = "启动阶段(SP未开始)" if uses_sp_recording else "启动阶段(首帧未到达)"
-        else:
-            phase_text = "SP记录后" if uses_sp_recording else "功能测试首帧后"
-        lines = [
-            "gRPC 流断连提醒",
-            f"发生阶段: {phase_text}",
-            f"断流信息: {self.current_run_stream_disconnect_message}",
-            f"SP记录启用: {uses_sp_recording}",
-            f"SP是否已开始: {self.current_run_sp_started}",
-            f"设备日志源文件: {device_log_path if device_log_path else '未定位'}",
-            f"归档日志文件: logs/{archived_log_name}" if archived_log_name else "归档日志文件: 未找到设备日志源文件",
-            "",
-            "说明: 本文件由 launcher 在归档时生成，用于快速定位断流对应的 testcases 设备日志。",
-        ]
-        return "\n".join(lines) + "\n"
 
     def _resolve_current_run_archive_dir(self) -> Optional[Path]:
         if self.current_run_archive_dir is not None:
@@ -6124,101 +6078,49 @@ class LauncherWindow(QWidget):
         if self.current_plan is None:
             return
 
-        run_output_text = self._all_output_text()[self.current_run_output_start:]
-        extra_text_files = {"launcher_output.txt": run_output_text}
         extra_log_files = {}
-        stream_device_log_path = None
-        stream_archived_log_name = None
-        stream_notice_written = False
-        device_log_stop_state = None
-
-        if self.current_run_stream_disconnected:
-            stream_device_log_path = self._resolve_current_device_log_path()
-            if stream_device_log_path is not None:
-                if not self.current_run_stream_disconnect_startup:
-                    device_log_stop_state = self._wait_for_device_log_stopped_signal()
-                    if device_log_stop_state and device_log_stop_state.get("event") == "device_log_stopped":
-                        self._log_message(
-                            "[Launcher] 已确认 testcases 执行 stop_device_log()，"
-                            f"log_path={device_log_stop_state.get('log_path')}。\n"
-                        )
-                    else:
-                        self._log_message(
-                            "[Launcher] 未等到 testcases 的 device_log_stopped 标记，"
-                            "将继续尝试复制当前日志文件；请检查子进程是否被提前终止或 stop_log 是否失败。\n",
-                            level=logging.WARNING,
-                        )
-                self._wait_for_device_log_stable(stream_device_log_path)
-                stream_notice_written = self._append_stream_disconnect_notice_to_device_log(
-                    stream_device_log_path,
+        device_log_path = self._resolve_current_device_log_path()
+        if device_log_path is not None:
+            if self.current_run_stream_disconnected:
+                self._append_stream_disconnect_notice_to_device_log(
+                    device_log_path,
                     exit_code,
                 )
-                if stream_device_log_path.exists() and stream_device_log_path.is_file():
-                    stream_archived_log_name = f"stream_disconnect_device_log_{stream_device_log_path.name}"
-                    extra_log_files[stream_archived_log_name] = str(stream_device_log_path)
-
-            extra_text_files["stream_disconnect_notice.txt"] = self._build_stream_disconnect_notice(
-                stream_device_log_path,
-                stream_archived_log_name,
-            )
+            self._wait_for_device_log_stable(device_log_path)
+            if device_log_path.exists() and device_log_path.is_file():
+                extra_log_files["hilog.txt"] = str(device_log_path)
+            else:
+                self._log_message(
+                    "[Launcher] 本次运行未找到 hilog 日志文件。\n",
+                    level=logging.WARNING,
+                )
 
         try:
+            generate_preview_video = bool(
+                self.current_plan.get("generate_preview_video")
+            )
             archive_dir = archive_run_artifacts(
                 run_index=run_no,
                 source="launcher",
-                extra_text_files=extra_text_files,
                 extra_log_files=extra_log_files or None,
-                generate_preview_video=bool(self.current_plan.get("generate_preview_video")),
+                generate_preview_video=generate_preview_video,
                 extra_metadata={
-                    "mode": self.current_plan["mode"],
-                    "project_case": self.current_plan["project_case"],
-                    "target_case": self.current_plan["target_case"],
-                    "testcase_label": self.current_plan["testcase_label"],
-                    "test_profile": self.current_plan["test_profile"],
-                    "exit_code": exit_code,
-                    "timed_out": self.current_run_timed_out,
-                    "stream_disconnected": self.current_run_stream_disconnected,
-                    "stream_disconnect_startup": self.current_run_stream_disconnect_startup,
-                    "stream_disconnect_message": self.current_run_stream_disconnect_message,
-                    "stream_disconnect_device_log_source": str(stream_device_log_path) if stream_device_log_path else None,
-                    "stream_disconnect_device_log_archived": stream_archived_log_name,
-                    "stream_disconnect_notice_written": stream_notice_written,
-                    "device_log_stop_state": device_log_stop_state,
-                    "stream_started": self.current_run_stream_started,
-                    "sp_started": self.current_run_sp_started,
-                    "sp_state": self.current_run_sp_state,
-                    "battery_stop_requested": self._current_run_stopped_by_marathon_battery(),
-                    "failure_code": self.current_run_failure_code,
-                    "failure_reason": self.current_run_failure_reason,
-                    "failure_details": self.current_run_failure_details,
-                    "inactivity_timeout_preserved": self.current_run_inactivity_preserved,
                     "batch_start_timestamp": self.current_batch_start_timestamp,
                     "run_start_timestamp": self.current_run_start_timestamp,
-                    "inactivity_timeout_minutes": self.current_plan["inactivity_timeout_minutes"],
-                    "marathon_duration_minutes": float(
-                        self.current_plan.get("marathon_duration_minutes") or 0.0
-                    ),
-                    "marathon_end_battery_percent": int(
-                        self.current_plan.get("marathon_end_battery_percent") or 0
-                    ),
-                    "battery_log": str(
-                        self.current_run_archive_dir.parent / "battery.log"
-                    ) if self.current_run_archive_dir is not None else None,
-                    "generate_preview_video": bool(self.current_plan.get("generate_preview_video")),
                 },
                 reuse_existing=True,
             )
             self._log_message(f"[Launcher] 本次运行产物已归档到：{archive_dir}\n")
-            if self.current_run_stream_disconnected:
-                if stream_archived_log_name:
-                    self._log_message(
-                        f"[Launcher] 断流设备日志已额外归档：{archive_dir / 'logs' / stream_archived_log_name}\n"
-                    )
-                else:
-                    self._log_message(
-                        "[Launcher] 未找到本次断流对应的设备日志文件，已写入 stream_disconnect_notice.txt。\n",
-                        level=logging.WARNING,
-                    )
+            logs_dir = archive_dir / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            (logs_dir / "launcher_output.txt").write_text(
+                self._all_output_text()[self.current_run_output_start:],
+                encoding="utf-8",
+            )
+            prune_run_archive_artifacts(
+                archive_dir,
+                keep_preview_video=generate_preview_video,
+            )
         except Exception:
             log_exception(f"archive_run_outputs failed: run_no={run_no}")
             self._log_message("[Launcher] 运行产物归档失败，请查看 launcher_debug.log。\n", level=logging.ERROR)

@@ -98,6 +98,13 @@ class GameAutomator:
             print(f"清空日志目录时出错: {e}")
 
         try:
+            if not bool(getattr(self.client, "save_frame", False)):
+                if os.path.isdir(temp_save_dir):
+                    shutil.rmtree(temp_save_dir)
+                    print(f"【系统】已移除未启用的保存帧目录: {temp_save_dir}")
+                elif os.path.exists(temp_save_dir):
+                    os.unlink(temp_save_dir)
+                return
             if os.path.exists(temp_save_dir):
                 print(f"【系统】正在清空临时保存目录: {temp_save_dir}")
                 # 遍历目录内的所有内容并删除

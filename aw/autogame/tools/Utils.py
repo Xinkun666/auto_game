@@ -77,54 +77,6 @@ def _safe_write_text(path: Path, content: str):
     path.write_text(content, encoding="utf-8")
 
 
-def _copy_top_level_log_files(dst_dir: Path) -> list[str]:
-    copied = []
-    if not LOG_DIR.exists():
-        return copied
-
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    for path in sorted(LOG_DIR.iterdir()):
-        if not path.is_file():
-            continue
-        shutil.copy2(path, dst_dir / path.name)
-        copied.append(path.name)
-    return copied
-
-
-def _copy_process_temp_logs(dst_dir: Path) -> list[str]:
-    copied = []
-    if not PROCESS_TEMP_LOGS_DIR.exists():
-        return copied
-
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    for path in sorted(PROCESS_TEMP_LOGS_DIR.iterdir()):
-        target = dst_dir / path.name
-        if path.is_file():
-            shutil.copy2(path, target)
-            copied.append(path.name)
-        elif path.is_dir():
-            shutil.copytree(path, target, dirs_exist_ok=True)
-            copied.append(path.name + "/")
-    return copied
-
-
-def _copy_process_save_frames(dst_dir: Path) -> list[str]:
-    copied = []
-    if not PROCESS_SAVE_FRAMES_DIR.exists():
-        return copied
-
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    for path in sorted(PROCESS_SAVE_FRAMES_DIR.iterdir()):
-        target = dst_dir / path.name
-        if path.is_file():
-            shutil.copy2(path, target)
-            copied.append(path.name)
-        elif path.is_dir():
-            shutil.copytree(path, target, dirs_exist_ok=True)
-            copied.append(path.name + "/")
-    return copied
-
-
 def _sanitize_archive_name_part(value: str) -> str:
     value = str(value or "").strip()
     if not value:
@@ -648,31 +600,13 @@ def archive_run_artifacts(
         reuse_existing=reuse_existing,
     )
     log_archive_dir = archive_dir / "logs"
-    process_archive_dir = archive_dir / "process_temp_logs"
-    save_frame_archive_dir = archive_dir / "process_save_frames"
 
-    copied_log_files = _copy_top_level_log_files(log_archive_dir)
-    copied_process_files = _copy_process_temp_logs(process_archive_dir)
-    copied_process_save_frames = _copy_process_save_frames(save_frame_archive_dir)
-    video_source = None
-    video_file = None
     if generate_preview_video:
-        video_file = _create_preview_video(
-            process_archive_dir,
+        _create_preview_video(
+            PROCESS_TEMP_LOGS_DIR,
             archive_dir / "preview_10fps.mp4",
             fps=10,
         )
-        if video_file:
-            video_source = "process_temp_logs"
-        elif copied_process_save_frames:
-            video_file = _create_preview_video(
-                save_frame_archive_dir,
-                archive_dir / "preview_10fps.mp4",
-                fps=10,
-                pattern="*.jpg",
-            )
-            if video_file:
-                video_source = "process_save_frames"
 
     if extra_text_files:
         for name, content in extra_text_files.items():
@@ -680,7 +614,6 @@ def archive_run_artifacts(
                 continue
             _safe_write_text(log_archive_dir / name, content)
 
-    copied_extra_log_files = []
     if extra_log_files:
         log_archive_dir.mkdir(parents=True, exist_ok=True)
         for archive_name, source_path in extra_log_files.items():
@@ -692,29 +625,41 @@ def archive_run_artifacts(
             safe_name = _sanitize_archive_name_part(archive_name) + src.suffix
             target = log_archive_dir / safe_name
             shutil.copy2(src, target)
-            copied_extra_log_files.append(safe_name)
+    return archive_dir
 
-    metadata = {
-        "source": source,
-        "run_index": run_index,
-        "archive_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "archive_dir": str(archive_dir),
-        "batch_dir": str(archive_dir.parent),
-        "copied_log_files": copied_log_files,
-        "copied_process_temp_logs": copied_process_files,
-        "copied_process_save_frames": copied_process_save_frames,
-        "copied_extra_log_files": copied_extra_log_files,
-        "generate_preview_video": bool(generate_preview_video),
-        "preview_video": video_file,
-        "preview_video_source": video_source,
-    }
-    if extra_metadata:
-        metadata.update(extra_metadata)
 
-    _safe_write_text(
-        archive_dir / "archive_info.json",
-        json.dumps(metadata, ensure_ascii=False, indent=2),
-    )
+def prune_run_archive_artifacts(
+    archive_dir: Path,
+    keep_preview_video: bool = False,
+) -> Path:
+    """Keep only Launcher output, hilog, and the optional preview video."""
+    archive_dir = Path(archive_dir)
+    allowed_logs = {"launcher_output.txt", "hilog.txt"}
+    logs_dir = archive_dir / "logs"
+
+    if logs_dir.exists():
+        for path in list(logs_dir.iterdir()):
+            if path.is_file() and path.name in allowed_logs:
+                continue
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
+
+    for path in list(archive_dir.iterdir()):
+        if path == logs_dir:
+            continue
+        if (
+            keep_preview_video
+            and path.is_file()
+            and path.name == "preview_10fps.mp4"
+        ):
+            continue
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink(missing_ok=True)
+
     return archive_dir
 
 TEMPLATE_MATCH_MODES = ("gray", "rgb", "hsv", "edge", "clahe_gray")

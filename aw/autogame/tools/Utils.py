@@ -77,6 +77,19 @@ def _safe_write_text(path: Path, content: str):
     path.write_text(content, encoding="utf-8")
 
 
+def _copy_process_temp_logs(dst_dir: Path):
+    if not PROCESS_TEMP_LOGS_DIR.exists():
+        return
+
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for path in sorted(PROCESS_TEMP_LOGS_DIR.iterdir()):
+        target = dst_dir / path.name
+        if path.is_file():
+            shutil.copy2(path, target)
+        elif path.is_dir():
+            shutil.copytree(path, target, dirs_exist_ok=True)
+
+
 def _sanitize_archive_name_part(value: str) -> str:
     value = str(value or "").strip()
     if not value:
@@ -600,10 +613,12 @@ def archive_run_artifacts(
         reuse_existing=reuse_existing,
     )
     log_archive_dir = archive_dir / "logs"
+    process_archive_dir = archive_dir / "process_temp_logs"
+    _copy_process_temp_logs(process_archive_dir)
 
     if generate_preview_video:
         _create_preview_video(
-            PROCESS_TEMP_LOGS_DIR,
+            process_archive_dir,
             archive_dir / "preview_10fps.mp4",
             fps=10,
         )
@@ -632,7 +647,7 @@ def prune_run_archive_artifacts(
     archive_dir: Path,
     keep_preview_video: bool = False,
 ) -> Path:
-    """Keep only Launcher output, hilog, and the optional preview video."""
+    """Keep runtime frames, Launcher output, hilog, and optional preview video."""
     archive_dir = Path(archive_dir)
     allowed_logs = {"launcher_output.txt", "hilog.txt"}
     logs_dir = archive_dir / "logs"
@@ -648,6 +663,8 @@ def prune_run_archive_artifacts(
 
     for path in list(archive_dir.iterdir()):
         if path == logs_dir:
+            continue
+        if path.is_dir() and path.name == "process_temp_logs":
             continue
         if (
             keep_preview_video

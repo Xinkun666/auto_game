@@ -1652,9 +1652,11 @@ def format_history_record_summary(record: dict) -> str:
     launcher_text = "有" if str(record.get("launcher_output") or "").strip() else "无"
     hilog_text = "有" if record.get("hilog_exists") else "无"
     battery_text = "有" if record.get("battery_log_exists") else "无"
+    frame_log_count = int(record.get("frame_log_count") or 0)
     lines = [
         f"Launcher 运行日志: {launcher_text}",
         f"hilog 日志: {hilog_text}",
+        f"运行帧 JSON: {frame_log_count}",
         f"battery.log: {battery_text}",
         f"预览视频: {preview_text}",
         f"归档目录: {archive_dir}",
@@ -2763,7 +2765,8 @@ class LauncherWindow(QWidget):
         self.generate_preview_video_button.setChecked(False)
         self.generate_preview_video_button.setProperty("toggleButton", True)
         self.generate_preview_video_button.setToolTip(
-            "关闭时只归档 Launcher 运行日志和 hilog，不生成预览视频"
+            "关闭时仍保留运行帧图片/JSON、Launcher 日志和 hilog，"
+            "但不生成预览视频"
         )
         self.preview_overlay_button = QPushButton("显示标注")
         self.preview_overlay_button.setCheckable(True)
@@ -4366,12 +4369,11 @@ class LauncherWindow(QWidget):
         self.history_next_frame_button.setEnabled(has_frame and self.history_frame_index < frame_count - 1)
 
         if not has_frame:
-            self.history_frame_counter_label.setText("未保留逐帧日志")
+            self.history_frame_counter_label.setText("未找到逐帧日志")
             self.history_frame_image_label.setPixmap(QPixmap())
-            self.history_frame_image_label.setText("当前归档策略不保留运行帧")
+            self.history_frame_image_label.setText("未找到 process_temp_logs/frame_*.jpg")
             self.history_frame_log_edit.setPlainText(
-                "每轮只保留 Launcher 运行日志、hilog，"
-                "以及可选的预览视频。"
+                "未找到逐帧 JSON。请检查本轮 process_temp_logs 是否已正常生成。"
             )
             return
 

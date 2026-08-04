@@ -7,6 +7,7 @@ TEST_PROFILE_MARATHON = "marathon"
 TEST_TYPE_POWER = "功耗测试"
 TEST_TYPE_FUNCTION = "功能测试"
 TEST_TYPE_MARATHON = "马拉松测试"
+DEFAULT_MARATHON_DURATION_MINUTES = 60.0
 DEFAULT_PUBG_GAME_PACKAGE = "com.tencent.tmgp.pubgmhd.hw"
 DEFAULT_SP_PACKAGE = "com.huawei.hmsapp.hismartperf"
 

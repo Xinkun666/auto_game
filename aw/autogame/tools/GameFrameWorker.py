@@ -16,7 +16,11 @@ from typing import Dict, Tuple
 
 import numpy as np
 
-from aw.autogame.common.SPController.SPArea import SPControllerBase
+from aw.autogame.common.SPController.SPArea import (
+    MARATHON_DURATION_ENV,
+    SPControllerBase,
+    parse_marathon_duration_minutes,
+)
 from aw.autogame.tools.Utils import *
 from aw.autogame.tools.Utils import _parse_display_rotation, _read_autogame_config
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
@@ -27,7 +31,12 @@ from aw.autogame.tools.FrameLog import (
     encode_frame_log_transport,
 )
 from aw.autogame.tools.GameSceneHandler import DEFAULT_GROUP_NAME, StageLogicController
-from aw.autogame.tools.GameLaunchProfile import normalize_test_profile, resolve_test_type
+from aw.autogame.tools.GameLaunchProfile import (
+    DEFAULT_MARATHON_DURATION_MINUTES,
+    TEST_PROFILE_MARATHON,
+    normalize_test_profile,
+    resolve_test_type,
+)
 from aw.autogame.tools.ProcessUtils import hdc_command_args, hidden_subprocess_kwargs
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -2187,6 +2196,14 @@ class FrameWorker(threading.Thread):
             os.environ.get("AUTOGAME_TEST_PROFILE")
         )
         self.test_type = resolve_test_type(self.test_profile)
+        self.marathon_duration_minutes = parse_marathon_duration_minutes(
+            os.environ.get(MARATHON_DURATION_ENV, "")
+        )
+        if (
+            self.test_profile == TEST_PROFILE_MARATHON
+            and self.marathon_duration_minutes <= 0
+        ):
+            self.marathon_duration_minutes = DEFAULT_MARATHON_DURATION_MINUTES
         self.running = False
         self.finished = False
         self.failed = False
@@ -2237,7 +2254,10 @@ class FrameWorker(threading.Thread):
         self.move_press = self._wrap_control_action("move_press", self.controller.move_press)
         self.move_to = self._wrap_control_action("move_to", self.controller.move_to)
         self.move_up = self._wrap_control_action("move_up", self.controller.move_up)
-        self.sp_controller = SPControllerBase(self)
+        self.sp_controller = SPControllerBase(
+            self,
+            marathon_duration_minutes=self.marathon_duration_minutes,
+        )
 
     def _begin_frame_log_context(self):
         self.current_frame_logs = []

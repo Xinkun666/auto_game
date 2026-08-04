@@ -2619,9 +2619,9 @@ class LauncherWindow(QWidget):
         self.test_profile_layout = QHBoxLayout(self.test_profile_field)
         self.test_profile_layout.setContentsMargins(0, 0, 0, 0)
         self.test_profile_layout.setSpacing(4)
-        self.power_test_radio = QRadioButton("功耗测试")
-        self.function_test_radio = QRadioButton("功能测试")
-        self.marathon_test_radio = QRadioButton("马拉松")
+        self.power_test_radio = QRadioButton("功耗\n测试")
+        self.function_test_radio = QRadioButton("功能\n测试")
+        self.marathon_test_radio = QRadioButton("马拉松\n测试")
         self.power_test_radio.setChecked(True)
         self.test_profile_button_group = QButtonGroup(self)
         self.test_profile_button_group.setExclusive(True)
@@ -3558,11 +3558,15 @@ class LauncherWindow(QWidget):
             section_layout.addWidget(title_label)
             item_height = 26 if len(items) > 4 else 32
             for label_text, widget, field_width in items:
+                if len(items) > 4:
+                    current_item_height = 34 if widget is self.test_profile_field else 24
+                else:
+                    current_item_height = item_height
                 config_item = create_config_item(
                     label_text,
                     widget,
                     field_width,
-                    item_height=item_height,
+                    item_height=current_item_height,
                 )
                 if widget is self.marathon_duration_field:
                     self.marathon_duration_item = config_item

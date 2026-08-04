@@ -25,7 +25,10 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.phase_time_mana
     load_phase_durations_from_config,
     parse_case_loop_count,
 )
-from aw.autogame.tools.GameLaunchProfile import should_use_sp_recording_for_profile
+from aw.autogame.tools.GameLaunchProfile import (
+    TEST_TYPE_MARATHON,
+    should_use_sp_recording_for_profile,
+)
 from aw.autogame.tools.FrameLog import FrameLogType
 from aw.autogame.tools.Utils import _read_project_config
 
@@ -290,7 +293,7 @@ def handle_sp_start(w: "FrameWorker"):
         driving_manager.set_game_time(phase_timer.start_game_time)
     if w.sp_controller.start("sp"):
         time.sleep(0.5)
-        if w.sp_controller.marathon_enabled:
+        if is_marathon_test(w):
             w.frame_log(
                 f"马拉松 SP 目标 {w.sp_controller.target_duration_seconds / 60:g} 分钟，"
                 f"当前有效时间 {w.sp_controller.effective_time / 60:.1f} 分钟",
@@ -328,9 +331,13 @@ def _stop_active_motion(w: "FrameWorker", reason: str = "检测到死亡或排�
         cancel_drive(w, f"{reason}，取消车辆自动前进")
 
 
+def is_marathon_test(w: "FrameWorker") -> bool:
+    return w.test_type == TEST_TYPE_MARATHON
+
+
 def finalize_marathon_if_target_reached(w: "FrameWorker") -> bool:
     _require_runtime()
-    if not SP_RECORDING_ENABLED or not w.sp_controller.marathon_enabled:
+    if not SP_RECORDING_ENABLED or not is_marathon_test(w):
         return False
     if not w.sp_controller.is_recording or not w.sp_controller.target_reached:
         return False
@@ -578,8 +585,8 @@ def finalize_automation(w: "FrameWorker"):
 
 def finish_case_loop_or_finalize(w: "FrameWorker"):
     _require_runtime()
-    marathon_enabled = SP_RECORDING_ENABLED and w.sp_controller.marathon_enabled
-    if marathon_enabled:
+    marathon_test = is_marathon_test(w)
+    if marathon_test:
         if w.sp_controller.target_reached:
             w.frame_log(
                 f"马拉松 SP 有效时间已达到 "
@@ -596,7 +603,7 @@ def finish_case_loop_or_finalize(w: "FrameWorker"):
     if w.current_stage == "跑图阶段":
         running_manager.stop_auto_forward(w)
 
-    if marathon_enabled:
+    if marathon_test:
         next_loop_message = (
             f"马拉松 SP 有效时间 "
             f"{w.sp_controller.effective_time / 60:.1f}/"
@@ -615,7 +622,7 @@ def finish_case_loop_or_finalize(w: "FrameWorker"):
         log_type=FrameLogType.TIME,
     )
     handle_sp_stop(w)
-    phase_timer.advance_case_loop(allow_extend=marathon_enabled)
+    phase_timer.advance_case_loop(allow_extend=marathon_test)
     w.change_stage("结束阶段")
 
 

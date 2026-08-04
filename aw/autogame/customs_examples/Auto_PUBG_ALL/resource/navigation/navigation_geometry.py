@@ -674,6 +674,8 @@ def execute_view_turn(
     use_uinput=False,
 ):
     for _ in range(max_steps):
+        if getattr(w, "failed", False) or not getattr(w, "running", True):
+            return False
         motion = plan_view_turn_motion(
             current_angle,
             target_angle,
@@ -697,7 +699,10 @@ def execute_view_turn(
         )
         turn_action = w.uinput_tap_single if use_uinput else w.tap_single
         turn_action("视角", x_bias=motion["x_bias"], dura=motion["dura"], wait=wait)
-        w.refresh_frame()
+        if not w.refresh_frame():
+            return False
+        if getattr(w, "failed", False) or not getattr(w, "running", True):
+            return False
         current_angle = w.get_info("direction")
         if current_angle is None:
             return False

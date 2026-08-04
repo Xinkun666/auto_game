@@ -10,6 +10,8 @@
     "hoscrcpy_decoder": "gstreamer",
     "hoscrcpy_first_frame_timeout": 15,
     "hoscrcpy_touch_replay_frame_grace_seconds": 5.0,
+    "hoscrcpy_cleanup_command_timeout_seconds": 5.0,
+    "hdc_recovery_command_timeout_seconds": 10.0,
     "stream_recovery_max_wait_seconds": 120,
     "hoscrcpy_device_port": 5000,
     "hoscrcpy_encoder_type": "0",

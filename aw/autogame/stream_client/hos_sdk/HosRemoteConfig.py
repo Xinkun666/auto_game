@@ -24,6 +24,10 @@ class HosRemoteConfig:
         self.windows_id = kwargs.get("windows_id", "")
         self.app_pid = kwargs.get("app_pid", "")
         self.encoder_type = kwargs.get("encoder_type", "0")
+        self.cleanup_command_timeout_seconds = kwargs.get(
+            "cleanup_command_timeout_seconds",
+            5.0,
+        )
         self.use_old_version = kwargs.get("use_old_version", False)
         if not self.sn:
             raise ValueError("sn cannot be empty")
@@ -104,6 +108,9 @@ class HosRemoteConfig:
 
     def set_encoder_type(self, encoder_type: str) -> None:
         self.encoder_type = encoder_type
+
+    def get_cleanup_command_timeout_seconds(self) -> float:
+        return float(self.cleanup_command_timeout_seconds)
 
     def get_use_old_version(self) -> bool:
         return self.use_old_version

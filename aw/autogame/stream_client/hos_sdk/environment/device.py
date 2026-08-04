@@ -118,6 +118,7 @@ class Device(object):
         self._config = None
         self._video_has_retried = False
         self._screen_cap_callback = None
+        self.cleanup_command_timeout_seconds = 5.0
 
     def _init_so_md5_map(self):
         folder_path = os.path.join(RESOURCE_PATH)
@@ -140,6 +141,10 @@ class Device(object):
     def setup(self, config: HosRemoteConfig) -> bool:
         self._config = config
         self._video_has_retried = False
+        self.cleanup_command_timeout_seconds = max(
+            0.1,
+            float(config.get_cleanup_command_timeout_seconds()),
+        )
         # 1、先执行获取设备的SN
         if not self._check_device_status():
             logger.error("Can not find device [%s], please check...", self.device_sn)
@@ -154,38 +159,91 @@ class Device(object):
         self.is_setup = start_result
         return start_result
 
+    def _remove_fport(self, local_port, remote_node, label):
+        if not local_port:
+            return None
+        command = "fport rm tcp:{} {}".format(local_port, remote_node)
+        try:
+            result = self.connector_command(
+                command,
+                timeout=self.cleanup_command_timeout_seconds,
+            )
+            logger.info("Close %s fport result: %s", label, result)
+            return result
+        except Exception as exc:
+            logger.warning(
+                "Close %s fport failed after %.1fs: %s",
+                label,
+                self.cleanup_command_timeout_seconds,
+                exc,
+            )
+            raise
+
     def close(self) -> None:
+        cleanup_errors = []
         if self.video_proxy is not None:
-            self.video_proxy.stop_video_screen()
-        if self.video_port:
-            if self.is_use_unix_socket_video_so:
-                self.connector_command("fport rm tcp:{} localabstract:scrcpy_grpc_socket".format(self.video_port))
-            else:
-                self.connector_command("fport rm tcp:{} tcp:{}".format(self.video_port, self.video_server_port))
-        if self.agent_port:
-            if self.is_use_unix_socket_agent_so:
-                ret = self.connector_command("fport rm tcp:{} localabstract:uitest_socket".format(self.agent_port))
-            else:
-                ret = self.connector_command("fport rm tcp:{} tcp:{}".format(self.agent_port, self.agent_server_port))
-            logger.info("Close agent port result: %s", ret)
-        if self.guest_port:
-            if self.is_use_unix_socket_agent_so:
-                ret = self.connector_command("fport rm tcp:{} localabstract:uitest_socket".format(self.guest_port))
-            else:
-                ret = self.connector_command("fport rm tcp:{} tcp:{}".format(self.guest_port, self.agent_server_port))
-            logger.info("Close guest port result: %s", ret)
-        if self.layout_port:
-            if self.is_use_unix_socket_agent_so:
-                ret = self.connector_command("fport rm tcp:{} localabstract:uitest_socket".format(self.layout_port))
-            else:
-                ret = self.connector_command("fport rm tcp:{} tcp:{}".format(self.layout_port, self.agent_server_port))
-            logger.info("Close layout port result: %s", ret)
-        if self.proxy:
-            self.proxy.close()
-        if self.guest_proxy:
-            self.guest_proxy.close()
-        if self.layout_proxy:
-            self.layout_proxy.close()
+            try:
+                self.video_proxy.stop_video_screen()
+            except Exception as exc:
+                cleanup_errors.append(("video rpc", exc))
+            finally:
+                self.video_proxy = None
+
+        cleanup_specs = (
+            (
+                "video_port",
+                "localabstract:scrcpy_grpc_socket"
+                if self.is_use_unix_socket_video_so
+                else "tcp:{}".format(self.video_server_port),
+                "video",
+            ),
+            (
+                "agent_port",
+                "localabstract:uitest_socket"
+                if self.is_use_unix_socket_agent_so
+                else "tcp:{}".format(self.agent_server_port),
+                "agent",
+            ),
+            (
+                "guest_port",
+                "localabstract:uitest_socket"
+                if self.is_use_unix_socket_agent_so
+                else "tcp:{}".format(self.agent_server_port),
+                "guest",
+            ),
+            (
+                "layout_port",
+                "localabstract:uitest_socket"
+                if self.is_use_unix_socket_agent_so
+                else "tcp:{}".format(self.agent_server_port),
+                "layout",
+            ),
+        )
+        for attr_name, remote_node, label in cleanup_specs:
+            local_port = getattr(self, attr_name, None)
+            try:
+                self._remove_fport(local_port, remote_node, label)
+            except Exception as exc:
+                cleanup_errors.append(("%s fport" % label, exc))
+            finally:
+                setattr(self, attr_name, None)
+
+        for attr_name in ("proxy", "guest_proxy", "layout_proxy"):
+            proxy = getattr(self, attr_name, None)
+            try:
+                if proxy is not None:
+                    proxy.close()
+            except Exception as exc:
+                cleanup_errors.append((attr_name, exc))
+            finally:
+                setattr(self, attr_name, None)
+
+        if cleanup_errors:
+            detail = "; ".join(
+                "%s: %s" % (label, error)
+                for label, error in cleanup_errors
+            )
+            raise RuntimeError("HOS cleanup failed: %s" % detail)
 
     def _get_uitest_process(self, extension: bool):
         result = self.connector_shell_command('\"ps -ef | grep singleness\"')
@@ -442,9 +500,17 @@ class Device(object):
         if self.video_port:
             try:
                 if self.is_use_unix_socket_video_so:
-                    self.connector_command("fport rm tcp:{} localabstract:scrcpy_grpc_socket".format(self.video_port))
+                    self._remove_fport(
+                        self.video_port,
+                        "localabstract:scrcpy_grpc_socket",
+                        "first-frame-timeout video",
+                    )
                 else:
-                    self.connector_command("fport rm tcp:{} tcp:{}".format(self.video_port, self.video_server_port))
+                    self._remove_fport(
+                        self.video_port,
+                        "tcp:{}".format(self.video_server_port),
+                        "first-frame-timeout video",
+                    )
             except Exception as e:
                 logger.error("清理端口转发失败: %s", e)
             self.video_port = None
@@ -465,8 +531,17 @@ class Device(object):
         if self.is_setup:
             if self.video_proxy is not None:
                 self.video_proxy.stop_video_screen()
+                self.video_proxy = None
             if self.video_port:
-                self.connector_command("fport rm tcp:{} tcp:{}".format(self.video_port, self.video_server_port))
+                remote_node = (
+                    "localabstract:scrcpy_grpc_socket"
+                    if self.is_use_unix_socket_video_so
+                    else "tcp:{}".format(self.video_server_port)
+                )
+                try:
+                    self._remove_fport(self.video_port, remote_node, "video")
+                finally:
+                    self.video_port = None
         else:
             self.close()
 

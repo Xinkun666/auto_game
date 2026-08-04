@@ -1142,6 +1142,7 @@ class GStreamerH264Decoder:
 class HOSScrcpyStreamClient:
     HDC_RECOVERY_STATUS_ATTEMPTS = 3
     HDC_RECOVERY_STATUS_DELAY_SECONDS = 1.0
+    HDC_RECOVERY_COMMAND_TIMEOUT_SECONDS = 10.0
 
     def __init__(
         self,
@@ -1166,6 +1167,7 @@ class HOSScrcpyStreamClient:
         self.device = None
         self._last_error = None
         self._first_frame_received = False
+        self._capture_first_frame_event = threading.Event()
         self._diagnostic_stage = "initialized"
         self._ready_received = False
         self._callback_data_count = 0
@@ -1175,6 +1177,7 @@ class HOSScrcpyStreamClient:
         self._last_decoded_at = None
         self._start_monotonic = None
         self._hdc_recovery_attempted = False
+        self._cleanup_hdc_recovery_attempted = False
         self._touch_replay_depth = 0
         self._touch_replay_label = ""
         self._touch_replay_started_at = None
@@ -1202,6 +1205,18 @@ class HOSScrcpyStreamClient:
         self.bit_rate = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_BIT_RATE", config, "hoscrcpy_bit_rate", 1))
         self.device_port = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_DEVICE_PORT", config, "hoscrcpy_device_port", 5000))
         self.encoder_type = _resolve_str_option("AUTOGAME_HOSCRCPY_ENCODER_TYPE", config, "hoscrcpy_encoder_type", "0") or "0"
+        self.cleanup_command_timeout_seconds = max(0.1, _resolve_float_option(
+            "AUTOGAME_HOSCRCPY_CLEANUP_TIMEOUT_SECONDS",
+            config,
+            "hoscrcpy_cleanup_command_timeout_seconds",
+            5.0,
+        ))
+        self.hdc_recovery_command_timeout_seconds = max(1.0, _resolve_float_option(
+            "AUTOGAME_HDC_RECOVERY_COMMAND_TIMEOUT_SECONDS",
+            config,
+            "hdc_recovery_command_timeout_seconds",
+            self.HDC_RECOVERY_COMMAND_TIMEOUT_SECONDS,
+        ))
         self.max_reconnect_attempts = max(0, _resolve_int_option(
             "AUTOGAME_HOSCRCPY_RECONNECT_RETRIES",
             config,
@@ -1284,8 +1299,10 @@ class HOSScrcpyStreamClient:
             reconnect_attempt = 0
             while self.running and not self._stop_event.is_set():
                 retry_delay = None
+                cleanup_error = None
                 self._last_error = None
                 self._stream_error_event.clear()
+                self._capture_first_frame_event.clear()
                 try:
                     self._diagnostic_stage = "creating_device"
                     device = self._create_device()
@@ -1303,16 +1320,24 @@ class HOSScrcpyStreamClient:
                     )
                     self._diagnostic_stage = "starting_capture"
                     self.device.start_capture_screen(callback)
-                    if self._last_error is None:
-                        reconnect_attempt = 0
-                        self._reconnect_attempt = 0
                     self._diagnostic_stage = "capture_started_waiting_frames"
+                    capture_confirmed = False
                     while self.running and not self._stop_event.is_set():
                         if self.is_capture_paused():
                             self._stop_event.wait(0.2)
                             continue
                         if self._last_error is not None or self._stream_error_event.is_set():
                             break
+                        if self._capture_first_frame_event.is_set() and not capture_confirmed:
+                            capture_confirmed = True
+                            reconnect_attempt = 0
+                            self._reconnect_attempt = 0
+                            self._cleanup_hdc_recovery_attempted = False
+                            self._diagnostic_stage = "stream_ready"
+                            print(
+                                "[HOS] Fresh decoded frame confirmed; reconnect budget reset.",
+                                flush=True,
+                            )
                         self._stop_event.wait(0.2)
                     if not self.running or self._stop_event.is_set():
                         break
@@ -1372,10 +1397,38 @@ class HOSScrcpyStreamClient:
                         flush=True,
                     )
                 finally:
-                    self._stop_device()
+                    cleanup_error = self._stop_device()
                     self._close_decoder()
                 if retry_delay is None:
                     break
+                if cleanup_error is not None:
+                    if self._cleanup_hdc_recovery_attempted:
+                        recovery_error = RuntimeError(
+                            "HDC cleanup recovery already attempted but cleanup failed again: %s"
+                            % cleanup_error
+                        )
+                        self._diagnostic_stage = "hdc_cleanup_recovery_failed"
+                        message = "[HOS] Runtime Error: %s" % recovery_error
+                        print(message, flush=True)
+                        self._write_disconnect_signal(
+                            "hdc_cleanup_recovery_failed",
+                            message,
+                            reconnect_attempt,
+                        )
+                        raise recovery_error
+                    self._cleanup_hdc_recovery_attempted = True
+                    try:
+                        self._recover_hdc_after_cleanup_failure(cleanup_error)
+                    except Exception as recovery_exc:
+                        self._diagnostic_stage = "hdc_cleanup_recovery_failed"
+                        message = "[HOS] Runtime Error: %s" % recovery_exc
+                        print(message, flush=True)
+                        self._write_disconnect_signal(
+                            "hdc_cleanup_recovery_failed",
+                            message,
+                            reconnect_attempt,
+                        )
+                        raise
                 if self._stop_event.wait(retry_delay):
                     break
         finally:
@@ -1456,6 +1509,7 @@ class HOSScrcpyStreamClient:
             bit_rate=self.bit_rate,
             device_port=self.device_port,
             encoder_type=self.encoder_type,
+            cleanup_command_timeout_seconds=self.cleanup_command_timeout_seconds,
         )
         return HosRemoteDevice(config)
 
@@ -1570,6 +1624,7 @@ class HOSScrcpyStreamClient:
             if not self._first_frame_received:
                 self._first_frame_received = True
                 print("[HOS] First frame received.", flush=True)
+            self._capture_first_frame_event.set()
 
     def _handle_stream_exception(self, err):
         if not self.running:
@@ -1636,6 +1691,7 @@ class HOSScrcpyStreamClient:
             "decoder_fallback_reason": self._decoder_fallback_reason,
             "ready_received": self._ready_received,
             "first_frame_received": self._first_frame_received,
+            "capture_first_frame_received": self._capture_first_frame_event.is_set(),
             "callback_data_count": self._callback_data_count,
             "last_data_bytes": self._last_data_bytes,
             "decoded_frame_count": self._decoded_frame_count,
@@ -1873,6 +1929,8 @@ class HOSScrcpyStreamClient:
                 device.stop_capture_screen()
             except Exception as exc:
                 print("[HOS] Stop capture warning: %s" % exc)
+                return exc
+        return None
 
     def _get_reconnect_delay(self, attempt: int) -> float:
         attempt = max(1, int(attempt))
@@ -1884,24 +1942,47 @@ class HOSScrcpyStreamClient:
         return "usb offline" in str(error or "").lower()
 
     def _recover_hdc_from_usb_offline(self) -> None:
+        self._restart_hdc_and_wait(
+            reason="USB Offline",
+            failure_prefix="hdc offline没有恢复",
+        )
+
+    def _recover_hdc_after_cleanup_failure(self, cleanup_error) -> None:
+        self._diagnostic_stage = "hdc_cleanup_recovery"
+        print(
+            "[HOS] 抓流清理失败，先重启 HDC 并确认设备在线，再继续重建抓流：%s"
+            % cleanup_error,
+            flush=True,
+        )
+        self._restart_hdc_and_wait(
+            reason="抓流清理失败",
+            failure_prefix="HDC cleanup recovery failed",
+        )
+
+    def _restart_hdc_and_wait(self, reason: str, failure_prefix: str) -> None:
         kill_command = hdc_command_args("hdc kill")
         start_command = hdc_command_args("hdc start")
         targets_command = hdc_command_args("hdc list targets")
         if not kill_command or not start_command or not targets_command:
-            raise RuntimeError("hdc offline没有恢复：无法构造 hdc 恢复命令")
+            raise RuntimeError("%s：无法构造 hdc 恢复命令" % failure_prefix)
 
         print(
-            "[HOS] 检测到 USB Offline：判定 HDC 已断连，先执行 hdc kill / hdc start，"
-            "确认 HDC 恢复后再恢复 gRPC。",
+            "[HOS] %s：先执行 hdc kill / hdc start，确认设备恢复在线后再恢复 gRPC。"
+            % reason,
             flush=True,
         )
+        command_timeout = float(getattr(
+            self,
+            "hdc_recovery_command_timeout_seconds",
+            self.HDC_RECOVERY_COMMAND_TIMEOUT_SECONDS,
+        ))
         command_results = []
         for description, command in (("kill", kill_command), ("start", start_command)):
             try:
                 result = subprocess.run(
                     command,
                     capture_output=True,
-                    timeout=30,
+                    timeout=command_timeout,
                     text=True,
                     encoding="utf-8",
                     errors="ignore",
@@ -1909,7 +1990,7 @@ class HOSScrcpyStreamClient:
                 )
             except Exception as exc:
                 raise RuntimeError(
-                    "hdc offline没有恢复：hdc %s 执行异常: %s" % (description, exc)
+                    "%s：hdc %s 执行异常: %s" % (failure_prefix, description, exc)
                 ) from exc
             output = ((result.stdout or "") + (result.stderr or "")).strip()
             command_results.append(
@@ -1925,7 +2006,7 @@ class HOSScrcpyStreamClient:
                 result = subprocess.run(
                     targets_command,
                     capture_output=True,
-                    timeout=30,
+                    timeout=command_timeout,
                     text=True,
                     encoding="utf-8",
                     errors="ignore",
@@ -1955,7 +2036,7 @@ class HOSScrcpyStreamClient:
                 time.sleep(self.HDC_RECOVERY_STATUS_DELAY_SECONDS)
 
         detail = "; ".join(command_results + [last_status])
-        raise RuntimeError("hdc offline没有恢复：%s" % detail)
+        raise RuntimeError("%s：%s" % (failure_prefix, detail))
 
     def _hdc_target_is_online(self, output: str) -> bool:
         text = str(output or "").strip()

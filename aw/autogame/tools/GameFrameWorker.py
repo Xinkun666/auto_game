@@ -2196,14 +2196,14 @@ class FrameWorker(threading.Thread):
             os.environ.get("AUTOGAME_TEST_PROFILE")
         )
         self.test_type = resolve_test_type(self.test_profile)
-        self.marathon_duration_minutes = parse_marathon_duration_minutes(
+        self.marathon_time = parse_marathon_duration_minutes(
             os.environ.get(MARATHON_DURATION_ENV, "")
         )
         if (
             self.test_profile == TEST_PROFILE_MARATHON
-            and self.marathon_duration_minutes <= 0
+            and self.marathon_time <= 0
         ):
-            self.marathon_duration_minutes = DEFAULT_MARATHON_DURATION_MINUTES
+            self.marathon_time = DEFAULT_MARATHON_DURATION_MINUTES
         self.running = False
         self.finished = False
         self.failed = False
@@ -2256,7 +2256,7 @@ class FrameWorker(threading.Thread):
         self.move_up = self._wrap_control_action("move_up", self.controller.move_up)
         self.sp_controller = SPControllerBase(
             self,
-            marathon_duration_minutes=self.marathon_duration_minutes,
+            marathon_duration_minutes=self.marathon_time,
         )
 
     def _begin_frame_log_context(self):

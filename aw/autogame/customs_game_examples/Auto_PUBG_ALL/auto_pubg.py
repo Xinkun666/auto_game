@@ -705,20 +705,38 @@ def confirm_lobby_after_popups(w: "FrameWorker") -> bool:
     return lobby_house_confirm_count >= LOBBY_CONFIRM_REQUIRED
 
 
-def prepare_rank_finish_for_lobby(w: "FrameWorker"):
+def prepare_rank_finish_for_lobby(w: "FrameWorker") -> bool:
     global rank_finish_pending
 
     if not rank_finish_pending and not _has_rank_finish_info(w):
-        return
+        return True
 
+    rank_finish_pending = True
     w.frame_log(
-        "检测到排名界面，等待2s后点击观战对手再返回大厅",
+        "检测到排名界面，等待2s后通过区域获取观战对手位置",
         log_type=FrameLogType.LOGIC,
     )
     time.sleep(RANK_FINISH_SPECTATE_WAIT_SECONDS)
-    w.click("观战对手")
-    w.refresh_frame()
+    if not w.refresh_frame():
+        return False
+
+    spectate_opponent = w.get_info("观战对手")
+    if not spectate_opponent:
+        w.frame_log(
+            "未识别到观战对手区域，保留在排名界面等待下一帧",
+            log_type=FrameLogType.LOGIC,
+        )
+        return False
+
+    w.frame_log(
+        f"通过区域动态点击观战对手: position={spectate_opponent}",
+        log_type=FrameLogType.UI_CONTROL,
+    )
+    w.click(spectate_opponent)
+    if not w.refresh_frame():
+        return False
     rank_finish_pending = False
+    return True
 
 
 def maybe_report_phase_remaining():
@@ -1060,7 +1078,8 @@ def on_stage(w: "FrameWorker"):
                 log_type=FrameLogType.LOGIC,
             )
             handle_sp_stop(w)
-            prepare_rank_finish_for_lobby(w)
+            if not prepare_rank_finish_for_lobby(w):
+                return
             w.click("设置")
             time.sleep(1)
             w.click("返回大厅")
@@ -1075,7 +1094,8 @@ def on_stage(w: "FrameWorker"):
             log_type=FrameLogType.LOGIC,
         )
         handle_sp_stop(w)
-        prepare_rank_finish_for_lobby(w)
+        if not prepare_rank_finish_for_lobby(w):
+            return
 
         w.click("设置")
         time.sleep(1)

@@ -726,6 +726,23 @@ def maybe_report_phase_remaining():
     phase_reporter.maybe_report(phase_timer)
 
 
+def click_classic_island_region(w: "FrameWorker") -> bool:
+    classic_island = w.get_info("经典海岛")
+    if not classic_island:
+        w.frame_log(
+            "未识别到经典海岛区域，保留在选图页等待下一帧",
+            log_type=FrameLogType.LOGIC,
+        )
+        return False
+
+    w.frame_log(
+        f"通过经典海岛区域动态选择海岛: position={classic_island}",
+        log_type=FrameLogType.UI_CONTROL,
+    )
+    w.click(classic_island)
+    return True
+
+
 
 
 
@@ -883,11 +900,10 @@ def on_stage(w: "FrameWorker"):
             w.click(w.get_info("对号"))
             time.sleep(2)
 
-        w.frame_log(
-            "选择海岛地图",
-            log_type=FrameLogType.UI_CONTROL,
-        )
-        w.click("海岛")
+        if not w.refresh_frame():
+            return
+        if not click_classic_island_region(w):
+            return
         time.sleep(1)
         w.refresh_frame()
         if w.get_info('自动匹配'):

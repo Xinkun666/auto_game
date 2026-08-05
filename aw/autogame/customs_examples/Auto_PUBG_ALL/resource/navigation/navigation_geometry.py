@@ -659,6 +659,60 @@ def plan_view_turn_motion(
     }
 
 
+def resolve_direction_after_turn(
+    before_angle,
+    observed_angle,
+    turn_dir,
+    expected_delta,
+    *,
+    max_candidate_error=60.0,
+    min_score_gain=40.0,
+):
+    """根据刚执行的转向动作，修复方向识别丢失百位的结果。
+
+    例如 170° 向右转约 50° 后识别到 20°，候选为
+    20/120/220/320°；按向右转 50° 的动作上下文选择 220°。
+    只处理 0~99° 的识别值，并且只在新候选显著更合理时纠正。
+    """
+    try:
+        before = float(before_angle) % 360.0
+        observed = float(observed_angle)
+        expected = abs(float(expected_delta))
+    except (TypeError, ValueError):
+        return observed_angle
+
+    if turn_dir not in {"left", "right"}:
+        return observed_angle
+    if not 0.0 <= observed < 100.0:
+        return observed_angle
+    if not 0.0 < expected <= 180.0:
+        return observed_angle
+
+    def directed_delta(candidate):
+        if turn_dir == "right":
+            return (candidate - before) % 360.0
+        return (before - candidate) % 360.0
+
+    def score(candidate):
+        delta = directed_delta(candidate)
+        if delta > 180.0:
+            return float("inf")
+        return abs(delta - expected)
+
+    candidates = [observed + hundreds for hundreds in (0.0, 100.0, 200.0, 300.0)]
+    candidates = [candidate for candidate in candidates if candidate < 360.0]
+    best = min(candidates, key=score)
+    raw_score = score(observed)
+    best_score = score(best)
+    if best == observed:
+        return observed_angle
+    if best_score > float(max_candidate_error):
+        return observed_angle
+    if raw_score - best_score < float(min_score_gain):
+        return observed_angle
+    return best
+
+
 def execute_view_turn(
     w,
     current_angle,
@@ -703,9 +757,31 @@ def execute_view_turn(
             return False
         if getattr(w, "failed", False) or not getattr(w, "running", True):
             return False
-        current_angle = w.get_info("direction")
-        if current_angle is None:
+        observed_angle = w.get_info("direction")
+        if observed_angle is None:
             return False
+        expected_delta = motion["diff"]
+        fallback_px = motion.get("fallback_px", 0)
+        if fallback_px and motion["px"] < fallback_px:
+            expected_delta *= motion["px"] / float(fallback_px)
+        corrected_angle = resolve_direction_after_turn(
+            current_angle,
+            observed_angle,
+            motion["turn_dir"],
+            expected_delta,
+        )
+        if corrected_angle != observed_angle:
+            message = (
+                f"[DirectionGuard] 转向后角度识别纠错: before={float(current_angle) % 360.0:.1f}°, "
+                f"turn={motion['turn_dir']} {expected_delta:.1f}°, "
+                f"raw={float(observed_angle):.1f}°, corrected={float(corrected_angle):.1f}°"
+            )
+            frame_log = getattr(w, "frame_log", None)
+            if callable(frame_log):
+                frame_log(message)
+            else:
+                print(message)
+        current_angle = corrected_angle
     return False
 
 

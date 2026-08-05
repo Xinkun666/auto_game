@@ -51,7 +51,7 @@ from aw.autogame.tools.GameLaunchProfile import (
     should_use_sp_recording_for_profile,
 )
 from aw.autogame.tools.FrameLog import FrameLogType, parse_frame_log_transport
-from aw.autogame.tools.Utils import archive_run_artifacts, get_display_rotation, get_resolution, get_screen_mode, prune_run_archive_artifacts, resolve_run_archive_dir, select_scene_resolution
+from aw.autogame.tools.Utils import LATEST_PREVIEW_POINTER_FILENAME, archive_run_artifacts, get_display_rotation, get_resolution, get_screen_mode, prune_run_archive_artifacts, resolve_run_archive_dir, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 from aw.autogame.common.SPController.SPArea import build_sp_save_shell_command
 
@@ -1724,31 +1724,26 @@ def _preview_frame_sequence(path: Path) -> int:
     return int(match.group(1))
 
 
-def _preview_frame_sort_key(path: Path):
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        mtime = -1.0
-    return (mtime, _preview_frame_sequence(path), path.name)
-
-
 def find_latest_preview_frame(preview_dir: Path) -> Optional[Path]:
-    if not preview_dir.exists():
+    pointer_path = preview_dir / LATEST_PREVIEW_POINTER_FILENAME
+    try:
+        payload = json.loads(pointer_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
         return None
 
-    candidates = []
-    for path in preview_dir.iterdir():
-        if not path.is_file():
-            continue
-        if path.suffix.lower() not in PREVIEW_FRAME_SUFFIXES:
-            continue
-        if not path.stem.startswith("frame_"):
-            continue
-        candidates.append(path)
-
-    if not candidates:
+    image_name = str(payload.get("image") or "").strip()
+    if not image_name or Path(image_name).name != image_name:
         return None
-    return max(candidates, key=_preview_frame_sort_key)
+    latest_image = preview_dir / image_name
+    if (
+        not latest_image.is_file()
+        or latest_image.suffix.lower() not in PREVIEW_FRAME_SUFFIXES
+        or not latest_image.stem.startswith("frame_")
+    ):
+        return None
+    return latest_image
 
 
 def _history_frame_sort_key(path: Path):
@@ -5039,38 +5034,18 @@ class LauncherWindow(QWidget):
         return pixmap
 
     def _poll_preview_frame(self):
-        LOGGER.debug("preview frame dir=%s exists=%s", PREVIEW_DIR, PREVIEW_DIR.exists())
         if not PREVIEW_DIR.exists():
             return
 
         latest_image = find_latest_preview_frame(PREVIEW_DIR)
-        LOGGER.debug(
-            "latest frame path=%s latest frame exists=%s",
-            latest_image,
-            bool(latest_image and latest_image.exists()),
-        )
-
         if latest_image is None or latest_image == self.latest_preview_file:
             return
 
         json_path = latest_image.with_suffix(".json")
-        LOGGER.info(
-            "latest frame path=%s latest frame exists=%s preview frame dir=%s",
-            latest_image,
-            latest_image.exists(),
-            PREVIEW_DIR,
-        )
-
         pixmap = QPixmap(str(latest_image))
         if pixmap.isNull():
             LOGGER.warning("QPixmap load fail: latest_frame=%s", latest_image)
             return
-        LOGGER.info(
-            "QPixmap load success: latest_frame=%s size=%sx%s",
-            latest_image,
-            pixmap.width(),
-            pixmap.height(),
-        )
 
         if json_path.exists():
             try:

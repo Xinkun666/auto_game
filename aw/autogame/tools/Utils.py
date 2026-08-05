@@ -48,6 +48,7 @@ def resolve_tmp_frames_dir() -> Path:
 
 PROCESS_TEMP_LOGS_DIR = resolve_process_temp_logs_dir()
 PROCESS_SAVE_FRAMES_DIR = resolve_process_save_frames_dir()
+LATEST_PREVIEW_POINTER_FILENAME = ".latest_preview.json"
 
 
 def write_image_unicode(path, image, params=None) -> bool:
@@ -75,6 +76,32 @@ def write_image_unicode(path, image, params=None) -> bool:
 def _safe_write_text(path: Path, content: str):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def publish_latest_preview_pointer(log_dir: Path, frame_name: str, frame_index: int) -> Path:
+    """Atomically publish the newest completed preview frame."""
+    log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    pointer_path = log_dir / LATEST_PREVIEW_POINTER_FILENAME
+    temporary_path = log_dir / f"{LATEST_PREVIEW_POINTER_FILENAME}.{os.getpid()}.tmp"
+    payload = {
+        "schema_version": 1,
+        "frame_index": int(frame_index),
+        "image": Path(frame_name).name,
+        "json": Path(frame_name).with_suffix(".json").name,
+    }
+    try:
+        temporary_path.write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.replace(temporary_path, pointer_path)
+    finally:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return pointer_path
 
 
 def _copy_process_temp_logs(dst_dir: Path):
@@ -1482,6 +1509,7 @@ def visualizer_process(queue, visual=True):
             )
             with open(f"{base_filename}.json", "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=4)
+            publish_latest_preview_pointer(log_dir, frame_name, index)
 
             # 5. 缩放显示 (此时文字会因为前面的反向补偿，在显示窗口中看起来大小适中)
             if show_window:

@@ -34,7 +34,7 @@ class ParachuteManager:
     PLANNED_DIRECTION_MAX_STEPS: int = 2  # 每帧最多执行的方向校准步数
     PLANNED_JUMP_POINT_TOLERANCE: float = 15.0  # 靠近计划航线交点时的允许误差
     PLANNED_JUMP_TARGET_DIST_TOLERANCE: float = 5.0  # 圆线交点取整后的距离误差
-    ROUTE_MAX_DISTANCE: float = 1459.3  # (322,1443) -> (1777,1331) 的实测航线长度
+    ROUTE_MAX_DISTANCE: float = 1450.0  # 根据实测航线长度收紧后的有效上限
 
     def __init__(self, route_max_distance: Optional[float] = None):
         self._frame_worker = None

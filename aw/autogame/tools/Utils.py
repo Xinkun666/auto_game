@@ -104,12 +104,16 @@ def publish_latest_preview_pointer(log_dir: Path, frame_name: str, frame_index: 
     return pointer_path
 
 
-def _copy_process_temp_logs(dst_dir: Path):
-    if not PROCESS_TEMP_LOGS_DIR.exists():
+def _copy_process_temp_logs(dst_dir: Path, src_dir: Optional[Path] = None):
+    src_dir = Path(src_dir or PROCESS_TEMP_LOGS_DIR)
+    dst_dir = Path(dst_dir)
+    if not src_dir.exists():
+        return
+    if src_dir.resolve() == dst_dir.resolve():
         return
 
     dst_dir.mkdir(parents=True, exist_ok=True)
-    for path in sorted(PROCESS_TEMP_LOGS_DIR.iterdir()):
+    for path in sorted(src_dir.iterdir()):
         target = dst_dir / path.name
         if path.is_file():
             shutil.copy2(path, target)
@@ -633,6 +637,7 @@ def archive_run_artifacts(
     extra_metadata: Optional[dict] = None,
     reuse_existing: bool = False,
     generate_preview_video: bool = False,
+    process_temp_logs_source_dir: Optional[Path] = None,
 ) -> Path:
     archive_dir = _build_archive_dir(
         run_index,
@@ -641,7 +646,10 @@ def archive_run_artifacts(
     )
     log_archive_dir = archive_dir / "logs"
     process_archive_dir = archive_dir / "process_temp_logs"
-    _copy_process_temp_logs(process_archive_dir)
+    _copy_process_temp_logs(
+        process_archive_dir,
+        src_dir=process_temp_logs_source_dir,
+    )
 
     if generate_preview_video:
         _create_preview_video(

@@ -4632,6 +4632,9 @@ class LauncherWindow(QWidget):
                 create=True,
             )
             self.current_run_archive_dir = run_archive_dir
+            run_preview_dir = run_archive_dir / "process_temp_logs"
+            run_preview_dir.mkdir(parents=True, exist_ok=True)
+            env.insert("AUTOGAME_PREVIEW_DIR", str(run_preview_dir))
             env.insert("AUTOGAME_RUN_ARCHIVE_DIR", str(run_archive_dir))
             env.insert("AUTOGAME_BATCH_ARCHIVE_DIR", str(run_archive_dir.parent))
         except Exception:
@@ -4726,9 +4729,15 @@ class LauncherWindow(QWidget):
             button.setEnabled(enabled)
         self._sync_testcase_controls_state()
 
+    def _current_preview_dir(self) -> Path:
+        if self.current_run_archive_dir is not None:
+            return self.current_run_archive_dir / "process_temp_logs"
+        return PREVIEW_DIR
+
     def _clear_preview_files(self):
-        LOGGER.info("preview frame dir=%s", PREVIEW_DIR)
-        LOGGER.debug("clear_preview_files: dir=%s", PREVIEW_DIR)
+        preview_dir = self._current_preview_dir()
+        LOGGER.info("preview frame dir=%s", preview_dir)
+        LOGGER.debug("clear_preview_files: dir=%s", preview_dir)
         self.latest_preview_file = None
         self.latest_preview_pixmap = None
         self.latest_preview_payload = None
@@ -4736,8 +4745,8 @@ class LauncherWindow(QWidget):
         self.preview_image_label.setPixmap(QPixmap())
         self.preview_info_edit.clear()
 
-        PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
-        for path in PREVIEW_DIR.iterdir():
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        for path in preview_dir.iterdir():
             if path.is_file():
                 try:
                     path.unlink()
@@ -5034,10 +5043,11 @@ class LauncherWindow(QWidget):
         return pixmap
 
     def _poll_preview_frame(self):
-        if not PREVIEW_DIR.exists():
+        preview_dir = self._current_preview_dir()
+        if not preview_dir.exists():
             return
 
-        latest_image = find_latest_preview_frame(PREVIEW_DIR)
+        latest_image = find_latest_preview_frame(preview_dir)
         if latest_image is None or latest_image == self.latest_preview_file:
             return
 
@@ -5439,6 +5449,7 @@ class LauncherWindow(QWidget):
         self.current_run_start_timestamp = time.strftime("%Y%m%d%H%M%S")
         self.current_run_archive_dir = None
         self.process_output_buffer = ""
+        self._resolve_current_run_archive_dir()
         self._clear_preview_files()
         self.current_run_output_start = len(self._all_output_text())
 
@@ -6139,6 +6150,7 @@ class LauncherWindow(QWidget):
                     "run_start_timestamp": self.current_run_start_timestamp,
                 },
                 reuse_existing=True,
+                process_temp_logs_source_dir=self._current_preview_dir(),
             )
             self._log_message(f"[Launcher] 本次运行产物已归档到：{archive_dir}\n")
             logs_dir = archive_dir / "logs"

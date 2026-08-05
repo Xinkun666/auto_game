@@ -98,7 +98,7 @@ class NandaLatestSettings:
     area_max_ratio: float = 0.04
     area_acceptable_min_ratio: float = 0.015
     area_acceptable_max_ratio: float = 0.055
-    acceptable_center_ratio: float = 0.02
+    acceptable_center_ratio: float = 0.01
     lateral_center_ratio: float = 0.07
     lateral_band_ratio: float = 0.01
     lateral_move_duration_ms: int = 100
@@ -535,7 +535,7 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
                 wait_ms=wait_ms,
             )
 
-        # 2%-7% 只轻微调整视角；入门方向已锁定，下一帧不再回拉。
+        # 1%-7% 只轻微调整视角；入门方向已锁定，下一帧不再回拉。
         if center_error > self.settings.acceptable_center_ratio:
             offset_px = float(context.door_center_offset_px)
             view_bias = int(round(offset_px * 0.33))

@@ -6,7 +6,7 @@
         "max_entry_distance": 2.5,
         "area_min_ratio": 0.02,
         "area_max_ratio": 0.04,
-        "acceptable_center_ratio": 0.02,
+        "acceptable_center_ratio": 0.01,
         "lateral_center_ratio": 0.07,
         "lateral_band_ratio": 0.01,
         "lateral_move_duration_ms": 100,

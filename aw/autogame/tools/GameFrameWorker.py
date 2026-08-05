@@ -2889,18 +2889,22 @@ class FrameWorker(threading.Thread):
             "正在长按 SP 保存。"
         )
         saved = self.sp_controller.stop()
+        sp_save_wait_time = max(
+            self.BATTERY_CUTOFF_SHUTDOWN_DELAY_SECONDS,
+            self.marathon_time * 2,
+        )
         if saved:
             self.frame_log(
-                f"SP 已保存，等待 {self.BATTERY_CUTOFF_SHUTDOWN_DELAY_SECONDS:g} 秒后"
+                f"SP 已保存，等待 {sp_save_wait_time:g} 秒后"
                 "结束自动化工程。"
             )
         else:
             self.frame_log(
                 f"SP 长按保存未确认执行，仍将等待 "
-                f"{self.BATTERY_CUTOFF_SHUTDOWN_DELAY_SECONDS:g} 秒后结束自动化工程。"
+                f"{sp_save_wait_time:g} 秒后结束自动化工程。"
             )
         self._flush_current_frame_log()
-        time.sleep(self.BATTERY_CUTOFF_SHUTDOWN_DELAY_SECONDS)
+        time.sleep(sp_save_wait_time)
         self.stop()
 
     def loop(self):

@@ -4902,10 +4902,10 @@ class HouseSceneSearchManager(HouseSearchManager):
             return
 
         house_scene = self._get_house_scene(w)
-        w.frame_log('[Action] 执行R城搜房主决策')
+        w.frame_log('[Action] 搜房')
         if self._finish_callback_configured() and self._can_finish_searching(w):
             w.frame_log('[Action] 结束搜房并切跑图')
-            self._continue_searching_until_timer(w, "R城搜房计时已满")
+            self._continue_searching_until_timer(w, "搜房计时已满")
             return
 
         if self._is_in_water(w):
@@ -5739,7 +5739,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             if not self.r_city_route_target and nearest:
                 self.r_city_route_target = nearest
             if not self.r_city_route_target:
-                w.frame_log('[Action] 结束R城搜房')
+                w.frame_log('[Action] 结束搜房')
                 self._finish_r_city_searching(w, "无法选择R城接入点")
                 return
             if not self.r_city_route_path:
@@ -5824,7 +5824,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         self._select_next_r_city_house(loc, current_direction)
         if not self.current_house_id:
-            w.frame_log('[Action] 结束R城搜房')
+            w.frame_log('[Action] 结束搜房')
             self._finish_r_city_searching(w, "R城路线交接后无可用入门点")
             return True
 

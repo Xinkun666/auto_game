@@ -161,7 +161,12 @@ def initialize_runtime():
     autogame_config = _read_project_config("Auto_PUBG_ALL")
     PHASE_DURATIONS = load_phase_durations_from_config(autogame_config)
 
-    parachute_manager = ParachuteManager()
+    parachute_config = autogame_config.get("parachute", {})
+    if not isinstance(parachute_config, dict):
+        parachute_config = {}
+    parachute_manager = ParachuteManager(
+        route_max_distance=parachute_config.get("route_max_distance")
+    )
     running_manager = RunningManager()
     driving_manager = DrivingManager()
     nanda_search_strategy = build_nanda_house_search_strategy(autogame_config)

@@ -34,8 +34,9 @@ class ParachuteManager:
     PLANNED_DIRECTION_MAX_STEPS: int = 2  # 每帧最多执行的方向校准步数
     PLANNED_JUMP_POINT_TOLERANCE: float = 15.0  # 靠近计划航线交点时的允许误差
     PLANNED_JUMP_TARGET_DIST_TOLERANCE: float = 5.0  # 圆线交点取整后的距离误差
+    ROUTE_MAX_DISTANCE: float = 1459.3  # (322,1443) -> (1777,1331) 的实测航线长度
 
-    def __init__(self):
+    def __init__(self, route_max_distance: Optional[float] = None):
         self._frame_worker = None
         self.is_active = False  # 是否处于监控跳伞距离的激活状态
         self.prior_dist = 0  # 历史最近距离（用于判断是否飞过了）
@@ -52,8 +53,14 @@ class ParachuteManager:
         self.target_candidates: Dict[str, Tuple[int, int]] = {}
         self.dynamic_target_selection = False
         self.route_samples: List[Tuple[int, int]] = []
+        self.route_start_location: Optional[Tuple[int, int]] = None
         self.route_unit: Optional[Tuple[float, float]] = None
         self.route_origin: Optional[Tuple[int, int]] = None
+        try:
+            configured_route_distance = float(route_max_distance)
+        except (TypeError, ValueError):
+            configured_route_distance = self.ROUTE_MAX_DISTANCE
+        self.route_max_distance = max(0.0, configured_route_distance)
         self.selected_target_name: Optional[str] = None
         self.planned_jump_position: Optional[Tuple[int, int]] = None
         self.planned_jump_direction: Optional[int] = None
@@ -79,6 +86,7 @@ class ParachuteManager:
         self.target_candidates = {}
         self.dynamic_target_selection = False
         self.route_samples = []
+        self.route_start_location = None
         self.route_unit = None
         self.route_origin = None
         self.selected_target_name = None
@@ -111,6 +119,7 @@ class ParachuteManager:
         self.target_candidates = normalized_candidates
         self.dynamic_target_selection = bool(normalized_candidates)
         self.route_samples = []
+        self.route_start_location = None
         self.route_unit = None
         self.route_origin = None
         self.selected_target_name = None
@@ -193,6 +202,16 @@ class ParachuteManager:
         jump_x = route_origin[0] + ux * entry_distance
         jump_y = route_origin[1] + uy * entry_distance
         jump_position = (int(round(jump_x)), int(round(jump_y)))
+        route_start = self.route_start_location or route_origin
+        route_start_distance = get_distance(route_start, jump_position)
+        if (
+            not self._is_valid_distance(route_start_distance)
+            or route_start_distance > self.route_max_distance
+        ):
+            return None, (
+                f"计划跳点距航线起点={route_start_distance:.2f} > "
+                f"航线最大长度={self.route_max_distance:.1f}"
+            )
         jump_direction = calculate_angle(jump_position, target_pos)
         if jump_direction is None:
             return None, "无法计算计划跳伞方向"
@@ -205,6 +224,7 @@ class ParachuteManager:
             "entry_distance": entry_distance,
             "exit_distance": exit_distance,
             "cross_distance": cross_distance,
+            "route_start_distance": route_start_distance,
         }, None
 
     def _select_target_from_route(self, location: Tuple[int, int], w: 'FrameWorker'):
@@ -306,6 +326,8 @@ class ParachuteManager:
                 f"垂直距离={plan['cross_distance']:.2f}, "
                 f"入口={plan['entry_distance']:.2f}, "
                 f"出口={plan['exit_distance']:.2f}, "
+                f"距航线起点={plan['route_start_distance']:.2f}/"
+                f"{self.route_max_distance:.1f}, "
                 f"计划跳点={plan['jump_position']}, "
                 f"计划方向={plan['jump_direction']}°"
             )
@@ -499,6 +521,13 @@ class ParachuteManager:
         if location is None:
             w.frame_log("[Parachute] 小地图坐标无效，等待连续有效航线点")
             return {}
+
+        if self.route_start_location is None:
+            self.route_start_location = location
+            w.frame_log(
+                f"[Parachute] 记录航线起点: {location}, "
+                f"航线最大长度={self.route_max_distance:.1f}"
+            )
 
         if self.dynamic_target_selection:
             if self.selected_target_name is None:

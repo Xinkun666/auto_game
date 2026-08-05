@@ -1,4 +1,7 @@
 {
+    "parachute": {
+        "route_max_distance": 1459.3
+    },
     "nanda_house_search": {
         "enabled": true,
         "door_pose_backend": "entry_direction_yolo",

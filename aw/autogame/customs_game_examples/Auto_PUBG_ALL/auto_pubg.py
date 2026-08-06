@@ -865,7 +865,7 @@ def on_stage(w: "FrameWorker"):
         if click_popup_info_if_visible(w, "重新进入比赛", "取消"):
             return
 
-        if click_popup_info_if_visible(w, "对局结束", "确定已结束"):
+        if click_popup_info_if_visible(w, "确定已结束"):
             return
 
         if click_popup_info_if_visible(w, "关闭预约"):

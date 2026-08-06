@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """按固定间隔从当前设备画面保存数据集图片。
 
-默认保存整张画面；传入 --roi X1 Y1 X2 Y2 后只保存该矩形区域。
-坐标原点为画面左上角，(X2, Y2) 是裁剪区域右下角的开区间边界。
+默认保存整张画面；设置归一化 ROI 后，会先按当前画面宽高转换为像素坐标再裁剪。
+坐标原点为画面左上角，ROI 格式为 (x1, y1, x2, y2)，每个值的范围是 0～1。
 """
 
 import argparse
+import math
 import time
 from datetime import datetime
 from pathlib import Path
@@ -17,41 +18,56 @@ import numpy as np
 from aw.autogame.tools.Utils import write_image_unicode
 
 
-Roi = Tuple[int, int, int, int]
-DEFAULT_INTERVAL_SECONDS = 1.0
+# ============================================================================
+# 用户配置：平时只需要修改这一块
+# ============================================================================
+SAVE_DIRECTORY = "./dataset_images"       # 图片保存目录，支持中文路径
+NORMALIZED_ROI = None                      # 整图：None
+# NORMALIZED_ROI = (0.1, 0.3, 0.8, 0.9)   # ROI：(左, 上, 右, 下)，范围 0～1
+CAPTURE_INTERVAL_SECONDS = 1.0             # 每隔多少秒保存一张
+CAPTURE_COUNT = 0                          # 0=持续采集；大于 0=保存指定张数后停止
+# ============================================================================
+
+
+NormalizedRoi = Tuple[float, float, float, float]
+PixelRoi = Tuple[int, int, int, int]
 FIRST_FRAME_TIMEOUT_SECONDS = 20.0
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="按固定间隔从设备画面保存 PNG 图片，默认保存整张画面。",
+        description=(
+            "按固定间隔从设备画面保存 PNG 图片。"
+            "不传参数时使用脚本顶部的用户配置。"
+        ),
     )
     parser.add_argument(
         "--output",
         "-o",
-        required=True,
-        help="图片保存目录，支持中文路径；目录不存在时会自动创建",
+        default=SAVE_DIRECTORY,
+        help=f"临时覆盖保存目录；默认使用顶部配置：{SAVE_DIRECTORY}",
     )
     parser.add_argument(
         "--roi",
         nargs=4,
-        type=int,
+        type=float,
+        default=NORMALIZED_ROI,
         metavar=("X1", "Y1", "X2", "Y2"),
-        help="只保存 ROI，例如 --roi 100 200 800 600；不传则保存整张画面",
+        help="临时覆盖归一化 ROI，例如 --roi 0.1 0.3 0.8 0.9",
     )
     parser.add_argument(
         "--interval",
         "-i",
         type=float,
-        default=DEFAULT_INTERVAL_SECONDS,
-        help="两次保存之间的休眠秒数，默认 1 秒",
+        default=CAPTURE_INTERVAL_SECONDS,
+        help=f"临时覆盖休眠秒数；默认使用顶部配置：{CAPTURE_INTERVAL_SECONDS:g}",
     )
     parser.add_argument(
         "--count",
         "-n",
         type=int,
-        default=0,
-        help="保存多少张后自动停止；默认 0 表示持续保存，直到按 Ctrl+C",
+        default=CAPTURE_COUNT,
+        help=f"临时覆盖采集张数；默认使用顶部配置：{CAPTURE_COUNT}",
     )
     args = parser.parse_args(argv)
 
@@ -61,23 +77,55 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         parser.error("--count 不能小于 0")
     if args.roi is not None:
         args.roi = tuple(args.roi)
+        try:
+            validate_normalized_roi(args.roi)
+        except ValueError as exc:
+            parser.error(str(exc))
     return args
 
 
-def crop_frame(frame: np.ndarray, roi: Optional[Roi]) -> np.ndarray:
-    """根据 ROI 裁剪 RGB 画面，并对越界或空区域报错。"""
+def validate_normalized_roi(roi: NormalizedRoi) -> None:
+    """校验归一化 ROI 是有效的 (左, 上, 右, 下) 矩形。"""
+    if len(roi) != 4:
+        raise ValueError("ROI 必须有 4 个值：(x1, y1, x2, y2)")
+    x1, y1, x2, y2 = roi
+    if not all(math.isfinite(value) for value in roi):
+        raise ValueError("ROI 不能包含 NaN 或无穷大")
+    if not (0.0 <= x1 < x2 <= 1.0 and 0.0 <= y1 < y2 <= 1.0):
+        raise ValueError(
+            f"ROI {roi} 无效：必须满足 0≤x1<x2≤1 且 0≤y1<y2≤1"
+        )
+
+
+def normalized_roi_to_pixels(
+    roi: NormalizedRoi,
+    width: int,
+    height: int,
+) -> PixelRoi:
+    """将归一化 ROI 转换为当前画面的像素坐标。"""
+    validate_normalized_roi(roi)
+    if width <= 0 or height <= 0:
+        raise ValueError(f"画面宽高无效：{width}×{height}")
+
+    x1, y1, x2, y2 = roi
+    return (
+        int(math.floor(x1 * width)),
+        int(math.floor(y1 * height)),
+        int(math.ceil(x2 * width)),
+        int(math.ceil(y2 * height)),
+    )
+
+
+def crop_frame(frame: np.ndarray, roi: Optional[NormalizedRoi]) -> np.ndarray:
+    """将归一化 ROI 转成像素坐标后裁剪 RGB 画面。"""
     image = np.asarray(frame)
     if image.ndim != 3 or image.shape[2] != 3:
         raise ValueError("只支持 H×W×3 的 RGB 画面")
     if roi is None:
         return np.ascontiguousarray(image)
 
-    x1, y1, x2, y2 = roi
     height, width = image.shape[:2]
-    if not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
-        raise ValueError(
-            f"ROI {roi} 超出画面范围或为空：当前画面宽高为 {width}×{height}"
-        )
+    x1, y1, x2, y2 = normalized_roi_to_pixels(roi, width, height)
     return np.ascontiguousarray(image[y1:y2, x1:x2])
 
 
@@ -143,7 +191,7 @@ def create_capture_client():
 
 def run_capture(
     output_dir: Path,
-    roi: Optional[Roi],
+    roi: Optional[NormalizedRoi],
     interval: float,
     count: int,
 ) -> int:
@@ -167,6 +215,14 @@ def run_capture(
                 raise RuntimeError(
                     f"{FIRST_FRAME_TIMEOUT_SECONDS:g} 秒内未获取到新画面，"
                     "请检查设备连接和 aw/autogame/config/config.json 中的 screen_mode"
+                )
+
+            if saved_count == 0 and roi is not None:
+                frame_height, frame_width = np.asarray(frame).shape[:2]
+                pixel_roi = normalized_roi_to_pixels(roi, frame_width, frame_height)
+                print(
+                    f"ROI 换算：{roi} -> 像素坐标 {pixel_roi} "
+                    f"(画面 {frame_width}×{frame_height})"
                 )
 
             cropped = crop_frame(frame, roi)

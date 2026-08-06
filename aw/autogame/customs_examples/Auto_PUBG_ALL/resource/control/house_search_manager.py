@@ -154,6 +154,7 @@ class HouseSearchManager:
     ENTRY_DOOR_ALIGN_NEAR_CENTER_THRESHOLD = 220
     ENTRY_DOOR_ALIGN_VERY_NEAR_CENTER_THRESHOLD = 300
     ENTRY_DOOR_ALIGN_STEP_RATIO = 0.33
+    ENTRY_DOOR_HORIZONTAL_ADJUST_SCALE = 1.7
     ENTRY_DOOR_ALIGN_MAX_BIAS = 400
     ENTRY_DOOR_ALIGN_DURA = 500
     ENTRY_DOOR_ALIGN_WAIT = 500
@@ -179,6 +180,9 @@ class HouseSearchManager:
     ENTRY_DOOR_MISSING_WALL_BACKOFF_Y_BIAS = 200
     ENTRY_DOOR_MISSING_WALL_BACKOFF_DURA = 200
     ENTRY_DOOR_MISSING_WALL_BACKOFF_WAIT = 520
+    ENTRY_DOOR_SAM3_GROUP = "sam3_door"
+    ENTRY_DOOR_SAM3_INFO_NAME = "sam3_door"
+    ENTRY_DOOR_SAM3_PROMPT = "door frame"
     ENTRY_NEAR_WALL_SIDE_ESCAPE_X_BIAS = 120
     ENTRY_NEAR_WALL_SIDE_ESCAPE_DURA = 160
     ENTRY_NEAR_WALL_SIDE_ESCAPE_WAIT = 320
@@ -315,11 +319,13 @@ class HouseSearchManager:
             else NandaHouseSearchStrategy()
         )
         self._nanda_preflight_passed = False
+        self._nanda_runtime_disabled_reason = None
 
     def configure_nanda_search_strategy(self, strategy) -> None:
         """配置南大门前房型匹配/回放方案；传 ``None`` 恢复现有搜房策略。"""
         self.nanda_search_strategy = strategy or NandaHouseSearchStrategy()
         self._nanda_preflight_passed = False
+        self._nanda_runtime_disabled_reason = None
 
     def _entry_location_tuple(self, entry):
         try:
@@ -409,6 +415,7 @@ class HouseSearchManager:
         self._jump_forward_guard = False
         self._jump_forward_wait_until_hidden = False
         self._nanda_preflight_passed = False
+        self._nanda_runtime_disabled_reason = None
         reset_nanda_strategy = getattr(self.nanda_search_strategy, 'reset', None)
         if callable(reset_nanda_strategy):
             reset_nanda_strategy()
@@ -1184,9 +1191,9 @@ class HouseSearchManager:
                 return door
 
             x_bias = (
-                -self.VISIBLE_DOOR_CENTER_SIDE_BIAS
+                -self._scaled_door_lateral_bias()
                 if door_center_x < left_bound
-                else self.VISIBLE_DOOR_CENTER_SIDE_BIAS
+                else self._scaled_door_lateral_bias()
             )
             w.frame_log("[NavBypass] 非目标房门不在中间1/3，横向调整人物位置")
             w.tap_single(
@@ -1344,6 +1351,14 @@ class HouseSearchManager:
     def _side_label(side: str) -> str:
         return "左" if side == "left" else "右"
 
+    def _scaled_door_lateral_bias(self) -> int:
+        return int(
+            round(
+                self.VISIBLE_DOOR_CENTER_SIDE_BIAS
+                * self.ENTRY_DOOR_HORIZONTAL_ADJUST_SCALE
+            )
+        )
+
     @staticmethod
     def _door_center_x(door):
         try:
@@ -1406,6 +1421,133 @@ class HouseSearchManager:
         self.entry_door_last_area_ratio = door_area_ratio
         offset_real = (center_x - (frame_w / 2.0)) * (float(screen_w) / float(frame_w))
         return offset_real, door_area_ratio, frame_w
+
+    @staticmethod
+    def _sam3_door_bbox_from_info(sam3_info):
+        if not isinstance(sam3_info, dict) or sam3_info.get("found") is not True:
+            return None
+
+        prompt = sam3_info.get("prompt")
+        if (
+            isinstance(prompt, str)
+            and prompt.strip()
+            and prompt.strip().casefold() != "door frame"
+        ):
+            return None
+
+        visuals = sam3_info.get("__visualizations__")
+        if isinstance(visuals, list):
+            for visual in visuals:
+                if not isinstance(visual, dict) or visual.get("type") != "sam3_mask":
+                    continue
+                bbox = visual.get("bbox_xyxy")
+                if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+                    continue
+                try:
+                    x1, y1, x2, y2 = (float(value) for value in bbox[:4])
+                    if str(visual.get("coord") or "local") != "frame":
+                        source_crop = visual.get("source_crop_xyxy")
+                        if isinstance(source_crop, (list, tuple)) and len(source_crop) >= 2:
+                            x_offset = float(source_crop[0])
+                            y_offset = float(source_crop[1])
+                            x1 += x_offset
+                            x2 += x_offset
+                            y1 += y_offset
+                            y2 += y_offset
+                except (TypeError, ValueError):
+                    continue
+                if x2 > x1 and y2 > y1:
+                    return [x1, y1, x2, y2]
+
+        bbox = sam3_info.get("bbox_xyxy_local")
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            try:
+                x1, y1, x2, y2 = (float(value) for value in bbox[:4])
+            except (TypeError, ValueError):
+                return None
+            if x2 > x1 and y2 > y1:
+                return [x1, y1, x2, y2]
+        return None
+
+    def _find_entry_door_with_sam3(self, w: 'FrameWorker', phase_label='Nav'):
+        original_group = str(getattr(w, "current_group", None) or "默认")
+        change_group = getattr(w, "change_group", None)
+        if not callable(change_group):
+            w.frame_log(f"[{phase_label}] YOLO未检测到门，但FrameWorker不支持切换SAM3分组")
+            return None
+
+        switched = False
+        try:
+            if change_group(self.ENTRY_DOOR_SAM3_GROUP) is not True:
+                w.frame_log(
+                    f"[{phase_label}] YOLO未检测到门，切换SAM3门分割分组失败: "
+                    f"group={self.ENTRY_DOOR_SAM3_GROUP}"
+                )
+                return None
+            switched = True
+            sam3_info = w.get_info(self.ENTRY_DOOR_SAM3_INFO_NAME)
+            door = self._sam3_door_bbox_from_info(sam3_info)
+            if door is None:
+                w.frame_log(
+                    f"[{phase_label}] YOLO未检测到门，SAM3 "
+                    f"{self.ENTRY_DOOR_SAM3_PROMPT}也未定位到门"
+                )
+                return None
+            w.frame_log(
+                f"[{phase_label}] YOLO未检测到门，SAM3已定位门中心: door={door}"
+            )
+            return door
+        except Exception as exc:
+            w.frame_log(f"[{phase_label}] SAM3门分割异常: {exc}")
+            return None
+        finally:
+            if switched:
+                try:
+                    if change_group(original_group) is not True:
+                        w.frame_log(f"[{phase_label}] SAM3门分割后恢复感知分组失败: {original_group}")
+                except Exception as exc:
+                    w.frame_log(f"[{phase_label}] SAM3门分割后恢复感知分组异常: {exc}")
+
+    def _adjust_to_sam3_door_once(self, w: 'FrameWorker', door, phase_label='Nav'):
+        offset_real, door_area_ratio, _ = self._get_visible_door_center_offset(w, door)
+        if offset_real is None:
+            return "failed", None
+
+        adjust_val = int(
+            offset_real
+            * self.ENTRY_DOOR_ALIGN_STEP_RATIO
+            * self.ENTRY_DOOR_HORIZONTAL_ADJUST_SCALE
+        )
+        if adjust_val == 0:
+            w.frame_log(
+                f"[{phase_label}] SAM3门中心已无可执行偏移："
+                f"offset={offset_real:.1f}px，直接使用本次SAM3定位结果"
+            )
+            return "aligned", door
+        adjust_val = max(
+            -self.ENTRY_DOOR_ALIGN_MAX_BIAS,
+            min(self.ENTRY_DOOR_ALIGN_MAX_BIAS, adjust_val),
+        )
+        w.frame_log(
+            f"[{phase_label}] SAM3门中心单次对齐：偏移={offset_real:.1f}px，"
+            f"面积占比={door_area_ratio}，视角x={adjust_val}，"
+            f"水平调整倍率={self.ENTRY_DOOR_HORIZONTAL_ADJUST_SCALE:g}"
+        )
+        w.tap_single(
+            "视角",
+            x_bias=adjust_val,
+            dura=self.ENTRY_DOOR_ALIGN_DURA,
+            wait=self.ENTRY_DOOR_ALIGN_WAIT,
+        )
+        refreshed_yolo_door = self._refresh_door_after_view_adjust(w, phase_label)
+        if refreshed_yolo_door is None:
+            w.frame_log(
+                f"[{phase_label}] SAM3对门调整一次后YOLO仍未检测到门，"
+                "下一轮仍从YOLO优先检测开始"
+            )
+            return "adjusting", None
+        w.frame_log(f"[{phase_label}] SAM3对门调整后YOLO已检测到门: door={refreshed_yolo_door}")
+        return "yolo", refreshed_yolo_door
 
     def _get_door_align_center_threshold(self, tolerance_px=80):
         try:
@@ -1470,16 +1612,17 @@ class HouseSearchManager:
 
         if ratio <= self.ENTRY_DOOR_EDGE_LATERAL_LEFT_RATIO:
             side = "left"
-            x_bias = -self.VISIBLE_DOOR_CENTER_SIDE_BIAS
+            x_bias = -self._scaled_door_lateral_bias()
         elif ratio >= self.ENTRY_DOOR_EDGE_LATERAL_RIGHT_RATIO:
             side = "right"
-            x_bias = self.VISIBLE_DOOR_CENTER_SIDE_BIAS
+            x_bias = self._scaled_door_lateral_bias()
         else:
             return False
 
         w.frame_log(
             f"[{phase_label}] 入门点附近最大门中心在画面{self._side_label(side)}侧边缘 "
-            f"(ratio={ratio:.2f})，不转视角，改用摇杆横移对齐门"
+            f"(ratio={ratio:.2f})，不转视角，改用摇杆横移对齐门，"
+            f"水平调整倍率={self.ENTRY_DOOR_HORIZONTAL_ADJUST_SCALE:g}"
         )
         w.tap_single(
             '摇杆',
@@ -2139,7 +2282,7 @@ class HouseSearchManager:
         strategy = getattr(self, 'nanda_search_strategy', None)
         return bool(strategy is not None and getattr(strategy, 'exclusive', False))
 
-    def _fail_nanda_only(
+    def _fallback_nanda_failure(
         self,
         w: 'FrameWorker',
         message: str,
@@ -2154,34 +2297,61 @@ class HouseSearchManager:
         status_text = str(status_value or 'exception')
         reason_text = str(message or getattr(result, 'message', None) or '南大方案执行异常')
         reason = (
-            f"南大独占搜房失败：phase={failure_phase}，"
+            f"南大搜房降级：phase={failure_phase}，"
             f"status={status_text}，reason={reason_text}"
         )
-        w.frame_log(
-            f"[NandaError] {reason}；原搜房逻辑仍保留，"
-            "但南大独占模式不回退，立即终止当前用例"
-        )
-        mark_failed = getattr(w, 'mark_failed', None)
-        if callable(mark_failed):
-            mark_failed(
-                'nanda_house_search_failed',
-                reason,
-                phase=failure_phase,
-                status=status_text,
-                house_id=str(getattr(self, 'current_house_id', None) or ''),
-                room_id=str(getattr(result, 'room_id', None) or ''),
-                replay_path=str(getattr(result, 'replay_path', None) or ''),
+        self._nanda_runtime_disabled_reason = reason
+        self._nanda_preflight_passed = False
+        reset_strategy = getattr(getattr(self, 'nanda_search_strategy', None), 'reset', None)
+        if callable(reset_strategy):
+            try:
+                reset_strategy()
+            except Exception as exc:
+                w.frame_log(f"[NandaFallback] 南大运行态重置异常，继续回退原搜房逻辑: {exc}")
+
+        # 真实的死亡、手动停止或已切走搜房阶段由上层生命周期处理，
+        # 这里不反向恢复。南大自身异常不再 mark_failed，也不改 worker
+        # running/finished，避免 Launcher 进入杀游戏和 SP 的用例失败清理。
+        if self._should_abort(w):
+            w.frame_log(f"[NandaFallback] {reason}；当前存在真实终止信号，交回上层生命周期")
+            return "aborted"
+
+        if failure_phase == "preflight":
+            w.frame_log(
+                f"[NandaFallback] {reason}；尚未进入搜房操作，"
+                "本轮禁用南大管线并继续原搜房逻辑"
             )
-        else:
-            w.frame_log("[NandaError] FrameWorker 不支持 mark_failed，仅设置终止状态")
-            setattr(w, 'failed', True)
-            setattr(w, 'failure_code', 'nanda_house_search_failed')
-            setattr(w, 'failure_reason', reason)
-        setattr(w, 'running', False)
-        setattr(w, 'finished', True)
-        return "failed"
+            return "fallback"
+
+        scene = self._get_house_scene(w)
+        if scene == self.HOUSE_INDOOR:
+            w.frame_log(
+                f"[NandaFallback] {reason}；人物已在室内，"
+                "立即交回原室内搜房/出房逻辑"
+            )
+            return "indoor"
+
+        if failure_phase in {"replay", "exit", "verify"}:
+            # 回放可能已经改变人物位姿，不继续使用进入南大前的旧门框。
+            # 下一帧回到原 PRECISE_NAV 近门流程，重新从当前画面
+            # YOLO -> SAM3 定位门，然后执行原对门进房，不使用旧门框。
+            self.status = "PRECISE_NAV"
+            self.history_locations = []
+            w.frame_log(
+                f"[NandaFallback] {reason}；house_scene={self._house_scene_label(scene)}，"
+                "下一帧回到原近门流程重新定位门，用例继续"
+            )
+            return "adjusting"
+
+        w.frame_log(
+            f"[NandaFallback] {reason}；尚未开始回放，"
+            "当前帧直接交回原对门进房逻辑"
+        )
+        return "fallback"
 
     def _validate_nanda_only_ready(self, w: 'FrameWorker') -> bool:
+        if getattr(self, '_nanda_runtime_disabled_reason', None):
+            return True
         if not self._nanda_only_enabled():
             return True
         if getattr(self, '_nanda_preflight_passed', False):
@@ -2190,29 +2360,29 @@ class HouseSearchManager:
         strategy = self.nanda_search_strategy
         validate_ready = getattr(strategy, 'validate_ready', None)
         if not callable(validate_ready):
-            self._fail_nanda_only(
+            self._fallback_nanda_failure(
                 w,
                 "南大策略缺少 validate_ready 预检接口",
                 phase="preflight",
             )
-            return False
+            return True
         try:
             result = validate_ready()
         except Exception as exc:
-            self._fail_nanda_only(
+            self._fallback_nanda_failure(
                 w,
                 f"南大策略预检异常: {exc}",
                 phase="preflight",
             )
-            return False
+            return True
         if result is not None:
-            self._fail_nanda_only(
+            self._fallback_nanda_failure(
                 w,
                 getattr(result, 'message', None) or "南大策略预检未通过",
                 result=result,
                 phase="preflight",
             )
-            return False
+            return True
 
         self._nanda_preflight_passed = True
         w.frame_log(
@@ -2329,10 +2499,12 @@ class HouseSearchManager:
         strategy = getattr(self, 'nanda_search_strategy', None)
         if strategy is None:
             return "fallback"
+        if getattr(self, '_nanda_runtime_disabled_reason', None):
+            return "fallback"
         exclusive = bool(getattr(strategy, 'exclusive', False))
         if not getattr(strategy, 'enabled', False):
             if exclusive:
-                return self._fail_nanda_only(
+                return self._fallback_nanda_failure(
                     w,
                     "南大独占策略未完整启用",
                     phase="preflight",
@@ -2354,26 +2526,17 @@ class HouseSearchManager:
         try:
             result = strategy.run(context)
         except Exception as exc:
-            if exclusive:
-                return self._fail_nanda_only(
-                    w,
-                    f"策略管线异常: {exc}",
-                    phase="pipeline",
-                )
-            w.frame_log(f"[NandaSearch] 策略管线异常: {exc}，不继续执行南大回放")
-            return "failed"
-        if not hasattr(result, 'status'):
-            if exclusive:
-                return self._fail_nanda_only(
-                    w,
-                    f"策略返回值无效: {type(result).__name__}",
-                    phase="pipeline",
-                )
-            w.frame_log(
-                f"[NandaSearch] 策略返回值无效: {type(result).__name__}，"
-                "不继续执行南大回放"
+            return self._fallback_nanda_failure(
+                w,
+                f"策略管线异常: {exc}",
+                phase="pipeline",
             )
-            return "failed"
+        if not hasattr(result, 'status'):
+            return self._fallback_nanda_failure(
+                w,
+                f"策略返回值无效: {type(result).__name__}",
+                phase="pipeline",
+            )
         if result.status == NandaSearchStatus.RETRY:
             w.frame_log(f"[NandaSearch] 门前位姿尚未稳定：{result.message or '等待下一帧'}")
             return "adjusting"
@@ -2390,6 +2553,20 @@ class HouseSearchManager:
             if context.should_abort():
                 return "aborted"
 
+            if scene == self.HOUSE_NEAR_WALL:
+                w.frame_log(
+                    "[NandaSearch] 回放后首帧为室外 near_wall，"
+                    "再刷新一帧复核，不直接判定出房失败"
+                )
+                w.refresh_frame()
+                scene = self._get_house_scene(w)
+                w.frame_log(
+                    f"[NandaSearch] near_wall 二次复核："
+                    f"house_scene={self._house_scene_label(scene)}"
+                )
+                if context.should_abort():
+                    return "aborted"
+
             room_label = result.room_id or "unknown"
             if scene == self.HOUSE_INDOOR:
                 w.frame_log(
@@ -2399,15 +2576,12 @@ class HouseSearchManager:
                 try:
                     self._exit_house(w)
                 except Exception as exc:
-                    if exclusive:
-                        return self._fail_nanda_only(
-                            w,
-                            f"南大回放完成后调用出房策略异常: {exc}",
-                            result=result,
-                            phase="exit",
-                        )
-                    w.frame_log(f"[NandaSearch] 出房策略异常: {exc}")
-                    return "failed"
+                    return self._fallback_nanda_failure(
+                        w,
+                        f"南大回放完成后调用出房策略异常: {exc}",
+                        result=result,
+                        phase="exit",
+                    )
                 if context.should_abort():
                     return "aborted"
                 w.refresh_frame()
@@ -2417,19 +2591,17 @@ class HouseSearchManager:
                     f"house_scene={self._house_scene_label(scene)}"
                 )
 
-            if scene not in {self.HOUSE_OUTDOOR, self.HOUSE_ROOFTOP}:
-                if exclusive:
-                    return self._fail_nanda_only(
-                        w,
-                        f"南大回放完成后出房失败，house_scene={scene}",
-                        result=result,
-                        phase="exit" if scene == self.HOUSE_INDOOR else "verify",
-                    )
-                w.frame_log(
-                    f"[NandaSearch] 回放完成后未确认人物在室外，"
-                    f"house_scene={scene}"
+            if scene not in {
+                self.HOUSE_OUTDOOR,
+                self.HOUSE_ROOFTOP,
+                self.HOUSE_NEAR_WALL,
+            }:
+                return self._fallback_nanda_failure(
+                    w,
+                    f"南大回放完成后未确认人物在室外，house_scene={scene}",
+                    result=result,
+                    phase="exit" if scene == self.HOUSE_INDOOR else "verify",
                 )
-                return "failed"
 
             w.frame_log(
                 f"[NandaSearch] 房型 {room_label} 已确认位于室外，"
@@ -2452,12 +2624,6 @@ class HouseSearchManager:
             return "skipped"
 
         if result.status == NandaSearchStatus.DISABLED:
-            if exclusive:
-                return self._fail_nanda_only(
-                    w,
-                    result.message or result.status.value,
-                    result=result,
-                )
             w.frame_log(
                 f"[NandaSearch] {result.message or result.status.value}，"
                 "退回现有对门进房策略"
@@ -2465,34 +2631,27 @@ class HouseSearchManager:
             return "fallback"
 
         scene = self._get_house_scene(w)
-        if result.metadata.get('phase') == 'match':
-            if exclusive:
-                return self._fail_nanda_only(
-                    w,
-                    result.message or "房型匹配失败",
-                    result=result,
-                )
-            w.frame_log(f"[NandaSearch] {result.message}，匹配阶段未产生移动，退回现有策略")
-            return "fallback"
+        result_metadata = getattr(result, 'metadata', None)
+        result_metadata = result_metadata if isinstance(result_metadata, dict) else {}
+        if result_metadata.get('phase') == 'match':
+            return self._fallback_nanda_failure(
+                w,
+                result.message or "房型匹配失败",
+                result=result,
+            )
         if scene == self.HOUSE_INDOOR:
-            if exclusive:
-                return self._fail_nanda_only(
-                    w,
-                    result.message or "南大方案执行失败",
-                    result=result,
-                )
-            w.frame_log(f"[NandaSearch] {result.message}，人物已在室内，转现有室内搜房")
-            return "indoor"
-        if exclusive:
-            return self._fail_nanda_only(
+            return self._fallback_nanda_failure(
                 w,
                 result.message or "南大方案执行失败",
                 result=result,
             )
-        w.frame_log(f"[NandaSearch] {result.message or '南大方案执行失败'}")
-        return "failed"
+        return self._fallback_nanda_failure(
+            w,
+            result.message or "南大方案执行失败",
+            result=result,
+        )
 
-    def _try_visible_entry_door_before_micro_adjust(
+    def _try_entry_door_yolo_then_sam3(
         self,
         w: 'FrameWorker',
         target_loc,
@@ -2503,13 +2662,29 @@ class HouseSearchManager:
         if door is None:
             w.frame_log(
                 f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
-                "方向已对齐但还没看到门，继续慢速微调到入门点"
+                "方向已对齐但YOLO没看到门，取消按入门点坐标左右横移，"
+                "改用SAM3分割门"
             )
-            return "not_visible"
+            door = self._find_entry_door_with_sam3(w, phase_label)
+            if door is None:
+                self._mark_current_entry_failed("YOLO与SAM3均未定位到门")
+                return "failed"
+
+            sam3_state, adjusted_door = self._adjust_to_sam3_door_once(
+                w,
+                door,
+                phase_label,
+            )
+            if sam3_state == "failed":
+                self._mark_current_entry_failed("SAM3已返回门但无法计算门中心")
+                return "failed"
+            if sam3_state == "adjusting":
+                return "adjusting"
+            door = adjusted_door
 
         w.frame_log(
             f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
-            f"方向已对齐且已看到门，跳过微调到0，先尝试南大门前方案: door={door}"
+            f"方向已对齐且已定位门，先尝试南大门前方案: door={door}"
         )
         self.stop_auto_forward(w)
         nanda_result = self._try_nanda_search_before_entry(
@@ -2605,44 +2780,14 @@ class HouseSearchManager:
             w.frame_log(f"[{phase_label}] 进门点方向尚未对准，等待下一轮继续对准")
             return "aligning"
 
-        visible_door_result = self._try_visible_entry_door_before_micro_adjust(
+        visible_door_result = self._try_entry_door_yolo_then_sam3(
             w,
             target_loc,
             dist,
             phase_label,
         )
-        if visible_door_result != "not_visible":
-            self._reset_entry_near_micro_adjust()
-            return visible_door_result
-
-        wall_result = self._handle_entry_near_wall_if_needed(w, phase_label, "对准进门方向后")
-        if wall_result == "indoor":
-            return "indoor"
-        if wall_result is not None:
-            return "adjusting"
-
-        micro_result = self._micro_adjust_near_entry_point(w, current_loc, target_loc, dist, phase_label)
-        if micro_result == "adjusting":
-            wall_result = self._handle_entry_near_wall_if_needed(w, phase_label, "入门点微调后")
-            if wall_result == "indoor":
-                return "indoor"
-            if wall_result is not None:
-                return "adjusting"
-            w.frame_log(f"[{phase_label}] 入门点微调动作已执行，等待下一帧重新计算距离")
-            return "adjusting"
-        if micro_result == "failed":
-            self._mark_current_entry_failed("入门点近距离微调多次后仍无法到达入门点")
-            return "failed"
-        if micro_result != "ready":
-            return "adjusting"
-
-        arrival_result = self._align_entry_door_after_arrival(w, phase_label)
-        if arrival_result != "not_ready":
-            self._reset_entry_near_micro_adjust()
-            return arrival_result
-
         self._reset_entry_near_micro_adjust()
-        return "not_ready"
+        return visible_door_result
 
     def _micro_adjust_near_entry_point(self, w: 'FrameWorker', current_loc, target_loc, dist: float, phase_label='Nav') -> str:
         try:
@@ -3841,7 +3986,11 @@ class HouseSearchManager:
                                 )
                 return finish("aligned")
 
-            adjust_val = int(offset_real * self.ENTRY_DOOR_ALIGN_STEP_RATIO)
+            adjust_val = int(
+                offset_real
+                * self.ENTRY_DOOR_ALIGN_STEP_RATIO
+                * self.ENTRY_DOOR_HORIZONTAL_ADJUST_SCALE
+            )
             adjust_val = max(
                 -self.ENTRY_DOOR_ALIGN_MAX_BIAS,
                 min(self.ENTRY_DOOR_ALIGN_MAX_BIAS, adjust_val),
@@ -3849,7 +3998,8 @@ class HouseSearchManager:
             w.frame_log(
                             f"[{phase_label}] 对门 {step + 1}/{self.ENTRY_DOOR_FINAL_ALIGN_MAX_STEPS}："
                             f"偏移={offset_real:.1f}px，阈值={center_threshold}，"
-                            f"视角x={adjust_val}"
+                            f"视角x={adjust_val}，"
+                            f"水平调整倍率={self.ENTRY_DOOR_HORIZONTAL_ADJUST_SCALE:g}"
                         )
             w.frame_log('[Action] 滑动视角微调门中心')
             w.tap_single(

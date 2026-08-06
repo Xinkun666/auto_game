@@ -13,6 +13,9 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_search_ma
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_latest_house_search import (
     build_nanda_house_search_strategy,
 )
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_house_search_strategy import (
+    NandaHouseSearchStrategy,
+)
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.house_exit_manager import (
     HouseExitManager,
 )
@@ -169,25 +172,33 @@ def initialize_runtime():
     )
     running_manager = RunningManager()
     driving_manager = DrivingManager()
-    nanda_search_strategy = build_nanda_house_search_strategy(autogame_config)
-    if nanda_search_strategy.enabled:
-        LOGGER.info(
-            "[NandaPreload] 自动化启动前检查 DINOv3、MLP、房型索引和"
-            "全部模板门窗结构..."
-        )
-        preload_error = nanda_search_strategy.validate_ready()
-        if preload_error is None:
+    try:
+        nanda_search_strategy = build_nanda_house_search_strategy(autogame_config)
+        if nanda_search_strategy.enabled:
             LOGGER.info(
-                "[NandaPreload] 南大房型匹配启动预检完成；"
-                "全部模板门窗结构已在本地就绪，允许启动自动化。"
+                "[NandaPreload] 自动化启动前检查 DINOv3、MLP、房型索引和"
+                "全部模板门窗结构..."
             )
-        else:
-            message = (
-                f"[NandaPreload] 南大房型匹配启动预检失败："
-                f"{preload_error.message}；自动化不会启动。"
-            )
-            LOGGER.error(message)
-            raise RuntimeError(message)
+            preload_error = nanda_search_strategy.validate_ready()
+            if preload_error is None:
+                LOGGER.info(
+                    "[NandaPreload] 南大房型匹配启动预检完成；"
+                    "全部模板门窗结构已在本地就绪，允许启动自动化。"
+                )
+            else:
+                LOGGER.error(
+                    "[NandaPreload] 南大房型匹配启动预检失败：%s；"
+                    "本轮禁用南大管线，继续原搜房逻辑。",
+                    preload_error.message,
+                )
+                nanda_search_strategy = NandaHouseSearchStrategy()
+    except Exception as exc:
+        LOGGER.exception(
+            "[NandaPreload] 南大策略构建/预检异常: %s；"
+            "本轮禁用南大管线，继续原搜房逻辑。",
+            exc,
+        )
+        nanda_search_strategy = NandaHouseSearchStrategy()
     searching_house_manager = HouseSceneSearchManager(
         nanda_search_strategy=nanda_search_strategy
     )

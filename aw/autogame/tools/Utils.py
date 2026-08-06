@@ -1528,8 +1528,11 @@ def visualizer_process(queue, visual=True):
                     break
 
         except Exception as e:
-            print(f"\n[Visualizer Error] {e}")
-            break
+            # 单帧的标注数据、图像编码或 JSON 落盘失败不应让整个
+            # 实时可视化进程永久退出。自动化逻辑与可视化本来就是分离的，
+            # 因此这里丢弃当前异常帧，继续处理后续有效帧。
+            print(f"\n[Visualizer Error] 当前帧处理失败，已丢弃并继续: {e}", flush=True)
+            continue
 
     if show_window:
         cv2.destroyAllWindows()

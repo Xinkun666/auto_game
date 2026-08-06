@@ -1,6 +1,8 @@
 """南大最新版房型匹配与单摇杆回放的 auto_game 适配实现。
 
-门前位姿仍只使用已有入门点方向和 YOLO 门框完成。位姿稳定后，
+门前位姿优先使用已有入门点方向和 YOLO 门框完成；YOLO 缺门时，
+上游搜房管理器会按需用 SAM3 ``door frame`` 定位中心，单次调整后重新优先检查 YOLO。
+位姿稳定后，
 按需把 ``get_info("sam3")`` 的 ``seg_name`` 切成 ``door frame``，
 取得门框分割结果，
 只判断房屋取景是否需要后拉与抬头；取景完成后再按需取得
@@ -106,6 +108,7 @@ class NandaLatestSettings:
     lateral_band_wait_ms: int = 20
     max_pose_actions: int = 18
     move_axis_bias: int = 240
+    horizontal_adjust_scale: float = 1.7
     pose_min_duration_ms: int = 60
     pose_max_duration_ms: int = 600
     pose_wait_ms: int = 500
@@ -222,6 +225,13 @@ class NandaLatestSettings:
             ),
             max_pose_actions=max(1, _as_int(raw.get("max_pose_actions"), cls.max_pose_actions)),
             move_axis_bias=max(1, _as_int(raw.get("move_axis_bias"), cls.move_axis_bias)),
+            horizontal_adjust_scale=max(
+                cls.horizontal_adjust_scale,
+                _as_float(
+                    raw.get("horizontal_adjust_scale"),
+                    cls.horizontal_adjust_scale,
+                ),
+            ),
             pose_min_duration_ms=max(
                 1, _as_int(raw.get("pose_min_duration_ms"), cls.pose_min_duration_ms)
             ),
@@ -525,12 +535,19 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
         if center_error > self.settings.lateral_center_ratio:
             excess_ratio, wait_ms = self._lateral_wait_for_error(center_error)
             side = 1 if center_delta > 0 else -1
+            lateral_bias = int(
+                round(
+                    self.settings.move_axis_bias
+                    * self.settings.horizontal_adjust_scale
+                )
+            )
             return self._retry_after_action(
                 context,
                 f"门中心偏差 {center_delta:+.3f}({center_error:.1%})，"
                 f"超出{self.settings.lateral_center_ratio:.0%}横移阈值 "
-                f"{excess_ratio:.1%}",
-                x_bias=side * self.settings.move_axis_bias,
+                f"{excess_ratio:.1%}，水平调整倍率="
+                f"{self.settings.horizontal_adjust_scale:g}",
+                x_bias=side * lateral_bias,
                 duration_ms=self.settings.lateral_move_duration_ms,
                 wait_ms=wait_ms,
             )
@@ -538,10 +555,22 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
         # 1%-7% 只轻微调整视角；入门方向已锁定，下一帧不再回拉。
         if center_error > self.settings.acceptable_center_ratio:
             offset_px = float(context.door_center_offset_px)
-            view_bias = int(round(offset_px * 0.33))
+            view_bias = int(
+                round(
+                    offset_px
+                    * 0.33
+                    * self.settings.horizontal_adjust_scale
+                )
+            )
+            max_view_bias = int(
+                round(
+                    self.settings.move_axis_bias
+                    * self.settings.horizontal_adjust_scale
+                )
+            )
             view_bias = max(
-                -self.settings.move_axis_bias,
-                min(self.settings.move_axis_bias, view_bias),
+                -max_view_bias,
+                min(max_view_bias, view_bias),
             )
             if view_bias == 0:
                 view_bias = 1 if center_delta > 0 else -1
@@ -554,7 +583,8 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
                 context,
                 f"门中心偏差 {center_delta:+.3f}({center_error:.1%})，"
                 f"位于{self.settings.acceptable_center_ratio:.0%}-"
-                f"{self.settings.lateral_center_ratio:.0%}，轻微调整视角",
+                f"{self.settings.lateral_center_ratio:.0%}，轻微调整视角，"
+                f"水平调整倍率={self.settings.horizontal_adjust_scale:g}",
                 x_bias=view_bias,
                 duration_ms=duration,
                 control="视角",

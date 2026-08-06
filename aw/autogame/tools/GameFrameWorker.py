@@ -2152,6 +2152,7 @@ class FrameWorker(threading.Thread):
     STREAM_RECOVERY_MAX_WAIT_SECONDS = 120.0
     LOGIC_THREAD_STOP_TIMEOUT_SECONDS = 6.0
     BATTERY_CUTOFF_SHUTDOWN_DELAY_SECONDS = 60.0
+    VISUALIZER_QUEUE_SIZE = 5
 
     def __init__(
         self,
@@ -2164,7 +2165,7 @@ class FrameWorker(threading.Thread):
     ):
         super().__init__()
         self.frame_index = 0
-        self.viz_queue = mp.Queue(maxsize=5)
+        self.viz_queue = mp.Queue(maxsize=self.VISUALIZER_QUEUE_SIZE)
         self.viz_proc = None
         self.thread = None
 
@@ -2264,8 +2265,60 @@ class FrameWorker(threading.Thread):
         self.current_frame_log_entries = []
         self.current_frame_flushed = False
 
+    def _start_visualizer_process(self, recreate_queue=False):
+        if recreate_queue:
+            old_queue = getattr(self, "viz_queue", None)
+            if old_queue is not None:
+                try:
+                    old_queue.cancel_join_thread()
+                except Exception:
+                    pass
+                try:
+                    old_queue.close()
+                except Exception:
+                    pass
+            self.viz_queue = mp.Queue(maxsize=self.VISUALIZER_QUEUE_SIZE)
+
+        self.viz_proc = mp.Process(
+            target=visualizer_process,
+            args=(self.viz_queue,),
+            daemon=True,
+        )
+        self.viz_proc.start()
+
+    def _ensure_visualizer_process(self):
+        proc = getattr(self, "viz_proc", None)
+        if proc is None:
+            return False
+
+        is_alive = getattr(proc, "is_alive", None)
+        if not callable(is_alive):
+            # 兼容测试替身及历史自定义进程封装。
+            return True
+        try:
+            if is_alive():
+                return True
+        except Exception:
+            pass
+
+        if not getattr(self, "running", False):
+            return False
+
+        exit_code = getattr(proc, "exitcode", None)
+        print(
+            f"[Visualizer] 检测到可视化进程已退出"
+            f" (exit_code={exit_code})，正在自动重建。",
+            flush=True,
+        )
+        try:
+            self._start_visualizer_process(recreate_queue=True)
+            return bool(self.viz_proc.is_alive())
+        except Exception as exc:
+            print(f"[Visualizer] 可视化进程重建失败: {exc}", flush=True)
+            return False
+
     def _queue_visual_frame(self):
-        if self.frame is None or not self.viz_proc:
+        if self.frame is None or not self._ensure_visualizer_process():
             return False
         stage_resolver = getattr(self, "stage_resolver", None)
         processor = getattr(stage_resolver, "processor", None)
@@ -2973,8 +3026,7 @@ class FrameWorker(threading.Thread):
             )
             self._watchdog_thread.start()
 
-        self.viz_proc = mp.Process(target=visualizer_process, args=(self.viz_queue,), daemon=True)
-        self.viz_proc.start()
+        self._start_visualizer_process()
 
     def stop(self):
         print("主动结束游戏自动化中......")

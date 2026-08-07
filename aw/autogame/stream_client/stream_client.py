@@ -835,20 +835,29 @@ class PyAVH264Decoder:
             ) from exc
         self.codec = av.CodecContext.create("h264", "r")
         self.memory_drop_count = 0
+        self.consecutive_memory_errors = 0
+        self.last_decode_memory_error = False
 
     def decode(self, data):
         # HOS 回调可能一次给出多个已解码帧。自动化只消费最新帧，保留旧帧不仅
         # 增加延迟，还会让 PIL 的 to_image/convert/copy 连续分配多份整帧内存。
         latest_frame = None
+        self.last_decode_memory_error = False
         try:
             for packet in self.codec.parse(bytes(data)):
                 for frame in self.codec.decode(packet):
                     latest_frame = frame
             if latest_frame is None:
                 return []
-            return [latest_frame.to_ndarray(format="rgb24")]
+            result = latest_frame.to_ndarray(format="rgb24")
+            self.consecutive_memory_errors = 0
+            return [result]
         except MemoryError:
-            self.memory_drop_count += 1
+            self.memory_drop_count = int(getattr(self, "memory_drop_count", 0)) + 1
+            self.consecutive_memory_errors = int(
+                getattr(self, "consecutive_memory_errors", 0)
+            ) + 1
+            self.last_decode_memory_error = True
             latest_frame = None
             print(
                 "[HOS] PyAV frame conversion ran out of memory; "
@@ -856,8 +865,24 @@ class PyAVH264Decoder:
                 % self.memory_drop_count,
                 flush=True,
             )
+            flush_buffers = getattr(getattr(self, "codec", None), "flush_buffers", None)
+            if callable(flush_buffers):
+                try:
+                    flush_buffers()
+                except Exception:
+                    pass
             gc.collect()
             return []
+
+    def close(self):
+        codec = getattr(self, "codec", None)
+        self.codec = None
+        flush_buffers = getattr(codec, "flush_buffers", None)
+        if callable(flush_buffers):
+            try:
+                flush_buffers()
+            except Exception:
+                pass
 
 
 class GStreamerH264Decoder:
@@ -1248,6 +1273,16 @@ class HOSScrcpyStreamClient:
                 5.0,
             ),
         )
+        self.decoder_memory_error_reconnect_threshold = max(
+            1,
+            _resolve_int_option(
+                "AUTOGAME_HOSCRCPY_MEMORY_ERROR_RECONNECT_THRESHOLD",
+                config,
+                "hoscrcpy_memory_error_reconnect_threshold",
+                1,
+            ),
+        )
+        self._decoder_memory_reconnects = 0
 
         self.save_frame_disabled = _resolve_bool_option(
             "AUTOGAME_DISABLE_SAVE_FRAMES",
@@ -1594,6 +1629,8 @@ class HOSScrcpyStreamClient:
     def _handle_stream_bytes(self, data):
         if not data:
             return
+        if self._stream_error_event.is_set():
+            return
         if self.is_capture_paused():
             return
         self._hdc_recovery_attempted = False
@@ -1605,6 +1642,23 @@ class HOSScrcpyStreamClient:
         if self.decoder is None:
             self.decoder = self._create_decoder()
         frames = self.decoder.decode(data) or []
+        consecutive_memory_errors = int(
+            getattr(self.decoder, "consecutive_memory_errors", 0) or 0
+        )
+        if (
+            bool(getattr(self.decoder, "last_decode_memory_error", False))
+            and consecutive_memory_errors >= self.decoder_memory_error_reconnect_threshold
+        ):
+            self._decoder_memory_reconnects += 1
+            self._handle_stream_exception(
+                MemoryError(
+                    "PyAV decoder memory exhausted; recycle HOScrcpy stream "
+                    "before repeated allocations freeze the host "
+                    f"(consecutive={consecutive_memory_errors}, "
+                    f"recycles={self._decoder_memory_reconnects})"
+                )
+            )
+            return
         if not frames and self._callback_data_count <= 3:
             print(
                 "[HOS] H264 buffer decoded no frame yet: callback_data_count=%s bytes=%s"
@@ -1633,7 +1687,11 @@ class HOSScrcpyStreamClient:
             print("[HOS] Ignore stream close caused by intentional pause: %s" % err, flush=True)
             return
         with self._capture_state_lock:
-            if self._touch_replay_depth > 0 and not self._is_usb_offline_error(err):
+            if (
+                self._touch_replay_depth > 0
+                and not isinstance(err, MemoryError)
+                and not self._is_usb_offline_error(err)
+            ):
                 self._touch_replay_deferred_error = err
                 self._touch_replay_deferred_error_at = time.monotonic()
                 self._diagnostic_stage = "touch_replay_stream_exception_deferred"
@@ -1689,6 +1747,10 @@ class HOSScrcpyStreamClient:
             "encoder_type": self.encoder_type,
             "decoder_backend": self.decoder_backend,
             "decoder_fallback_reason": self._decoder_fallback_reason,
+            "decoder_memory_reconnects": self._decoder_memory_reconnects,
+            "decoder_memory_error_reconnect_threshold": (
+                self.decoder_memory_error_reconnect_threshold
+            ),
             "ready_received": self._ready_received,
             "first_frame_received": self._first_frame_received,
             "capture_first_frame_received": self._capture_first_frame_event.is_set(),

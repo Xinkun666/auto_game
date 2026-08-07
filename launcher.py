@@ -128,6 +128,8 @@ PREVIEW_FRAME_SUFFIXES = {".jpg", ".jpeg", ".png"}
 PYINSTALLER_SUPPRESS_SPLASH_ENV = "PYINSTALLER_SUPPRESS_SPLASH_SCREEN"
 PYINSTALLER_SPLASH_IPC_ENV = "_PYI_SPLASH_IPC"
 PROCESS_TRACE_ENV = "AUTOGAME_PROCESS_TRACE"
+OUTPUT_CONSOLE_MAX_BLOCKS = 3000
+OUTPUT_MEMORY_MAX_ENTRIES = 5000
 STREAM_CONNECTED_MARKERS = (
     "[Stream] Start receiving...",
     "[HDC] First frame received.",
@@ -1292,15 +1294,18 @@ while ($true) {{
         Remove-Event -EventIdentifier $eventItem.EventIdentifier
     }}
 
+    $currentSeen = @{{}}
     foreach ($proc in Get-AutoGameProcesses) {{
         $pidValue = [int]$proc.ProcessId
+        $currentSeen[$pidValue] = $true
         if (-not $seen.ContainsKey($pidValue)) {{
             $seen[$pidValue] = $true
             Write-AutoGameProcessLine "POLL_CREATE" $pidValue ([int]$proc.ParentProcessId) ([string]$proc.Name)
         }}
     }}
+    $seen = $currentSeen
 
-    Start-Sleep -Milliseconds 200
+    Start-Sleep -Milliseconds 1000
 }}
 """
 
@@ -2574,6 +2579,7 @@ class LauncherWindow(QWidget):
         self.current_plan: Optional[dict] = None
         self.current_run_timed_out = False
         self.current_run_output_start = 0
+        self.output_log_spool_path: Optional[Path] = None
         self.process_output_buffer = ""
         self.current_run_stream_started = False
         self.current_run_stream_disconnected = False
@@ -2841,6 +2847,7 @@ class LauncherWindow(QWidget):
         self.output_edit.setReadOnly(True)
         self.output_edit.setMinimumHeight(90)
         self.output_edit.setPlaceholderText("运行输出会显示在这里...")
+        self.output_edit.document().setMaximumBlockCount(OUTPUT_CONSOLE_MAX_BLOCKS)
         self.output_log_filter = LOG_FILTER_ALL
         self.output_log_entries: list[tuple[str, str]] = []
         self.output_filter_button_group = QButtonGroup(self)
@@ -3921,19 +3928,66 @@ class LauncherWindow(QWidget):
             scrollbar.setValue(scrollbar.maximum())
         else:
             scrollbar.setValue(old_scroll_value)
-        QApplication.processEvents()
+
+    def _start_output_log_spool(self):
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = self.current_batch_start_timestamp or time.strftime("%Y%m%d%H%M%S")
+        self.output_log_spool_path = (
+            LOG_DIR / f"launcher_output_live_{timestamp}_{os.getpid()}.txt"
+        )
+        self.output_log_spool_path.write_text("", encoding="utf-8")
+
+    def _append_output_log_spool(self, entries):
+        path = self.output_log_spool_path
+        if path is None or not entries:
+            return
+        text = "".join(line for _, line in entries)
+        if not text:
+            return
+        with path.open("a", encoding="utf-8", newline="") as spool:
+            spool.write(text)
+
+    def _current_output_offset(self) -> int:
+        path = self.output_log_spool_path
+        if path is None or not path.exists():
+            return len(self._all_output_text().encode("utf-8"))
+        try:
+            return int(path.stat().st_size)
+        except OSError:
+            return 0
+
+    def _output_text_since(self, offset: int) -> str:
+        path = self.output_log_spool_path
+        if path is None or not path.exists():
+            return self._all_output_text()
+        try:
+            with path.open("rb") as spool:
+                spool.seek(max(0, int(offset or 0)))
+                return spool.read().decode("utf-8", errors="replace")
+        except OSError:
+            return ""
 
     def _record_output_text(self, text: str):
         entries = decode_output_text(text)
+        self._append_output_log_spool(entries)
         self.output_log_entries.extend(entries)
+        overflow = len(self.output_log_entries) - OUTPUT_MEMORY_MAX_ENTRIES
+        if overflow > 0:
+            del self.output_log_entries[:overflow]
         return entries
 
     def _all_output_text(self) -> str:
+        path = self.output_log_spool_path
+        if path is not None and path.exists():
+            try:
+                return path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
         return "".join(line for _, line in self.output_log_entries)
 
     def _filtered_output_text(self) -> str:
         if self.output_log_filter == LOG_FILTER_ALL:
-            return self._all_output_text()
+            return "".join(line for _, line in self.output_log_entries)
         return "".join(
             line
             for category, line in self.output_log_entries
@@ -3943,7 +3997,6 @@ class LauncherWindow(QWidget):
     def _render_output_filter(self):
         self.output_edit.setPlainText(self._filtered_output_text())
         self.output_edit.moveCursor(QTextCursor.MoveOperation.End)
-        QApplication.processEvents()
 
     def _set_output_log_filter(self, filter_name: str):
         if filter_name not in LOG_FILTERS:
@@ -5154,6 +5207,7 @@ class LauncherWindow(QWidget):
         self.current_plan = plan
         screen_width, screen_height = self._lock_preview_render_screen_size_for_plan(plan)
         self.current_batch_start_timestamp = time.strftime("%Y%m%d%H%M%S")
+        self._start_output_log_spool()
         self.current_run_start_timestamp = None
         self.batch_active = True
         self.stop_requested = False
@@ -5401,7 +5455,7 @@ class LauncherWindow(QWidget):
         self.process_output_buffer = ""
         self._resolve_current_run_archive_dir()
         self._clear_preview_files()
-        self.current_run_output_start = len(self._all_output_text())
+        self.current_run_output_start = self._current_output_offset()
 
         project_case = self.current_plan["project_case"]
         target_case = self.current_plan["target_case"]
@@ -5593,7 +5647,7 @@ class LauncherWindow(QWidget):
         try:
             logs_dir = archive_dir / "logs"
             logs_dir.mkdir(parents=True, exist_ok=True)
-            run_output_text = self._all_output_text()[self.current_run_output_start:]
+            run_output_text = self._output_text_since(self.current_run_output_start)
             (logs_dir / "launcher_output_partial.txt").write_text(
                 run_output_text,
                 encoding="utf-8",
@@ -6106,7 +6160,7 @@ class LauncherWindow(QWidget):
             logs_dir = archive_dir / "logs"
             logs_dir.mkdir(parents=True, exist_ok=True)
             (logs_dir / "launcher_output.txt").write_text(
-                self._all_output_text()[self.current_run_output_start:],
+                self._output_text_since(self.current_run_output_start),
                 encoding="utf-8",
             )
             prune_run_archive_artifacts(

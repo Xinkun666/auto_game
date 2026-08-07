@@ -105,8 +105,8 @@ class WindowsSubprocessWindowSuppressor:
         excluded_window_title_markers: Sequence[str] = ("autogame restart.bat",),
         xdc_temp_path_markers: Sequence[str] = ("\\temp\\xdc\\",),
         hide_descendant_windows: bool = True,
-        interval_seconds: float = 0.01,
-        snapshot_interval_seconds: float = 0.01,
+        interval_seconds: float = 0.05,
+        snapshot_interval_seconds: float = 0.2,
         os_name: Optional[str] = None,
     ):
         self.root_pid = int(root_pid or os.getpid())
@@ -223,6 +223,8 @@ class WindowsSubprocessWindowSuppressor:
             user32.ShowWindow(hwnd, SW_HIDE)
             key = (int(hwnd), pid)
             if key not in self._hidden_windows:
+                if len(self._hidden_windows) >= 4096:
+                    self._hidden_windows.clear()
                 self._hidden_windows.add(key)
                 LOGGER.info(
                     "subprocess window hidden: hwnd=%s pid=%s name=%s path=%s class=%s title=%s root_pid=%s reason=%s",
@@ -354,9 +356,11 @@ class WindowsSubprocessWindowSuppressor:
             int(pid): (int(parent_pid), str(process_name).lower())
             for pid, (parent_pid, process_name) in snapshot.items()
         }
-        previous_seen = set(self._seen_processes)
+        previous_seen = set(self._process_snapshot)
         self._process_snapshot = next_snapshot
-        self._seen_processes.update(next_snapshot.keys())
+        # 只保留当前快照的 PID。Windows 长跑中 hdc/conhost 会频繁启停，
+        # 若永久记住历史 PID，这个集合会无上限增长。
+        self._seen_processes = set(next_snapshot)
 
         if not previous_seen:
             return

@@ -11,6 +11,7 @@ from pathlib import Path
 
 project_case = "Auto_PUBG_ALL"  # label-tool exported resource directory
 target_case = "template_target_case"  # runtime script under customs_game_examples/<project_case>
+testcase_description = "请填写该用例的测试目标、主要阶段、预计时长和关键结束条件。"
 GAME_DISPLAY_NAME = "CHANGE_ME_GAME_NAME"  # name shown inside SP app selector
 GAME_PACKAGE_NAME = "com.example.game"  # package launched for function tests
 STARTUP_WAIT_SECONDS = 10

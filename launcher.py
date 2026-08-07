@@ -417,7 +417,11 @@ def parse_case_vars(py_file: Path) -> Dict[str, str]:
             target_name = node.target.id
             value_node = node.value
 
-        if target_name not in {"project_case", "target_case"} or value_node is None:
+        if target_name not in {
+            "project_case",
+            "target_case",
+            "testcase_description",
+        } or value_node is None:
             continue
 
         if isinstance(value_node, ast.Constant) and isinstance(value_node.value, str):
@@ -2553,6 +2557,7 @@ class LauncherWindow(QWidget):
         LOGGER.info("LauncherWindow init start")
         self.process: Optional[QProcess] = None
         self.selected_testcase_file: Optional[Path] = None
+        self.selected_testcase_description = ""
         self._updating_targets = False
         self.latest_preview_file: Optional[Path] = None
         self.latest_preview_pixmap: Optional[QPixmap] = None
@@ -2642,10 +2647,12 @@ class LauncherWindow(QWidget):
         self.project_combo = QComboBox()
         self.target_combo = QComboBox()
 
-        self.status_label = QLabel("请选择启动方式，并选择 testcases 用例或直接指定配置。")
-        self.status_label.setObjectName("statusLabel")
-        self.status_label.setWordWrap(True)
-        self.status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.case_info_label = QLabel("用例信息：未选择用例")
+        self.case_info_label.setObjectName("caseInfoLabel")
+        self.case_info_label.setWordWrap(True)
+        self.case_info_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        # 保留旧属性名，避免外部扩展直接访问时中断。
+        self.status_label = self.case_info_label
         self.runtime_label = QLabel("运行信息：未开始")
         self.runtime_label.setObjectName("runtimeLabel")
         self.runtime_label.setWordWrap(True)
@@ -3090,7 +3097,7 @@ class LauncherWindow(QWidget):
                 QLabel {
                     background: transparent;
                 }
-                QLabel#statusLabel,
+                QLabel#caseInfoLabel,
                 QLabel#runtimeLabel {
                     color: #334155;
                     background: #f8fbff;
@@ -3360,7 +3367,7 @@ class LauncherWindow(QWidget):
             QLabel {
                 background: transparent;
             }
-            QLabel#statusLabel,
+            QLabel#caseInfoLabel,
             QLabel#runtimeLabel {
                 color: #cbd5e1;
                 background: #101722;
@@ -3634,7 +3641,7 @@ class LauncherWindow(QWidget):
         status_layout = QHBoxLayout(status_strip)
         status_layout.setContentsMargins(12, 9, 12, 9)
         status_layout.setSpacing(10)
-        status_layout.addWidget(self.status_label, 1)
+        status_layout.addWidget(self.case_info_label, 1)
         status_layout.addWidget(self.runtime_label, 1)
         main_layout.addWidget(status_strip, 0)
 
@@ -3886,6 +3893,7 @@ class LauncherWindow(QWidget):
         self.back_to_launcher_button.clicked.connect(self._show_launcher_page)
         self.refresh_button.clicked.connect(self._refresh_config_choices)
         self.project_combo.currentTextChanged.connect(self._on_project_changed)
+        self.target_combo.currentTextChanged.connect(self._on_target_changed)
         self.start_button.clicked.connect(self._start_run)
         self.stream_verify_button.clicked.connect(self._toggle_stream_verification)
         self.hos_frame_rate_combo.currentIndexChanged.connect(self._on_hos_frame_rate_changed)
@@ -4050,13 +4058,29 @@ class LauncherWindow(QWidget):
         self.header_status_label.setText(state_text)
         self.header_runtime_label.setText(runtime_text)
 
-    def _set_status(self, text: str):
-        self.status_label.setText(text)
+    @staticmethod
+    def _format_information_text(prefix: str, text: str) -> str:
+        value = str(text or "").strip()
+        normalized_prefix = f"{prefix}："
+        if value.startswith(normalized_prefix) or value.startswith(f"{prefix}:"):
+            return value
+        return f"{normalized_prefix}{value}"
+
+    def _set_case_info(self, text: str):
+        self.case_info_label.setText(
+            self._format_information_text("用例信息", text)
+        )
         self._update_header_badges()
 
     def _set_runtime(self, text: str):
-        self.runtime_label.setText(text)
+        self.runtime_label.setText(
+            self._format_information_text("运行信息", text)
+        )
         self._update_header_badges()
+
+    def _set_status(self, text: str):
+        """兼容旧的运行状态调用；运行过程不再覆盖用例信息。"""
+        self._set_runtime(text)
 
     def _toggle_preview_overlay(self, checked: bool):
         self.preview_overlay_button.setText("隐藏标注" if checked else "显示标注")
@@ -4153,6 +4177,34 @@ class LauncherWindow(QWidget):
     def _sync_mode_ui(self):
         LOGGER.debug("sync_mode_ui: testcase_mode=%s", self.mode_testcase.isChecked())
         self._sync_testcase_controls_state()
+        self._refresh_case_info_display()
+
+    def _refresh_case_info_display(self):
+        if self.mode_testcase.isChecked():
+            if self.selected_testcase_file is None:
+                self._set_case_info("未选择 testcases 用例")
+                return
+
+            description = self.selected_testcase_description.strip()
+            if description:
+                self._set_case_info(description)
+                return
+
+            try:
+                case_path = self.selected_testcase_file.relative_to(APP_DIR).as_posix()
+            except ValueError:
+                case_path = str(self.selected_testcase_file)
+            self._set_case_info(f"{case_path} 未提供 testcase_description")
+            return
+
+        project_case = self.project_combo.currentText().strip()
+        target_case = self.target_combo.currentText().strip()
+        if project_case and target_case:
+            self._set_case_info(
+                f"直接启动 project_case={project_case}，target_case={target_case}"
+            )
+        else:
+            self._set_case_info("直接启动模式：请选择 project_case 和 target_case")
 
     def _can_open_label_tool_for_selection(self) -> bool:
         if self.selected_testcase_file is None:
@@ -4236,7 +4288,13 @@ class LauncherWindow(QWidget):
         if project_case:
             self._set_status(f"已选择 project_case={project_case}，请确认 target_case。")
         self._sync_testcase_controls_state()
+        self._refresh_case_info_display()
         self._refresh_preview_pixmap()
+
+    def _on_target_changed(self, _target_case: str):
+        if self._updating_targets:
+            return
+        self._refresh_case_info_display()
 
     def _show_validation_issues(self, dialog_title: str, issues: ValidationIssues) -> bool:
         for warning_title, warning_message in issues.warnings:
@@ -4294,8 +4352,10 @@ class LauncherWindow(QWidget):
     def _clear_testcase_file(self):
         LOGGER.info("clear_testcase_file")
         self.selected_testcase_file = None
+        self.selected_testcase_description = ""
         self.testcase_path_edit.clear()
         self._sync_testcase_controls_state()
+        self._refresh_case_info_display()
         self._set_status("已清空 testcases 选择。可以直接指定 project_case / target_case 启动。")
 
     def _ensure_label_tool(self):
@@ -4571,11 +4631,16 @@ class LauncherWindow(QWidget):
             parsed = parse_case_vars(py_file)
         except Exception as exc:
             log_exception(f"apply_parsed_testcase failed: file={py_file}")
+            self.selected_testcase_description = ""
+            self._set_case_info(f"用例解析失败：{exc}")
             self._set_status(f"解析失败：{exc}")
             return
 
         project_case = parsed.get("project_case")
         target_case = parsed.get("target_case")
+        self.selected_testcase_description = str(
+            parsed.get("testcase_description") or ""
+        ).strip()
 
         messages = []
         if project_case:
@@ -4597,9 +4662,9 @@ class LauncherWindow(QWidget):
 
         if is_pubg_testcase_file(py_file, parsed):
             self.case_loop_count_spin.setValue(PUBG_CASE_DEFAULT_LOOP_COUNT)
-            messages.append(PUBG_CASE_RUNTIME_DESCRIPTION)
 
         self._sync_testcase_controls_state()
+        self._refresh_case_info_display()
         self._set_status("；".join(messages))
 
     def _build_process_environment(self, project_case: str, target_case: str, run_no: int) -> QProcessEnvironment:
@@ -5186,6 +5251,11 @@ class LauncherWindow(QWidget):
             ),
             "cleanup_apps": sorted(cleanup_apps),
             "runtime_description": runtime_description,
+            "testcase_description": (
+                self.selected_testcase_description
+                if mode == "testcase"
+                else f"直接启动 project_case={project_case}，target_case={target_case}"
+            ),
         }
         LOGGER.info("collect_plan result: %s", plan)
         return plan
@@ -5249,6 +5319,10 @@ class LauncherWindow(QWidget):
         )
         if plan.get("runtime_description"):
             self._log_message(f"[Launcher] {plan['runtime_description']}\n")
+        if plan.get("testcase_description"):
+            self._log_message(
+                f"[Launcher] 用例信息：{plan['testcase_description']}\n"
+            )
         if marathon_minutes > 0:
             self._log_message(
                 "[Launcher] 马拉松模式已启用：运行期间不做温度/电量门禁检查，"

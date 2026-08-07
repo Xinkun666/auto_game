@@ -2934,6 +2934,13 @@ class FrameWorker(threading.Thread):
             return None
         return self._wait_for_stream_recovery_frame(purpose)
 
+    def get_sp_save_settle_seconds(self):
+        """长按 SP 保存后预留给手机端的落盘时间。"""
+        return max(
+            self.BATTERY_CUTOFF_SHUTDOWN_DELAY_SECONDS,
+            self.marathon_time * 2,
+        )
+
     def _handle_marathon_battery_stop(self):
         percent = self.sp_controller.last_battery_percent
         threshold = self.sp_controller.end_battery_percent
@@ -2942,10 +2949,7 @@ class FrameWorker(threading.Thread):
             "正在长按 SP 保存。"
         )
         saved = self.sp_controller.stop()
-        sp_save_wait_time = max(
-            self.BATTERY_CUTOFF_SHUTDOWN_DELAY_SECONDS,
-            self.marathon_time * 2,
-        )
+        sp_save_wait_time = self.get_sp_save_settle_seconds()
         if saved:
             self.frame_log(
                 f"SP 已保存，等待 {sp_save_wait_time:g} 秒后"

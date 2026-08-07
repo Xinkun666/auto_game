@@ -593,7 +593,18 @@ def finalize_automation(w: "FrameWorker"):
 
     if SP_RECORDING_ENABLED and not w.sp_controller.is_saved:
         if w.sp_controller.stop():
-            time.sleep(1)
+            sp_save_wait_seconds = (
+                w.get_sp_save_settle_seconds()
+                if is_marathon_test(w)
+                else 1.0
+            )
+            if is_marathon_test(w):
+                w.frame_log(
+                    f"SP 长按保存指令已执行，等待 {sp_save_wait_seconds:g} 秒"
+                    "让数据落盘，随后才退出本轮并拉取 SP 数据",
+                    log_type=FrameLogType.TIME,
+                )
+            time.sleep(sp_save_wait_seconds)
 
     final_shutdown_pending = True
     w.change_stage("结束阶段")

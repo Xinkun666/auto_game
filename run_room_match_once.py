@@ -18,6 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = (
     REPO_ROOT / "aw" / "autogame" / "temp" / "results" / "room_match_once"
 )
+DETAILS_FILENAME = "匹配详情.json"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -34,8 +35,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output",
+        "--output-dir",
+        dest="output_dir",
         default="",
-        help="结果 JSON 路径；默认写入 room_match_once 结果目录",
+        help=(
+            "结果保存根目录；每次运行会在其中新建 YYYYMMDD_HHMMSS 目录，"
+            "默认写入 room_match_once 结果目录"
+        ),
     )
     parser.add_argument(
         "--room-library",
@@ -62,6 +68,20 @@ def _set_if_value(name: str, value) -> None:
         os.environ[name] = text
 
 
+def _create_run_dir(base_dir: Path) -> Path:
+    base_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for index in range(1000):
+        suffix = "" if index == 0 else f"_{index:02d}"
+        candidate = base_dir / f"{timestamp}{suffix}"
+        try:
+            candidate.mkdir()
+        except FileExistsError:
+            continue
+        return candidate
+    raise RuntimeError(f"无法创建本次匹配结果目录: {base_dir}")
+
+
 def _configure_environment(args: argparse.Namespace) -> Path:
     os.chdir(REPO_ROOT)
     os.environ["TARGET_PROJECT_CASE"] = "Auto_PUBG_ALL"
@@ -78,13 +98,15 @@ def _configure_environment(args: argparse.Namespace) -> Path:
     _set_if_value("AUTOGAME_HOSCRCPY_IP", args.ip)
     _set_if_value("AUTOGAME_HOSCRCPY_PORT", args.port)
 
-    if args.output:
-        output = Path(args.output).expanduser().resolve()
-    else:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        output = DEFAULT_OUTPUT_DIR / f"room_match_{timestamp}.json"
-    os.environ["AUTOGAME_ROOM_MATCH_OUTPUT"] = str(output)
-    return output
+    output_root = (
+        Path(args.output_dir).expanduser().resolve()
+        if args.output_dir
+        else DEFAULT_OUTPUT_DIR
+    )
+    run_dir = _create_run_dir(output_root)
+    os.environ["AUTOGAME_ROOM_MATCH_OUTPUT_DIR"] = str(run_dir)
+    os.environ.pop("AUTOGAME_ROOM_MATCH_OUTPUT", None)
+    return run_dir / DETAILS_FILENAME
 
 
 def _read_result(path: Path) -> dict:
@@ -158,7 +180,8 @@ def main(argv=None) -> int:
 
     payload = _read_result(output)
     status = payload.get("status")
-    print(f"结果文件: {output}")
+    print(f"结果目录: {output.parent}")
+    print(f"详细结果: {output}")
     if status == "matched":
         print(
             f"匹配结果: room_id={payload.get('room_id')}, "

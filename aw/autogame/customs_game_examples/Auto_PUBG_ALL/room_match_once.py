@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import cv2
 import json
 import os
 from pathlib import Path
@@ -30,9 +31,13 @@ if TYPE_CHECKING:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
-DEFAULT_RESULT_DIR = (
+DEFAULT_RESULT_ROOT = (
     PROJECT_ROOT / "aw" / "autogame" / "temp" / "results" / "room_match_once"
 )
+DETAILS_FILENAME = "匹配详情.json"
+SUMMARY_FILENAME = "匹配概要.json"
+ORIGINAL_IMAGE_FILENAME = "原始图片.png"
+MATCH_IMAGE_FILENAME = "匹配结果.png"
 RESULT_MARKER = "__AUTOGAME_ROOM_MATCH_RESULT__:"
 
 _matcher: Optional[NandaLocalRoomMatcher] = None
@@ -56,15 +61,30 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-def _result_path() -> Path:
-    explicit = os.environ.get("AUTOGAME_ROOM_MATCH_OUTPUT", "").strip()
+def _new_timestamp_dir(base_dir: Path) -> Path:
+    base_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for index in range(1000):
+        suffix = "" if index == 0 else f"_{index:02d}"
+        candidate = base_dir / f"{timestamp}{suffix}"
+        try:
+            candidate.mkdir()
+        except FileExistsError:
+            continue
+        return candidate
+    raise RuntimeError(f"无法创建本次匹配结果目录: {base_dir}")
+
+
+def _result_dir() -> Path:
+    explicit = os.environ.get("AUTOGAME_ROOM_MATCH_OUTPUT_DIR", "").strip()
     if explicit:
-        return Path(explicit).expanduser().resolve()
+        result_dir = Path(explicit).expanduser().resolve()
+        result_dir.mkdir(parents=True, exist_ok=True)
+        return result_dir
     archive_dir = os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()
     if archive_dir:
-        return Path(archive_dir).expanduser().resolve() / "room_match_result.json"
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    return DEFAULT_RESULT_DIR / f"room_match_{timestamp}.json"
+        return _new_timestamp_dir(Path(archive_dir).expanduser().resolve())
+    return _new_timestamp_dir(DEFAULT_RESULT_ROOT)
 
 
 def _write_payload(path: Path, payload: Mapping[str, Any]) -> None:
@@ -75,6 +95,55 @@ def _write_payload(path: Path, payload: Mapping[str, Any]) -> None:
         encoding="utf-8",
     )
     os.replace(temporary, path)
+
+
+def _frame_rgb_to_bgr(frame: np.ndarray) -> np.ndarray:
+    """HOScrcpy 输出 RGB；OpenCV 写盘前必须转成 BGR。"""
+    if frame.ndim != 3 or frame.shape[2] != 3:
+        raise ValueError(f"原始画面必须是 HxWx3 RGB 图像: {frame.shape}")
+    return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+
+def _save_original_image(path: Path, frame: np.ndarray) -> None:
+    if not write_image_unicode(path, _frame_rgb_to_bgr(frame)):
+        raise RuntimeError(f"无法保存原始图片: {path}")
+
+
+def _save_match_image(
+    path: Path,
+    frame: np.ndarray,
+    result: NandaCurrentViewMatchResult,
+) -> None:
+    image = _frame_rgb_to_bgr(frame)
+    height, width = image.shape[:2]
+    if result.crop_xyxy is not None and len(result.crop_xyxy) == 4:
+        x1, y1, x2, y2 = (int(value) for value in result.crop_xyxy)
+        x1 = max(0, min(width - 1, x1))
+        y1 = max(0, min(height - 1, y1))
+        x2 = max(x1 + 1, min(width, x2))
+        y2 = max(y1 + 1, min(height, y2))
+        cv2.rectangle(image, (x1, y1), (x2 - 1, y2 - 1), (0, 255, 0), 3)
+    label = f"MATCHED: {result.room_id}"
+    cv2.rectangle(image, (0, 0), (min(width, 520), min(height, 46)), (0, 0, 0), -1)
+    cv2.putText(
+        image,
+        label,
+        (12, min(height - 8, 32)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (0, 255, 0),
+        2,
+        cv2.LINE_AA,
+    )
+    if not write_image_unicode(path, image):
+        raise RuntimeError(f"无法保存匹配结果图片: {path}")
+
+
+def _summary_payload(result: NandaCurrentViewMatchResult) -> dict[str, Any]:
+    summary: dict[str, Any] = {"matched": bool(result.matched)}
+    if result.matched:
+        summary["room_id"] = result.room_id
+    return summary
 
 
 def _load_settings() -> NandaLatestSettings:
@@ -126,8 +195,11 @@ def _build_context(worker: "FrameWorker", frame: np.ndarray) -> NandaSearchConte
 def _match_payload(
     result: NandaCurrentViewMatchResult,
     *,
-    result_path: Path,
-    query_frame_path: Optional[Path],
+    result_dir: Path,
+    details_path: Path,
+    original_image_path: Path,
+    summary_path: Path,
+    match_image_path: Optional[Path],
     frame: np.ndarray,
     elapsed_seconds: float,
 ) -> dict[str, Any]:
@@ -159,10 +231,14 @@ def _match_payload(
         "replay_path": result.replay_path,
         "frame_shape": list(frame.shape),
         "elapsed_seconds": elapsed_seconds,
-        "query_frame_path": (
-            str(query_frame_path) if query_frame_path is not None else None
+        "result_dir": str(result_dir),
+        "original_image_path": str(original_image_path),
+        "query_frame_path": str(original_image_path),
+        "summary_path": str(summary_path),
+        "match_image_path": (
+            str(match_image_path) if match_image_path is not None else None
         ),
-        "result_path": str(result_path),
+        "result_path": str(details_path),
     }
 
 
@@ -171,9 +247,12 @@ def on_stage(worker: "FrameWorker") -> None:
     if _completed or _running:
         return
     _running = True
-    result_path = _result_path()
+    result_dir = _result_dir()
+    details_path = result_dir / DETAILS_FILENAME
+    summary_path = result_dir / SUMMARY_FILENAME
+    original_image_path = result_dir / ORIGINAL_IMAGE_FILENAME
     started_at = time.monotonic()
-    query_frame_path: Optional[Path] = None
+    match_image_path: Optional[Path] = None
     try:
         if worker.current_stage != "搜房阶段":
             worker.change_stage("搜房阶段")
@@ -187,25 +266,30 @@ def on_stage(worker: "FrameWorker") -> None:
         if frame is None:
             raise RuntimeError("当前没有可用游戏画面")
         frame = np.ascontiguousarray(frame).copy()
-        query_frame_path = result_path.with_suffix(".query.png")
-        if not write_image_unicode(query_frame_path, frame):
-            query_frame_path = None
+        _save_original_image(original_image_path, frame)
 
         matcher = _get_matcher()
         result = matcher.match_current_view(_build_context(worker, frame))
+        if result.matched:
+            match_image_path = result_dir / MATCH_IMAGE_FILENAME
+            _save_match_image(match_image_path, frame, result)
         payload = _match_payload(
             result,
-            result_path=result_path,
-            query_frame_path=query_frame_path,
+            result_dir=result_dir,
+            details_path=details_path,
+            original_image_path=original_image_path,
+            summary_path=summary_path,
+            match_image_path=match_image_path,
             frame=frame,
             elapsed_seconds=time.monotonic() - started_at,
         )
-        _write_payload(result_path, payload)
+        _write_payload(details_path, payload)
+        _write_payload(summary_path, _summary_payload(result))
         worker.frame_log(
             f"[NandaMatchOnly] 单次匹配结束：status={payload['status']}，"
             f"room={payload['room_id']}，score={payload['score']}，"
             f"expected={payload['expected_room_id']}，correct={payload['correct']}，"
-            f"result={result_path}"
+            f"result_dir={result_dir}"
         )
         print(RESULT_MARKER + json.dumps(_json_safe(payload), ensure_ascii=False))
     except Exception as exc:
@@ -218,19 +302,26 @@ def on_stage(worker: "FrameWorker") -> None:
             "error_type": type(exc).__name__,
             "error": str(exc),
             "elapsed_seconds": time.monotonic() - started_at,
-            "result_path": str(result_path),
+            "result_dir": str(result_dir),
+            "original_image_path": (
+                str(original_image_path) if original_image_path.is_file() else None
+            ),
+            "summary_path": str(summary_path),
+            "match_image_path": None,
+            "result_path": str(details_path),
         }
-        _write_payload(result_path, payload)
+        _write_payload(details_path, payload)
+        _write_payload(summary_path, {"matched": False})
         worker.frame_log(
             f"[NandaMatchOnly] 单次匹配失败：{type(exc).__name__}: {exc}；"
-            f"result={result_path}"
+            f"result_dir={result_dir}"
         )
         mark_failed = getattr(worker, "mark_failed", None)
         if callable(mark_failed):
             mark_failed(
                 "room_match_once_failed",
                 str(exc),
-                result_path=str(result_path),
+                result_path=str(details_path),
                 exception=type(exc).__name__,
             )
         print(RESULT_MARKER + json.dumps(_json_safe(payload), ensure_ascii=False))

@@ -48,6 +48,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_room_matc
     NandaMatcherAssetPaths,
 )
 LOGGER = logging.getLogger("NandaLatestHouseSearch")
+NANDA_ORIGINAL_SEGMENTATION_MAX_ATTEMPTS = 3
 
 
 _UNSUPPORTED_REPLAY_ACTIONS = {
@@ -979,7 +980,7 @@ class _NandaDoorViewPreparation:
 
 @dataclass(frozen=True)
 class NandaCurrentViewMatchResult:
-    """不移动人物或视角的单次房型匹配结果。"""
+    """单栋房屋匹配结果，可用于直接匹配或南大原始取景流程。"""
 
     matched: bool
     room_id: Optional[str]
@@ -994,6 +995,12 @@ class NandaCurrentViewMatchResult:
     matcher_elapsed_ms: Any = None
     query_structure: Any = None
     thresholds: Any = None
+    movement_enabled: bool = False
+    attempt_count: int = 1
+    matching_attempts: Any = None
+    view_preparation: Any = None
+    selection_reason: Any = None
+    requires_pose_realign: Any = None
 
 
 @dataclass(frozen=True)
@@ -1883,6 +1890,176 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
             query_structure=debug_payload.get("query_structure"),
             thresholds=debug_payload.get("thresholds"),
         )
+
+    def _original_segmentation_view(
+        self,
+        context: NandaSearchContext,
+        *,
+        attempt_index: int,
+    ) -> _NandaDoorViewPreparation:
+        """按南大原流程只估算临时抬头，不重复执行门前距离校准。"""
+        frame, sam3_info = self._capture_door_frame(context)
+        bbox, area_ratio, top_ratio, aspect_ratio = self._door_view_geometry(
+            frame,
+            sam3_info,
+        )
+        _, screen_height = self._screen_size(context)
+        pitch_duration_ms, pitch_bias_px = self._pitch_plan(
+            screen_height,
+            top_ratio,
+        )
+        context.worker.frame_log(
+            f"[NandaOriginal] 第 {attempt_index}/"
+            f"{NANDA_ORIGINAL_SEGMENTATION_MAX_ATTEMPTS} 次分割取景："
+            f"door_bbox={bbox}，area={area_ratio:.4f}，top={top_ratio:.4f}，"
+            f"pitch_duration={pitch_duration_ms}ms，pitch_bias=-{pitch_bias_px}px；"
+            "门前距离由用户手动校准，本阶段不重复校准"
+        )
+        return _NandaDoorViewPreparation(
+            bbox_xyxy=bbox,
+            bbox_area_ratio=area_ratio,
+            door_top_ratio=top_ratio,
+            door_aspect_ratio=aspect_ratio,
+            backoff_pulses=0,
+            pitch_duration_ms=pitch_duration_ms,
+            pitch_bias_px=pitch_bias_px,
+        )
+
+    def _original_flow_result(
+        self,
+        attempt: _NandaRoomMatchAttempt,
+        *,
+        attempts: Sequence[_NandaRoomMatchAttempt],
+        views: Sequence[_NandaDoorViewPreparation],
+        matched: bool,
+        backoff_count: int,
+        selection_reason: str,
+    ) -> NandaCurrentViewMatchResult:
+        debug_payload = (
+            attempt.debug_payload
+            if isinstance(attempt.debug_payload, Mapping)
+            else {}
+        )
+        decision = (
+            attempt.decision
+            if isinstance(attempt.decision, Mapping)
+            else {}
+        )
+        return NandaCurrentViewMatchResult(
+            matched=matched,
+            room_id=attempt.room_id if matched else None,
+            replay_path=attempt.replay_path if matched else None,
+            score=attempt.score,
+            no_match_reason="" if matched else attempt.no_match_reason,
+            sam3_score=attempt.sam3_score,
+            crop_xyxy=attempt.crop_xyxy,
+            decision=dict(decision),
+            top_candidates=debug_payload.get("top_candidates"),
+            top2_margin=debug_payload.get("top2_margin"),
+            matcher_elapsed_ms=debug_payload.get("elapsed_ms"),
+            query_structure=debug_payload.get("query_structure"),
+            thresholds=debug_payload.get("thresholds"),
+            movement_enabled=True,
+            attempt_count=len(attempts),
+            matching_attempts=[dict(item.summary()) for item in attempts],
+            view_preparation={
+                "mode": "nanda_original_segmentation",
+                "max_attempts": NANDA_ORIGINAL_SEGMENTATION_MAX_ATTEMPTS,
+                "backoff_count": backoff_count,
+                "backoff_duration_ms": self.settings.match_retry_backoff_duration_ms,
+                "forward_recover_duration_ms": (
+                    self.settings.match_retry_forward_recover_duration_ms
+                ),
+                "attempts": [dict(view.metadata()) for view in views],
+            },
+            selection_reason=selection_reason,
+            requires_pose_realign=backoff_count > 0,
+        )
+
+    def match_original_nanda_flow(
+        self,
+        context: NandaSearchContext,
+    ) -> NandaCurrentViewMatchResult:
+        """复现南大当前分割匹配链，但跳过手动门前校准和进屋回放。
+
+        上游语义是：最多分割三次；仅在 building 分割失败时后退
+        1500ms 后再试；每次按门顶位置临时抬头并在分割后恢复；后退后
+        匹配成功则按后退次数各前进 1300ms 恢复。房型判定为 no_match
+        时直接结束，不把“房型不匹配”误当成“房屋分割失败”继续移动。
+        """
+        attempts: List[_NandaRoomMatchAttempt] = []
+        views: List[_NandaDoorViewPreparation] = []
+        backoff_count = 0
+
+        for attempt_index in range(1, NANDA_ORIGINAL_SEGMENTATION_MAX_ATTEMPTS + 1):
+            view = self._original_segmentation_view(
+                context,
+                attempt_index=attempt_index,
+            )
+            views.append(view)
+            attempt = self._run_match_attempt(
+                context,
+                index=attempt_index,
+                label="nanda_original_segmentation",
+                view=view,
+            )
+            attempts.append(attempt)
+
+            if attempt.mask_found:
+                if attempt.room_id is None:
+                    context.worker.frame_log(
+                        "[NandaOriginal] building 分割成功但房型未通过，"
+                        "按南大原流程直接结束，不再后拉重试"
+                    )
+                    return self._original_flow_result(
+                        attempt,
+                        attempts=attempts,
+                        views=views,
+                        matched=False,
+                        backoff_count=backoff_count,
+                        selection_reason="segmented_but_room_no_match",
+                    )
+
+                if backoff_count > 0:
+                    context.worker.frame_log(
+                        f"[NandaOriginal] 第 {attempt_index} 次分割后匹配成功，"
+                        f"按南大原流程执行 {backoff_count} 次前推恢复，"
+                        f"每次 {self.settings.match_retry_forward_recover_duration_ms}ms；"
+                        "单次脚本随后结束，不执行进屋回放"
+                    )
+                    for _ in range(backoff_count):
+                        self._move_for_match_retry(context, forward=True)
+                return self._original_flow_result(
+                    attempt,
+                    attempts=attempts,
+                    views=views,
+                    matched=True,
+                    backoff_count=backoff_count,
+                    selection_reason="nanda_original_segmentation_match",
+                )
+
+            if attempt_index >= NANDA_ORIGINAL_SEGMENTATION_MAX_ATTEMPTS:
+                context.worker.frame_log(
+                    "[NandaOriginal] building 连续三次分割失败，按南大原流程结束"
+                )
+                return self._original_flow_result(
+                    attempt,
+                    attempts=attempts,
+                    views=views,
+                    matched=False,
+                    backoff_count=backoff_count,
+                    selection_reason="building_segmentation_exhausted",
+                )
+
+            context.worker.frame_log(
+                f"[NandaOriginal] 第 {attempt_index}/"
+                f"{NANDA_ORIGINAL_SEGMENTATION_MAX_ATTEMPTS} 次 building 分割失败，"
+                f"后退 {self.settings.match_retry_backoff_duration_ms}ms 后重试"
+            )
+            self._move_for_match_retry(context, forward=False)
+            backoff_count += 1
+
+        raise RuntimeError("南大原流程未生成匹配结果")
 
     def match(self, context: NandaSearchContext) -> Optional[NandaRoomMatch]:
         if context.should_abort():

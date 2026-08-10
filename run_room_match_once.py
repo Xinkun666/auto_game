@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""对已手动校准的当前游戏画面执行一次房型匹配。"""
+"""对已手动到达的当前房屋执行一次南大原流程房型匹配。"""
 
 from __future__ import annotations
 
@@ -24,8 +24,9 @@ DETAILS_FILENAME = "匹配详情.json"
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "手动走到门前并校准视角后，从 HOScrcpy 取当前画面，"
-            "只执行一次 building/door frame/window + DINOv3/MLP 房型匹配。"
+            "手动走到门前后，从 HOScrcpy 取当前画面，按南大原方案执行门框取景、"
+            "必要时后拉和动态抬头，并进行 building/door frame/window + "
+            "DINOv3/MLP 房型匹配；只处理当前一栋房屋，不执行进屋回放。"
         )
     )
     parser.add_argument(

@@ -1,6 +1,7 @@
-"""手动到达房屋门前后，只对当前画面执行一次房型匹配。
+"""手动到达房屋门前后，按南大原方案匹配当前一栋房子。
 
-这个入口不校准人物位置，不移动视角，不后拉，不重试，不执行进屋回放。
+这个入口保留南大动态抬头、房屋分割失败时最多三次取景和位置恢复，
+但不重复用户已完成的门前校准，也不执行进屋回放。
 """
 
 from __future__ import annotations
@@ -116,7 +117,13 @@ def _save_match_image(
 ) -> None:
     image = _frame_rgb_to_bgr(frame)
     height, width = image.shape[:2]
-    if result.crop_xyxy is not None and len(result.crop_xyxy) == 4:
+    # 直接匹配时 crop 与当前帧一致；南大原流程会抬头后再恢复，最终帧与
+    # building crop 不再是同一视角，因此只在无移动模式绘制 crop，避免误标。
+    if (
+        not result.movement_enabled
+        and result.crop_xyxy is not None
+        and len(result.crop_xyxy) == 4
+    ):
         x1, y1, x2, y2 = (int(value) for value in result.crop_xyxy)
         x1 = max(0, min(width - 1, x1))
         y1 = max(0, min(height - 1, y1))
@@ -172,6 +179,10 @@ def preload_runtime() -> None:
 
 
 def _build_context(worker: "FrameWorker", frame: np.ndarray) -> NandaSearchContext:
+    def refresh_frame(_reason: str = "") -> bool:
+        refresh = getattr(worker, "refresh_frame", None)
+        return bool(refresh()) if callable(refresh) else False
+
     return NandaSearchContext(
         worker=worker,
         frame=frame,
@@ -185,8 +196,8 @@ def _build_context(worker: "FrameWorker", frame: np.ndarray) -> NandaSearchConte
         door_box=None,
         door_center_offset_px=None,
         door_area_ratio=None,
-        phase_label="manual_room_match_once",
-        refresh_frame=lambda _reason: True,
+        phase_label="manual_nanda_room_match_once",
+        refresh_frame=refresh_frame,
         should_abort=lambda: False,
         is_outside=lambda: True,
     )
@@ -208,9 +219,9 @@ def _match_payload(
     return {
         "status": status,
         "created_at": datetime.now().astimezone().isoformat(),
-        "mode": "manual_current_view_once",
-        "movement_enabled": False,
-        "attempt_count": 1,
+        "mode": "manual_nanda_original_flow_once",
+        "movement_enabled": result.movement_enabled,
+        "attempt_count": result.attempt_count,
         "room_id": result.room_id,
         "expected_room_id": expected_room_id or None,
         "correct": (
@@ -228,6 +239,10 @@ def _match_payload(
         "crop_xyxy": result.crop_xyxy,
         "query_structure": result.query_structure,
         "thresholds": result.thresholds,
+        "matching_attempts": result.matching_attempts,
+        "view_preparation": result.view_preparation,
+        "selection_reason": result.selection_reason,
+        "requires_pose_realign": result.requires_pose_realign,
         "replay_path": result.replay_path,
         "frame_shape": list(frame.shape),
         "elapsed_seconds": elapsed_seconds,
@@ -269,10 +284,17 @@ def on_stage(worker: "FrameWorker") -> None:
         _save_original_image(original_image_path, frame)
 
         matcher = _get_matcher()
-        result = matcher.match_current_view(_build_context(worker, frame))
+        result = matcher.match_original_nanda_flow(_build_context(worker, frame))
         if result.matched:
             match_image_path = result_dir / MATCH_IMAGE_FILENAME
-            _save_match_image(match_image_path, frame, result)
+            result_frame = getattr(worker, "frame", None)
+            if result_frame is None:
+                result_frame = frame
+            _save_match_image(
+                match_image_path,
+                np.ascontiguousarray(result_frame).copy(),
+                result,
+            )
         payload = _match_payload(
             result,
             result_dir=result_dir,
@@ -296,8 +318,8 @@ def on_stage(worker: "FrameWorker") -> None:
         payload = {
             "status": "error",
             "created_at": datetime.now().astimezone().isoformat(),
-            "mode": "manual_current_view_once",
-            "movement_enabled": False,
+            "mode": "manual_nanda_original_flow_once",
+            "movement_enabled": True,
             "attempt_count": 0,
             "error_type": type(exc).__name__,
             "error": str(exc),

@@ -36,7 +36,7 @@ DEFAULT_RESULT_ROOT = (
     PROJECT_ROOT / "aw" / "autogame" / "temp" / "results" / "room_match_once"
 )
 DETAILS_FILENAME = "匹配详情.json"
-SUMMARY_FILENAME = "匹配概要.json"
+SUMMARY_FILENAME = "匹配概要.txt"
 ORIGINAL_IMAGE_FILENAME = "原始图片.png"
 MATCH_IMAGE_FILENAME = "匹配结果.png"
 RESULT_MARKER = "__AUTOGAME_ROOM_MATCH_RESULT__:"
@@ -95,6 +95,13 @@ def _write_payload(path: Path, payload: Mapping[str, Any]) -> None:
         json.dumps(_json_safe(payload), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    os.replace(temporary, path)
+
+
+def _write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(content, encoding="utf-8")
     os.replace(temporary, path)
 
 
@@ -158,11 +165,11 @@ def _save_match_image(
     return source_path
 
 
-def _summary_payload(result: NandaCurrentViewMatchResult) -> dict[str, Any]:
-    summary: dict[str, Any] = {"matched": bool(result.matched)}
+def _summary_text(result: NandaCurrentViewMatchResult) -> str:
+    lines = [f"匹配成功：{'是' if result.matched else '否'}"]
     if result.matched:
-        summary["room_id"] = result.room_id
-    return summary
+        lines.append(f"匹配房型：{result.room_id}")
+    return "\n".join(lines) + "\n"
 
 
 def _load_settings() -> NandaLatestSettings:
@@ -322,7 +329,7 @@ def on_stage(worker: "FrameWorker") -> None:
             elapsed_seconds=time.monotonic() - started_at,
         )
         _write_payload(details_path, payload)
-        _write_payload(summary_path, _summary_payload(result))
+        _write_text(summary_path, _summary_text(result))
         worker.frame_log(
             f"[NandaMatchOnly] 单次匹配结束：status={payload['status']}，"
             f"room={payload['room_id']}，score={payload['score']}，"
@@ -350,7 +357,7 @@ def on_stage(worker: "FrameWorker") -> None:
             "result_path": str(details_path),
         }
         _write_payload(details_path, payload)
-        _write_payload(summary_path, {"matched": False})
+        _write_text(summary_path, "匹配成功：否\n")
         worker.frame_log(
             f"[NandaMatchOnly] 单次匹配失败：{type(exc).__name__}: {exc}；"
             f"result_dir={result_dir}"

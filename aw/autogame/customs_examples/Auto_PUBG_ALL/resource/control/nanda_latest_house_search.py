@@ -978,6 +978,25 @@ class _NandaDoorViewPreparation:
 
 
 @dataclass(frozen=True)
+class NandaCurrentViewMatchResult:
+    """不移动人物或视角的单次房型匹配结果。"""
+
+    matched: bool
+    room_id: Optional[str]
+    replay_path: Optional[str]
+    score: Optional[float]
+    no_match_reason: str
+    sam3_score: Any
+    crop_xyxy: Optional[Tuple[int, int, int, int]]
+    decision: Mapping[str, Any]
+    top_candidates: Any = None
+    top2_margin: Any = None
+    matcher_elapsed_ms: Any = None
+    query_structure: Any = None
+    thresholds: Any = None
+
+
+@dataclass(frozen=True)
 class _NandaMatchPerception:
     building_frame: np.ndarray
     building_info: Mapping[str, Any]
@@ -1811,6 +1830,60 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
             replay_steps=replay_steps,
         )
 
+    def match_current_view(
+        self,
+        context: NandaSearchContext,
+    ) -> NandaCurrentViewMatchResult:
+        """只匹配当前画面，不校准门前位姿，不移动也不回放。
+
+        调用者必须先手动将人物和视角放到期望位置。这个入口仅在
+        当前帧上依次提取 ``building``、``door frame`` 和 ``window``，
+        然后执行一次 DINOv3 + MLP 匹配。
+        """
+        context.worker.frame_log(
+            "[NandaMatchOnly] 开始匹配手动校准后的当前画面；"
+            "禁用门前校准、后拉、抬头、重试移动和进屋回放"
+        )
+        attempt = self._run_match_attempt(
+            context,
+            index=1,
+            label="manual_current_view",
+            view=_NandaDoorViewPreparation(
+                bbox_xyxy=(0, 0, 0, 0),
+                bbox_area_ratio=0.0,
+                door_top_ratio=0.0,
+                door_aspect_ratio=0.0,
+                backoff_pulses=0,
+                pitch_duration_ms=0,
+                pitch_bias_px=0,
+            ),
+        )
+        debug_payload = (
+            attempt.debug_payload
+            if isinstance(attempt.debug_payload, Mapping)
+            else {}
+        )
+        decision = (
+            attempt.decision
+            if isinstance(attempt.decision, Mapping)
+            else {}
+        )
+        return NandaCurrentViewMatchResult(
+            matched=attempt.valid,
+            room_id=attempt.room_id,
+            replay_path=attempt.replay_path,
+            score=attempt.score,
+            no_match_reason=attempt.no_match_reason,
+            sam3_score=attempt.sam3_score,
+            crop_xyxy=attempt.crop_xyxy,
+            decision=dict(decision),
+            top_candidates=debug_payload.get("top_candidates"),
+            top2_margin=debug_payload.get("top2_margin"),
+            matcher_elapsed_ms=debug_payload.get("elapsed_ms"),
+            query_structure=debug_payload.get("query_structure"),
+            thresholds=debug_payload.get("thresholds"),
+        )
+
     def match(self, context: NandaSearchContext) -> Optional[NandaRoomMatch]:
         if context.should_abort():
             return None
@@ -2587,6 +2660,7 @@ def build_nanda_house_search_strategy(
 
 
 __all__ = [
+    "NandaCurrentViewMatchResult",
     "NandaDoorPosePreparer",
     "NandaHosJoystickReplayExecutor",
     "NandaLocalRoomMatcher",

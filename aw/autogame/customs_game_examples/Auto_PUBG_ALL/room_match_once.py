@@ -112,38 +112,50 @@ def _save_original_image(path: Path, frame: np.ndarray) -> None:
 
 def _save_match_image(
     path: Path,
-    frame: np.ndarray,
     result: NandaCurrentViewMatchResult,
-) -> None:
-    image = _frame_rgb_to_bgr(frame)
-    height, width = image.shape[:2]
-    # 直接匹配时 crop 与当前帧一致；南大原流程会抬头后再恢复，最终帧与
-    # building crop 不再是同一视角，因此只在无移动模式绘制 crop，避免误标。
-    if (
-        not result.movement_enabled
-        and result.crop_xyxy is not None
-        and len(result.crop_xyxy) == 4
-    ):
-        x1, y1, x2, y2 = (int(value) for value in result.crop_xyxy)
-        x1 = max(0, min(width - 1, x1))
-        y1 = max(0, min(height - 1, y1))
-        x2 = max(x1 + 1, min(width, x2))
-        y2 = max(y1 + 1, min(height, y2))
-        cv2.rectangle(image, (x1, y1), (x2 - 1, y2 - 1), (0, 255, 0), 3)
-    label = f"MATCHED: {result.room_id}"
-    cv2.rectangle(image, (0, 0), (min(width, 520), min(height, 46)), (0, 0, 0), -1)
-    cv2.putText(
-        image,
-        label,
-        (12, min(height - 8, 32)),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.8,
-        (0, 255, 0),
-        2,
-        cv2.LINE_AA,
-    )
+) -> Path:
+    decision = result.decision if isinstance(result.decision, Mapping) else {}
+    template_path_text = str(decision.get("template_path") or "").strip()
+    if not template_path_text and isinstance(result.top_candidates, (list, tuple)):
+        for candidate in result.top_candidates:
+            if not isinstance(candidate, Mapping):
+                continue
+            if str(candidate.get("room_id") or "") != str(result.room_id or ""):
+                continue
+            template_path_text = str(candidate.get("template_path") or "").strip()
+            if template_path_text:
+                break
+    if not template_path_text:
+        raise RuntimeError(f"匹配到 {result.room_id}，但结果中没有模板视角路径")
+
+    template_path = Path(template_path_text).expanduser().resolve()
+    template_dir = template_path.parent
+    room_dir = template_dir.parent.parent
+    capture_dir = room_dir / "captures"
+    source_path: Optional[Path] = None
+    for suffix in (".jpeg", ".jpg", ".png"):
+        candidate = capture_dir / f"{template_dir.name}{suffix}"
+        if candidate.is_file():
+            source_path = candidate
+            break
+    if source_path is None and template_path.is_file():
+        source_path = template_path
+    if source_path is None:
+        raise FileNotFoundError(
+            f"匹配到 {result.room_id}，但找不到对应视角图片: "
+            f"capture={capture_dir / template_dir.name}, template={template_path}"
+        )
+
+    try:
+        encoded = np.fromfile(str(source_path), dtype=np.uint8)
+        image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    except (OSError, ValueError, cv2.error):
+        image = None
+    if image is None:
+        raise RuntimeError(f"无法读取匹配视角图片: {source_path}")
     if not write_image_unicode(path, image):
         raise RuntimeError(f"无法保存匹配结果图片: {path}")
+    return source_path
 
 
 def _summary_payload(result: NandaCurrentViewMatchResult) -> dict[str, Any]:
@@ -211,6 +223,7 @@ def _match_payload(
     original_image_path: Path,
     summary_path: Path,
     match_image_path: Optional[Path],
+    match_image_source_path: Optional[Path],
     frame: np.ndarray,
     elapsed_seconds: float,
 ) -> dict[str, Any]:
@@ -253,6 +266,11 @@ def _match_payload(
         "match_image_path": (
             str(match_image_path) if match_image_path is not None else None
         ),
+        "match_image_source_path": (
+            str(match_image_source_path)
+            if match_image_source_path is not None
+            else None
+        ),
         "result_path": str(details_path),
     }
 
@@ -268,6 +286,7 @@ def on_stage(worker: "FrameWorker") -> None:
     original_image_path = result_dir / ORIGINAL_IMAGE_FILENAME
     started_at = time.monotonic()
     match_image_path: Optional[Path] = None
+    match_image_source_path: Optional[Path] = None
     try:
         if worker.current_stage != "搜房阶段":
             worker.change_stage("搜房阶段")
@@ -287,12 +306,8 @@ def on_stage(worker: "FrameWorker") -> None:
         result = matcher.match_original_nanda_flow(_build_context(worker, frame))
         if result.matched:
             match_image_path = result_dir / MATCH_IMAGE_FILENAME
-            result_frame = getattr(worker, "frame", None)
-            if result_frame is None:
-                result_frame = frame
-            _save_match_image(
+            match_image_source_path = _save_match_image(
                 match_image_path,
-                np.ascontiguousarray(result_frame).copy(),
                 result,
             )
         payload = _match_payload(
@@ -302,6 +317,7 @@ def on_stage(worker: "FrameWorker") -> None:
             original_image_path=original_image_path,
             summary_path=summary_path,
             match_image_path=match_image_path,
+            match_image_source_path=match_image_source_path,
             frame=frame,
             elapsed_seconds=time.monotonic() - started_at,
         )
@@ -330,6 +346,7 @@ def on_stage(worker: "FrameWorker") -> None:
             ),
             "summary_path": str(summary_path),
             "match_image_path": None,
+            "match_image_source_path": None,
             "result_path": str(details_path),
         }
         _write_payload(details_path, payload)

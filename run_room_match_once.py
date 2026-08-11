@@ -9,6 +9,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import subprocess
 import sys
 import threading
 import time
@@ -19,6 +20,10 @@ DEFAULT_OUTPUT_DIR = (
     REPO_ROOT / "aw" / "autogame" / "temp" / "results" / "room_match_once"
 )
 DETAILS_FILENAME = "匹配详情.json"
+SCREEN_RECORDER_BUNDLE = "com.huawei.hmos.screenrecorder"
+SCREEN_RECORDER_ABILITY = (
+    "com.huawei.hmos.screenrecorder.ServiceExtAbility"
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -120,6 +125,55 @@ def _read_result(path: Path) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def _run_screen_recorder_command(command: str, action: str) -> None:
+    from aw.autogame.tools.ProcessUtils import (
+        hdc_command_args,
+        hidden_subprocess_kwargs,
+    )
+
+    command_args = hdc_command_args(command)
+    if not command_args:
+        raise RuntimeError(f"无法生成{action}录屏的 HDC 命令")
+
+    try:
+        completed = subprocess.run(
+            command_args,
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+            check=False,
+            **hidden_subprocess_kwargs(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"{action}录屏命令执行失败: {exc}") from exc
+
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        raise RuntimeError(
+            f"{action}录屏命令返回码 {completed.returncode}{suffix}"
+        )
+
+
+def _start_screen_recording(run_dir: Path) -> str:
+    recording_filename = f"{run_dir.name}.mp4"
+    command = (
+        f"hdc shell aa start -b {SCREEN_RECORDER_BUNDLE} "
+        f"-a {SCREEN_RECORDER_ABILITY} "
+        f'--ps "CustomizedFileName" "{recording_filename}"'
+    )
+    _run_screen_recorder_command(command, "开启")
+    return recording_filename
+
+
+def _stop_screen_recording() -> None:
+    command = (
+        f"hdc shell aa start -b {SCREEN_RECORDER_BUNDLE} "
+        f"-a {SCREEN_RECORDER_ABILITY}"
+    )
+    _run_screen_recorder_command(command, "关闭")
+
+
 def main(argv=None) -> int:
     args = _parser().parse_args(argv)
     if args.timeout <= 0:
@@ -159,25 +213,48 @@ def main(argv=None) -> int:
             break
         client.stop()
 
-    worker.start()
-    monitor_thread = threading.Thread(
-        target=monitor,
-        name="RoomMatchOnceMonitor",
-        daemon=True,
-    )
-    monitor_thread.start()
+    monitor_thread = None
+    recording_attempted = False
+    execution_error = None
+    interrupted = False
     try:
+        recording_attempted = True
+        recording_filename = _start_screen_recording(output.parent)
+        print(f"录屏已开启: {recording_filename}")
+
+        worker.start()
+        monitor_thread = threading.Thread(
+            target=monitor,
+            name="RoomMatchOnceMonitor",
+            daemon=True,
+        )
+        monitor_thread.start()
         client.run()
     except KeyboardInterrupt:
         print("收到中断，停止单次房型匹配。")
-        worker.stop()
-        client.stop()
-        return 130
+        interrupted = True
+    except Exception as exc:
+        execution_error = exc
     finally:
         stop_requested.set()
         client.stop()
         worker.stop()
-        monitor_thread.join(timeout=2.0)
+        if monitor_thread is not None:
+            monitor_thread.join(timeout=2.0)
+        if recording_attempted:
+            try:
+                _stop_screen_recording()
+                print("录屏已关闭。")
+            except Exception as exc:
+                print(f"关闭录屏失败: {exc}")
+                if execution_error is None and not interrupted:
+                    execution_error = exc
+
+    if interrupted:
+        return 130
+    if execution_error is not None:
+        print(f"单次房型匹配执行失败: {execution_error}")
+        return 1
 
     payload = _read_result(output)
     status = payload.get("status")

@@ -230,7 +230,6 @@ class GameImageProcessor:
                     scope = config.get('scope')
                     scope_config = config.get('scope_config')
                     tpl_relative_path = config.get('template_path')
-                    match_mode = config.get('match_mode', 'gray')
 
                     if scope_config or scope:
                         px_min_x, px_min_y, px_max_x, px_max_y = resolve_area_rect_for_frame(
@@ -285,7 +284,6 @@ class GameImageProcessor:
                     match_res = find_template_center_multiscale(
                         search_img,
                         tpl_img_resized,
-                        match_mode=match_mode,
                     )
 
                     if match_res:
@@ -479,7 +477,6 @@ class StageLogicController:
                     'scope': scope,
                     'scope_config': scope_config,
                     'template_path': area_data.get('template'),
-                    'match_mode': area_data.get('match_mode', 'gray'),
                     'origin_width': origin_w,
                     'origin_height': origin_h
                 }

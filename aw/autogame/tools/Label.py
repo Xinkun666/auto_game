@@ -22,7 +22,6 @@ from PyQt6.QtCore import Qt, QRectF, QPointF, QEvent
 from PyQt6.QtGui import QAction, QPixmap, QColor, QPen, QBrush, QImage, QPainter, QGuiApplication, QFontMetricsF
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
-from aw.autogame.tools.Utils import TEMPLATE_MATCH_MODES
 # ==========================================
 # 1. 数据模型 (Data Structure)
 # ==========================================
@@ -103,7 +102,6 @@ class ItemData:
     rect: RectData  # 核心坐标
     search_scope: Optional[RectData] = None  # 搜索范围 (仅Area有效)
     visible: bool = True
-    match_mode: str = "gray"
 @dataclass
 class SceneData:
     id: str
@@ -934,7 +932,6 @@ class AutoStudioWindow(QMainWindow):
                         "rect": AutoStudioWindow._rect_to_state(item.rect),
                         "search_scope": AutoStudioWindow._rect_to_state(item.search_scope),
                         "visible": item.visible,
-                        "match_mode": item.match_mode or "gray",
                     }
                     for item in scene.items
                 ],
@@ -1002,7 +999,6 @@ class AutoStudioWindow(QMainWindow):
                     rect=rect,
                     search_scope=AutoStudioWindow._rect_from_state(raw_item.get("search_scope")),
                     visible=bool(raw_item.get("visible", True)),
-                    match_mode=str(raw_item.get("match_mode") or "gray"),
                 ))
             scenes_by_id[scene.id] = scene
 
@@ -1429,7 +1425,6 @@ class AutoStudioWindow(QMainWindow):
                     item.item_type,
                     AutoStudioWindow._rect_signature(item.rect),
                     AutoStudioWindow._rect_signature(item.search_scope),
-                    item.match_mode or "gray",
                 )
             )
         return (
@@ -3664,11 +3659,6 @@ class AutoStudioWindow(QMainWindow):
             lbl = QLabel(f"当前选中: {data.name}")
             self.action_layout.addWidget(lbl)
             if data.item_type == 'area':
-                lbl_mode = QLabel(f"匹配模式: {data.match_mode or 'gray'}")
-                self.action_layout.addWidget(lbl_mode)
-                btn_match_mode = QPushButton("🎨 设置匹配模式")
-                btn_match_mode.clicked.connect(lambda: self.set_area_match_mode(data))
-                self.action_layout.addWidget(btn_match_mode)
                 btn_scope = QPushButton("🔍 设置搜索范围 (Search Scope)")
                 btn_scope.clicked.connect(lambda: self.prepare_draw('search_scope', data))
                 self.action_layout.addWidget(btn_scope)
@@ -3861,9 +3851,6 @@ class AutoStudioWindow(QMainWindow):
             return
         menu = QMenu(self)
         if item_data.item_type == 'area':
-            action_match_mode = QAction("🎨 设置匹配模式", self)
-            action_match_mode.triggered.connect(lambda: self.set_area_match_mode(item_data))
-            menu.addAction(action_match_mode)
             action_scope = QAction("🔍 设置搜索范围", self)
             action_scope.triggered.connect(lambda: self.prepare_draw('search_scope', item_data))
             menu.addAction(action_scope)
@@ -4165,7 +4152,6 @@ class AutoStudioWindow(QMainWindow):
             rect=self._clone_rect(item.rect),
             search_scope=self._clone_rect(item.search_scope),
             visible=item.visible,
-            match_mode=item.match_mode or "gray",
         )
 
     def _clone_item_for_scene_size(self, item: ItemData, source_size: Tuple[int, int], target_size: Tuple[int, int]) -> ItemData:
@@ -4178,7 +4164,6 @@ class AutoStudioWindow(QMainWindow):
             rect=self._scale_rect_between_images(item.rect, old_w, old_h, new_w, new_h),
             search_scope=self._scale_rect_between_images(item.search_scope, old_w, old_h, new_w, new_h),
             visible=item.visible,
-            match_mode=item.match_mode or "gray",
         )
 
     def sync_added_item_to_scene_peers(self, source_scene: SceneData, item_data: ItemData):
@@ -4210,7 +4195,6 @@ class AutoStudioWindow(QMainWindow):
             target = self._find_scene_item(peer, item_data.item_type, old_name)
             if target:
                 target.name = item_data.name
-                target.match_mode = item_data.match_mode or target.match_mode
         stages = self.project.stages if self.project else [self._find_stage_for_scene(source_scene)]
         for stage in stages:
             self._rename_group_item_refs(
@@ -4704,32 +4688,6 @@ class AutoStudioWindow(QMainWindow):
                 if item.item_type == item_type:
                     names.append(item.name)
         return names
-    def set_area_match_mode(self, item_data: ItemData):
-        if item_data.item_type != "area":
-            return
-        options = list(TEMPLATE_MATCH_MODES)
-        current_mode = item_data.match_mode if item_data.match_mode in options else "gray"
-        current_index = options.index(current_mode)
-        mode, ok = QInputDialog.getItem(
-            self,
-            "设置匹配模式",
-            "请选择区域匹配模式:",
-            options,
-            current_index,
-            False,
-        )
-        if not ok or not mode:
-            return
-        item_data.match_mode = mode
-        if self.current_scene:
-            for peer in self._find_scene_peers(self.current_scene):
-                target = self._find_scene_item(peer, item_data.item_type, item_data.name)
-                if target:
-                    target.match_mode = mode
-        self.status_label.setText(f"已将区域 {item_data.name} 的匹配模式设置为 {mode}")
-        self.update_tree_view()
-        if self.current_scene:
-            self.canvas.redraw_overlays(self.current_scene)
     def set_special_area_range(self, item_data: ItemData):
         if not self.canvas.current_pixmap:
             QMessageBox.warning(self, "错误", "请先抓图再进行设置。")
@@ -5401,7 +5359,6 @@ class AutoStudioWindow(QMainWindow):
                         scene_entry["areas"][item.name] = {
                             "rect": rect_norm,
                             "search_scope": scope_norm,
-                            "match_mode": item.match_mode or "gray",
                             "template": template_rel,
                         }
                     elif item.item_type == "control":
@@ -5709,7 +5666,6 @@ class AutoStudioWindow(QMainWindow):
                 item_type="area",
                 rect=rect,
                 search_scope=scope,
-                match_mode=area_data.get("match_mode", "gray"),
             )
             scene.items.append(item)
         for name, point_data in scene_data.get("points", {}).items():

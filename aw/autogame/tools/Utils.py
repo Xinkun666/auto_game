@@ -1127,6 +1127,25 @@ def extract_absolute_points(stage_info):
                     "screen_width": int(target_w),
                     "screen_height": int(target_h),
                 }
+                positioning = str(point_content.get("positioning") or "absolute")
+                relative_to = str(point_content.get("relative_to") or "").strip()
+                relative_offset = point_content.get("relative_offset")
+                if (
+                    positioning == "relative"
+                    and relative_to
+                    and isinstance(relative_offset, (list, tuple))
+                    and len(relative_offset) == 2
+                ):
+                    absolute_points[key].update({
+                        "positioning": "relative",
+                        "relative_to": relative_to,
+                        "relative_offset": (
+                            float(relative_offset[0]),
+                            float(relative_offset[1]),
+                        ),
+                    })
+                else:
+                    absolute_points[key]["positioning"] = "absolute"
                 if "anchor" in point_content:
                     absolute_points[key]["anchor"] = point_content.get("anchor")
                     absolute_points[key]["offset"] = dict(point_content.get("offset", {}))

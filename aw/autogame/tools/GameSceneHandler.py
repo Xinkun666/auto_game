@@ -459,8 +459,21 @@ class StageLogicController:
 
             # 普通 Areas (模板匹配)
             areas = scene_info.get('areas', {})
+            required_control_anchors = {
+                str(point_data.get('relative_to') or '').strip()
+                for point_data in scene_info.get('points', {}).values()
+                if (
+                    isinstance(point_data, dict)
+                    and point_data.get('positioning') == 'relative'
+                    and point_data.get('relative_to')
+                )
+            }
             for area_name, area_data in areas.items():
-                if group_filter is not None and (scene_name, 'area', area_name) not in group_filter:
+                if (
+                    group_filter is not None
+                    and (scene_name, 'area', area_name) not in group_filter
+                    and area_name not in required_control_anchors
+                ):
                     continue
                 task_key = f"{scene_name}__{area_name}"
                 scope = area_data.get('search_scope', area_data.get('rect'))

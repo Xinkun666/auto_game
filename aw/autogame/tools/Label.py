@@ -102,6 +102,8 @@ class ItemData:
     rect: RectData  # 核心坐标
     search_scope: Optional[RectData] = None  # 搜索范围 (仅Area有效)
     visible: bool = True
+    positioning: str = "absolute"
+    relative_to: str = ""
 @dataclass
 class SceneData:
     id: str
@@ -932,6 +934,14 @@ class AutoStudioWindow(QMainWindow):
                         "rect": AutoStudioWindow._rect_to_state(item.rect),
                         "search_scope": AutoStudioWindow._rect_to_state(item.search_scope),
                         "visible": item.visible,
+                        **(
+                            {
+                                "positioning": item.positioning,
+                                "relative_to": item.relative_to,
+                            }
+                            if item.item_type == "control"
+                            else {}
+                        ),
                     }
                     for item in scene.items
                 ],
@@ -992,6 +1002,11 @@ class AutoStudioWindow(QMainWindow):
                 if not isinstance(raw_item, dict):
                     continue
                 rect = AutoStudioWindow._rect_from_state(raw_item.get("rect")) or RectData(0, 0, 0, 0)
+                positioning = str(raw_item.get("positioning") or "absolute")
+                relative_to = str(raw_item.get("relative_to") or "").strip()
+                if positioning != "relative" or not relative_to:
+                    positioning = "absolute"
+                    relative_to = ""
                 scene.items.append(ItemData(
                     id=str(raw_item.get("id") or random.randint(10000, 99999)),
                     name=str(raw_item.get("name") or ""),
@@ -999,6 +1014,8 @@ class AutoStudioWindow(QMainWindow):
                     rect=rect,
                     search_scope=AutoStudioWindow._rect_from_state(raw_item.get("search_scope")),
                     visible=bool(raw_item.get("visible", True)),
+                    positioning=positioning,
+                    relative_to=relative_to,
                 ))
             scenes_by_id[scene.id] = scene
 
@@ -1425,6 +1442,8 @@ class AutoStudioWindow(QMainWindow):
                     item.item_type,
                     AutoStudioWindow._rect_signature(item.rect),
                     AutoStudioWindow._rect_signature(item.search_scope),
+                    item.positioning if item.item_type == "control" else "",
+                    item.relative_to if item.item_type == "control" else "",
                 )
             )
         return (
@@ -3682,6 +3701,14 @@ class AutoStudioWindow(QMainWindow):
                 btn_rename.clicked.connect(lambda: self.rename_item(data))
                 self.action_layout.addWidget(btn_rename)
             else:
+                positioning_text = "绝对定位"
+                if data.positioning == "relative" and data.relative_to:
+                    positioning_text = f"相对定位（区域：{data.relative_to}）"
+                lbl_positioning = QLabel(f"定位方式: {positioning_text}")
+                self.action_layout.addWidget(lbl_positioning)
+                btn_positioning = QPushButton("📍 设置定位方式")
+                btn_positioning.clicked.connect(lambda: self.set_control_positioning(data))
+                self.action_layout.addWidget(btn_positioning)
                 btn_edit_ctrl = QPushButton("✏️ 修改控点位置")
                 btn_edit_ctrl.clicked.connect(lambda: self.prepare_draw('edit_control', data))
                 self.action_layout.addWidget(btn_edit_ctrl)
@@ -3874,6 +3901,9 @@ class AutoStudioWindow(QMainWindow):
             action_rename.triggered.connect(lambda: self.rename_item(item_data))
             menu.addAction(action_rename)
         elif item_data.item_type == 'control':
+            action_positioning = QAction("📍 设置定位方式", self)
+            action_positioning.triggered.connect(lambda: self.set_control_positioning(item_data))
+            menu.addAction(action_positioning)
             action_edit = QAction("✏️ 修改控点位置", self)
             action_edit.triggered.connect(lambda: self.prepare_draw('edit_control', item_data))
             menu.addAction(action_edit)
@@ -4152,6 +4182,8 @@ class AutoStudioWindow(QMainWindow):
             rect=self._clone_rect(item.rect),
             search_scope=self._clone_rect(item.search_scope),
             visible=item.visible,
+            positioning=item.positioning,
+            relative_to=item.relative_to,
         )
 
     def _clone_item_for_scene_size(self, item: ItemData, source_size: Tuple[int, int], target_size: Tuple[int, int]) -> ItemData:
@@ -4164,6 +4196,8 @@ class AutoStudioWindow(QMainWindow):
             rect=self._scale_rect_between_images(item.rect, old_w, old_h, new_w, new_h),
             search_scope=self._scale_rect_between_images(item.search_scope, old_w, old_h, new_w, new_h),
             visible=item.visible,
+            positioning=item.positioning,
+            relative_to=item.relative_to,
         )
 
     def sync_added_item_to_scene_peers(self, source_scene: SceneData, item_data: ItemData):
@@ -4175,6 +4209,12 @@ class AutoStudioWindow(QMainWindow):
             peer.items.append(self._clone_item_for_scene_size(item_data, source_size, peer_size))
 
     def sync_deleted_item_to_scene_peers(self, source_scene: SceneData, item_data: ItemData):
+        if item_data.item_type == "area":
+            for scene in [source_scene, *self._find_scene_peers(source_scene)]:
+                for control in scene.items:
+                    if control.item_type == "control" and control.relative_to == item_data.name:
+                        control.positioning = "absolute"
+                        control.relative_to = ""
         for peer in self._find_scene_peers(source_scene):
             target = self._find_scene_item(peer, item_data.item_type, item_data.name)
             if target:
@@ -4191,6 +4231,11 @@ class AutoStudioWindow(QMainWindow):
             )
 
     def sync_renamed_item_to_scene_peers(self, source_scene: SceneData, item_data: ItemData, old_name: str):
+        if item_data.item_type == "area":
+            for scene in [source_scene, *self._find_scene_peers(source_scene)]:
+                for control in scene.items:
+                    if control.item_type == "control" and control.relative_to == old_name:
+                        control.relative_to = item_data.name
         for peer in self._find_scene_peers(source_scene):
             target = self._find_scene_item(peer, item_data.item_type, old_name)
             if target:
@@ -4688,6 +4733,67 @@ class AutoStudioWindow(QMainWindow):
                 if item.item_type == item_type:
                     names.append(item.name)
         return names
+    def set_control_positioning(self, item_data: ItemData):
+        if item_data.item_type != "control" or not self.current_scene:
+            return
+
+        options = ["绝对定位", "相对定位"]
+        current_index = 1 if item_data.positioning == "relative" and item_data.relative_to else 0
+        selected_mode, ok = QInputDialog.getItem(
+            self,
+            "设置定位方式",
+            "请选择控点定位方式:",
+            options,
+            current_index,
+            False,
+        )
+        if not ok or not selected_mode:
+            return
+
+        positioning = "absolute"
+        relative_to = ""
+        if selected_mode == "相对定位":
+            area_names = sorted(
+                item.name
+                for item in self.current_scene.items
+                if item.item_type == "area"
+            )
+            if not area_names:
+                QMessageBox.warning(self, "无可用区域", "当前场景没有可作为锚点的普通区域。")
+                return
+            area_index = area_names.index(item_data.relative_to) if item_data.relative_to in area_names else 0
+            relative_to, ok = QInputDialog.getItem(
+                self,
+                "选择相对区域",
+                "请选择控点要相对定位的区域:",
+                area_names,
+                area_index,
+                False,
+            )
+            if not ok or not relative_to:
+                return
+            positioning = "relative"
+
+        targets = [item_data]
+        for peer in self._find_scene_peers(self.current_scene):
+            peer_control = self._find_scene_item(peer, "control", item_data.name)
+            if peer_control:
+                targets.append(peer_control)
+        for target in targets:
+            target.positioning = positioning
+            target.relative_to = relative_to
+
+        if positioning == "relative":
+            self.status_label.setText(f"已将控点 {item_data.name} 设为相对区域 {relative_to} 定位。")
+        else:
+            self.status_label.setText(f"已将控点 {item_data.name} 设为绝对定位。")
+        self.update_tree_view()
+        self.select_data_in_tree(
+            item_data,
+            preferred_tree=getattr(self, "_active_tree_widget", None),
+        )
+        self.canvas.redraw_overlays(self.current_scene)
+
     def set_special_area_range(self, item_data: ItemData):
         if not self.canvas.current_pixmap:
             QMessageBox.warning(self, "错误", "请先抓图再进行设置。")
@@ -5362,7 +5468,37 @@ class AutoStudioWindow(QMainWindow):
                             "template": template_rel,
                         }
                     elif item.item_type == "control":
-                        scene_entry["points"][item.name] = {"rect": rect_norm}
+                        point_entry = {
+                            "rect": rect_norm,
+                            "positioning": "absolute",
+                        }
+                        if item.positioning == "relative" and item.relative_to:
+                            anchor_item = next(
+                                (
+                                    candidate
+                                    for candidate in scene.items
+                                    if candidate.item_type == "area" and candidate.name == item.relative_to
+                                ),
+                                None,
+                            )
+                            if anchor_item is None:
+                                raise ValueError(
+                                    f"控点 {item.name} 引用的相对区域 {item.relative_to} 不存在"
+                                )
+                            anchor_rect_norm = normalize_rect(anchor_item.rect, scene_width, scene_height)
+                            control_center_x = (rect_norm[0] + rect_norm[2]) / 2.0
+                            control_center_y = (rect_norm[1] + rect_norm[3]) / 2.0
+                            anchor_center_x = (anchor_rect_norm[0] + anchor_rect_norm[2]) / 2.0
+                            anchor_center_y = (anchor_rect_norm[1] + anchor_rect_norm[3]) / 2.0
+                            point_entry.update({
+                                "positioning": "relative",
+                                "relative_to": item.relative_to,
+                                "relative_offset": [
+                                    control_center_x - anchor_center_x,
+                                    control_center_y - anchor_center_y,
+                                ],
+                            })
+                        scene_entry["points"][item.name] = point_entry
                     elif item.item_type == "special_area":
                         special_area_names.add(item.name)
                         template_name = next_template_name(item)
@@ -5678,7 +5814,17 @@ class AutoStudioWindow(QMainWindow):
                 id=str(random.randint(10000, 99999)),
                 name=name,
                 item_type="control",
-                rect=rect
+                rect=rect,
+                positioning=(
+                    "relative"
+                    if point_data.get("positioning") == "relative" and point_data.get("relative_to")
+                    else "absolute"
+                ),
+                relative_to=(
+                    str(point_data.get("relative_to") or "").strip()
+                    if point_data.get("positioning") == "relative"
+                    else ""
+                ),
             )
             scene.items.append(item)
         for name, sp_data in scene_data.get("special_areas", {}).items():

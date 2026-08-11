@@ -1728,6 +1728,29 @@ class Controller:
             return None, None, None
         return None, None
 
+    def _get_relative_anchor_center(self, area_name):
+        area_name = str(area_name or "").strip()
+        if not area_name:
+            return None
+        stage_info = getattr(self.worker, "stage_info", {})
+        if not isinstance(stage_info, dict):
+            return None
+        suffix = f"__{area_name}"
+        for key, value in stage_info.items():
+            if not str(key).endswith(suffix):
+                continue
+            value = _unwrap_timed_special_info(value)
+            if not isinstance(value, (list, tuple)) or len(value) != 2:
+                continue
+            try:
+                norm_x = float(value[0])
+                norm_y = float(value[1])
+            except (TypeError, ValueError):
+                continue
+            if 0.0 <= norm_x <= 1.0 and 0.0 <= norm_y <= 1.0:
+                return norm_x, norm_y
+        return None
+
     def _transform_button_pos(self, button_data, x_bias=0, y_bias=0, return_trace: bool = False):
         trace = {
             "trace_type": "static_button",
@@ -1779,12 +1802,35 @@ class Controller:
         dst_width, dst_height = int(current_res[0]), int(current_res[1])
         trace["scene_size"] = (src_width, src_height)
         trace["screen_size"] = (dst_width, dst_height)
-        if src_width <= 0 or src_height <= 0:
+
+        if button_data.get("positioning") == "relative":
+            relative_to = str(button_data.get("relative_to") or "").strip()
+            relative_offset = button_data.get("relative_offset")
+            anchor_center = self._get_relative_anchor_center(relative_to)
+            trace["trace_type"] = "relative_button"
+            trace["relative_to"] = relative_to
+            trace["relative_offset"] = relative_offset
+            trace["anchor_center"] = anchor_center
+            if (
+                anchor_center is None
+                or not isinstance(relative_offset, (list, tuple))
+                or len(relative_offset) != 2
+            ):
+                trace["error"] = f"relative anchor not found: {relative_to}"
+                if not return_trace:
+                    print(f"[控点定位] 未识别到相对区域 {relative_to}，取消本次操作。")
+                return (None, trace) if return_trace else None
+            mapped_x = (anchor_center[0] + float(relative_offset[0])) * float(dst_width)
+            mapped_y = (anchor_center[1] + float(relative_offset[1])) * float(dst_height)
+            scaled_x = min(max(int(round(mapped_x)), 0), max(dst_width - 1, 0))
+            scaled_y = min(max(int(round(mapped_y)), 0), max(dst_height - 1, 0))
+            trace["mapped_from_relative_anchor"] = (mapped_x, mapped_y)
+            trace["mapped_rect_to_screen"] = None
+        elif src_width <= 0 or src_height <= 0:
             result = (x + x_bias, y + y_bias)
             trace["display_output"] = result
             return (result, trace) if return_trace else result
-
-        if "anchor" in button_data or (rect and len(rect) == 4):
+        elif "anchor" in button_data or (rect and len(rect) == 4):
             area_config = button_data if "anchor" in button_data else {"rect": rect}
             mapped_rect = resolve_area_rect_for_frame(
                 dst_width,

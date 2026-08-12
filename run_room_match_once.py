@@ -21,6 +21,7 @@ DEFAULT_OUTPUT_DIR = (
     REPO_ROOT / "aw" / "autogame" / "temp" / "results" / "room_match_once"
 )
 DETAILS_FILENAME = "匹配详情.json"
+SUMMARY_FILENAME = "匹配概要.txt"
 SCREEN_RECORDER_BUNDLE = "com.huawei.hmos.screenrecorder"
 SCREEN_RECORDER_ABILITY = (
     "com.huawei.hmos.screenrecorder.ServiceExtAbility"
@@ -124,6 +125,54 @@ def _read_result(path: Path) -> dict:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _as_duration_seconds(value) -> float | None:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
+
+
+def _append_timing_summary(
+    summary_path: Path,
+    *,
+    started_at: datetime,
+    finished_at: datetime,
+    timings: dict[str, float],
+    payload: dict,
+) -> None:
+    try:
+        existing = summary_path.read_text(encoding="utf-8").rstrip()
+    except OSError:
+        existing = "匹配成功：未知"
+
+    matching_stage_seconds = _as_duration_seconds(payload.get("elapsed_seconds"))
+    matcher_elapsed_ms = _as_duration_seconds(payload.get("matcher_elapsed_ms"))
+    if matching_stage_seconds is not None:
+        timings["房型匹配阶段合计"] = matching_stage_seconds
+    if matcher_elapsed_ms is not None:
+        dino_mlp_seconds = matcher_elapsed_ms / 1000.0
+        timings["DINOv3/MLP 房型配准"] = dino_mlp_seconds
+        if matching_stage_seconds is not None:
+            timings["取景、分割、门窗定位等（含首次模型/房屋库初始化及结果落盘）"] = max(
+                0.0,
+                matching_stage_seconds - dino_mlp_seconds,
+            )
+
+    lines = [
+        existing,
+        "",
+        "运行耗时统计（run_room_match_once）：",
+        f"开始时间：{started_at.astimezone().isoformat(timespec='seconds')}",
+        f"结束时间：{finished_at.astimezone().isoformat(timespec='seconds')}",
+    ]
+    for label, seconds in timings.items():
+        lines.append(f"{label}：{seconds:.3f} 秒")
+    temporary = summary_path.with_suffix(summary_path.suffix + ".tmp")
+    temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    temporary.replace(summary_path)
 
 
 def _run_hdc_command(command: str, action: str, timeout: float = 30.0) -> str:
@@ -277,10 +326,15 @@ def _download_screen_recording(filename: str, run_dir: Path) -> Path:
 
 
 def main(argv=None) -> int:
+    run_started_at = time.monotonic()
+    wall_started_at = datetime.now().astimezone()
+    timings: dict[str, float] = {}
+    phase_started_at = time.monotonic()
     args = _parser().parse_args(argv)
     if args.timeout <= 0:
         raise SystemExit("--timeout 必须大于 0")
     output = _configure_environment(args)
+    timings["启动参数与结果目录准备"] = time.monotonic() - phase_started_at
 
     from aw.autogame.stream_client.stream_client import (
         HOSScrcpyStreamClient,
@@ -316,22 +370,41 @@ def main(argv=None) -> int:
         client.stop()
 
     monitor_thread = None
+    stream_timing_thread = None
     recording_attempted = False
     recording_filename = ""
+    stream_started_at = None
     execution_error = None
     interrupted = False
     try:
         recording_attempted = True
+        phase_started_at = time.monotonic()
         recording_filename = _start_screen_recording(output.parent)
+        timings["录屏开启"] = time.monotonic() - phase_started_at
         print(f"录屏已开启: {recording_filename}")
 
+        phase_started_at = time.monotonic()
         worker.start()
+        timings["匹配工作线程启动"] = time.monotonic() - phase_started_at
         monitor_thread = threading.Thread(
             target=monitor,
             name="RoomMatchOnceMonitor",
             daemon=True,
         )
         monitor_thread.start()
+        stream_started_at = time.monotonic()
+
+        def record_first_stream_frame() -> None:
+            event = getattr(client, "_capture_first_frame_event", None)
+            if event is not None and event.wait(timeout=float(args.timeout)):
+                timings["拉流至首帧"] = time.monotonic() - stream_started_at
+
+        stream_timing_thread = threading.Thread(
+            target=record_first_stream_frame,
+            name="RoomMatchOnceStreamTiming",
+            daemon=True,
+        )
+        stream_timing_thread.start()
         client.run()
     except KeyboardInterrupt:
         print("收到中断，停止单次房型匹配。")
@@ -339,15 +412,21 @@ def main(argv=None) -> int:
     except Exception as exc:
         execution_error = exc
     finally:
+        phase_started_at = time.monotonic()
         stop_requested.set()
         client.stop()
         worker.stop()
         if monitor_thread is not None:
             monitor_thread.join(timeout=2.0)
+        if stream_timing_thread is not None:
+            stream_timing_thread.join(timeout=2.0)
+        timings["拉流关闭与工作线程收尾"] = time.monotonic() - phase_started_at
         if recording_attempted:
             recording_stopped = False
             try:
+                phase_started_at = time.monotonic()
                 _stop_screen_recording()
+                timings["录屏关闭"] = time.monotonic() - phase_started_at
                 print("录屏已关闭。")
                 recording_stopped = True
             except Exception as exc:
@@ -356,9 +435,13 @@ def main(argv=None) -> int:
                     execution_error = exc
             if recording_stopped and recording_filename:
                 try:
+                    phase_started_at = time.monotonic()
                     local_recording = _download_screen_recording(
                         recording_filename,
                         output.parent,
+                    )
+                    timings["录屏查询、中转与下载"] = (
+                        time.monotonic() - phase_started_at
                     )
                     print(f"录屏已下载: {local_recording}")
                 except Exception as exc:
@@ -366,13 +449,22 @@ def main(argv=None) -> int:
                     if execution_error is None and not interrupted:
                         execution_error = exc
 
+    payload = _read_result(output)
+    timings["全流程总耗时"] = time.monotonic() - run_started_at
+    _append_timing_summary(
+        output.parent / SUMMARY_FILENAME,
+        started_at=wall_started_at,
+        finished_at=datetime.now().astimezone(),
+        timings=timings,
+        payload=payload,
+    )
+
     if interrupted:
         return 130
     if execution_error is not None:
         print(f"单次房型匹配执行失败: {execution_error}")
         return 1
 
-    payload = _read_result(output)
     status = payload.get("status")
     print(f"结果目录: {output.parent}")
     print(f"详细结果: {output}")

@@ -259,14 +259,21 @@ def _locate_recording_on_device(filename: str) -> str:
 def _download_screen_recording(filename: str, run_dir: Path) -> Path:
     remote_path = _locate_recording_on_device(filename)
     local_path = run_dir / filename
-    _run_hdc_command(
-        f'hdc file recv "{remote_path}" "{local_path}"',
-        "下载录屏到结果目录",
-        timeout=180.0,
-    )
-    if not local_path.is_file() or local_path.stat().st_size <= 0:
-        raise RuntimeError(f"录屏下载后文件不存在或为空: {local_path}")
-    return local_path
+    for attempt in range(1, 4):
+        print(
+            f"录屏中转完成，正在下载 {attempt}/3: "
+            f"{remote_path} -> {local_path}"
+        )
+        _run_hdc_command(
+            f'hdc file recv "{remote_path}" "{local_path}"',
+            "下载录屏到结果目录",
+            timeout=180.0,
+        )
+        if local_path.is_file() and local_path.stat().st_size > 0:
+            return local_path
+        if attempt < 3:
+            time.sleep(1.0)
+    raise RuntimeError(f"录屏下载后文件不存在或为空: {local_path}")
 
 
 def main(argv=None) -> int:

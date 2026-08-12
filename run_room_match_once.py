@@ -9,6 +9,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import threading
@@ -125,7 +126,7 @@ def _read_result(path: Path) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def _run_screen_recorder_command(command: str, action: str) -> None:
+def _run_hdc_command(command: str, action: str, timeout: float = 30.0) -> str:
     from aw.autogame.tools.ProcessUtils import (
         hdc_command_args,
         hidden_subprocess_kwargs,
@@ -133,26 +134,31 @@ def _run_screen_recorder_command(command: str, action: str) -> None:
 
     command_args = hdc_command_args(command)
     if not command_args:
-        raise RuntimeError(f"无法生成{action}录屏的 HDC 命令")
+        raise RuntimeError(f"无法生成{action}的 HDC 命令")
 
     try:
         completed = subprocess.run(
             command_args,
             capture_output=True,
             text=True,
-            timeout=30.0,
+            timeout=timeout,
             check=False,
             **hidden_subprocess_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(f"{action}录屏命令执行失败: {exc}") from exc
+        raise RuntimeError(f"{action}命令执行失败: {exc}") from exc
 
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "").strip()
         suffix = f": {detail}" if detail else ""
         raise RuntimeError(
-            f"{action}录屏命令返回码 {completed.returncode}{suffix}"
+            f"{action}命令返回码 {completed.returncode}{suffix}"
         )
+    return completed.stdout or ""
+
+
+def _run_screen_recorder_command(command: str, action: str) -> None:
+    _run_hdc_command(command, f"{action}录屏")
 
 
 def _start_screen_recording(run_dir: Path) -> str:
@@ -172,6 +178,74 @@ def _stop_screen_recording() -> None:
         f"-a {SCREEN_RECORDER_ABILITY}"
     )
     _run_screen_recorder_command(command, "关闭")
+
+
+def _extract_media_uri(output: str) -> str:
+    match = re.search(r"file://[^\s\"']+", str(output or ""))
+    return match.group(0) if match else ""
+
+
+def _extract_remote_media_path(output: str, filename: str) -> str:
+    for raw_line in str(output or "").splitlines():
+        line = raw_line.strip()
+        if not line or "file://" in line:
+            continue
+        path_start = line.find("/")
+        if path_start < 0:
+            continue
+        candidate = line[path_start:].strip().strip("\"'")
+        if candidate.endswith(f"/{filename}") or candidate == filename:
+            return candidate
+    return ""
+
+
+def _locate_recording_on_device(filename: str) -> str:
+    query_command = f'hdc shell mediatool query "{filename}" -u'
+    last_error = None
+    for attempt in range(10):
+        if attempt:
+            time.sleep(1.0)
+        try:
+            query_output = _run_hdc_command(
+                query_command,
+                "查询录屏文件",
+                timeout=15.0,
+            )
+        except RuntimeError as exc:
+            last_error = exc
+            continue
+
+        media_uri = _extract_media_uri(query_output)
+        if media_uri:
+            recv_output = _run_hdc_command(
+                f'hdc shell mediatool recv "{media_uri}" /data/local/tmp',
+                "复制录屏到手机临时目录",
+                timeout=60.0,
+            )
+            return (
+                _extract_remote_media_path(recv_output, filename)
+                or f"/data/local/tmp/{filename}"
+            )
+
+        remote_path = _extract_remote_media_path(query_output, filename)
+        if remote_path:
+            return remote_path
+
+    detail = f": {last_error}" if last_error else ""
+    raise RuntimeError(f"未能在手机媒体库中找到 {filename}{detail}")
+
+
+def _download_screen_recording(filename: str, run_dir: Path) -> Path:
+    remote_path = _locate_recording_on_device(filename)
+    local_path = run_dir / filename
+    _run_hdc_command(
+        f'hdc file recv "{remote_path}" "{local_path}"',
+        "下载录屏到结果目录",
+        timeout=180.0,
+    )
+    if not local_path.is_file() or local_path.stat().st_size <= 0:
+        raise RuntimeError(f"录屏下载后文件不存在或为空: {local_path}")
+    return local_path
 
 
 def main(argv=None) -> int:
@@ -215,6 +289,7 @@ def main(argv=None) -> int:
 
     monitor_thread = None
     recording_attempted = False
+    recording_filename = ""
     execution_error = None
     interrupted = False
     try:
@@ -242,13 +317,26 @@ def main(argv=None) -> int:
         if monitor_thread is not None:
             monitor_thread.join(timeout=2.0)
         if recording_attempted:
+            recording_stopped = False
             try:
                 _stop_screen_recording()
                 print("录屏已关闭。")
+                recording_stopped = True
             except Exception as exc:
                 print(f"关闭录屏失败: {exc}")
                 if execution_error is None and not interrupted:
                     execution_error = exc
+            if recording_stopped and recording_filename:
+                try:
+                    local_recording = _download_screen_recording(
+                        recording_filename,
+                        output.parent,
+                    )
+                    print(f"录屏已下载: {local_recording}")
+                except Exception as exc:
+                    print(f"下载录屏失败: {exc}")
+                    if execution_error is None and not interrupted:
+                        execution_error = exc
 
     if interrupted:
         return 130

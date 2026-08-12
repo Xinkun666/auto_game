@@ -138,8 +138,6 @@ def _as_duration_seconds(value) -> float | None:
 def _append_timing_summary(
     summary_path: Path,
     *,
-    started_at: datetime,
-    finished_at: datetime,
     timings: dict[str, float],
     payload: dict,
 ) -> None:
@@ -150,25 +148,23 @@ def _append_timing_summary(
 
     matching_stage_seconds = _as_duration_seconds(payload.get("elapsed_seconds"))
     matcher_elapsed_ms = _as_duration_seconds(payload.get("matcher_elapsed_ms"))
-    if matching_stage_seconds is not None:
-        timings["房型匹配阶段合计"] = matching_stage_seconds
+    summary_timings = {}
+    stream_seconds = _as_duration_seconds(timings.get("拉流至首帧"))
+    if stream_seconds is not None:
+        summary_timings["拉流至首帧"] = stream_seconds
     if matcher_elapsed_ms is not None:
-        dino_mlp_seconds = matcher_elapsed_ms / 1000.0
-        timings["DINOv3/MLP 房型配准"] = dino_mlp_seconds
-        if matching_stage_seconds is not None:
-            timings["取景、分割、门窗定位等（含首次模型/房屋库初始化及结果落盘）"] = max(
-                0.0,
-                matching_stage_seconds - dino_mlp_seconds,
-            )
-
+        summary_timings["DINOv3/MLP 房型匹配"] = matcher_elapsed_ms / 1000.0
+    if matching_stage_seconds is not None:
+        location_seconds = matching_stage_seconds - (
+            matcher_elapsed_ms / 1000.0 if matcher_elapsed_ms is not None else 0.0
+        )
+        summary_timings["取景、分割与门窗定位"] = max(0.0, location_seconds)
     lines = [
         existing,
         "",
         "运行耗时统计（run_room_match_once）：",
-        f"开始时间：{started_at.astimezone().isoformat(timespec='seconds')}",
-        f"结束时间：{finished_at.astimezone().isoformat(timespec='seconds')}",
     ]
-    for label, seconds in timings.items():
+    for label, seconds in summary_timings.items():
         lines.append(f"{label}：{seconds:.3f} 秒")
     temporary = summary_path.with_suffix(summary_path.suffix + ".tmp")
     temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -326,15 +322,12 @@ def _download_screen_recording(filename: str, run_dir: Path) -> Path:
 
 
 def main(argv=None) -> int:
-    run_started_at = time.monotonic()
-    wall_started_at = datetime.now().astimezone()
     timings: dict[str, float] = {}
     phase_started_at = time.monotonic()
     args = _parser().parse_args(argv)
     if args.timeout <= 0:
         raise SystemExit("--timeout 必须大于 0")
     output = _configure_environment(args)
-    timings["启动参数与结果目录准备"] = time.monotonic() - phase_started_at
 
     from aw.autogame.stream_client.stream_client import (
         HOSScrcpyStreamClient,
@@ -378,14 +371,10 @@ def main(argv=None) -> int:
     interrupted = False
     try:
         recording_attempted = True
-        phase_started_at = time.monotonic()
         recording_filename = _start_screen_recording(output.parent)
-        timings["录屏开启"] = time.monotonic() - phase_started_at
         print(f"录屏已开启: {recording_filename}")
 
-        phase_started_at = time.monotonic()
         worker.start()
-        timings["匹配工作线程启动"] = time.monotonic() - phase_started_at
         monitor_thread = threading.Thread(
             target=monitor,
             name="RoomMatchOnceMonitor",
@@ -420,13 +409,10 @@ def main(argv=None) -> int:
             monitor_thread.join(timeout=2.0)
         if stream_timing_thread is not None:
             stream_timing_thread.join(timeout=2.0)
-        timings["拉流关闭与工作线程收尾"] = time.monotonic() - phase_started_at
         if recording_attempted:
             recording_stopped = False
             try:
-                phase_started_at = time.monotonic()
                 _stop_screen_recording()
-                timings["录屏关闭"] = time.monotonic() - phase_started_at
                 print("录屏已关闭。")
                 recording_stopped = True
             except Exception as exc:
@@ -435,13 +421,9 @@ def main(argv=None) -> int:
                     execution_error = exc
             if recording_stopped and recording_filename:
                 try:
-                    phase_started_at = time.monotonic()
                     local_recording = _download_screen_recording(
                         recording_filename,
                         output.parent,
-                    )
-                    timings["录屏查询、中转与下载"] = (
-                        time.monotonic() - phase_started_at
                     )
                     print(f"录屏已下载: {local_recording}")
                 except Exception as exc:
@@ -450,11 +432,8 @@ def main(argv=None) -> int:
                         execution_error = exc
 
     payload = _read_result(output)
-    timings["全流程总耗时"] = time.monotonic() - run_started_at
     _append_timing_summary(
         output.parent / SUMMARY_FILENAME,
-        started_at=wall_started_at,
-        finished_at=datetime.now().astimezone(),
         timings=timings,
         payload=payload,
     )

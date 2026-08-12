@@ -199,6 +199,18 @@ def _extract_remote_media_path(output: str, filename: str) -> str:
     return ""
 
 
+def _remote_file_exists(remote_path: str) -> bool:
+    try:
+        _run_hdc_command(
+            f'hdc shell test -s "{remote_path}"',
+            f"验证手机录屏文件 {remote_path}",
+            timeout=15.0,
+        )
+    except RuntimeError:
+        return False
+    return True
+
+
 def _locate_recording_on_device(filename: str) -> str:
     query_command = f'hdc shell mediatool query "{filename}" -u'
     last_error = None
@@ -222,13 +234,22 @@ def _locate_recording_on_device(filename: str) -> str:
                 "复制录屏到手机临时目录",
                 timeout=60.0,
             )
-            return (
-                _extract_remote_media_path(recv_output, filename)
-                or f"/data/local/tmp/{filename}"
+            candidates = [
+                _extract_remote_media_path(recv_output, filename),
+                f"/data/local/tmp/{filename}",
+            ]
+            for remote_path in dict.fromkeys(
+                candidate for candidate in candidates if candidate
+            ):
+                if _remote_file_exists(remote_path):
+                    return remote_path
+            raise RuntimeError(
+                "mediatool recv 执行后未在手机临时目录确认到录屏文件: "
+                f"filename={filename}, uri={media_uri}, output={recv_output.strip()!r}"
             )
 
         remote_path = _extract_remote_media_path(query_output, filename)
-        if remote_path:
+        if remote_path and _remote_file_exists(remote_path):
             return remote_path
 
     detail = f": {last_error}" if last_error else ""

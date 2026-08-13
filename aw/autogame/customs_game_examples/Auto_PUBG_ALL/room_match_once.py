@@ -1,7 +1,8 @@
-"""手动到达房屋门前后，按南大原方案匹配当前一栋房子。
+"""手动到达房屋门前后，按南大原方案匹配并搜索当前一栋房子。
 
 这个入口保留南大动态抬头、房屋分割失败时最多三次取景和位置恢复，
-但不重复用户已完成的门前校准，也不执行进屋回放。
+不重复用户已完成的门前校准；匹配成功后，使用迁移后的 HOS 单摇杆
+执行器回放房屋库中的南大搜房 DSL，匹配失败则直接结束。
 """
 
 from __future__ import annotations
@@ -17,10 +18,14 @@ from typing import Any, Mapping, Optional, TYPE_CHECKING
 import numpy as np
 
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_house_search_strategy import (
+    NandaRoomMatch,
     NandaSearchContext,
+    NandaSearchResult,
+    NandaSearchStatus,
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_latest_house_search import (
     NandaCurrentViewMatchResult,
+    NandaHosJoystickReplayExecutor,
     NandaLatestSettings,
     NandaLocalRoomMatcher,
 )
@@ -42,6 +47,7 @@ MATCH_IMAGE_FILENAME = "匹配结果.png"
 RESULT_MARKER = "__AUTOGAME_ROOM_MATCH_RESULT__:"
 
 _matcher: Optional[NandaLocalRoomMatcher] = None
+_replay_executor: Optional[NandaHosJoystickReplayExecutor] = None
 _running = False
 _completed = False
 
@@ -192,6 +198,13 @@ def _get_matcher() -> NandaLocalRoomMatcher:
     return matcher
 
 
+def _get_replay_executor() -> NandaHosJoystickReplayExecutor:
+    global _replay_executor
+    if _replay_executor is None:
+        _replay_executor = NandaHosJoystickReplayExecutor(_load_settings())
+    return _replay_executor
+
+
 def preload_runtime() -> None:
     """可选预热；只加载模型和房型索引，不读取画面也不控制设备。"""
     _get_matcher()
@@ -201,6 +214,9 @@ def _build_context(worker: "FrameWorker", frame: np.ndarray) -> NandaSearchConte
     def refresh_frame(_reason: str = "") -> bool:
         refresh = getattr(worker, "refresh_frame", None)
         return bool(refresh()) if callable(refresh) else False
+
+    def should_abort() -> bool:
+        return not bool(getattr(worker, "running", True))
 
     return NandaSearchContext(
         worker=worker,
@@ -217,8 +233,28 @@ def _build_context(worker: "FrameWorker", frame: np.ndarray) -> NandaSearchConte
         door_area_ratio=None,
         phase_label="manual_nanda_room_match_once",
         refresh_frame=refresh_frame,
-        should_abort=lambda: False,
+        should_abort=should_abort,
+        should_abort_replay=should_abort,
         is_outside=lambda: True,
+    )
+
+
+def _build_replay_match(
+    result: NandaCurrentViewMatchResult,
+) -> NandaRoomMatch:
+    if not result.matched or not result.room_id or not result.replay_path:
+        raise ValueError("只有包含房型和回放路径的成功匹配才能执行搜房")
+    return NandaRoomMatch(
+        room_id=str(result.room_id),
+        replay_path=str(result.replay_path),
+        score=result.score,
+        metadata={
+            "decision": result.decision,
+            "selection_reason": result.selection_reason,
+            "requires_pose_realign": result.requires_pose_realign,
+            "matching_attempts": result.matching_attempts,
+            "view_preparation": result.view_preparation,
+        },
     )
 
 
@@ -233,13 +269,24 @@ def _match_payload(
     match_image_source_path: Optional[Path],
     frame: np.ndarray,
     elapsed_seconds: float,
+    search_result: Optional[NandaSearchResult],
+    search_elapsed_seconds: Optional[float],
 ) -> dict[str, Any]:
     expected_room_id = os.environ.get("AUTOGAME_EXPECTED_ROOM_ID", "").strip()
+    search_status = (
+        search_result.status.value if search_result is not None else "skipped"
+    )
     status = "matched" if result.matched else "no_match"
+    if result.matched and (
+        search_result is None
+        or search_result.status != NandaSearchStatus.COMPLETED
+    ):
+        status = "search_failed"
     return {
         "status": status,
+        "match_status": "matched" if result.matched else "no_match",
         "created_at": datetime.now().astimezone().isoformat(),
-        "mode": "manual_nanda_original_flow_once",
+        "mode": "manual_nanda_original_match_and_search_once",
         "movement_enabled": result.movement_enabled,
         "attempt_count": result.attempt_count,
         "room_id": result.room_id,
@@ -266,6 +313,20 @@ def _match_payload(
         "replay_path": result.replay_path,
         "frame_shape": list(frame.shape),
         "elapsed_seconds": elapsed_seconds,
+        "search_performed": search_result is not None,
+        "search_status": search_status,
+        "search_message": (
+            search_result.message if search_result is not None else None
+        ),
+        "search_elapsed_seconds": search_elapsed_seconds,
+        "search_metadata": (
+            dict(search_result.metadata) if search_result is not None else None
+        ),
+        "total_algorithm_seconds": (
+            elapsed_seconds + search_elapsed_seconds
+            if search_elapsed_seconds is not None
+            else elapsed_seconds
+        ),
         "result_dir": str(result_dir),
         "original_image_path": str(original_image_path),
         "query_frame_path": str(original_image_path),
@@ -294,6 +355,8 @@ def on_stage(worker: "FrameWorker") -> None:
     started_at = time.monotonic()
     match_image_path: Optional[Path] = None
     match_image_source_path: Optional[Path] = None
+    search_result: Optional[NandaSearchResult] = None
+    search_elapsed_seconds: Optional[float] = None
     try:
         if worker.current_stage != "搜房阶段":
             worker.change_stage("搜房阶段")
@@ -310,13 +373,34 @@ def on_stage(worker: "FrameWorker") -> None:
         _save_original_image(original_image_path, frame)
 
         matcher = _get_matcher()
-        result = matcher.match_original_nanda_flow(_build_context(worker, frame))
+        context = _build_context(worker, frame)
+        result = matcher.match_original_nanda_flow(context)
+        match_elapsed_seconds = time.monotonic() - started_at
         if result.matched:
             match_image_path = result_dir / MATCH_IMAGE_FILENAME
             match_image_source_path = _save_match_image(
                 match_image_path,
                 result,
             )
+            search_started_at = time.monotonic()
+            try:
+                search_result = _get_replay_executor().replay(
+                    context,
+                    _build_replay_match(result),
+                )
+            except Exception as exc:
+                search_result = NandaSearchResult(
+                    NandaSearchStatus.FAILED,
+                    f"南大搜房回放执行异常: {exc}",
+                    room_id=result.room_id,
+                    replay_path=result.replay_path,
+                    metadata={
+                        "phase": "replay",
+                        "exception": type(exc).__name__,
+                    },
+                )
+            finally:
+                search_elapsed_seconds = time.monotonic() - search_started_at
         payload = _match_payload(
             result,
             result_dir=result_dir,
@@ -326,27 +410,46 @@ def on_stage(worker: "FrameWorker") -> None:
             match_image_path=match_image_path,
             match_image_source_path=match_image_source_path,
             frame=frame,
-            elapsed_seconds=time.monotonic() - started_at,
+            elapsed_seconds=match_elapsed_seconds,
+            search_result=search_result,
+            search_elapsed_seconds=search_elapsed_seconds,
         )
         _write_payload(details_path, payload)
         _write_text(summary_path, _summary_text(result))
         worker.frame_log(
-            f"[NandaMatchOnly] 单次匹配结束：status={payload['status']}，"
+            f"[NandaMatchSearchOnce] 单次匹配与搜房结束：status={payload['status']}，"
             f"room={payload['room_id']}，score={payload['score']}，"
             f"expected={payload['expected_room_id']}，correct={payload['correct']}，"
+            f"search_status={payload['search_status']}，"
+            f"search_elapsed={payload['search_elapsed_seconds']}，"
             f"result_dir={result_dir}"
         )
+        if payload["status"] == "search_failed":
+            mark_failed = getattr(worker, "mark_failed", None)
+            if callable(mark_failed):
+                mark_failed(
+                    "room_search_once_failed",
+                    payload.get("search_message") or "匹配成功后搜房未完成",
+                    result_path=str(details_path),
+                    room_id=result.room_id,
+                    search_status=payload.get("search_status"),
+                )
         print(RESULT_MARKER + json.dumps(_json_safe(payload), ensure_ascii=False))
     except Exception as exc:
         payload = {
             "status": "error",
             "created_at": datetime.now().astimezone().isoformat(),
-            "mode": "manual_nanda_original_flow_once",
+            "mode": "manual_nanda_original_match_and_search_once",
             "movement_enabled": True,
             "attempt_count": 0,
             "error_type": type(exc).__name__,
             "error": str(exc),
             "elapsed_seconds": time.monotonic() - started_at,
+            "search_performed": search_result is not None,
+            "search_status": (
+                search_result.status.value if search_result is not None else "skipped"
+            ),
+            "search_elapsed_seconds": search_elapsed_seconds,
             "result_dir": str(result_dir),
             "original_image_path": (
                 str(original_image_path) if original_image_path.is_file() else None
@@ -359,7 +462,7 @@ def on_stage(worker: "FrameWorker") -> None:
         _write_payload(details_path, payload)
         _write_text(summary_path, "匹配成功：否\n")
         worker.frame_log(
-            f"[NandaMatchOnly] 单次匹配失败：{type(exc).__name__}: {exc}；"
+            f"[NandaMatchSearchOnce] 单次执行失败：{type(exc).__name__}: {exc}；"
             f"result_dir={result_dir}"
         )
         mark_failed = getattr(worker, "mark_failed", None)

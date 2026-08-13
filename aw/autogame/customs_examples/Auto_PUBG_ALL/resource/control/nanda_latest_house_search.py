@@ -1980,12 +1980,13 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
         self,
         context: NandaSearchContext,
     ) -> NandaCurrentViewMatchResult:
-        """复现南大当前分割匹配链，但跳过手动门前校准和进屋回放。
+        """复现南大当前分割匹配链，但跳过手动门前校准。
 
         上游语义是：最多分割三次；仅在 building 分割失败时后退
         1500ms 后再试；每次按门顶位置临时抬头并在分割后恢复；后退后
         匹配成功则按后退次数各前进 1300ms 恢复。房型判定为 no_match
         时直接结束，不把“房型不匹配”误当成“房屋分割失败”继续移动。
+        本方法只返回匹配和回放路径；是否执行搜房 DSL 由调用入口决定。
         """
         attempts: List[_NandaRoomMatchAttempt] = []
         views: List[_NandaDoorViewPreparation] = []
@@ -2025,7 +2026,7 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
                         f"[NandaOriginal] 第 {attempt_index} 次分割后匹配成功，"
                         f"按南大原流程执行 {backoff_count} 次前推恢复，"
                         f"每次 {self.settings.match_retry_forward_recover_duration_ms}ms；"
-                        "单次脚本随后结束，不执行进屋回放"
+                        "恢复后由调用入口决定是否执行搜房回放"
                     )
                     for _ in range(backoff_count):
                         self._move_for_match_retry(context, forward=True)

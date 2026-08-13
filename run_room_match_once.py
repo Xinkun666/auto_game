@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""对已手动到达的当前房屋执行一次南大原流程房型匹配。"""
+"""对已手动到达的当前房屋执行一次南大原流程房型匹配与搜房。"""
 
 from __future__ import annotations
 
@@ -33,7 +33,8 @@ def _parser() -> argparse.ArgumentParser:
         description=(
             "手动走到门前后，从 HOScrcpy 取当前画面，按南大原方案执行门框取景、"
             "必要时后拉和动态抬头，并进行 building/door frame/window + "
-            "DINOv3/MLP 房型匹配；只处理当前一栋房屋，不执行进屋回放。"
+            "DINOv3/MLP 房型匹配；匹配成功后回放房屋库中的南大搜房 DSL，"
+            "匹配失败直接结束，只处理当前一栋房屋。"
         )
     )
     parser.add_argument(
@@ -159,6 +160,9 @@ def _append_timing_summary(
             matcher_elapsed_ms / 1000.0 if matcher_elapsed_ms is not None else 0.0
         )
         summary_timings["取景、分割与门窗定位"] = max(0.0, location_seconds)
+    search_seconds = _as_duration_seconds(payload.get("search_elapsed_seconds"))
+    if search_seconds is not None:
+        summary_timings["搜房"] = search_seconds
     lines = [
         existing,
         "",
@@ -355,7 +359,7 @@ def main(argv=None) -> int:
                 continue
             worker.mark_failed(
                 "room_match_once_timeout",
-                f"单次房型匹配超过 {args.timeout:g} 秒",
+                f"单次房型匹配与搜房超过 {args.timeout:g} 秒",
                 result_path=str(output),
             )
             worker.stop()
@@ -396,7 +400,7 @@ def main(argv=None) -> int:
         stream_timing_thread.start()
         client.run()
     except KeyboardInterrupt:
-        print("收到中断，停止单次房型匹配。")
+        print("收到中断，停止单次房型匹配与搜房。")
         interrupted = True
     except Exception as exc:
         execution_error = exc
@@ -452,6 +456,10 @@ def main(argv=None) -> int:
             f"匹配结果: room_id={payload.get('room_id')}, "
             f"score={payload.get('score')}, correct={payload.get('correct')}"
         )
+        print(
+            f"搜房结果: status={payload.get('search_status')}, "
+            f"elapsed={payload.get('search_elapsed_seconds')} 秒"
+        )
         return 0
     if status == "no_match":
         print(
@@ -459,7 +467,14 @@ def main(argv=None) -> int:
             f"top_candidates={payload.get('top_candidates')}"
         )
         return 2
-    print(f"匹配失败: {payload.get('error') or worker.failure_reason or '未知错误'}")
+    if status == "search_failed":
+        print(
+            f"匹配成功但搜房失败: room_id={payload.get('room_id')}, "
+            f"status={payload.get('search_status')}, "
+            f"reason={payload.get('search_message') or worker.failure_reason or '未知错误'}"
+        )
+        return 1
+    print(f"执行失败: {payload.get('error') or worker.failure_reason or '未知错误'}")
     return 1
 
 

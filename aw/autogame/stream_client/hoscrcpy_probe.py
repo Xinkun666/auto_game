@@ -168,6 +168,9 @@ def _frame_size(frame):
     size = getattr(frame, "size", None)
     if isinstance(size, tuple) and len(size) >= 2:
         return int(size[0]), int(size[1])
+    shape = getattr(frame, "shape", None)
+    if shape is not None and len(shape) >= 2:
+        return int(shape[1]), int(shape[0])
     width = getattr(frame, "width", None)
     height = getattr(frame, "height", None)
     if width is not None and height is not None:
@@ -178,11 +181,25 @@ def _frame_size(frame):
 def _save_frame(frame, save_frame_path: Optional[Path]) -> Optional[Path]:
     if save_frame_path is None:
         return None
-    if not hasattr(frame, "save"):
-        raise HOScrcpyProbeError("HOScrcpy 首帧不是可保存的图像对象: %r" % (type(frame),))
+    image = frame
+    if not hasattr(image, "save"):
+        try:
+            import numpy as np
+            from PIL import Image
+
+            array = np.asarray(frame)
+            if array.ndim not in (2, 3):
+                raise ValueError("unsupported array shape: %r" % (array.shape,))
+            image = Image.fromarray(array)
+        except Exception as exc:
+            raise HOScrcpyProbeError(
+                "HOScrcpy 首帧不是可保存的图像对象: %r" % (type(frame),)
+            ) from exc
+    if getattr(image, "mode", "RGB") != "RGB":
+        image = image.convert("RGB")
     save_frame_path = Path(save_frame_path)
     save_frame_path.parent.mkdir(parents=True, exist_ok=True)
-    frame.save(str(save_frame_path), "JPEG")
+    image.save(str(save_frame_path), "JPEG")
     return save_frame_path
 
 

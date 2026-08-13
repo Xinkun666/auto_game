@@ -42,6 +42,9 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_house_sea
     NandaSearchStatus,
     NandaViewPreparationError,
 )
+from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_door_frame_selector import (
+    NandaDoorFrameSelector,
+)
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_room_matcher_runtime import (
     FacadeMaskObservation,
     IntegratedNandaRoomMatcher,
@@ -804,20 +807,44 @@ class _NandaSpecialAreaRoomMatcher(NandaRoomMatcher):
         for visual in visuals:
             if not isinstance(visual, dict) or visual.get("type") != "sam3_mask":
                 continue
-            contours = visual.get("contours")
-            if not isinstance(contours, list):
-                continue
             coord = str(visual.get("coord") or "local")
             offset_x = 0
             offset_y = 0
+            source_crop = visual.get("source_crop_xyxy")
             if coord != "frame":
-                source_crop = visual.get("source_crop_xyxy")
                 if isinstance(source_crop, (list, tuple)) and len(source_crop) >= 2:
                     offset_x = int(round(float(source_crop[0])))
                     offset_y = int(round(float(source_crop[1])))
             mask = np.zeros((frame_h, frame_w), dtype=np.uint8)
+            local_mask = _NandaSpecialAreaRoomMatcher._decode_mask_rle(
+                visual.get("mask_rle")
+            )
+            if local_mask is not None:
+                rle_offset_x = 0
+                rle_offset_y = 0
+                if isinstance(source_crop, (list, tuple)) and len(source_crop) >= 2:
+                    rle_offset_x = int(round(float(source_crop[0])))
+                    rle_offset_y = int(round(float(source_crop[1])))
+                local_h, local_w = local_mask.shape[:2]
+                paste_x1 = min(frame_w, max(0, rle_offset_x))
+                paste_y1 = min(frame_h, max(0, rle_offset_y))
+                paste_x2 = min(frame_w, max(0, rle_offset_x + local_w))
+                paste_y2 = min(frame_h, max(0, rle_offset_y + local_h))
+                if paste_x2 > paste_x1 and paste_y2 > paste_y1:
+                    source_x1 = paste_x1 - rle_offset_x
+                    source_y1 = paste_y1 - rle_offset_y
+                    mask[paste_y1:paste_y2, paste_x1:paste_x2] = (
+                        local_mask[
+                            source_y1 : source_y1 + paste_y2 - paste_y1,
+                            source_x1 : source_x1 + paste_x2 - paste_x1,
+                        ]
+                        * 255
+                    )
+            contours = visual.get("contours")
+            if local_mask is None and not isinstance(contours, list):
+                continue
             polygons = []
-            for contour in contours:
+            for contour in contours if local_mask is None else []:
                 if not isinstance(contour, list):
                     continue
                 points = []
@@ -860,6 +887,29 @@ class _NandaSpecialAreaRoomMatcher(NandaRoomMatcher):
         if not observations:
             raise ValueError(f"sam3 {subject} mask 轮廓为空")
         return observations
+
+    @staticmethod
+    def _decode_mask_rle(value: Any) -> Optional[np.ndarray]:
+        if not isinstance(value, Mapping):
+            return None
+        shape = value.get("shape")
+        counts = value.get("counts")
+        if not isinstance(shape, (list, tuple)) or len(shape) != 2:
+            return None
+        if not isinstance(counts, list):
+            return None
+        try:
+            height, width = int(shape[0]), int(shape[1])
+            starts_with = 1 if int(value.get("starts_with", 0)) else 0
+            run_lengths = np.asarray(counts, dtype=np.int64)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if height <= 0 or width <= 0 or np.any(run_lengths < 0):
+            return None
+        if int(run_lengths.sum()) != height * width:
+            return None
+        values = (np.arange(run_lengths.size, dtype=np.uint8) + starts_with) % 2
+        return np.repeat(values, run_lengths).reshape(height, width).astype(np.uint8)
 
     @staticmethod
     def _crop_observations(
@@ -968,6 +1018,11 @@ class _NandaDoorViewPreparation:
     pitch_duration_ms: int
     pitch_bias_px: int
     capture_elapsed_seconds: float = 0.0
+    door_target_found: bool = True
+    door_candidate_count: int = 1
+    door_selection_reason: str = "legacy_largest_mask"
+    door_quality: str = "unknown"
+    door_quality_flags: Tuple[str, ...] = ()
 
     def metadata(self) -> Mapping[str, Any]:
         return {
@@ -979,6 +1034,11 @@ class _NandaDoorViewPreparation:
             "pitch_duration_ms": self.pitch_duration_ms,
             "pitch_bias_px": self.pitch_bias_px,
             "capture_elapsed_seconds": self.capture_elapsed_seconds,
+            "door_target_found": self.door_target_found,
+            "door_candidate_count": self.door_candidate_count,
+            "door_selection_reason": self.door_selection_reason,
+            "door_quality": self.door_quality,
+            "door_quality_flags": list(self.door_quality_flags),
         }
 
 
@@ -1035,6 +1095,7 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
         self._runtime_factory = runtime_factory
         self._touch_controller_factory = touch_controller_factory
         self._runtime = None
+        self._door_frame_selector = NandaDoorFrameSelector()
         self.template_structure_preflight: Optional[Mapping[str, Any]] = None
         self.unavailable_reason = "进程内 DINOv3/MLP 尚未检查"
 
@@ -1949,10 +2010,38 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
         """按南大原流程只估算临时抬头，不重复执行门前距离校准。"""
         capture_started_at = time.monotonic()
         frame, sam3_info = self._capture_door_frame(context)
-        bbox, area_ratio, top_ratio, aspect_ratio = self._door_view_geometry(
+        door_observations = self._special_area_observations(
             frame,
             sam3_info,
+            subject="门框",
+            allow_no_match=True,
         )
+        selected = self._door_frame_selector.select(frame, door_observations)
+        if selected is None:
+            context.worker.frame_log(
+                f"[NandaOriginal] 第 {attempt_index}/"
+                f"{NANDA_ORIGINAL_SEGMENTATION_MAX_ATTEMPTS} 次分割取景："
+                "南大门框候选筛选后无可用目标，按原源码不抬头，"
+                "直接使用当前视角做 building 分割"
+            )
+            return _NandaDoorViewPreparation(
+                bbox_xyxy=(0, 0, 0, 0),
+                bbox_area_ratio=0.0,
+                door_top_ratio=0.5,
+                door_aspect_ratio=0.0,
+                backoff_pulses=0,
+                pitch_duration_ms=0,
+                pitch_bias_px=0,
+                capture_elapsed_seconds=time.monotonic() - capture_started_at,
+                door_target_found=False,
+                door_candidate_count=0,
+                door_selection_reason="no_usable_door_target",
+                door_quality="missing",
+            )
+        bbox = selected.bbox_xyxy
+        area_ratio = selected.bbox_area_ratio
+        top_ratio = selected.door_top_ratio
+        aspect_ratio = selected.aspect_ratio
         _, screen_height = self._screen_size(context)
         pitch_duration_ms, pitch_bias_px = self._pitch_plan(
             screen_height,
@@ -1963,7 +2052,10 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
             f"{NANDA_ORIGINAL_SEGMENTATION_MAX_ATTEMPTS} 次分割取景："
             f"door_bbox={bbox}，area={area_ratio:.4f}，top={top_ratio:.4f}，"
             f"pitch_duration={pitch_duration_ms}ms，pitch_bias=-{pitch_bias_px}px；"
-            "门前距离由用户手动校准，本阶段不重复校准"
+            f"candidates={selected.candidate_count}，"
+            f"selection={selected.selection_reason}，quality={selected.quality}/"
+            f"{selected.quality_flags}；门前距离由用户手动校准，"
+            "本阶段不重复校准"
         )
         return _NandaDoorViewPreparation(
             bbox_xyxy=bbox,
@@ -1974,6 +2066,11 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
             pitch_duration_ms=pitch_duration_ms,
             pitch_bias_px=pitch_bias_px,
             capture_elapsed_seconds=time.monotonic() - capture_started_at,
+            door_target_found=True,
+            door_candidate_count=selected.candidate_count,
+            door_selection_reason=selected.selection_reason,
+            door_quality=selected.quality,
+            door_quality_flags=selected.quality_flags,
         )
 
     @staticmethod
@@ -2088,6 +2185,7 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
         """
         attempts: List[_NandaRoomMatchAttempt] = []
         views: List[_NandaDoorViewPreparation] = []
+        self._door_frame_selector.reset()
         backoff_count = 0
         retry_backoff_seconds = 0.0
         pose_recovery_seconds = 0.0

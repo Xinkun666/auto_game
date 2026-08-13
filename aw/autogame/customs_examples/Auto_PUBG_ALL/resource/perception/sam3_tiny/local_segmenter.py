@@ -247,6 +247,20 @@ class LocalSam3Segmenter:
                 result.append(points)
         return result
 
+    @staticmethod
+    def _mask_rle(mask: np.ndarray) -> Dict[str, Any]:
+        """保留 SAM3 原始 mask 的孔洞和分离部件，供南大门框几何使用。"""
+        flat = (np.asarray(mask).reshape(-1) > 0).astype(np.uint8)
+        if flat.size == 0:
+            return {"shape": list(mask.shape[:2]), "starts_with": 0, "counts": []}
+        changes = np.flatnonzero(flat[1:] != flat[:-1]) + 1
+        boundaries = np.concatenate(([0], changes, [flat.size]))
+        return {
+            "shape": [int(mask.shape[0]), int(mask.shape[1])],
+            "starts_with": int(flat[0]),
+            "counts": np.diff(boundaries).astype(int).tolist(),
+        }
+
     def _select_best_mask(
         self,
         masks: Any,
@@ -408,6 +422,7 @@ class LocalSam3Segmenter:
             "label": f"sam3:{prompt}:{index}",
             "bbox_xyxy": bbox,
             "contours": cls._mask_contours(candidate["mask"]),
+            "mask_rle": cls._mask_rle(candidate["mask"]),
             "score": candidate["score"],
             "coord": "local",
             "color_bgr": [0, 165, 255],

@@ -149,13 +149,44 @@ def _append_timing_summary(
 
     matching_stage_seconds = _as_duration_seconds(payload.get("elapsed_seconds"))
     matcher_elapsed_ms = _as_duration_seconds(payload.get("matcher_elapsed_ms"))
+    breakdown = payload.get("match_timing_breakdown")
+    breakdown = breakdown if isinstance(breakdown, dict) else {}
     summary_timings = {}
     stream_seconds = _as_duration_seconds(timings.get("拉流至首帧"))
     if stream_seconds is not None:
         summary_timings["拉流至首帧"] = stream_seconds
-    if matcher_elapsed_ms is not None:
-        summary_timings["DINOv3/MLP 房型匹配"] = matcher_elapsed_ms / 1000.0
-    if matching_stage_seconds is not None:
+    detailed_labels = (
+        ("current_frame_preparation_seconds", "当前帧准备"),
+        ("model_library_initialization_seconds", "模型与房屋库初始化"),
+        ("door_view_capture_seconds", "door frame 门框取景"),
+        ("view_raise_seconds", "动态抬头"),
+        ("building_segmentation_seconds", "building 分割"),
+        ("door_frame_segmentation_seconds", "door frame 分割"),
+        ("window_segmentation_seconds", "window 分割"),
+        ("view_restore_seconds", "视角恢复"),
+        ("mask_postprocess_seconds", "分割结果整理"),
+        ("dino_mlp_matching_seconds", "DINOv3/MLP 房型配准"),
+        ("retry_backoff_seconds", "分割失败后拉重试"),
+        ("pose_recovery_seconds", "重试后位置恢复"),
+    )
+    has_detailed_breakdown = any(
+        _as_duration_seconds(breakdown.get(key)) is not None
+        for key, _label in detailed_labels
+    )
+    if has_detailed_breakdown:
+        if matching_stage_seconds is not None:
+            summary_timings["房型匹配总计"] = matching_stage_seconds
+        for key, label in detailed_labels:
+            seconds = _as_duration_seconds(breakdown.get(key))
+            if seconds is None:
+                continue
+            if key in {"retry_backoff_seconds", "pose_recovery_seconds"} and seconds == 0:
+                continue
+            summary_timings[label] = seconds
+    else:
+        if matcher_elapsed_ms is not None:
+            summary_timings["DINOv3/MLP 房型匹配"] = matcher_elapsed_ms / 1000.0
+    if matching_stage_seconds is not None and not has_detailed_breakdown:
         location_seconds = matching_stage_seconds - (
             matcher_elapsed_ms / 1000.0 if matcher_elapsed_ms is not None else 0.0
         )

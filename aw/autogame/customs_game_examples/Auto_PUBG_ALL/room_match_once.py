@@ -269,6 +269,7 @@ def _match_payload(
     match_image_source_path: Optional[Path],
     frame: np.ndarray,
     elapsed_seconds: float,
+    match_timing_breakdown: Mapping[str, Any],
     search_result: Optional[NandaSearchResult],
     search_elapsed_seconds: Optional[float],
 ) -> dict[str, Any]:
@@ -313,6 +314,7 @@ def _match_payload(
         "replay_path": result.replay_path,
         "frame_shape": list(frame.shape),
         "elapsed_seconds": elapsed_seconds,
+        "match_timing_breakdown": dict(match_timing_breakdown),
         "search_performed": search_result is not None,
         "search_status": search_status,
         "search_message": (
@@ -357,7 +359,9 @@ def on_stage(worker: "FrameWorker") -> None:
     match_image_source_path: Optional[Path] = None
     search_result: Optional[NandaSearchResult] = None
     search_elapsed_seconds: Optional[float] = None
+    match_timing_breakdown: dict[str, Any] = {}
     try:
+        frame_preparation_started_at = time.monotonic()
         if worker.current_stage != "搜房阶段":
             worker.change_stage("搜房阶段")
         if worker.current_stage != "搜房阶段":
@@ -371,11 +375,25 @@ def on_stage(worker: "FrameWorker") -> None:
             raise RuntimeError("当前没有可用游戏画面")
         frame = np.ascontiguousarray(frame).copy()
         _save_original_image(original_image_path, frame)
+        match_timing_breakdown["current_frame_preparation_seconds"] = (
+            time.monotonic() - frame_preparation_started_at
+        )
 
+        initialization_started_at = time.monotonic()
         matcher = _get_matcher()
+        match_timing_breakdown["model_library_initialization_seconds"] = (
+            time.monotonic() - initialization_started_at
+        )
         context = _build_context(worker, frame)
+        flow_started_at = time.monotonic()
         result = matcher.match_original_nanda_flow(context)
+        match_timing_breakdown["original_flow_seconds"] = (
+            time.monotonic() - flow_started_at
+        )
+        if isinstance(result.timing_breakdown, Mapping):
+            match_timing_breakdown.update(result.timing_breakdown)
         match_elapsed_seconds = time.monotonic() - started_at
+        match_timing_breakdown["match_total_seconds"] = match_elapsed_seconds
         if result.matched:
             match_image_path = result_dir / MATCH_IMAGE_FILENAME
             match_image_source_path = _save_match_image(
@@ -411,6 +429,7 @@ def on_stage(worker: "FrameWorker") -> None:
             match_image_source_path=match_image_source_path,
             frame=frame,
             elapsed_seconds=match_elapsed_seconds,
+            match_timing_breakdown=match_timing_breakdown,
             search_result=search_result,
             search_elapsed_seconds=search_elapsed_seconds,
         )
@@ -445,6 +464,7 @@ def on_stage(worker: "FrameWorker") -> None:
             "error_type": type(exc).__name__,
             "error": str(exc),
             "elapsed_seconds": time.monotonic() - started_at,
+            "match_timing_breakdown": match_timing_breakdown,
             "search_performed": search_result is not None,
             "search_status": (
                 search_result.status.value if search_result is not None else "skipped"

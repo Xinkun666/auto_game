@@ -932,6 +932,7 @@ class _NandaRoomMatchAttempt:
     no_match_reason: str
     decision: Mapping[str, Any]
     debug_payload: Mapping[str, Any]
+    timings: Mapping[str, float]
 
     @property
     def valid(self) -> bool:
@@ -953,6 +954,7 @@ class _NandaRoomMatchAttempt:
             "sam3_score": self.sam3_score,
             "replay_allowed": self.replay_allowed,
             "no_match_reason": self.no_match_reason,
+            "timings": dict(self.timings),
         }
 
 
@@ -965,6 +967,7 @@ class _NandaDoorViewPreparation:
     backoff_pulses: int
     pitch_duration_ms: int
     pitch_bias_px: int
+    capture_elapsed_seconds: float = 0.0
 
     def metadata(self) -> Mapping[str, Any]:
         return {
@@ -975,6 +978,7 @@ class _NandaDoorViewPreparation:
             "backoff_pulses": self.backoff_pulses,
             "pitch_duration_ms": self.pitch_duration_ms,
             "pitch_bias_px": self.pitch_bias_px,
+            "capture_elapsed_seconds": self.capture_elapsed_seconds,
         }
 
 
@@ -1001,6 +1005,7 @@ class NandaCurrentViewMatchResult:
     view_preparation: Any = None
     selection_reason: Any = None
     requires_pose_realign: Any = None
+    timing_breakdown: Any = None
 
 
 @dataclass(frozen=True)
@@ -1011,6 +1016,7 @@ class _NandaMatchPerception:
     door_info: Mapping[str, Any]
     window_frame: np.ndarray
     window_info: Mapping[str, Any]
+    timings: Mapping[str, float]
 
 
 class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
@@ -1153,6 +1159,7 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
         index: int,
         label: str,
         reason: str,
+        timings: Optional[Mapping[str, float]] = None,
     ) -> _NandaRoomMatchAttempt:
         return _NandaRoomMatchAttempt(
             index=index,
@@ -1168,6 +1175,7 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
             no_match_reason=str(reason),
             decision={},
             debug_payload={},
+            timings=dict(timings or {}),
         )
 
     @staticmethod
@@ -1579,8 +1587,10 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
     ) -> _NandaMatchPerception:
         pitch_applied = False
         restore_error = None
+        timings: Dict[str, float] = {}
         try:
             if view.pitch_duration_ms > 0 and view.pitch_bias_px > 0:
+                phase_started_at = time.monotonic()
                 context.worker.frame_log(
                     f"[NandaView] 按 door_top={view.door_top_ratio:.4f} 执行动态抬头："
                     f"y_bias=-{view.pitch_bias_px}，dura={view.pitch_duration_ms}ms"
@@ -1594,7 +1604,11 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
                 pitch_applied = True
                 if not context.refresh_frame("NandaView 抬头后采集 building"):
                     raise RuntimeError("door frame 抬头后刷新画面失败")
+                timings["view_raise_seconds"] = (
+                    time.monotonic() - phase_started_at
+                )
 
+            phase_started_at = time.monotonic()
             building_frame, building_info = self._capture_segment_frame(
                 context,
                 group_name=self.settings.building_segment_group,
@@ -1602,6 +1616,10 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
                 expected_prompt="building",
                 log_prefix="[NandaMatch] building 房型配准",
             )
+            timings["building_segmentation_seconds"] = (
+                time.monotonic() - phase_started_at
+            )
+            phase_started_at = time.monotonic()
             door_frame, door_info = self._capture_segment_frame(
                 context,
                 group_name=self.settings.building_segment_group,
@@ -1609,6 +1627,10 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
                 expected_prompt="door frame",
                 log_prefix="[NandaMatch] door frame 结构配准",
             )
+            timings["door_frame_segmentation_seconds"] = (
+                time.monotonic() - phase_started_at
+            )
+            phase_started_at = time.monotonic()
             window_frame, window_info = self._capture_segment_frame(
                 context,
                 group_name=self.settings.building_segment_group,
@@ -1616,16 +1638,12 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
                 expected_prompt="window",
                 log_prefix="[NandaMatch] window 结构配准",
             )
-            return _NandaMatchPerception(
-                building_frame=building_frame,
-                building_info=building_info,
-                door_frame=door_frame,
-                door_info=door_info,
-                window_frame=window_frame,
-                window_info=window_info,
+            timings["window_segmentation_seconds"] = (
+                time.monotonic() - phase_started_at
             )
         finally:
             if pitch_applied:
+                restore_started_at = time.monotonic()
                 try:
                     self._move_view_for_segmentation(
                         context,
@@ -1645,8 +1663,21 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
                         )
                 except Exception as exc:
                     restore_error = exc
+                finally:
+                    timings["view_restore_seconds"] = (
+                        time.monotonic() - restore_started_at
+                    )
             if restore_error is not None:
                 raise restore_error
+        return _NandaMatchPerception(
+            building_frame=building_frame,
+            building_info=building_info,
+            door_frame=door_frame,
+            door_info=door_info,
+            window_frame=window_frame,
+            window_info=window_info,
+            timings=timings,
+        )
 
     def _run_match_attempt(
         self,
@@ -1659,8 +1690,10 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
         if context.should_abort():
             return self._invalid_attempt(index, label, "搜房阶段已中止")
         perception = self._capture_match_perception(context, view)
+        attempt_timings = dict(perception.timings)
         frame = perception.building_frame
         sam3_info = perception.building_info
+        postprocess_started_at = time.monotonic()
         try:
             segmented_bgr, cropped_mask, cropped_bgr, crop_xyxy = (
                 self._special_area_facade(frame, sam3_info)
@@ -1670,7 +1703,15 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
                 context.worker.frame_log(
                     f"[NandaMatch] 第{index}阶段({label}) 未分割到房屋：{exc}"
                 )
-                return self._invalid_attempt(index, label, str(exc))
+                attempt_timings["mask_postprocess_seconds"] = (
+                    time.monotonic() - postprocess_started_at
+                )
+                return self._invalid_attempt(
+                    index,
+                    label,
+                    str(exc),
+                    timings=attempt_timings,
+                )
             raise RuntimeError(f"SAM3 building 结果无法还原: {exc}") from exc
         try:
             door_observations = self._special_area_observations(
@@ -1697,6 +1738,9 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
             )
         except ValueError as exc:
             raise RuntimeError(f"SAM3 门窗结构结果无法还原: {exc}") from exc
+        attempt_timings["mask_postprocess_seconds"] = (
+            time.monotonic() - postprocess_started_at
+        )
 
         top_edge_limit = 0
         touches_top = int(crop_xyxy[1]) <= 0
@@ -1714,12 +1758,16 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
             "直接在当前进程执行 DINOv3/MLP"
         )
         runtime = self._get_runtime(context)
+        matcher_started_at = time.monotonic()
         room_id, replay_path, debug_payload = runtime.match(
             segmented_bgr,
             cropped_mask,
             cropped_bgr,
             door_observations=door_observations,
             window_observations=window_observations,
+        )
+        attempt_timings["dino_mlp_matching_seconds"] = (
+            time.monotonic() - matcher_started_at
         )
         debug_payload = debug_payload if isinstance(debug_payload, dict) else {}
         decision = debug_payload.get("decision")
@@ -1784,6 +1832,7 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
             no_match_reason=no_match_reason,
             decision=decision,
             debug_payload=debug_payload,
+            timings=attempt_timings,
         )
 
     def _build_selected_match(
@@ -1898,6 +1947,7 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
         attempt_index: int,
     ) -> _NandaDoorViewPreparation:
         """按南大原流程只估算临时抬头，不重复执行门前距离校准。"""
+        capture_started_at = time.monotonic()
         frame, sam3_info = self._capture_door_frame(context)
         bbox, area_ratio, top_ratio, aspect_ratio = self._door_view_geometry(
             frame,
@@ -1923,7 +1973,47 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
             backoff_pulses=0,
             pitch_duration_ms=pitch_duration_ms,
             pitch_bias_px=pitch_bias_px,
+            capture_elapsed_seconds=time.monotonic() - capture_started_at,
         )
+
+    @staticmethod
+    def _original_flow_timing_breakdown(
+        attempts: Sequence[_NandaRoomMatchAttempt],
+        views: Sequence[_NandaDoorViewPreparation],
+        *,
+        retry_backoff_seconds: float,
+        pose_recovery_seconds: float,
+    ) -> Mapping[str, Any]:
+        timing_keys = (
+            "view_raise_seconds",
+            "building_segmentation_seconds",
+            "door_frame_segmentation_seconds",
+            "window_segmentation_seconds",
+            "view_restore_seconds",
+            "mask_postprocess_seconds",
+            "dino_mlp_matching_seconds",
+        )
+        breakdown: Dict[str, Any] = {
+            "door_view_capture_seconds": sum(
+                max(0.0, float(view.capture_elapsed_seconds)) for view in views
+            ),
+            "retry_backoff_seconds": max(0.0, float(retry_backoff_seconds)),
+            "pose_recovery_seconds": max(0.0, float(pose_recovery_seconds)),
+            "attempts": [
+                {
+                    "index": attempt.index,
+                    "label": attempt.label,
+                    **dict(attempt.timings),
+                }
+                for attempt in attempts
+            ],
+        }
+        for key in timing_keys:
+            breakdown[key] = sum(
+                max(0.0, float(attempt.timings.get(key, 0.0)))
+                for attempt in attempts
+            )
+        return breakdown
 
     def _original_flow_result(
         self,
@@ -1934,6 +2024,8 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
         matched: bool,
         backoff_count: int,
         selection_reason: str,
+        retry_backoff_seconds: float = 0.0,
+        pose_recovery_seconds: float = 0.0,
     ) -> NandaCurrentViewMatchResult:
         debug_payload = (
             attempt.debug_payload
@@ -1974,6 +2066,12 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
             },
             selection_reason=selection_reason,
             requires_pose_realign=backoff_count > 0,
+            timing_breakdown=self._original_flow_timing_breakdown(
+                attempts,
+                views,
+                retry_backoff_seconds=retry_backoff_seconds,
+                pose_recovery_seconds=pose_recovery_seconds,
+            ),
         )
 
     def match_original_nanda_flow(
@@ -1991,6 +2089,8 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
         attempts: List[_NandaRoomMatchAttempt] = []
         views: List[_NandaDoorViewPreparation] = []
         backoff_count = 0
+        retry_backoff_seconds = 0.0
+        pose_recovery_seconds = 0.0
 
         for attempt_index in range(1, NANDA_ORIGINAL_SEGMENTATION_MAX_ATTEMPTS + 1):
             view = self._original_segmentation_view(
@@ -2019,6 +2119,8 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
                         matched=False,
                         backoff_count=backoff_count,
                         selection_reason="segmented_but_room_no_match",
+                        retry_backoff_seconds=retry_backoff_seconds,
+                        pose_recovery_seconds=pose_recovery_seconds,
                     )
 
                 if backoff_count > 0:
@@ -2028,8 +2130,10 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
                         f"每次 {self.settings.match_retry_forward_recover_duration_ms}ms；"
                         "恢复后由调用入口决定是否执行搜房回放"
                     )
+                    recovery_started_at = time.monotonic()
                     for _ in range(backoff_count):
                         self._move_for_match_retry(context, forward=True)
+                    pose_recovery_seconds += time.monotonic() - recovery_started_at
                 return self._original_flow_result(
                     attempt,
                     attempts=attempts,
@@ -2037,6 +2141,8 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
                     matched=True,
                     backoff_count=backoff_count,
                     selection_reason="nanda_original_segmentation_match",
+                    retry_backoff_seconds=retry_backoff_seconds,
+                    pose_recovery_seconds=pose_recovery_seconds,
                 )
 
             if attempt_index >= NANDA_ORIGINAL_SEGMENTATION_MAX_ATTEMPTS:
@@ -2050,6 +2156,8 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
                     matched=False,
                     backoff_count=backoff_count,
                     selection_reason="building_segmentation_exhausted",
+                    retry_backoff_seconds=retry_backoff_seconds,
+                    pose_recovery_seconds=pose_recovery_seconds,
                 )
 
             context.worker.frame_log(
@@ -2057,7 +2165,9 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
                 f"{NANDA_ORIGINAL_SEGMENTATION_MAX_ATTEMPTS} 次 building 分割失败，"
                 f"后退 {self.settings.match_retry_backoff_duration_ms}ms 后重试"
             )
+            backoff_started_at = time.monotonic()
             self._move_for_match_retry(context, forward=False)
+            retry_backoff_seconds += time.monotonic() - backoff_started_at
             backoff_count += 1
 
         raise RuntimeError("南大原流程未生成匹配结果")

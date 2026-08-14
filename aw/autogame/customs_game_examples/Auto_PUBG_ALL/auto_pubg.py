@@ -332,7 +332,7 @@ def _has_rank_finish_info(w: "FrameWorker") -> bool:
 
 
 def _has_death_finish_info(w: "FrameWorker") -> bool:
-    return bool(w.get_info("变身")) or bool(w.get_info("红色血条"))
+    return bool(w.get_info("变身"))
 
 
 def _stop_active_motion(w: "FrameWorker", reason: str = "检测到死亡或排名界面"):

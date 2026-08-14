@@ -138,7 +138,6 @@ class HouseExitManager:
     def _is_terminal_state(self, w: "FrameWorker") -> bool:
         return bool(
             w.get_info("变身")
-            or w.get_info("红色血条")
             or w.get_info("个人排名")
             or w.get_info("队伍排名")
         )

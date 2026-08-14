@@ -2078,11 +2078,7 @@ class DrivingManager:
         return self.prior_angle
 
     def _is_dead(self, w: "FrameWorker") -> bool:
-        if bool(w.get_info("变身")):
-            return True
-        if bool(w.get_info("红色血条")):
-            return True
-        return False
+        return bool(w.get_info("变身"))
 
     def _has_rank_info(self, w: "FrameWorker") -> bool:
         return bool(w.get_info("个人排名")) or bool(w.get_info("队伍排名"))

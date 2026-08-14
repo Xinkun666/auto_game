@@ -1275,7 +1275,7 @@ class RunningManager:
             self.water_float_pressed_in_episode = False
 
     def _is_dead(self, w: "FrameWorker") -> bool:
-        return bool(w.get_info("变身")) or bool(w.get_info("红色血条"))
+        return bool(w.get_info("变身"))
 
     def _has_rank_info(self, w: "FrameWorker") -> bool:
         return bool(w.get_info("个人排名")) or bool(w.get_info("队伍排名"))

@@ -1022,6 +1022,20 @@ def get_live_screen_resolution():
     return get_runtime_screen_resolution()
 
 
+def resolution_iou(width_a, height_a, width_b, height_b):
+    """Compare two resolutions as origin-aligned rectangles."""
+    width_a = int(width_a or 0)
+    height_a = int(height_a or 0)
+    width_b = int(width_b or 0)
+    height_b = int(height_b or 0)
+    if min(width_a, height_a, width_b, height_b) <= 0:
+        return 0.0
+
+    intersection = min(width_a, width_b) * min(height_a, height_b)
+    union = width_a * height_a + width_b * height_b - intersection
+    return float(intersection) / float(union) if union > 0 else 0.0
+
+
 def select_scene_resolution(scene_content, screen_width=None, screen_height=None):
     if not isinstance(scene_content, dict) or "resolutions" not in scene_content:
         return scene_content
@@ -1034,13 +1048,29 @@ def select_scene_resolution(scene_content, screen_width=None, screen_height=None
         exact_key = f"{int(screen_width)}_{int(screen_height)}"
         if exact_key in resolutions:
             return resolutions[exact_key]
+
+        best_resolution = None
+        best_similarity = -1.0
         for value in resolutions.values():
-            if (
-                isinstance(value, dict)
-                and int(value.get("width") or 0) == int(screen_width)
-                and int(value.get("height") or 0) == int(screen_height)
-            ):
+            if not isinstance(value, dict):
+                continue
+            candidate_width = int(value.get("width") or 0)
+            candidate_height = int(value.get("height") or 0)
+            if candidate_width == int(screen_width) and candidate_height == int(screen_height):
                 return value
+
+            similarity = resolution_iou(
+                screen_width,
+                screen_height,
+                candidate_width,
+                candidate_height,
+            )
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_resolution = value
+
+        if best_resolution is not None:
+            return best_resolution
 
     return next(iter(resolutions.values()))
 

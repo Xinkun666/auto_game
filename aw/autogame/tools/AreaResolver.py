@@ -130,32 +130,19 @@ def resolve_area_rect_for_frame(
     """
     Resolve an area to the requested target coordinate system.
 
-    Area configs are defined in the scene annotation coordinate system. Runtime
-    first resolves them against the real screen size, then scales the resolved
-    real-screen rect to the requested target size. For vision crops the target
-    is the resized frame; for touch points the target is the real screen size.
+    Normalized rect configs are resolution-independent and map directly to the
+    requested frame. Explicit pixel-based anchor configs first resolve against
+    the real screen, then scale to the requested frame size.
     """
+    if "anchor" not in area_config and "rect" in area_config:
+        return resolve_area_rect(frame_width, frame_height, area_config)
+
     has_screen_size = screen_width and screen_height and int(screen_width) > 0 and int(screen_height) > 0
-    has_origin_size = origin_width and origin_height and int(origin_width) > 0 and int(origin_height) > 0
 
     if has_screen_size:
         target_width = int(screen_width)
         target_height = int(screen_height)
-
-        if has_origin_size and int(origin_width) == target_width and int(origin_height) == target_height:
-            x1, y1, x2, y2 = resolve_area_rect(origin_width, origin_height, area_config)
-        elif has_origin_size and "anchor" not in area_config and "rect" in area_config:
-            inferred_config = infer_anchor_config_from_rect(
-                int(origin_width),
-                int(origin_height),
-                area_config["rect"],
-            )
-            if inferred_config:
-                x1, y1, x2, y2 = get_rect_by_anchor(target_width, target_height, inferred_config)
-            else:
-                x1, y1, x2, y2 = resolve_area_rect(target_width, target_height, area_config)
-        else:
-            x1, y1, x2, y2 = resolve_area_rect(target_width, target_height, area_config)
+        x1, y1, x2, y2 = resolve_area_rect(target_width, target_height, area_config)
 
         scale_x = float(frame_width) / float(target_width)
         scale_y = float(frame_height) / float(target_height)

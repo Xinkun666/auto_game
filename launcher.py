@@ -1607,6 +1607,16 @@ def _looks_like_history_archive_dir(path: Path) -> bool:
     return False
 
 
+def _looks_like_history_batch_dir(path: Path) -> bool:
+    """Accept both the current date_target-case layout and legacy archives."""
+    if not path.exists() or not path.is_dir():
+        return False
+    name = path.name
+    return name.startswith("game_cases_") or bool(
+        re.fullmatch(r"\d{8,14}_.+", name)
+    )
+
+
 def _iter_history_archive_dirs(temp_dir: Path) -> list[Path]:
     archive_dirs: list[Path] = []
     seen: set[Path] = set()
@@ -1622,7 +1632,7 @@ def _iter_history_archive_dirs(temp_dir: Path) -> list[Path]:
         archive_dirs.append(path)
 
     for batch_dir in sorted(temp_dir.iterdir()):
-        if not batch_dir.is_dir() or not batch_dir.name.startswith("game_cases_"):
+        if not _looks_like_history_batch_dir(batch_dir):
             continue
         run_dirs = [
             child
@@ -2620,6 +2630,7 @@ class LauncherWindow(QWidget):
         self.label_tool_project_dir: Optional[Path] = None
         self.history_records: list[dict] = []
         self.selected_history_record: Optional[dict] = None
+        self.selected_history_batch_dir: Optional[Path] = None
         self.history_frame_records: list[dict] = []
         self.history_frame_index = -1
         self.process_launch_tracer = WindowsProcessLaunchTracer(LOG_DIR)
@@ -4452,10 +4463,11 @@ class LauncherWindow(QWidget):
 
     def _set_selected_history_record(self, record: Optional[dict]):
         self.selected_history_record = record
-        has_record = record is not None
-        self.history_open_dir_button.setEnabled(has_record)
-        self.history_delete_button.setEnabled(has_record)
-        if not has_record:
+        has_archive = record is not None
+        has_batch = self.selected_history_batch_dir is not None
+        self.history_open_dir_button.setEnabled(has_archive or has_batch)
+        self.history_delete_button.setEnabled(has_batch)
+        if not has_archive:
             self.history_summary_edit.clear()
             self.history_output_edit.clear()
             self.history_frame_records = []
@@ -4529,6 +4541,7 @@ class LauncherWindow(QWidget):
         history_temp_dir = resolve_history_temp_dir()
         self.history_records = discover_history_outputs(history_temp_dir)
         self.history_tree.clear()
+        self.selected_history_batch_dir = None
         self._set_selected_history_record(None)
 
         if not self.history_records:
@@ -4569,46 +4582,58 @@ class LauncherWindow(QWidget):
     def _on_history_selection_changed(self):
         items = self.history_tree.selectedItems()
         if not items:
+            self.selected_history_batch_dir = None
             self._set_selected_history_record(None)
             return
 
         index = items[0].data(0, Qt.ItemDataRole.UserRole)
         if index is None:
+            self.selected_history_batch_dir = Path(items[0].text(2))
             self._set_selected_history_record(None)
             return
         try:
             record = self.history_records[int(index)]
         except (IndexError, TypeError, ValueError):
             record = None
+        self.selected_history_batch_dir = (
+            Path(record["batch_dir"]) if record is not None else None
+        )
         self._set_selected_history_record(record)
 
     def _open_selected_history_dir(self):
-        if not self.selected_history_record:
+        if self.selected_history_record:
+            history_dir = Path(self.selected_history_record["archive_dir"])
+        elif self.selected_history_batch_dir:
+            history_dir = self.selected_history_batch_dir
+        else:
             return
-        archive_dir = Path(self.selected_history_record["archive_dir"])
-        if not archive_dir.exists():
+        if not history_dir.exists():
             issues = ValidationIssues()
-            issues.add_error("目录不存在", f"历史输出目录不存在：{archive_dir}")
+            issues.add_error("目录不存在", f"历史输出目录不存在：{history_dir}")
             self._show_validation_issues("无法打开历史输出", issues)
             self._refresh_history_outputs()
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(archive_dir.resolve())))
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(history_dir.resolve())))
 
     def _delete_selected_history_output(self):
-        if not self.selected_history_record:
+        if not self.selected_history_batch_dir:
             return
-        archive_dir = Path(self.selected_history_record["archive_dir"]).resolve()
+        batch_dir = self.selected_history_batch_dir.resolve()
         history_temp_dir = resolve_history_temp_dir().resolve()
         try:
-            archive_dir.relative_to(history_temp_dir)
+            batch_dir.relative_to(history_temp_dir)
         except ValueError:
-            QMessageBox.warning(self, "拒绝删除", f"只能删除 temp 目录下的历史输出：\n{archive_dir}")
+            QMessageBox.warning(self, "拒绝删除", f"只能删除 temp 目录下的历史输出：\n{batch_dir}")
+            return
+        if batch_dir == history_temp_dir:
+            QMessageBox.warning(self, "拒绝删除", "不能删除历史输出的根目录。")
             return
 
         reply = QMessageBox.question(
             self,
             "确认删除",
-            f"确定删除这条历史输出吗？\n\n{archive_dir}",
+            "确定删除这个日期_用例名目录及其中所有用例信息吗？\n\n"
+            f"{batch_dir}",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -4616,13 +4641,13 @@ class LauncherWindow(QWidget):
             return
 
         try:
-            shutil.rmtree(archive_dir)
+            shutil.rmtree(batch_dir)
         except Exception as exc:
-            log_exception(f"delete history output failed: archive_dir={archive_dir}")
+            log_exception(f"delete history output failed: batch_dir={batch_dir}")
             QMessageBox.critical(self, "删除失败", f"删除失败：\n{exc}")
             return
 
-        self._set_status(f"已删除历史输出：{archive_dir.name}")
+        self._set_status(f"已删除历史输出批次：{batch_dir.name}")
         self._refresh_history_outputs()
 
     def _apply_parsed_testcase(self, py_file: Path):
@@ -4689,6 +4714,8 @@ class LauncherWindow(QWidget):
         if self.current_run_start_timestamp:
             env.insert("AUTOGAME_RUN_START_TIMESTAMP", self.current_run_start_timestamp)
         archive_metadata = {}
+        if target_case:
+            archive_metadata["target_case"] = target_case
         if self.current_batch_start_timestamp:
             archive_metadata["batch_start_timestamp"] = self.current_batch_start_timestamp
         if self.current_run_start_timestamp:
@@ -5696,6 +5723,9 @@ class LauncherWindow(QWidget):
             return None
 
         archive_metadata = {}
+        target_case = str(self.current_plan.get("target_case") or "").strip()
+        if target_case:
+            archive_metadata["target_case"] = target_case
         if self.current_batch_start_timestamp:
             archive_metadata["batch_start_timestamp"] = self.current_batch_start_timestamp
         if self.current_run_start_timestamp:
@@ -6224,6 +6254,7 @@ class LauncherWindow(QWidget):
                 extra_log_files=extra_log_files or None,
                 generate_preview_video=generate_preview_video,
                 extra_metadata={
+                    "target_case": self.current_plan.get("target_case"),
                     "batch_start_timestamp": self.current_batch_start_timestamp,
                     "run_start_timestamp": self.current_run_start_timestamp,
                 },

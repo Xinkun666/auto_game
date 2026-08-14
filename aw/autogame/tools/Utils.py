@@ -150,8 +150,11 @@ def _resolve_run_timestamp(extra_metadata: Optional[dict]) -> str:
 def _resolve_archive_dir_path(run_index: int, extra_metadata: Optional[dict] = None) -> Path:
     batch_timestamp = _resolve_batch_start_timestamp(extra_metadata)
     run_timestamp = _resolve_run_timestamp(extra_metadata)
+    target_case = _sanitize_archive_name_part(
+        (extra_metadata or {}).get("target_case", "")
+    )
 
-    batch_dir = TEMP_DIR / f"game_cases_{batch_timestamp}"
+    batch_dir = TEMP_DIR / f"{batch_timestamp}_{target_case}"
     return batch_dir / f"第{run_index}次_{run_timestamp}"
 
 

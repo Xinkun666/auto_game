@@ -1123,6 +1123,24 @@ def is_preview_stage_item_visible(group_filter, scene_name: str, item_type: str,
     return bool(group_item_type) and (scene_name, group_item_type, item_name) in group_filter
 
 
+def resolve_preview_area_search_scope(area_data):
+    """Return a drawable configured search scope for one template area."""
+    if not isinstance(area_data, dict):
+        return None
+
+    scope = area_data.get("search_scope")
+    if not isinstance(scope, (list, tuple)) or len(scope) != 4:
+        return None
+
+    try:
+        x1, y1, x2, y2 = (float(value) for value in scope)
+    except (TypeError, ValueError):
+        return None
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return {"rect": scope}
+
+
 def stream_disconnect_policy_for_screen_mode(screen_mode: str) -> str:
     mode = str(screen_mode).strip()
     if mode == "1":
@@ -5032,6 +5050,9 @@ class LauncherWindow(QWidget):
         screen_height: Optional[int],
         color: QColor,
         label: str,
+        pen_style=None,
+        fill_alpha: int = 35,
+        label_offset_y: int = 16,
     ):
         try:
             if isinstance(area_config, dict):
@@ -5063,10 +5084,19 @@ class LauncherWindow(QWidget):
         height = max(1, y2 - y1)
 
         pen = QPen(color, 2)
+        if pen_style is not None:
+            pen.setStyle(pen_style)
         painter.setPen(pen)
         painter.drawRect(x1, y1, width, height)
-        painter.fillRect(x1, y1, width, height, QColor(color.red(), color.green(), color.blue(), 35))
-        painter.drawText(x1 + 4, max(14, y1 + 16), label)
+        if fill_alpha > 0:
+            painter.fillRect(
+                x1,
+                y1,
+                width,
+                height,
+                QColor(color.red(), color.green(), color.blue(), fill_alpha),
+            )
+        painter.drawText(x1 + 4, max(14, y1 + label_offset_y), label)
 
     def _build_preview_display_pixmap(self) -> QPixmap:
         if self.latest_preview_pixmap is None:
@@ -5133,6 +5163,24 @@ class LauncherWindow(QWidget):
                             color,
                             label,
                         )
+                        if item_type == "areas":
+                            search_scope = resolve_preview_area_search_scope(item_data)
+                            if search_scope is not None:
+                                self._draw_stage_rect(
+                                    painter,
+                                    search_scope,
+                                    pixmap.width(),
+                                    pixmap.height(),
+                                    int(scene_data.get("width") or pixmap.width()),
+                                    int(scene_data.get("height") or pixmap.height()),
+                                    screen_width,
+                                    screen_height,
+                                    QColor(255, 220, 80),
+                                    f"搜索范围:{label}",
+                                    pen_style=Qt.PenStyle.DashLine,
+                                    fill_alpha=8,
+                                    label_offset_y=34,
+                                )
         finally:
             painter.end()
         return pixmap

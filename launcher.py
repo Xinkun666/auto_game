@@ -2159,12 +2159,6 @@ def format_history_frame_details(frame_record: dict) -> str:
 
     lines.extend([
         "",
-        "当前阶段",
-        f"- stage: {semantic_stage.get('stage') or stage_name}",
-        f"- group: {semantic_stage.get('group') or stage_group}",
-        "",
-        *_format_history_info(info_payload),
-        "",
         "日志信息",
         *_format_history_logic(
             seen_text=seen_summary,
@@ -2177,6 +2171,12 @@ def format_history_frame_details(frame_record: dict) -> str:
             code_branch=code_branch,
             next_action=next_action,
         ),
+        "",
+        "当前阶段",
+        f"- stage: {semantic_stage.get('stage') or stage_name}",
+        f"- group: {semantic_stage.get('group') or stage_group}",
+        "",
+        *_format_history_info(info_payload),
         "",
         "控制信息",
         *_format_history_control(control_frame_logs, semantic_actions),

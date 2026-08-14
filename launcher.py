@@ -2603,8 +2603,8 @@ def resolve_preview_stage_info_entries(
     seen_keys = set()
     scenes = resolve_preview_stage_scenes(stage_entry, scene_pool_info)
     item_types = (
-        ("areas", "区域"),
         ("special_areas", "特殊区域"),
+        ("areas", "区域"),
         ("points", "控点"),
     )
 

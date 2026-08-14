@@ -2627,7 +2627,7 @@ def resolve_preview_stage_info_entries(
             items = scene_data.get(item_type, {})
             if not isinstance(items, dict):
                 continue
-            for item_name in items:
+            for item_name, item_data in items.items():
                 item_name = str(item_name or "").strip()
                 if not item_name:
                     continue
@@ -2643,6 +2643,11 @@ def resolve_preview_stage_info_entries(
                         "item_type": item_type,
                         "type": type_label,
                         "name": f"{scene_name}/{item_name}",
+                        "template": str(
+                            item_data.get("template") or ""
+                            if isinstance(item_data, dict)
+                            else ""
+                        ),
                     }
                 )
     return entries
@@ -2667,6 +2672,8 @@ class LauncherWindow(QWidget):
         self.preview_info_items: dict[str, QTreeWidgetItem] = {}
         self.preview_info_item_types: dict[str, str] = {}
         self.preview_info_result_keys: dict[str, str] = {}
+        self.preview_info_template_paths: dict[str, str] = {}
+        self.preview_info_template_pixmap: Optional[QPixmap] = None
         self.preview_timer = QTimer(self)
         self.preview_timer.setInterval(150)
         self.stream_verify_timer = QTimer(self)
@@ -3009,8 +3016,22 @@ class LauncherWindow(QWidget):
         self.preview_info_tree.setColumnWidth(0, 82)
         self.preview_info_tree.setColumnWidth(1, 150)
         self.preview_info_tree.header().setStretchLastSection(True)
+        preview_template_group = QGroupBox("模板预览")
+        preview_template_layout = QVBoxLayout(preview_template_group)
+        preview_template_layout.setContentsMargins(8, 8, 8, 8)
+        self.preview_info_template_label = QLabel("点击特殊区域或区域查看模板图片")
+        self.preview_info_template_label.setObjectName("previewTemplate")
+        self.preview_info_template_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_info_template_label.setMinimumHeight(120)
+        self.preview_info_template_label.setMaximumHeight(180)
+        self.preview_info_template_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        preview_template_layout.addWidget(self.preview_info_template_label)
         preview_info_layout.addWidget(preview_info_header, 0)
         preview_info_layout.addWidget(self.preview_info_tree, 1)
+        preview_info_layout.addWidget(preview_template_group, 0)
 
         self._build_ui()
         self._bind_signals()
@@ -3241,6 +3262,12 @@ class LauncherWindow(QWidget):
                     border-radius: 8px;
                     color: #8b96a6;
                     font-size: 14px;
+                }
+                QLabel#previewTemplate {
+                    background: #f8fbff;
+                    border: 1px dashed #b9c9da;
+                    border-radius: 6px;
+                    color: #64748b;
                 }
                 QPlainTextEdit#outputConsole,
                 QTreeWidget#previewInfo {
@@ -3511,6 +3538,12 @@ class LauncherWindow(QWidget):
                 border-radius: 8px;
                 color: #8b96a6;
                 font-size: 14px;
+            }
+            QLabel#previewTemplate {
+                background: #080d16;
+                border: 1px dashed #3a4658;
+                border-radius: 6px;
+                color: #94a3b8;
             }
             QPlainTextEdit#outputConsole,
             QTreeWidget#previewInfo {
@@ -4043,6 +4076,9 @@ class LauncherWindow(QWidget):
         self.preview_info_select_all_button.clicked.connect(self._select_all_preview_info)
         self.preview_info_select_none_button.clicked.connect(self._select_no_preview_info)
         self.preview_info_tree.itemChanged.connect(self._on_preview_info_item_changed)
+        self.preview_info_tree.itemSelectionChanged.connect(
+            self._on_preview_info_selection_changed
+        )
         self.preview_fullscreen_button.clicked.connect(self._toggle_preview_fullscreen)
         self.preview_fullscreen_exit_button.clicked.connect(self._exit_preview_fullscreen)
         self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
@@ -4274,6 +4310,71 @@ class LauncherWindow(QWidget):
             button.setText(checked_text if checked else unchecked_text)
             button.blockSignals(previous_signals_blocked)
 
+    def _reset_preview_info_template(self, message: str):
+        self.preview_info_template_pixmap = None
+        self.preview_info_template_label.setPixmap(QPixmap())
+        self.preview_info_template_label.setText(message)
+        self.preview_info_template_label.setToolTip("")
+
+    def _render_preview_info_template(self):
+        label = getattr(self, "preview_info_template_label", None)
+        pixmap = getattr(self, "preview_info_template_pixmap", None)
+        if label is None or pixmap is None or pixmap.isNull():
+            return
+        target_width = max(1, label.width() - 8)
+        target_height = max(1, label.height() - 8)
+        scaled = pixmap.scaled(
+            target_width,
+            target_height,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        label.setText("")
+        label.setPixmap(scaled)
+
+    def _on_preview_info_selection_changed(self):
+        selected_items = self.preview_info_tree.selectedItems()
+        if not selected_items:
+            self._reset_preview_info_template("点击特殊区域或区域查看模板图片")
+            return
+
+        item = selected_items[0]
+        row_key = str(item.data(0, Qt.ItemDataRole.UserRole) or "")
+        item_type = self.preview_info_item_types.get(row_key)
+        if item_type not in {"special_areas", "areas"}:
+            message = "控点没有模板图片" if item_type == "points" else "该条目没有模板图片"
+            self._reset_preview_info_template(message)
+            return
+
+        template_path = self.preview_info_template_paths.get(row_key, "").strip()
+        if not template_path:
+            self._reset_preview_info_template("该区域未配置模板图片")
+            return
+
+        path = Path(template_path)
+        if not path.is_absolute():
+            project_case = self._get_preview_project_case()
+            path = (
+                ROOT_DIR
+                / "aw"
+                / "autogame"
+                / "customs_examples"
+                / project_case
+                / path
+            )
+        path = path.resolve()
+        if not path.is_file():
+            self._reset_preview_info_template(f"模板图片不存在：{path.name}")
+            return
+
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            self._reset_preview_info_template(f"模板图片读取失败：{path.name}")
+            return
+        self.preview_info_template_pixmap = pixmap
+        self.preview_info_template_label.setToolTip(str(path))
+        self._render_preview_info_template()
+
     def _toggle_preview_fullscreen(self):
         if self.page_stack.currentWidget() is self.preview_fullscreen_page:
             self._exit_preview_fullscreen()
@@ -4345,6 +4446,7 @@ class LauncherWindow(QWidget):
         super().resizeEvent(event)
         self._adjust_preview_splitter_sizes()
         self._refresh_preview_pixmap()
+        self._render_preview_info_template()
 
     def closeEvent(self, event):
         self._stop_stream_verification("")
@@ -5011,10 +5113,12 @@ class LauncherWindow(QWidget):
         self.preview_info_items.clear()
         self.preview_info_item_types.clear()
         self.preview_info_result_keys.clear()
+        self.preview_info_template_paths.clear()
         self.preview_image_label.setText("启动后将在这里实时显示可视化帧")
         self.preview_image_label.setPixmap(QPixmap())
         self.preview_info_stage_label.setText("当前阶段：等待运行")
         self.preview_info_tree.clear()
+        self._reset_preview_info_template("点击特殊区域或区域查看模板图片")
 
         preview_dir.mkdir(parents=True, exist_ok=True)
         for path in preview_dir.iterdir():
@@ -5201,6 +5305,8 @@ class LauncherWindow(QWidget):
         self.preview_info_items.clear()
         self.preview_info_item_types.clear()
         self.preview_info_result_keys.clear()
+        self.preview_info_template_paths.clear()
+        self._reset_preview_info_template("点击特殊区域或区域查看模板图片")
         self.preview_info_stage_name = stage_name
 
         project_info = self._load_preview_project_info(self._get_preview_project_case())
@@ -5231,6 +5337,7 @@ class LauncherWindow(QWidget):
                     "item_type": "other",
                     "type": "其他",
                     "name": info_key,
+                    "template": "",
                 }
             )
             known_info_keys.add(info_key)
@@ -5247,6 +5354,7 @@ class LauncherWindow(QWidget):
             self.preview_info_items[entry["key"]] = item
             self.preview_info_item_types[entry["key"]] = entry["item_type"]
             self.preview_info_result_keys[entry["key"]] = entry["info_key"]
+            self.preview_info_template_paths[entry["key"]] = entry["template"]
 
         self._sync_preview_master_buttons_from_checks()
 

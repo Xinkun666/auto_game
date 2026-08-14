@@ -2172,14 +2172,14 @@ def format_history_frame_details(frame_record: dict) -> str:
             next_action=next_action,
         ),
         "",
+        "控制信息",
+        *_format_history_control(control_frame_logs, semantic_actions),
+        "",
         "当前阶段",
         f"- stage: {semantic_stage.get('stage') or stage_name}",
         f"- group: {semantic_stage.get('group') or stage_group}",
         "",
         *_format_history_info(info_payload),
-        "",
-        "控制信息",
-        *_format_history_control(control_frame_logs, semantic_actions),
     ])
 
     return "\n".join(lines)

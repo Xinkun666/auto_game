@@ -2605,17 +2605,25 @@ def resolve_preview_stage_info_entries(
     item_types = (
         ("areas", "区域"),
         ("special_areas", "特殊区域"),
+        ("points", "控点"),
     )
 
+    selected_scenes = []
     for scene_name, raw_scene_data in scenes.items():
-        if not isinstance(raw_scene_data, dict):
-            continue
-        scene_data = select_scene_resolution(
-            raw_scene_data,
-            screen_width,
-            screen_height,
-        )
-        for item_type, type_label in item_types:
+        if isinstance(raw_scene_data, dict):
+            selected_scenes.append(
+                (
+                    scene_name,
+                    select_scene_resolution(
+                        raw_scene_data,
+                        screen_width,
+                        screen_height,
+                    ),
+                )
+            )
+
+    for item_type, type_label in item_types:
+        for scene_name, scene_data in selected_scenes:
             items = scene_data.get(item_type, {})
             if not isinstance(items, dict):
                 continue
@@ -2624,12 +2632,15 @@ def resolve_preview_stage_info_entries(
                 if not item_name:
                     continue
                 info_key = f"{scene_name}__{item_name}"
-                if info_key in seen_keys:
+                row_key = f"{item_type}::{info_key}"
+                if row_key in seen_keys:
                     continue
-                seen_keys.add(info_key)
+                seen_keys.add(row_key)
                 entries.append(
                     {
-                        "key": info_key,
+                        "key": row_key,
+                        "info_key": info_key if item_type != "points" else "",
+                        "item_type": item_type,
                         "type": type_label,
                         "name": f"{scene_name}/{item_name}",
                     }
@@ -2654,6 +2665,8 @@ class LauncherWindow(QWidget):
         self.preview_info_cache: dict[str, dict] = {}
         self.preview_info_stage_name: Optional[str] = None
         self.preview_info_items: dict[str, QTreeWidgetItem] = {}
+        self.preview_info_item_types: dict[str, str] = {}
+        self.preview_info_result_keys: dict[str, str] = {}
         self.preview_timer = QTimer(self)
         self.preview_timer.setInterval(150)
         self.stream_verify_timer = QTimer(self)
@@ -2922,13 +2935,13 @@ class LauncherWindow(QWidget):
             "关闭时仍保留运行帧图片/JSON、Launcher 日志和 hilog，"
             "但不生成预览视频"
         )
-        self.preview_overlay_button = QPushButton("显示标注")
+        self.preview_overlay_button = QPushButton("隐藏标注")
         self.preview_overlay_button.setCheckable(True)
-        self.preview_overlay_button.setChecked(False)
+        self.preview_overlay_button.setChecked(True)
         self.preview_overlay_button.setProperty("toggleButton", True)
-        self.preview_points_button = QPushButton("显示控点")
+        self.preview_points_button = QPushButton("隐藏控点")
         self.preview_points_button.setCheckable(True)
-        self.preview_points_button.setChecked(False)
+        self.preview_points_button.setChecked(True)
         self.preview_points_button.setProperty("toggleButton", True)
         self.preview_fullscreen_button = QPushButton("放大预览")
         self.preview_fullscreen_button.setToolTip("让实时预览覆盖整个启动器界面；按 Esc 可退出")
@@ -2971,8 +2984,19 @@ class LauncherWindow(QWidget):
         preview_info_layout = QVBoxLayout(self.preview_info_panel)
         preview_info_layout.setContentsMargins(0, 0, 0, 0)
         preview_info_layout.setSpacing(6)
+        preview_info_header = QWidget()
+        preview_info_header_layout = QHBoxLayout(preview_info_header)
+        preview_info_header_layout.setContentsMargins(0, 0, 0, 0)
+        preview_info_header_layout.setSpacing(6)
         self.preview_info_stage_label = QLabel("当前阶段：等待运行")
         self.preview_info_stage_label.setObjectName("previewInfoStage")
+        self.preview_info_select_all_button = QPushButton("全选")
+        self.preview_info_select_none_button = QPushButton("全不选")
+        self.preview_info_select_all_button.setFixedWidth(64)
+        self.preview_info_select_none_button.setFixedWidth(64)
+        preview_info_header_layout.addWidget(self.preview_info_stage_label, 1)
+        preview_info_header_layout.addWidget(self.preview_info_select_all_button)
+        preview_info_header_layout.addWidget(self.preview_info_select_none_button)
         self.preview_info_tree = QTreeWidget()
         self.preview_info_tree.setObjectName("previewInfo")
         self.preview_info_tree.setHeaderLabels(["类型", "场景/名称", "当前帧识别信息"])
@@ -2985,7 +3009,7 @@ class LauncherWindow(QWidget):
         self.preview_info_tree.setColumnWidth(0, 82)
         self.preview_info_tree.setColumnWidth(1, 150)
         self.preview_info_tree.header().setStretchLastSection(True)
-        preview_info_layout.addWidget(self.preview_info_stage_label, 0)
+        preview_info_layout.addWidget(preview_info_header, 0)
         preview_info_layout.addWidget(self.preview_info_tree, 1)
 
         self._build_ui()
@@ -4016,6 +4040,9 @@ class LauncherWindow(QWidget):
         self.generate_preview_video_button.toggled.connect(self._toggle_generate_preview_video)
         self.preview_overlay_button.toggled.connect(self._toggle_preview_overlay)
         self.preview_points_button.toggled.connect(self._toggle_preview_points)
+        self.preview_info_select_all_button.clicked.connect(self._select_all_preview_info)
+        self.preview_info_select_none_button.clicked.connect(self._select_no_preview_info)
+        self.preview_info_tree.itemChanged.connect(self._on_preview_info_item_changed)
         self.preview_fullscreen_button.clicked.connect(self._toggle_preview_fullscreen)
         self.preview_fullscreen_exit_button.clicked.connect(self._exit_preview_fullscreen)
         self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
@@ -4197,6 +4224,55 @@ class LauncherWindow(QWidget):
         self.preview_points_button.setText("隐藏控点" if checked else "显示控点")
         LOGGER.info("preview points toggled: %s", checked)
         self._refresh_preview_pixmap()
+
+    def _set_all_preview_info_checked(self, checked: bool):
+        previous_signals_blocked = self.preview_info_tree.blockSignals(True)
+        try:
+            check_state = (
+                Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            )
+            for item in self.preview_info_items.values():
+                info_key = str(item.data(0, Qt.ItemDataRole.UserRole) or "")
+                if self.preview_info_item_types.get(info_key) == "other":
+                    continue
+                item.setCheckState(0, check_state)
+        finally:
+            self.preview_info_tree.blockSignals(previous_signals_blocked)
+        self._sync_preview_master_buttons_from_checks()
+        self._refresh_preview_pixmap()
+
+    def _select_all_preview_info(self):
+        self._set_all_preview_info_checked(True)
+
+    def _select_no_preview_info(self):
+        self._set_all_preview_info_checked(False)
+
+    def _on_preview_info_item_changed(self, _item, column: int):
+        if column == 0:
+            self._sync_preview_master_buttons_from_checks()
+            self._refresh_preview_pixmap()
+
+    def _sync_preview_master_buttons_from_checks(self):
+        overlay_checked = False
+        points_checked = False
+        for info_key, item in self.preview_info_items.items():
+            if item.checkState(0) != Qt.CheckState.Checked:
+                continue
+            item_type = self.preview_info_item_types.get(info_key)
+            if item_type in {"areas", "special_areas"}:
+                overlay_checked = True
+            elif item_type == "points":
+                points_checked = True
+
+        button_states = (
+            (self.preview_overlay_button, overlay_checked, "隐藏标注", "显示标注"),
+            (self.preview_points_button, points_checked, "隐藏控点", "显示控点"),
+        )
+        for button, checked, checked_text, unchecked_text in button_states:
+            previous_signals_blocked = button.blockSignals(True)
+            button.setChecked(checked)
+            button.setText(checked_text if checked else unchecked_text)
+            button.blockSignals(previous_signals_blocked)
 
     def _toggle_preview_fullscreen(self):
         if self.page_stack.currentWidget() is self.preview_fullscreen_page:
@@ -4933,6 +5009,8 @@ class LauncherWindow(QWidget):
         self.latest_preview_payload = None
         self.preview_info_stage_name = None
         self.preview_info_items.clear()
+        self.preview_info_item_types.clear()
+        self.preview_info_result_keys.clear()
         self.preview_image_label.setText("启动后将在这里实时显示可视化帧")
         self.preview_image_label.setPixmap(QPixmap())
         self.preview_info_stage_label.setText("当前阶段：等待运行")
@@ -5121,6 +5199,8 @@ class LauncherWindow(QWidget):
     def _rebuild_preview_info_list(self, stage_name: str, payload):
         self.preview_info_tree.clear()
         self.preview_info_items.clear()
+        self.preview_info_item_types.clear()
+        self.preview_info_result_keys.clear()
         self.preview_info_stage_name = stage_name
 
         project_info = self._load_preview_project_info(self._get_preview_project_case())
@@ -5137,27 +5217,38 @@ class LauncherWindow(QWidget):
 
         info_payload = payload.get("info") if isinstance(payload, dict) else None
         info_payload = info_payload if isinstance(info_payload, dict) else {}
-        known_keys = {entry["key"] for entry in entries}
+        known_info_keys = {
+            entry["info_key"] for entry in entries if entry["info_key"]
+        }
         for info_key in info_payload:
             info_key = str(info_key)
-            if info_key in known_keys:
+            if info_key in known_info_keys:
                 continue
             entries.append(
                 {
-                    "key": info_key,
+                    "key": f"other::{info_key}",
+                    "info_key": info_key,
+                    "item_type": "other",
                     "type": "其他",
                     "name": info_key,
                 }
             )
-            known_keys.add(info_key)
+            known_info_keys.add(info_key)
 
         for entry in entries:
             item = QTreeWidgetItem(self.preview_info_tree)
             item.setText(0, entry["type"])
             item.setText(1, entry["name"])
             item.setText(2, "—")
+            if entry["item_type"] != "other":
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(0, Qt.CheckState.Checked)
             item.setData(0, Qt.ItemDataRole.UserRole, entry["key"])
             self.preview_info_items[entry["key"]] = item
+            self.preview_info_item_types[entry["key"]] = entry["item_type"]
+            self.preview_info_result_keys[entry["key"]] = entry["info_key"]
+
+        self._sync_preview_master_buttons_from_checks()
 
         if not entries:
             empty_item = QTreeWidgetItem(self.preview_info_tree)
@@ -5176,6 +5267,7 @@ class LauncherWindow(QWidget):
         vertical_value = vertical_scroll.value()
         horizontal_value = horizontal_scroll.value()
 
+        previous_signals_blocked = self.preview_info_tree.blockSignals(True)
         self.preview_info_tree.setUpdatesEnabled(False)
         try:
             if stage_changed:
@@ -5189,7 +5281,8 @@ class LauncherWindow(QWidget):
 
             info_payload = payload.get("info")
             info_payload = info_payload if isinstance(info_payload, dict) else {}
-            for info_key, item in self.preview_info_items.items():
+            for row_key, item in self.preview_info_items.items():
+                info_key = self.preview_info_result_keys.get(row_key, row_key)
                 if info_key in info_payload:
                     value = info_payload[info_key]
                     display_text = format_preview_info_item_value(value)
@@ -5202,10 +5295,26 @@ class LauncherWindow(QWidget):
                 item.setToolTip(2, tooltip_text)
         finally:
             self.preview_info_tree.setUpdatesEnabled(True)
+            self.preview_info_tree.blockSignals(previous_signals_blocked)
 
         if not stage_changed:
             vertical_scroll.setValue(vertical_value)
             horizontal_scroll.setValue(horizontal_value)
+
+    def _is_preview_info_item_checked(
+        self,
+        scene_name: str,
+        item_type: str,
+        item_name: str,
+    ) -> bool:
+        info_key = f"{scene_name}__{item_name}"
+        row_key = f"{item_type}::{info_key}"
+        item = self.preview_info_items.get(row_key)
+        if item is None:
+            return True
+        if self.preview_info_item_types.get(row_key) != item_type:
+            return True
+        return item.checkState(0) == Qt.CheckState.Checked
 
     def _draw_stage_rect(
         self,
@@ -5277,7 +5386,6 @@ class LauncherWindow(QWidget):
 
         payload = self.latest_preview_payload or {}
         stage = resolve_preview_payload_stage_name(payload)
-        group_name = resolve_preview_payload_group_name(payload)
         project_case = self._get_preview_project_case()
         project_info = self._load_preview_project_info(project_case)
         stage_info = project_info.get("stage_info", {})
@@ -5286,7 +5394,6 @@ class LauncherWindow(QWidget):
         scenes = resolve_preview_stage_scenes(stage_entry, scene_pool)
         if not scenes:
             return self.latest_preview_pixmap
-        group_filter = resolve_preview_group_filter(stage_entry, group_name)
 
         pixmap = self.latest_preview_pixmap.copy()
         painter = QPainter(pixmap)
@@ -5312,8 +5419,7 @@ class LauncherWindow(QWidget):
                     for item_name, item_data in items.items():
                         if not isinstance(item_data, dict):
                             continue
-                        if not is_preview_stage_item_visible(
-                            group_filter,
+                        if not self._is_preview_info_item_checked(
                             scene_name,
                             item_type,
                             item_name,
@@ -5382,6 +5488,7 @@ class LauncherWindow(QWidget):
         self.latest_preview_pixmap = pixmap
         self.latest_preview_payload = payload if isinstance(payload, dict) else {"raw": payload}
         self.preview_image_label.setText("")
+        self._update_preview_info_list(payload)
         self._adjust_preview_splitter_sizes()
         render_success = self._refresh_preview_pixmap()
         LOGGER.info(
@@ -5389,7 +5496,6 @@ class LauncherWindow(QWidget):
             "success" if render_success else "fail",
             latest_image,
         )
-        self._update_preview_info_list(payload)
 
     def _validate_selection(self, issues: ValidationIssues) -> Optional[tuple[str, str]]:
         project_case = self.project_combo.currentText().strip()
@@ -6856,9 +6962,9 @@ class LauncherWindow(QWidget):
         self.latest_preview_pixmap = pixmap
         self.latest_preview_payload = payload
         self.preview_image_label.setText("")
+        self._update_preview_info_list(payload)
         self._adjust_preview_splitter_sizes()
         self._refresh_preview_pixmap()
-        self._update_preview_info_list(payload)
 
     def _check_stream_verification_client_state(self):
         client = self.stream_verify_client

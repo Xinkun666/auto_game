@@ -1081,6 +1081,21 @@ def format_preview_frame_info(payload) -> str:
     return "当前帧暂无画面识别信息。"
 
 
+def format_preview_info_item_value(value, max_length: int = PREVIEW_INFO_VALUE_MAX_LENGTH) -> str:
+    """Format one recognition result for a stable preview-list cell."""
+    compact_value = _truncate_preview_info_value(value, max_length=max_length)
+    if isinstance(compact_value, str):
+        return compact_value
+    if isinstance(compact_value, (list, tuple, dict)):
+        return json.dumps(
+            compact_value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+    return str(compact_value)
+
+
 def resolve_preview_group_filter(stage_entry, group_name: str):
     """Match the runtime stage-group selection used by StageLogicController."""
     group_name = str(group_name or "").strip()
@@ -2577,6 +2592,51 @@ def resolve_preview_stage_scenes(stage_entry, scene_pool_info=None) -> dict[str,
     return resolved
 
 
+def resolve_preview_stage_info_entries(
+    stage_entry,
+    scene_pool_info=None,
+    screen_width: Optional[int] = None,
+    screen_height: Optional[int] = None,
+) -> list[dict[str, str]]:
+    """Build the stable area rows shown while one preview stage is active."""
+    entries = []
+    seen_keys = set()
+    scenes = resolve_preview_stage_scenes(stage_entry, scene_pool_info)
+    item_types = (
+        ("areas", "区域"),
+        ("special_areas", "特殊区域"),
+    )
+
+    for scene_name, raw_scene_data in scenes.items():
+        if not isinstance(raw_scene_data, dict):
+            continue
+        scene_data = select_scene_resolution(
+            raw_scene_data,
+            screen_width,
+            screen_height,
+        )
+        for item_type, type_label in item_types:
+            items = scene_data.get(item_type, {})
+            if not isinstance(items, dict):
+                continue
+            for item_name in items:
+                item_name = str(item_name or "").strip()
+                if not item_name:
+                    continue
+                info_key = f"{scene_name}__{item_name}"
+                if info_key in seen_keys:
+                    continue
+                seen_keys.add(info_key)
+                entries.append(
+                    {
+                        "key": info_key,
+                        "type": type_label,
+                        "name": f"{scene_name}/{item_name}",
+                    }
+                )
+    return entries
+
+
 class LauncherWindow(QWidget):
     stream_verification_failed = pyqtSignal(str)
 
@@ -2592,6 +2652,8 @@ class LauncherWindow(QWidget):
         self.latest_preview_payload: Optional[dict] = None
         self.stage_info_cache: dict[str, dict] = {}
         self.preview_info_cache: dict[str, dict] = {}
+        self.preview_info_stage_name: Optional[str] = None
+        self.preview_info_items: dict[str, QTreeWidgetItem] = {}
         self.preview_timer = QTimer(self)
         self.preview_timer.setInterval(150)
         self.stream_verify_timer = QTimer(self)
@@ -2904,12 +2966,27 @@ class LauncherWindow(QWidget):
         self.preview_image_label.setMinimumHeight(100)
         self.preview_image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        self.preview_info_edit = QPlainTextEdit()
-        self.preview_info_edit.setObjectName("previewInfo")
-        self.preview_info_edit.setReadOnly(True)
-        self.preview_info_edit.setPlaceholderText("当前帧识别信息会显示在这里...")
-        self.preview_info_edit.setMinimumHeight(50)
-        self.preview_info_edit.setMinimumWidth(280)
+        self.preview_info_panel = QWidget()
+        self.preview_info_panel.setObjectName("previewInfoPanel")
+        preview_info_layout = QVBoxLayout(self.preview_info_panel)
+        preview_info_layout.setContentsMargins(0, 0, 0, 0)
+        preview_info_layout.setSpacing(6)
+        self.preview_info_stage_label = QLabel("当前阶段：等待运行")
+        self.preview_info_stage_label.setObjectName("previewInfoStage")
+        self.preview_info_tree = QTreeWidget()
+        self.preview_info_tree.setObjectName("previewInfo")
+        self.preview_info_tree.setHeaderLabels(["类型", "场景/名称", "当前帧识别信息"])
+        self.preview_info_tree.setRootIsDecorated(False)
+        self.preview_info_tree.setAlternatingRowColors(True)
+        self.preview_info_tree.setUniformRowHeights(True)
+        self.preview_info_tree.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.preview_info_tree.setMinimumHeight(120)
+        self.preview_info_tree.setMinimumWidth(320)
+        self.preview_info_tree.setColumnWidth(0, 82)
+        self.preview_info_tree.setColumnWidth(1, 150)
+        self.preview_info_tree.header().setStretchLastSection(True)
+        preview_info_layout.addWidget(self.preview_info_stage_label, 0)
+        preview_info_layout.addWidget(self.preview_info_tree, 1)
 
         self._build_ui()
         self._bind_signals()
@@ -3142,7 +3219,7 @@ class LauncherWindow(QWidget):
                     font-size: 14px;
                 }
                 QPlainTextEdit#outputConsole,
-                QPlainTextEdit#previewInfo {
+                QTreeWidget#previewInfo {
                     background: #fbfdff;
                     border: 1px solid #d3dfec;
                     border-radius: 8px;
@@ -3412,7 +3489,7 @@ class LauncherWindow(QWidget):
                 font-size: 14px;
             }
             QPlainTextEdit#outputConsole,
-            QPlainTextEdit#previewInfo {
+            QTreeWidget#previewInfo {
                 background: #060912;
                 border: 1px solid #273142;
                 border-radius: 8px;
@@ -3687,7 +3764,7 @@ class LauncherWindow(QWidget):
         self.preview_splitter.setChildrenCollapsible(False)
         self.preview_splitter.setHandleWidth(8)
         self.preview_splitter.addWidget(self.preview_image_label)
-        self.preview_splitter.addWidget(self.preview_info_edit)
+        self.preview_splitter.addWidget(self.preview_info_panel)
         self.preview_splitter.setStretchFactor(0, 4)
         self.preview_splitter.setStretchFactor(1, 1)
         self.preview_splitter.setSizes([620, self.preview_target_info_height])
@@ -4854,9 +4931,12 @@ class LauncherWindow(QWidget):
         self.latest_preview_file = None
         self.latest_preview_pixmap = None
         self.latest_preview_payload = None
+        self.preview_info_stage_name = None
+        self.preview_info_items.clear()
         self.preview_image_label.setText("启动后将在这里实时显示可视化帧")
         self.preview_image_label.setPixmap(QPixmap())
-        self.preview_info_edit.clear()
+        self.preview_info_stage_label.setText("当前阶段：等待运行")
+        self.preview_info_tree.clear()
 
         preview_dir.mkdir(parents=True, exist_ok=True)
         for path in preview_dir.iterdir():
@@ -4897,7 +4977,7 @@ class LauncherWindow(QWidget):
             if available_width <= 0:
                 return
 
-            min_info_width = max(self.preview_info_edit.minimumWidth(), 280)
+            min_info_width = max(self.preview_info_tree.minimumWidth(), 320)
             preferred_info_width = max(min_info_width, self.preview_target_info_width)
             current_preview_width = max(0, current_sizes[0])
             current_info_width = max(0, current_sizes[1])
@@ -4922,7 +5002,7 @@ class LauncherWindow(QWidget):
             if available_height <= 0:
                 return
 
-            min_info_height = max(self.preview_info_edit.minimumHeight(), 150)
+            min_info_height = max(self.preview_info_tree.minimumHeight(), 150)
             preferred_info_height = max(min_info_height, self.preview_target_info_height)
             current_preview_height = max(0, current_sizes[0])
             current_info_height = max(0, current_sizes[1])
@@ -5037,6 +5117,95 @@ class LauncherWindow(QWidget):
 
     def _load_stage_info(self, project_case: str) -> dict:
         return self._load_preview_project_info(project_case).get("stage_info", {})
+
+    def _rebuild_preview_info_list(self, stage_name: str, payload):
+        self.preview_info_tree.clear()
+        self.preview_info_items.clear()
+        self.preview_info_stage_name = stage_name
+
+        project_info = self._load_preview_project_info(self._get_preview_project_case())
+        stage_info = project_info.get("stage_info", {})
+        scene_pool = project_info.get("scene_pool", {})
+        stage_entry = stage_info.get(stage_name, {}) if isinstance(stage_info, dict) else {}
+        screen_width, screen_height = self._get_preview_render_screen_size(payload)
+        entries = resolve_preview_stage_info_entries(
+            stage_entry,
+            scene_pool,
+            screen_width,
+            screen_height,
+        )
+
+        info_payload = payload.get("info") if isinstance(payload, dict) else None
+        info_payload = info_payload if isinstance(info_payload, dict) else {}
+        known_keys = {entry["key"] for entry in entries}
+        for info_key in info_payload:
+            info_key = str(info_key)
+            if info_key in known_keys:
+                continue
+            entries.append(
+                {
+                    "key": info_key,
+                    "type": "其他",
+                    "name": info_key,
+                }
+            )
+            known_keys.add(info_key)
+
+        for entry in entries:
+            item = QTreeWidgetItem(self.preview_info_tree)
+            item.setText(0, entry["type"])
+            item.setText(1, entry["name"])
+            item.setText(2, "—")
+            item.setData(0, Qt.ItemDataRole.UserRole, entry["key"])
+            self.preview_info_items[entry["key"]] = item
+
+        if not entries:
+            empty_item = QTreeWidgetItem(self.preview_info_tree)
+            empty_item.setText(0, "阶段信息")
+            empty_item.setText(1, stage_name or "未识别阶段")
+            empty_item.setText(2, "该阶段未配置区域或特殊区域")
+
+    def _update_preview_info_list(self, payload):
+        payload = payload if isinstance(payload, dict) else {"raw": payload}
+        stage_name = resolve_preview_payload_stage_name(payload)
+        group_name = resolve_preview_payload_group_name(payload)
+        stage_changed = stage_name != self.preview_info_stage_name
+
+        vertical_scroll = self.preview_info_tree.verticalScrollBar()
+        horizontal_scroll = self.preview_info_tree.horizontalScrollBar()
+        vertical_value = vertical_scroll.value()
+        horizontal_value = horizontal_scroll.value()
+
+        self.preview_info_tree.setUpdatesEnabled(False)
+        try:
+            if stage_changed:
+                self._rebuild_preview_info_list(stage_name, payload)
+
+            stage_text = stage_name or "未识别"
+            group_text = group_name or "默认"
+            self.preview_info_stage_label.setText(
+                f"当前阶段：{stage_text}    分组：{group_text}"
+            )
+
+            info_payload = payload.get("info")
+            info_payload = info_payload if isinstance(info_payload, dict) else {}
+            for info_key, item in self.preview_info_items.items():
+                if info_key in info_payload:
+                    value = info_payload[info_key]
+                    display_text = format_preview_info_item_value(value)
+                    tooltip_text = format_preview_info_item_value(value, max_length=2000)
+                else:
+                    display_text = "—"
+                    tooltip_text = "当前帧无该项信息"
+                if item.text(2) != display_text:
+                    item.setText(2, display_text)
+                item.setToolTip(2, tooltip_text)
+        finally:
+            self.preview_info_tree.setUpdatesEnabled(True)
+
+        if not stage_changed:
+            vertical_scroll.setValue(vertical_value)
+            horizontal_scroll.setValue(horizontal_value)
 
     def _draw_stage_rect(
         self,
@@ -5220,7 +5389,7 @@ class LauncherWindow(QWidget):
             "success" if render_success else "fail",
             latest_image,
         )
-        self.preview_info_edit.setPlainText(format_preview_frame_info(payload))
+        self._update_preview_info_list(payload)
 
     def _validate_selection(self, issues: ValidationIssues) -> Optional[tuple[str, str]]:
         project_case = self.project_combo.currentText().strip()
@@ -6689,7 +6858,7 @@ class LauncherWindow(QWidget):
         self.preview_image_label.setText("")
         self._adjust_preview_splitter_sizes()
         self._refresh_preview_pixmap()
-        self.preview_info_edit.setPlainText(format_preview_frame_info(payload))
+        self._update_preview_info_list(payload)
 
     def _check_stream_verification_client_state(self):
         client = self.stream_verify_client

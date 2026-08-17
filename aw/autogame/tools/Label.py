@@ -66,6 +66,7 @@ ITEM_TYPE_LABELS = {
     "control": "控点",
     "special_area": "特殊区域",
 }
+SEARCH_SCOPE_INERTIA_FACTOR = 0.8
 
 
 @dataclass
@@ -4028,6 +4029,85 @@ class AutoStudioWindow(QMainWindow):
             y2 - y1,
         )
 
+    @staticmethod
+    def _rects_match(first: Optional[RectData], second: Optional[RectData], tolerance: float = 1e-6) -> bool:
+        if first is None or second is None:
+            return first is second
+        return all(
+            abs(first_value - second_value) <= tolerance
+            for first_value, second_value in (
+                (first.x, second.x),
+                (first.y, second.y),
+                (first.w, second.w),
+                (first.h, second.h),
+            )
+        )
+
+    def _scale_search_scope_between_images(
+        self,
+        item_type: str,
+        rect: Optional[RectData],
+        search_scope: Optional[RectData],
+        scaled_rect: Optional[RectData],
+        old_w,
+        old_h,
+        new_w,
+        new_h,
+    ) -> Optional[RectData]:
+        if search_scope is None:
+            return None
+        if old_w <= 0 or old_h <= 0 or new_w <= 0 or new_h <= 0:
+            return self._clone_rect(search_scope)
+
+        # The default scope follows the area exactly. Only a separately drawn
+        # area scope receives the center-outward inertia transformation.
+        if item_type != "area" or self._rects_match(rect, search_scope):
+            return self._clone_rect(scaled_rect)
+
+        scale_x = float(new_w) / float(old_w)
+        scale_y = float(new_h) / float(old_h)
+        old_center_x = float(old_w) / 2.0
+        old_center_y = float(old_h) / 2.0
+        new_center_x = float(new_w) / 2.0
+        new_center_y = float(new_h) / 2.0
+
+        def transform_x(value):
+            centered = float(value) - old_center_x
+            return (
+                new_center_x
+                + scale_x * centered
+                + SEARCH_SCOPE_INERTIA_FACTOR * (scale_x - 1.0) * centered
+            )
+
+        def transform_y(value):
+            centered = float(value) - old_center_y
+            return (
+                new_center_y
+                + scale_y * centered
+                + SEARCH_SCOPE_INERTIA_FACTOR * (scale_y - 1.0) * centered
+            )
+
+        x1, x2 = sorted((transform_x(search_scope.x), transform_x(search_scope.x + search_scope.w)))
+        y1, y2 = sorted((transform_y(search_scope.y), transform_y(search_scope.y + search_scope.h)))
+
+        # The membrane cannot leave the image and cannot cut through its area
+        # nucleus. A colliding edge is aligned exactly with that hard boundary.
+        x1 = max(0.0, min(float(new_w), x1))
+        y1 = max(0.0, min(float(new_h), y1))
+        x2 = max(0.0, min(float(new_w), x2))
+        y2 = max(0.0, min(float(new_h), y2))
+        if scaled_rect is not None:
+            core_x1 = max(0.0, min(float(new_w), float(scaled_rect.x)))
+            core_y1 = max(0.0, min(float(new_h), float(scaled_rect.y)))
+            core_x2 = max(0.0, min(float(new_w), float(scaled_rect.x + scaled_rect.w)))
+            core_y2 = max(0.0, min(float(new_h), float(scaled_rect.y + scaled_rect.h)))
+            x1 = min(x1, core_x1)
+            y1 = min(y1, core_y1)
+            x2 = max(x2, core_x2)
+            y2 = max(y2, core_y2)
+
+        return RectData(x1, y1, x2 - x1, y2 - y1)
+
     def _rescale_scene_items_for_new_image(self, scene: SceneData, old_size, new_size):
         old_w, old_h = old_size
         new_w, new_h = new_size
@@ -4038,9 +4118,20 @@ class AutoStudioWindow(QMainWindow):
         if not scene.items:
             return False
         for item in scene.items:
-            item.rect = self._scale_rect_between_images(item.rect, old_w, old_h, new_w, new_h)
-            if item.search_scope:
-                item.search_scope = self._scale_rect_between_images(item.search_scope, old_w, old_h, new_w, new_h)
+            old_rect = item.rect
+            old_search_scope = item.search_scope
+            scaled_rect = self._scale_rect_between_images(old_rect, old_w, old_h, new_w, new_h)
+            item.rect = scaled_rect
+            item.search_scope = self._scale_search_scope_between_images(
+                item.item_type,
+                old_rect,
+                old_search_scope,
+                scaled_rect,
+                old_w,
+                old_h,
+                new_w,
+                new_h,
+            )
         return True
 
     def _replace_scene_image(self, scene_data: SceneData, image_path: str, pixmap: QPixmap):
@@ -4189,12 +4280,22 @@ class AutoStudioWindow(QMainWindow):
     def _clone_item_for_scene_size(self, item: ItemData, source_size: Tuple[int, int], target_size: Tuple[int, int]) -> ItemData:
         old_w, old_h = source_size
         new_w, new_h = target_size
+        scaled_rect = self._scale_rect_between_images(item.rect, old_w, old_h, new_w, new_h)
         return ItemData(
             id=str(random.randint(10000, 99999)),
             name=item.name,
             item_type=item.item_type,
-            rect=self._scale_rect_between_images(item.rect, old_w, old_h, new_w, new_h),
-            search_scope=self._scale_rect_between_images(item.search_scope, old_w, old_h, new_w, new_h),
+            rect=scaled_rect,
+            search_scope=self._scale_search_scope_between_images(
+                item.item_type,
+                item.rect,
+                item.search_scope,
+                scaled_rect,
+                old_w,
+                old_h,
+                new_w,
+                new_h,
+            ),
             visible=item.visible,
             positioning=item.positioning,
             relative_to=item.relative_to,

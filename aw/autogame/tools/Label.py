@@ -3587,6 +3587,7 @@ class AutoStudioWindow(QMainWindow):
             scene_name = data.get("scene_name", "")
             is_virtual_group = bool(data.get("virtual")) or self._is_virtual_all_scene_group(scene_group)
             first_scene = self._first_pool_scene_resolution(scene_group, scene_name)
+            action_scene_group = self._find_scene_pool_group_for_scene(first_scene) if first_scene else None
             self.current_stage = self._find_stage_for_scene(first_scene) if first_scene else None
             self.set_current_work_stage(self.current_stage)
             self.current_scene = first_scene
@@ -3596,6 +3597,18 @@ class AutoStudioWindow(QMainWindow):
                 self.clear_scene_display()
             lbl = QLabel(f"池内场景: {scene_name}")
             self.action_layout.addWidget(lbl)
+            btn_cap = QPushButton("📷 抓图")
+            btn_cap.clicked.connect(
+                lambda: self.capture_image(first_scene, scene_group=action_scene_group)
+            )
+            btn_cap.setEnabled(bool(first_scene and action_scene_group))
+            self.action_layout.addWidget(btn_cap)
+            btn_import = QPushButton("🖼 导入图片")
+            btn_import.clicked.connect(
+                lambda: self.import_image(first_scene, scene_group=action_scene_group)
+            )
+            btn_import.setEnabled(bool(first_scene and action_scene_group))
+            self.action_layout.addWidget(btn_import)
             btn_manage_stages = QPushButton("管理阶段")
             btn_manage_stages.clicked.connect(lambda: self.manage_pool_scene_stages(scene_group, scene_name))
             btn_manage_stages.setEnabled(bool(self.project and self.project.stages and first_scene))
@@ -3634,10 +3647,15 @@ class AutoStudioWindow(QMainWindow):
             self.current_scene = data
             self.show_scene_image(data)
             if is_pool_scene:
+                action_scene_group = self._find_scene_pool_group_for_scene(data)
                 btn_cap = QPushButton("📷 抓图")
-                btn_cap.clicked.connect(lambda: self.capture_image(data))
+                btn_cap.clicked.connect(
+                    lambda: self.capture_image(data, scene_group=action_scene_group)
+                )
                 btn_import = QPushButton("🖼 导入图片")
-                btn_import.clicked.connect(lambda: self.import_image(data))
+                btn_import.clicked.connect(
+                    lambda: self.import_image(data, scene_group=action_scene_group)
+                )
                 btn_area = QPushButton("🟦 添加区域 (Area)")
                 btn_area.clicked.connect(lambda: self.prepare_draw('area'))
                 btn_ctrl = QPushButton("🟥 添加控点 (Control)")
@@ -3799,6 +3817,20 @@ class AutoStudioWindow(QMainWindow):
             scene_name = data.get("scene_name", "")
             is_virtual_group = bool(data.get("virtual")) or self._is_virtual_all_scene_group(scene_group)
             first_scene = self._first_pool_scene_resolution(scene_group, scene_name)
+            action_scene_group = self._find_scene_pool_group_for_scene(first_scene) if first_scene else None
+            capture_action = QAction("📷 抓图", self)
+            capture_action.setEnabled(bool(first_scene and action_scene_group))
+            capture_action.triggered.connect(
+                lambda: self.capture_image(first_scene, scene_group=action_scene_group)
+            )
+            menu.addAction(capture_action)
+            import_image_action = QAction("🖼 导入图片", self)
+            import_image_action.setEnabled(bool(first_scene and action_scene_group))
+            import_image_action.triggered.connect(
+                lambda: self.import_image(first_scene, scene_group=action_scene_group)
+            )
+            menu.addAction(import_image_action)
+            menu.addSeparator()
             manage_stage_action = QAction("管理阶段", self)
             manage_stage_action.setEnabled(bool(
                 self.project
@@ -3850,6 +3882,18 @@ class AutoStudioWindow(QMainWindow):
             menu.addSeparator()
         elif isinstance(data, SceneData):
             if tree is getattr(self, "scene_pool_tree", None):
+                action_scene_group = self._find_scene_pool_group_for_scene(data)
+                capture_action = QAction("📷 抓图", self)
+                capture_action.triggered.connect(
+                    lambda: self.capture_image(data, scene_group=action_scene_group)
+                )
+                menu.addAction(capture_action)
+                import_image_action = QAction("🖼 导入图片", self)
+                import_image_action.triggered.connect(
+                    lambda: self.import_image(data, scene_group=action_scene_group)
+                )
+                menu.addAction(import_image_action)
+                menu.addSeparator()
                 copy_action = QAction("复制场景", self)
                 copy_action.triggered.connect(lambda: self.copy_scene(data))
                 menu.addAction(copy_action)
@@ -4514,7 +4558,54 @@ class AutoStudioWindow(QMainWindow):
         self.status_label.setText(
             f"已在{location_label}将场景 {scene_name} 的组件转换到 {new_size[0]} * {new_size[1]}，可在新图片上微调。"
         )
-    def capture_image(self, scene_data):
+    def _apply_scene_image_by_resolution(
+        self,
+        scene_data: SceneData,
+        image_path: str,
+        pixmap: QPixmap,
+        operation_name: str,
+        scene_group: Optional[SceneGroupData] = None,
+    ) -> CaptureResolutionApplyResult:
+        new_size = (pixmap.width(), pixmap.height())
+        if scene_group is not None:
+            resolution_scenes = [scene for scene in scene_group.scenes if scene.name == scene_data.name]
+        else:
+            stage = self._find_stage_for_scene(scene_data)
+            resolution_scenes = [
+                scene for scene in (stage.scenes if stage else [scene_data])
+                if scene.name == scene_data.name
+            ]
+        matching_resolution_existed = self._find_scene_with_image_size(resolution_scenes, new_size) is not None
+        apply_result = self._apply_capture_pixmap_to_scene_resolution(
+            scene_data,
+            image_path,
+            pixmap,
+            scene_group=scene_group,
+        )
+        target_scene = apply_result.scene
+        from_pool = scene_group is not None
+        if self.project and not from_pool:
+            self._sync_stage_scene_resolutions_from_pool(self.project)
+        preferred_tree = getattr(self, "scene_pool_tree", None) if from_pool else None
+        self.current_stage = None if from_pool else self._find_stage_for_scene(target_scene)
+        self.set_current_work_stage(self.current_stage)
+        self.current_scene = target_scene
+        self.canvas.set_image(pixmap)
+        self.canvas.redraw_overlays(target_scene)
+        self._refresh_tree_for_scene(target_scene, preferred_tree=preferred_tree)
+        if not matching_resolution_existed:
+            self.status_label.setText(
+                f"{operation_name}成功，检测到新分辨率 {target_scene.image_width} * {target_scene.image_height}，"
+                "已新建一套分辨率并复制转换标注。"
+            )
+            return apply_result
+        self.status_label.setText(
+            f"{operation_name}成功，已覆盖已有分辨率 "
+            f"{target_scene.image_width} * {target_scene.image_height} 的图片。"
+        )
+        return apply_result
+
+    def capture_image(self, scene_data, scene_group: Optional[SceneGroupData] = None):
         # 通过 hdc 截图并拉取到本地，再显示到工作区
         remote_path = "/data/local/tmp/screenCasting.jpeg"
         local_dir = tempfile.gettempdir()
@@ -4533,43 +4624,19 @@ class AutoStudioWindow(QMainWindow):
         if not img:
             QMessageBox.critical(self, "抓图失败", "读取截图文件失败，请检查路径或权限。")
             return
-        capture_from_pool = (
+        if scene_group is None and (
             getattr(self, "_active_tree_widget", None)
             is getattr(self, "scene_pool_tree", None)
-        )
-        scene_group = self._find_scene_pool_group_for_scene(scene_data) if capture_from_pool else None
-        apply_result = self._apply_capture_pixmap_to_scene_resolution(
+        ):
+            scene_group = self._find_scene_pool_group_for_scene(scene_data)
+        self._apply_scene_image_by_resolution(
             scene_data,
             local_path,
             img,
+            "抓图",
             scene_group=scene_group,
         )
-        target_scene = apply_result.scene
-        if self.project and not capture_from_pool:
-            self._sync_stage_scene_resolutions_from_pool(self.project)
-        preferred_tree = getattr(self, "scene_pool_tree", None) if capture_from_pool else None
-        self.current_stage = None if capture_from_pool else self._find_stage_for_scene(target_scene)
-        self.set_current_work_stage(self.current_stage)
-        self.current_scene = target_scene
-        self.canvas.set_image(img)
-        self.canvas.redraw_overlays(target_scene)
-        self._refresh_tree_for_scene(target_scene, preferred_tree=preferred_tree)
-        if apply_result.action == "created":
-            self.status_label.setText(
-                f"抓图成功，检测到新分辨率 {target_scene.image_width} * {target_scene.image_height}，"
-                "已自动复制并转换控件。"
-            )
-            return
-        if apply_result.action == "replaced_existing" and target_scene is not scene_data:
-            self.status_label.setText(
-                f"抓图成功，已覆盖已有分辨率 {target_scene.image_width} * {target_scene.image_height} 的图片。"
-            )
-            return
-        if apply_result.resized_items:
-            self.status_label.setText("抓图成功，已按新图片尺寸同步缩放已有标注。")
-            return
-        self.status_label.setText("抓图成功。请开始添加区域或控点。")
-    def import_image(self, scene_data):
+    def import_image(self, scene_data, scene_group: Optional[SceneGroupData] = None):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "选择图片",
@@ -4582,13 +4649,18 @@ class AutoStudioWindow(QMainWindow):
         if not img:
             QMessageBox.critical(self, "导入失败", "读取图片失败，请检查文件格式或路径。")
             return
-        resized_items = self._replace_scene_image(scene_data, file_path, img)
-        self.show_scene_image(scene_data)
-        self._refresh_tree_for_scene(scene_data)
-        if resized_items:
-            self.status_label.setText("图片已导入，已按新图片尺寸同步缩放已有标注。")
-            return
-        self.status_label.setText("图片已导入。请开始添加区域或控点。")
+        if scene_group is None and (
+            getattr(self, "_active_tree_widget", None)
+            is getattr(self, "scene_pool_tree", None)
+        ):
+            scene_group = self._find_scene_pool_group_for_scene(scene_data)
+        self._apply_scene_image_by_resolution(
+            scene_data,
+            file_path,
+            img,
+            "导入",
+            scene_group=scene_group,
+        )
     def show_scene_image(self, scene_data):
         if not scene_data:
             self.clear_scene_display()

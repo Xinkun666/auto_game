@@ -3630,6 +3630,7 @@ class AutoStudioWindow(QMainWindow):
             self.set_current_work_stage(self.current_stage)
             scene_name = data.get("scene_name", "")
             first_scene = self._first_stage_scene_resolution(self.current_stage, scene_name)
+            action_scene_group = self._find_scene_pool_group_for_scene(first_scene) if first_scene else None
             self.current_scene = first_scene
             if first_scene:
                 self.show_scene_image(first_scene)
@@ -3637,6 +3638,26 @@ class AutoStudioWindow(QMainWindow):
                 self.clear_scene_display()
             lbl = QLabel(f"当前场景: {self._stage_scene_display_name(self.current_stage, scene_name)}")
             self.action_layout.addWidget(lbl)
+            btn_cap = QPushButton("📷 抓图")
+            btn_cap.clicked.connect(
+                lambda: self.capture_image(
+                    first_scene,
+                    scene_group=action_scene_group,
+                    stage_context=self.current_stage,
+                )
+            )
+            btn_cap.setEnabled(bool(first_scene))
+            self.action_layout.addWidget(btn_cap)
+            btn_import = QPushButton("🖼 导入图片")
+            btn_import.clicked.connect(
+                lambda: self.import_image(
+                    first_scene,
+                    scene_group=action_scene_group,
+                    stage_context=self.current_stage,
+                )
+            )
+            btn_import.setEnabled(bool(first_scene))
+            self.action_layout.addWidget(btn_import)
             btn_delete = QPushButton("从当前阶段移除")
             btn_delete.clicked.connect(lambda: self.delete_scene_group(self.current_stage, scene_name))
             self.action_layout.addWidget(btn_delete)
@@ -3804,6 +3825,7 @@ class AutoStudioWindow(QMainWindow):
         tree = tree or self.tree
         item = tree.itemAt(position)
         if not item: return
+        self._active_tree_widget = tree
         data = item.data(0, Qt.ItemDataRole.UserRole)
         menu = QMenu()
         if isinstance(data, StageData):
@@ -3869,9 +3891,34 @@ class AutoStudioWindow(QMainWindow):
             menu.addAction(batch_action)
             menu.addSeparator()
         elif isinstance(data, dict) and data.get("kind") == "scene_group":
+            stage = data.get("stage")
+            scene_name = data.get("scene_name", "")
+            first_scene = self._first_stage_scene_resolution(stage, scene_name)
+            action_scene_group = self._find_scene_pool_group_for_scene(first_scene) if first_scene else None
+            capture_action = QAction("📷 抓图", self)
+            capture_action.setEnabled(bool(first_scene))
+            capture_action.triggered.connect(
+                lambda: self.capture_image(
+                    first_scene,
+                    scene_group=action_scene_group,
+                    stage_context=stage,
+                )
+            )
+            menu.addAction(capture_action)
+            import_image_action = QAction("🖼 导入图片", self)
+            import_image_action.setEnabled(bool(first_scene))
+            import_image_action.triggered.connect(
+                lambda: self.import_image(
+                    first_scene,
+                    scene_group=action_scene_group,
+                    stage_context=stage,
+                )
+            )
+            menu.addAction(import_image_action)
+            menu.addSeparator()
             copy_resolution_action = QAction("复制控件到不同分辨率", self)
             copy_resolution_action.triggered.connect(
-                lambda: self.copy_scene_to_different_resolution(data.get("stage"), data.get("scene_name", ""))
+                lambda: self.copy_scene_to_different_resolution(stage, scene_name)
             )
             menu.addAction(copy_resolution_action)
             remove_reference_action = QAction("从当前阶段移除", self)
@@ -4565,6 +4612,7 @@ class AutoStudioWindow(QMainWindow):
         pixmap: QPixmap,
         operation_name: str,
         scene_group: Optional[SceneGroupData] = None,
+        stage_context: Optional[StageData] = None,
     ) -> CaptureResolutionApplyResult:
         new_size = (pixmap.width(), pixmap.height())
         if scene_group is not None:
@@ -4583,11 +4631,13 @@ class AutoStudioWindow(QMainWindow):
             scene_group=scene_group,
         )
         target_scene = apply_result.scene
-        from_pool = scene_group is not None
-        if self.project and not from_pool:
+        from_pool_only = scene_group is not None and stage_context is None
+        if self.project and scene_group is None:
             self._sync_stage_scene_resolutions_from_pool(self.project)
-        preferred_tree = getattr(self, "scene_pool_tree", None) if from_pool else None
-        self.current_stage = None if from_pool else self._find_stage_for_scene(target_scene)
+        elif self.project and scene_group is not None and stage_context is not None:
+            self._sync_stage_scene_resolutions_from_pool(self.project)
+        preferred_tree = getattr(self, "scene_pool_tree", None) if from_pool_only else getattr(self, "tree", None)
+        self.current_stage = None if from_pool_only else (stage_context or self._find_stage_for_scene(target_scene))
         self.set_current_work_stage(self.current_stage)
         self.current_scene = target_scene
         self.canvas.set_image(pixmap)
@@ -4605,7 +4655,12 @@ class AutoStudioWindow(QMainWindow):
         )
         return apply_result
 
-    def capture_image(self, scene_data, scene_group: Optional[SceneGroupData] = None):
+    def capture_image(
+        self,
+        scene_data,
+        scene_group: Optional[SceneGroupData] = None,
+        stage_context: Optional[StageData] = None,
+    ):
         # 通过 hdc 截图并拉取到本地，再显示到工作区
         remote_path = "/data/local/tmp/screenCasting.jpeg"
         local_dir = tempfile.gettempdir()
@@ -4635,8 +4690,14 @@ class AutoStudioWindow(QMainWindow):
             img,
             "抓图",
             scene_group=scene_group,
+            stage_context=stage_context,
         )
-    def import_image(self, scene_data, scene_group: Optional[SceneGroupData] = None):
+    def import_image(
+        self,
+        scene_data,
+        scene_group: Optional[SceneGroupData] = None,
+        stage_context: Optional[StageData] = None,
+    ):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "选择图片",
@@ -4660,6 +4721,7 @@ class AutoStudioWindow(QMainWindow):
             img,
             "导入",
             scene_group=scene_group,
+            stage_context=stage_context,
         )
     def show_scene_image(self, scene_data):
         if not scene_data:

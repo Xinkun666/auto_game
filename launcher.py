@@ -188,6 +188,33 @@ LOG_FILTERS = (
 )
 LOG_CATEGORIES = set(LOG_FILTERS) - {LOG_FILTER_ALL}
 
+# 这些字段是每帧都会刷新、只供算法使用的原始识别结果。它们仍完整展示在
+# “识别信息”里，但不应冒充为“日志信息”中的业务结论。
+HISTORY_ROUTINE_INFO_KEYS = frozenset({
+    "direction",
+    "location",
+    "speed",
+    "white_angle",
+    "forward_scene",
+    "house_scene",
+})
+HISTORY_MAX_VISIBLE_LOG_LINES = 3
+HISTORY_KEY_LOG_MARKERS = (
+    "异常",
+    "失败",
+    "错误",
+    "超时",
+    "结束",
+    "停止",
+    "切换",
+    "进入",
+    "退出",
+    "重试",
+    "恢复",
+    "卡死",
+    "成功",
+)
+
 
 def build_launcher_process_args(*helper_args: str) -> list[str]:
     args = [str(arg) for arg in helper_args]
@@ -1857,20 +1884,83 @@ def _strip_seen_prefix(text: str) -> str:
     return value
 
 
+def _is_routine_history_info_key(key) -> bool:
+    """Return whether an info key is routine telemetry rather than a scene event."""
+    value = str(key or "").strip().lower()
+    if "__" in value:
+        value = value.rsplit("__", 1)[-1]
+    return value in HISTORY_ROUTINE_INFO_KEYS
+
+
+def _is_routine_recognition_history_log(text: str) -> bool:
+    """Suppress bare `看到 direction/location` lines from the decision log."""
+    value = _clean_history_text(text, "")
+    if not value:
+        return False
+    normalized = value.lower().replace("，", ",").replace("、", ",")
+    normalized = re.sub(r"^\[[^\]]+\]\s*", "", normalized).strip(" 。.!！")
+    match = re.fullmatch(r"(?:看到|看到了|识别到|检测到|发现)\s*(.+)", normalized)
+    names_text = match.group(1) if match else normalized
+    names = [part.strip() for part in names_text.split(",") if part.strip()]
+    return bool(names) and all(_is_routine_history_info_key(name) for name in names)
+
+
+def _compact_history_logic_logs(frame_logs: list) -> list[str]:
+    """Keep the history view readable without deleting the raw frame log payload."""
+    unique_logs = []
+    seen_logs = set()
+    for item in frame_logs if isinstance(frame_logs, list) else []:
+        text = _clean_history_text(item, "")
+        if not text or text in seen_logs or _is_routine_recognition_history_log(text):
+            continue
+        unique_logs.append(text)
+        seen_logs.add(text)
+
+    if len(unique_logs) <= HISTORY_MAX_VISIBLE_LOG_LINES:
+        return [f"- {text}" for text in unique_logs]
+
+    key_indexes = [
+        index
+        for index, text in enumerate(unique_logs)
+        if any(marker in text for marker in HISTORY_KEY_LOG_MARKERS)
+    ]
+    selected_indexes = key_indexes[:HISTORY_MAX_VISIBLE_LOG_LINES]
+    for index in range(len(unique_logs) - 1, -1, -1):
+        if len(selected_indexes) >= HISTORY_MAX_VISIBLE_LOG_LINES:
+            break
+        if index not in selected_indexes:
+            selected_indexes.append(index)
+    selected_indexes.sort()
+
+    lines = [f"- {unique_logs[index]}" for index in selected_indexes]
+    hidden_count = len(unique_logs) - len(selected_indexes)
+    lines.append(f"- 其余 {hidden_count} 条普通日志已折叠（原始记录仍保留在该帧 JSON）。")
+    return lines
+
+
 def _extract_seen_text(semantic_perception: dict, seen: dict, info_payload: dict) -> str:
     for source in (semantic_perception, seen):
         if isinstance(source, dict):
             info_keys = source.get("info_keys")
             if isinstance(info_keys, list) and info_keys:
-                return ", ".join(str(key) for key in info_keys)
+                meaningful_keys = [
+                    str(key) for key in info_keys
+                    if not _is_routine_history_info_key(key)
+                ]
+                if meaningful_keys:
+                    return ", ".join(meaningful_keys)
             summary = _strip_seen_prefix(str(source.get("summary") or ""))
-            if summary:
+            if summary and not _is_routine_recognition_history_log(summary):
                 return summary
     if isinstance(info_payload, dict):
         active_keys = []
         for key, value in info_payload.items():
             text = str(value).strip()
-            if text and text not in {"False", "None", "[]", "{}"}:
+            if (
+                text
+                and text not in {"False", "None", "[]", "{}"}
+                and not _is_routine_history_info_key(key)
+            ):
                 active_keys.append(str(key))
         if active_keys:
             return ", ".join(active_keys)
@@ -1899,12 +1989,7 @@ def _format_history_logic(
     next_action: str,
 ) -> list[str]:
     if isinstance(frame_logs, list):
-        lines = []
-        for item in frame_logs:
-            text = _clean_history_text(item, "")
-            if not text:
-                continue
-            lines.append(f"- {text}")
+        lines = _compact_history_logic_logs(frame_logs)
         if lines:
             return lines
 
@@ -1946,20 +2031,18 @@ def _format_history_logic(
         "",
     )
 
-    lines = [f"- 看到: {_clean_history_text(seen_text)}"]
-    if branch_name:
-        lines.append(f"- 逻辑: {branch_name}")
+    lines = []
     if observation and observation != seen_text:
         lines.append(f"- 判断: {observation}")
     if action:
-        lines.append(f"- 要做: {action}")
-    if method:
-        lines.append(f"- 方法: {method}")
-    if result:
+        lines.append(f"- 决策: {action}")
+    if result and any(marker in result for marker in HISTORY_KEY_LOG_MARKERS):
         lines.append(f"- 结果: {result}")
-    if len(lines) == 1 and _clean_history_text(stage_name, ""):
-        lines.append(f"- 逻辑: {stage_name}")
-    return lines
+    if lines:
+        return lines[:HISTORY_MAX_VISIBLE_LOG_LINES]
+    if branch_name and branch_name != _clean_history_text(stage_name, ""):
+        return [f"- 当前逻辑: {branch_name}"]
+    return ["- 本帧暂无新的业务决策日志。"]
 
 
 def _strip_control_history_log_prefix(text: str) -> str:
@@ -2212,6 +2295,7 @@ def format_history_frame_details(frame_record: dict) -> str:
         f"- stage: {semantic_stage.get('stage') or stage_name}",
         f"- group: {semantic_stage.get('group') or stage_group}",
         "",
+        "识别信息",
         *_format_history_info(info_payload),
     ])
 

@@ -19,6 +19,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_g
     stable_angle,
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import Cooldown, Stopwatch
+from aw.autogame.tools.FrameLog import log_frame_event_on_change
 
 if TYPE_CHECKING:
     from aw.autogame.tools.GameFrameWorker import FrameWorker
@@ -458,11 +459,16 @@ class DrivingManager:
 
         context = self._build_context(w)
         if context is None:
-            w.frame_log("[Driving] 当前帧没有有效车辆位置或方向，本帧不执行动作")
+            log_frame_event_on_change(
+                w,
+                "driving.input_recovery",
+                "context_missing",
+                "[Driving] 当前帧没有有效车辆位置或方向，本帧不执行动作",
+                repeat_after_seconds=5.0,
+            )
             self._finalize_frame(w)
             return
 
-        self._log_frame_context(w, context)
         if not self.match_clock.is_running():
             self.set_game_time()
 
@@ -548,16 +554,6 @@ class DrivingManager:
         if self._frame_action_executed and not w.refresh_frame():
             w.frame_log("[Driving] 本帧动作已执行，但刷新下一帧失败")
 
-    def _log_frame_context(self, w: "FrameWorker", context: DriveContext):
-        obstacle_count = int(context.obstacle_info.get("obstacles_count", 0) or 0)
-        hard_count = int(context.obstacle_info.get("hard_obstacles_count", 0) or 0)
-        coverage = float(context.obstacle_info.get("coverage_ratio", 0.0) or 0.0)
-        w.frame_log(
-            f"[Driving] 帧信息：位置={context.location}，方向={context.direction:.1f}°，"
-            f"速度={context.speed}，阶段={self.current_stage}，视觉建议={context.decision}，"
-            f"障碍={obstacle_count}，硬障碍={hard_count}，覆盖={coverage:.2f}"
-        )
-
     def _format_action(self, action: str, duration: Optional[int] = None) -> str:
         labels = {
             "straight": "straight（自动前进直行）",
@@ -598,7 +594,13 @@ class DrivingManager:
             self.road_list = []
             self.last_planned_circle_angle = None
             if getattr(self, "_frame_worker", None) is not None:
-                self._frame_worker.frame_log("[Driving] 白圈方向尚未稳定，本帧没有进圈目标角度")
+                log_frame_event_on_change(
+                    self._frame_worker,
+                    "driving.navigation_mode",
+                    "circle_angle_missing",
+                    "[Driving] 白圈方向尚未稳定，暂不生成进圈目标角度",
+                    repeat_after_seconds=5.0,
+                )
             return None
 
         if self._should_plan_route():
@@ -610,15 +612,20 @@ class DrivingManager:
             target = self.road_list[0]
             target_direction = calculate_angle(location, target)
             if getattr(self, "_frame_worker", None) is not None:
-                self._frame_worker.frame_log(
-                    f"[Driving] 当前路径点={target}，距离={get_distance(location, target):.1f}，"
-                    f"目标方向={target_direction:.1f}°"
+                log_frame_event_on_change(
+                    self._frame_worker,
+                    "driving.navigation_mode",
+                    f"waypoint:{target}",
+                    f"[Driving] 切换到路径点 {target}，目标方向={target_direction:.1f}°",
                 )
             return target_direction
 
         if getattr(self, "_frame_worker", None) is not None:
-            self._frame_worker.frame_log(
-                f"[Driving] 当前无路径点，按稳定白圈方向 {self.stable_circle_angle:.1f}° 自由巡航"
+            log_frame_event_on_change(
+                self._frame_worker,
+                "driving.navigation_mode",
+                f"circle:{self.stable_circle_angle:.1f}",
+                f"[Driving] 路径点已用完，按白圈方向 {self.stable_circle_angle:.1f}° 自由巡航",
             )
         return self.stable_circle_angle
 
@@ -1143,16 +1150,24 @@ class DrivingManager:
         target_direction: Optional[float],
     ):
         if target_direction is None:
-            w.frame_log("[Driving] 没有稳定目标方向，执行 straight（自动前进直行）")
+            log_frame_event_on_change(
+                w,
+                "driving.maneuver",
+                "straight:no_target",
+                "[Driving] 暂无稳定目标方向，切换为自动前进直行",
+                repeat_after_seconds=5.0,
+            )
             self._execute_maneuver(w, "straight", context.speed)
             return
 
         turn_dir, _, diff = calculate_move_count(context.direction, target_direction)
 
         if turn_dir is None or diff <= self.ALIGN_THRESHOLD:
-            w.frame_log(
-                f"[Driving] 已对准目标：当前={context.direction:.1f}°，目标={target_direction:.1f}°，"
-                f"偏差={diff:.1f}°，执行 straight（自动前进直行）"
+            log_frame_event_on_change(
+                w,
+                "driving.maneuver",
+                "straight:aligned",
+                f"[Driving] 已对准目标（偏差 {diff:.1f}°），切换为自动前进直行",
             )
             self._execute_maneuver(w, "straight", context.speed)
             return
@@ -1167,9 +1182,11 @@ class DrivingManager:
             self.ROUTE_TURN_MAX_DURATION_MS,
         )
 
-        w.frame_log(
-            f"[Driving] 对齐目标：当前={context.direction:.1f}°，目标={target_direction:.1f}°，"
-            f"偏差={diff:.1f}°，执行 {self._format_action(action, duration)}"
+        log_frame_event_on_change(
+            w,
+            "driving.maneuver",
+            action,
+            f"[Driving] 目标未对准（偏差 {diff:.1f}°），切换为 {self._format_action(action, duration)}",
         )
         self._execute_calibrated_turn(
             w,

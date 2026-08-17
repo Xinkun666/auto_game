@@ -552,16 +552,6 @@ class ParachuteManager:
             self.last_location = None
             return {}
 
-        last_dist_text = f"{self.last_dist:.2f}" if self.last_dist is not None else "None"
-        w.frame_log(
-            f"[ParachuteFrame] loc={tuple(location)}, target={self.target_pos}, "
-            f"dist={current_dist:.2f}, threshold={self.TRIGGER_DIST}, "
-            f"closest={self.prior_dist:.2f}, last={last_dist_text}, "
-            f"away_streak={self.increase_streak}, "
-            f"jump_window={len(self.jump_confirm_distances)}/3, "
-            f"route_window={len(self.route_confirm_distances)}/3"
-        )
-
         # 5. 距离趋势检查 (判断是否飞过了/飞远了)
         if self._check_flight_path(current_dist, location, w):
             return self._restart_match_for_bad_route(w)

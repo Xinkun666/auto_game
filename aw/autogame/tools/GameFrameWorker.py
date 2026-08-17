@@ -2291,6 +2291,8 @@ class FrameWorker(threading.Thread):
         self.current_frame_logs = []
         self.current_frame_log_entries = []
         self.current_frame_flushed = False
+        self._frame_log_state_cache = {}
+        self._frame_log_state_lock = threading.Lock()
         self.last_gc_time = time.time()
 
         self.click = self._wrap_control_action("click", self.controller.click)
@@ -2750,6 +2752,48 @@ class FrameWorker(threading.Thread):
         self.current_frame_log_entries = existing_entries
         return True
 
+    def frame_log_state(
+        self,
+        event_key,
+        state,
+        message,
+        log_type=DEFAULT_FRAME_LOG_TYPE,
+        repeat_after_seconds=0.0,
+    ):
+        """Write an event only when its meaningful state changes.
+
+        ``repeat_after_seconds`` is for persistent faults: it keeps evidence
+        visible without emitting the same line once per rendered frame.
+        """
+        key = str(event_key or "").strip()
+        if not key:
+            return self.frame_log(message, log_type=log_type)
+        normalized_state = str(state or "")
+        try:
+            repeat_after = max(0.0, float(repeat_after_seconds or 0.0))
+        except (TypeError, ValueError):
+            repeat_after = 0.0
+        cache = getattr(self, "_frame_log_state_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._frame_log_state_cache = cache
+        lock = getattr(self, "_frame_log_state_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._frame_log_state_lock = lock
+
+        now = time.monotonic()
+        with lock:
+            previous = cache.get(key)
+            if previous is not None:
+                previous_state, previous_time = previous
+                if previous_state == normalized_state and (
+                    repeat_after <= 0 or now - previous_time < repeat_after
+                ):
+                    return False
+            cache[key] = (normalized_state, now)
+        return self.frame_log(message, log_type=log_type)
+
     def mark_failed(self, code, reason, **details):
         with self._failure_lock:
             if self.failed:
@@ -2822,12 +2866,14 @@ class FrameWorker(threading.Thread):
         if archive_dir is None:
             archive_dir = TEMP_DIR
 
-        screenshot_dir = os.path.join(str(archive_dir), "unknow_screenshots")
+        # 无操作超时属于需要人工回看的异常，截图必须随本次运行归档，
+        # 不能散落在临时目录或使用含义不清的旧目录名。
+        screenshot_dir = os.path.join(str(archive_dir), "异常画面")
         os.makedirs(screenshot_dir, exist_ok=True)
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        remote_path = f"/data/local/tmp/unknow_screen_{timestamp}.jpeg"
-        local_path = os.path.join(screenshot_dir, f"unknow_screen_{timestamp}.jpeg")
+        remote_path = f"/data/local/tmp/inactivity_timeout_{timestamp}.jpeg"
+        local_path = os.path.join(screenshot_dir, f"无操作超时_{timestamp}.jpeg")
         need_remote_rm = False
 
         try:
@@ -2854,10 +2900,10 @@ class FrameWorker(threading.Thread):
             if recv_result.returncode != 0:
                 raise RuntimeError(recv_result.stderr.strip() or recv_result.stdout.strip())
 
-            print(f"[FrameWorker] 已抓取卡死截图: {local_path}")
+            print(f"[FrameWorker] 已抓取无操作超时截图: {local_path}")
             return local_path
         except Exception as exc:
-            print(f"[FrameWorker] 抓取卡死截图失败: {exc}")
+            print(f"[FrameWorker] 抓取无操作超时截图失败: {exc}")
             return None
         finally:
             if need_remote_rm:
@@ -2876,9 +2922,26 @@ class FrameWorker(threading.Thread):
     def _handle_launcher_inactivity_timeout(self):
         idle_seconds = max(0.0, time.monotonic() - self.last_control_action_time)
         screenshot_path = self._capture_launcher_unknown_screenshot()
+        idle_seconds_text = f"{idle_seconds:.1f}".rstrip("0").rstrip(".")
+        timeout_message = (
+            f"连续 {idle_seconds_text} 秒没有操控，已结束游戏进程。"
+        )
+        self.frame_log(timeout_message, log_type=FrameLogType.SYSTEM)
+        if screenshot_path:
+            self.frame_log(
+                f"无操作超时截图已保存至：{screenshot_path}",
+                log_type=FrameLogType.SYSTEM,
+            )
+        else:
+            self.frame_log(
+                "无操作超时截图抓取失败，异常画面目录中未生成截图。",
+                log_type=FrameLogType.SYSTEM,
+            )
+        self._flush_current_frame_log()
+
         reason = (
-            f"launcher 模式下连续 {int(idle_seconds)} 秒未执行操控，"
-            f"已判定当前用例卡在未知界面并主动结束。"
+            f"launcher 模式下连续 {idle_seconds_text} 秒未执行操控，"
+            f"已判定当前用例卡在未知界面并主动结束游戏进程。"
         )
         if screenshot_path:
             reason = f"{reason} 截图: {screenshot_path}"
@@ -3060,6 +3123,7 @@ class FrameWorker(threading.Thread):
         self.failure_details = {}
         self.paused = False
         self._pause_wait_event.clear()
+        self._frame_log_state_cache = {}
         self.last_control_action_time = time.monotonic()
         self._post_control_refresh_ready_at = 0.0
         self._stream_recovery_waiting = False
@@ -3183,6 +3247,10 @@ class FrameWorker(threading.Thread):
         self.stage_dict[stage_name] = True
         self.current_stage = stage_name
         self.current_group = self._get_initial_group_for_stage(stage_name)
+        self.frame_log(
+            f"[Stage] {old_stage or '未设置'} → {stage_name}，分组={self.current_group}",
+            log_type=FrameLogType.SYSTEM,
+        )
 
         print("\n" + ">" * 40)
         print(f"  STATUS CHANGE: [{old_stage}] -> [{stage_name}]")
@@ -3201,6 +3269,11 @@ class FrameWorker(threading.Thread):
         old_group = self.current_group
         self.current_group = group_name
         print(f"[GROUP CHANGE] [{self.current_stage}] {old_group} -> {group_name}")
+        if old_group != group_name:
+            self.frame_log(
+                f"[Group] 阶段={self.current_stage}，{old_group} → {group_name}",
+                log_type=FrameLogType.LOGIC,
+            )
 
         if self.frame is not None:
             self.stage_info = self.stage_resolver.process_frame(

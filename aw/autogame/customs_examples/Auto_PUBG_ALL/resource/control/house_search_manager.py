@@ -16,6 +16,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.control.nanda_house_sea
     NandaSearchStatus,
 )
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import TimeoutTracker
+from aw.autogame.tools.FrameLog import log_frame_event_on_change
 from aw.autogame.tools.Utils import *
 
 if TYPE_CHECKING:
@@ -456,8 +457,13 @@ class HouseSearchManager:
         )
         if location_raw is None:
             self.location_missing_frames += 1
-            w.frame_log('位置值是None，等待位置刷新...')
-            w.frame_log("搜房观察：当前位置为空，所以轻推摇杆前探并刷新画面，下一帧重新读取坐标")
+            log_frame_event_on_change(
+                w,
+                "house_search.input_recovery",
+                "location_missing",
+                "[Searching] 当前位置为空，轻推摇杆前探并刷新画面，下一帧重新读取坐标",
+                repeat_after_seconds=5.0,
+            )
             self._reset_stuck_history_for_frame_wait("搜房阶段当前位置缺失")
             w.tap_single('摇杆', y_bias=self.VALID_FRAME_LOCATION_RECOVERY_Y_BIAS, wait=self.VALID_FRAME_LOCATION_RECOVERY_WAIT)
             self._refresh_frame_and_handle_jump(w)
@@ -467,8 +473,13 @@ class HouseSearchManager:
 
         if location is None:
             self.location_missing_frames += 1
-            w.frame_log('位置值无效，等待位置刷新...')
-            w.frame_log(f"搜房观察：当前位置值无效 raw={location_raw}，所以轻推摇杆前探并刷新坐标")
+            log_frame_event_on_change(
+                w,
+                "house_search.input_recovery",
+                "location_invalid",
+                "[Searching] 当前坐标无效，轻推摇杆前探并刷新坐标",
+                repeat_after_seconds=5.0,
+            )
             self._reset_stuck_history_for_frame_wait("搜房阶段位置值无效")
             w.tap_single('摇杆', y_bias=self.VALID_FRAME_LOCATION_RECOVERY_Y_BIAS, wait=self.VALID_FRAME_LOCATION_RECOVERY_WAIT)
             self._refresh_frame_and_handle_jump(w)
@@ -482,8 +493,13 @@ class HouseSearchManager:
             x_bias = self.VALID_FRAME_DIRECTION_RECOVERY_X_BIAS
             if self.direction_missing_frames % 2 == 0:
                 x_bias = -x_bias
-            w.frame_log("方向值无效，轻微滑动视角刷新方向...")
-            w.frame_log(f"搜房观察：当前位置有效但方向值无效 direction={direction}，轻滑视角后下一帧重读")
+            log_frame_event_on_change(
+                w,
+                "house_search.input_recovery",
+                "direction_invalid",
+                "[Searching] 坐标有效但方向无效，轻滑视角后下一帧重读",
+                repeat_after_seconds=5.0,
+            )
             self._reset_stuck_history_for_frame_wait("搜房阶段方向值无效")
             w.tap_single(
                 '视角',
@@ -495,7 +511,6 @@ class HouseSearchManager:
             return
 
         self.direction_missing_frames = 0
-        w.frame_log('[Action] 进入搜房决策逻辑')
         self.searching_logic(w, location, direction)
 
     def _confirm_landing_location_before_first_view(self, w: 'FrameWorker'):
@@ -511,7 +526,7 @@ class HouseSearchManager:
             return None
 
         self.location_missing_frames = 0
-        w.frame_log(f"[Searching] 落地首帧当前位置={first_loc}，轻推摇杆后刷新第二帧确认坐标稳定")
+        w.frame_log("[Searching] 落地坐标首次有效，轻推摇杆后刷新第二帧确认稳定性")
         w.tap_single(
             '摇杆',
             y_bias=self.LANDING_LOCATION_PROBE_Y_BIAS,
@@ -645,16 +660,15 @@ class HouseSearchManager:
 
         current_dir = w.get_info("direction")
         house_scene = self._get_house_scene(w)
-        if reason or not refreshed or location_source != "current":
+        if not refreshed or location_source != "current":
             notes = []
             if not refreshed:
                 notes.append("刷新失败")
             if location_source != "current":
-                notes.append(f"location_source={location_source}")
-            suffix = f"，{'，'.join(notes)}" if notes else ""
+                notes.append(f"坐标来源={location_source}")
             w.frame_log(
-                f"[Frame] {reason or '画面刷新'}：raw_location={raw_location}，当前位置={current_loc}，"
-                f"方向={current_dir}，场景={self._house_scene_label(house_scene)}{suffix}"
+                f"[Frame] {reason or '画面刷新'}：{'，'.join(notes)}，"
+                f"当前场景={self._house_scene_label(house_scene)}"
             )
 
         jump_reason = reason or f"{getattr(self, 'status', 'UNKNOWN')} 刷新后检查"
@@ -698,20 +712,18 @@ class HouseSearchManager:
         self._reset_entry_near_micro_adjust()
 
     def _reset_stuck_history_for_frame_wait(self, reason: str = ""):
-        if getattr(self, "history_locations", None):
-            if getattr(self, "_frame_worker", None) is not None:
-                self._frame_worker.frame_log(f"[Stuck] {reason or '等待刷新帧'}，清空卡住窗口，避免把等待帧误判为卡死")
         self.history_locations = []
 
     def _reset_entry_near_micro_adjust(self):
         self.entry_near_micro_adjust_attempts = 0
 
     def _pause_unstuck_for_house_bypass(self, phase_label='NAV'):
+        already_paused = self._is_house_bypass_unstuck_paused()
         self.house_bypass_unstuck_pause_until = (
             time.monotonic() + self.HOUSE_BYPASS_UNSTUCK_PAUSE_SECONDS
         )
         self.history_locations = []
-        if getattr(self, "_frame_worker", None) is not None:
+        if not already_paused and getattr(self, "_frame_worker", None) is not None:
             self._frame_worker.frame_log(f'[NavBypass] {phase_label} 绕房调整视角/前推期间暂停通用避障')
 
     def _is_house_bypass_unstuck_paused(self) -> bool:

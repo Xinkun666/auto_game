@@ -29,6 +29,7 @@ from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.support.timing import (
     Stopwatch,
     TimeoutTracker,
 )
+from aw.autogame.tools.FrameLog import log_frame_event_on_change
 from aw.autogame.tools.Utils import get_resolution
 if TYPE_CHECKING:
     from aw.autogame.tools.GameFrameWorker import FrameWorker
@@ -939,18 +940,17 @@ class RunningManager:
 
         location = self._get_location(w)
         if location is None:
-            w.frame_log("[Running] 位置无效，尝试小幅前探刷新坐标...")
+            log_frame_event_on_change(
+                w,
+                "running.input_recovery",
+                "location_missing",
+                "[Running] 当前坐标无效，轻推摇杆前探并等待下一帧刷新",
+                repeat_after_seconds=5.0,
+            )
             w.tap_single("摇杆", y_bias=-250, dura=250, wait=500)
             return
 
         direction = self._get_scalar(w.get_info("direction"))
-        w.frame_log(
-            f"[RunningFrame] loc={location}, dir={direction}, "
-            f"route_points={len(self.road_list)}, "
-            f"next={self.road_list[0] if self.road_list else None}, "
-            f"finding_car={self.finding_car}, car_mode={self.car_search_mode}, "
-            f"forced={self.forced_route_target is not None}, auto_forward={self.auto_forward}"
-        )
         self._update_circle_angle(w.get_info("white_angle"))
         forced_route_active = self._has_forced_route()
         if forced_route_active:
@@ -1076,11 +1076,6 @@ class RunningManager:
 
         target = self.road_list[0]
         dist = get_distance(location, target)
-        w.frame_log(
-            f"[RunningNav] loc={location}, target={target}, dist={dist:.2f}, "
-            f"remaining={len(self.road_list)}"
-        )
-
         if self._handle_garage_to_roadside_forward_push(w, location, direction, target):
             return
 
@@ -1493,7 +1488,6 @@ class RunningManager:
         direction: Optional[float],
     ) -> bool:
         if self.finding_car:
-            w.frame_log("[Running] 当前处于寻车阶段，跳过黑区脱离推理")
             return False
 
         if self.map_tool.is_walkable(location):
@@ -1572,14 +1566,17 @@ class RunningManager:
             self.locations.pop(0)
 
         if len(self.locations) >= self.STUCK_HISTORY_LEN:
+            was_stuck = bool(getattr(self, "stuck", False))
             try:
                 origin = (self.locations[0][0], self.locations[0][1])
                 self.stuck = all((loc[0], loc[1]) == origin for loc in self.locations)
             except (TypeError, IndexError):
                 self.stuck = False
-            if self.stuck:
+            if self.stuck and not was_stuck:
                 if getattr(self, "_frame_worker", None) is not None:
-                    self._frame_worker.frame_log(f'[Running] 检测到短时卡死: 连续{len(self.locations)}帧坐标完全一致 location={origin}')
+                    self._frame_worker.frame_log(
+                        f'[Running] 检测到短时卡死：连续{len(self.locations)}帧坐标无有效位移，进入脱困判断'
+                    )
         else:
             self.stuck = False
 
@@ -1630,10 +1627,6 @@ class RunningManager:
         target = self.forced_route_target
         finish_stage = self.forced_route_finish_stage
         dist_to_final = get_distance(location, target)
-        w.frame_log(
-            f"[Running] 临时路线前往 {target}, dist={dist_to_final:.2f}, "
-            f"reason={self.forced_route_reason}"
-        )
         if 0 <= dist_to_final <= self.forced_route_arrival_distance:
             w.frame_log(f"[Running] 已到达临时路线目标 {target}，切回 {finish_stage}")
             self.stop_auto_forward(w)
@@ -1706,7 +1699,6 @@ class RunningManager:
 
         waypoint = self.road_list[0]
         waypoint_dist = get_distance(location, waypoint)
-        w.frame_log(f"[Running] 临时路线 waypoint={waypoint}, dist={waypoint_dist:.2f}")
 
         if 0 <= waypoint_dist < self._get_current_waypoint_tolerance():
             self._discard_current_road_target()

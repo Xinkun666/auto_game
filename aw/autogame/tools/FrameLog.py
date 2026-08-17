@@ -93,3 +93,28 @@ def parse_frame_log_transport(line: str):
         "category": category,
         "message": message,
     }
+
+
+def log_frame_event_on_change(
+    worker,
+    event_key,
+    state,
+    message,
+    log_type=DEFAULT_FRAME_LOG_TYPE,
+    repeat_after_seconds: float = 0.0,
+):
+    """Record a recurring runtime condition once per state transition.
+
+    Test doubles and older workers retain the normal ``frame_log`` fallback.
+    The real FrameWorker keeps the state cache for the lifetime of one run.
+    """
+    reporter = getattr(worker, "frame_log_state", None)
+    if callable(reporter):
+        return reporter(
+            event_key,
+            state,
+            message,
+            log_type=log_type,
+            repeat_after_seconds=repeat_after_seconds,
+        )
+    return worker.frame_log(message)

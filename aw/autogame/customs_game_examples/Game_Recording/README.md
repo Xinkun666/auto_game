@@ -5,10 +5,10 @@
 ## 第一次使用
 
 1. 用标注工具加载：
-   `aw/autogame/customs_examples/Game_Recording`
+   `aw/autogame/customs_game_examples/Game_Recording`
 2. 新建一个阶段和一个场景，并导入当前手机画面。
 3. 使用“控点”标注 `w`、`a`、`s`、`d`，也可以继续标注 `space`、`f`、`j`、`k` 等键。
-4. 导出时仍选择 `Game_Recording` 工程。
+4. 导出时仍选择 `Game_Recording` 工程；启动脚本会自动读取 Label 导出的布局。
 
 `q` 和 `e` 已被录制开关占用，不要标成游戏控点。`w/a/s/d` 应标在同一个移动摇杆的上、左、下、右四个方向。
 

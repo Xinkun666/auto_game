@@ -40,7 +40,7 @@ def main(argv=None) -> int:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
-    from aw.autogame.customs_examples.Game_Recording.resource.app import run
+    from aw.autogame.customs_game_examples.Game_Recording.resource.app import run
 
     return run(output_root=args.output.expanduser().resolve(), fps=args.fps)
 

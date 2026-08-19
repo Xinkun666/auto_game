@@ -29,6 +29,11 @@ class HosRemoteConfig:
             5.0,
         )
         self.force_video_so = str(kwargs.get("force_video_so", "") or "").strip()
+        self.excluded_video_sos = tuple(
+            str(name).strip()
+            for name in (kwargs.get("excluded_video_sos", ()) or ())
+            if str(name).strip()
+        )
         self.use_old_version = kwargs.get("use_old_version", False)
         if not self.sn:
             raise ValueError("sn cannot be empty")
@@ -115,6 +120,9 @@ class HosRemoteConfig:
 
     def get_force_video_so(self) -> str:
         return self.force_video_so
+
+    def get_excluded_video_sos(self):
+        return self.excluded_video_sos
 
     def get_use_old_version(self) -> bool:
         return self.use_old_version

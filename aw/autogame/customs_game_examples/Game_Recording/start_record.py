@@ -30,10 +30,11 @@ def parse_args(argv=None):
     parser.add_argument("--fps", type=float, default=15.0, help="本地 MP4 帧率，默认 15")
     parser.add_argument(
         "--video-so",
-        default="latest",
+        default="auto",
         help=(
-            "HOS 投屏 SO：latest 强制推送本地最新候选（默认）；"
-            "reuse 复用设备现有版本；也可填写完整 SO 文件名"
+            "HOS 投屏 SO：auto 动态尝试全部候选（默认）；"
+            "latest 只强制最新候选；reuse 复用设备现有版本；"
+            "也可填写完整 SO 文件名"
         ),
     )
     args = parser.parse_args(argv)

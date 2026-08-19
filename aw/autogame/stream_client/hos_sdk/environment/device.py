@@ -21,6 +21,10 @@ BASE_TIME = "2023-10-01 00:00:00"
 AGENT_CLEAR_PATH = ["app", "commons-", "agent", "libagent_antry"]
 FPORT_RETRY_ATTEMPTS = int(os.environ.get("AUTOGAME_HOSCRCPY_FPORT_RETRIES", "10"))
 FPORT_RETRY_DELAY_SECONDS = float(os.environ.get("AUTOGAME_HOSCRCPY_FPORT_RETRY_DELAY", "1"))
+VIDEO_PROCESS_START_TIMEOUT_SECONDS = float(
+    os.environ.get("AUTOGAME_HOSCRCPY_VIDEO_PROCESS_START_TIMEOUT", "1.0")
+)
+VIDEO_PROCESS_POLL_INTERVAL_SECONDS = 0.1
 
 PATH = os.path.dirname(os.path.abspath(__file__))
 RESOURCE_PATH = os.path.join(os.path.dirname(PATH), "res")
@@ -47,6 +51,7 @@ def _format_video_attempt(attempt):
         "start_output",
         "pid_list",
         "unix_socket",
+        "skipped",
         "error",
     )
     return ", ".join(
@@ -122,6 +127,7 @@ class Device(object):
         self.selected_video_so = ""
         self.selected_video_so_source = ""
         self.video_start_pids = []
+        self.video_start_attempts = []
 
     def _init_so_md5_map(self):
         folder_path = os.path.join(RESOURCE_PATH)
@@ -331,7 +337,7 @@ class Device(object):
         """推送并开启投屏so服务"""
         # 拉起进程
         video_params = config.get_params()
-        attempts = []
+        attempts = self.video_start_attempts = []
         # 先获取当前设备中有没推送过资源,如果已经推送过了则优先使用设备中的资源进行启动
         device_agent_path = "/data/local/tmp/libscreen_casting.z.so"
         # 获取设备端的资源md5值
@@ -345,7 +351,12 @@ class Device(object):
             _compact_log_value(device_so_md5_output),
         )
         forced_so = str(getattr(config, "get_force_video_so", lambda: "")() or "").strip()
-        if forced_so:
+        auto_mode = forced_so == "auto"
+        excluded_video_sos = set(
+            getattr(config, "get_excluded_video_sos", lambda: ())() or ()
+        )
+        attempted_video_sos = set()
+        if forced_so and not auto_mode:
             if forced_so == "latest":
                 if not self.so_name_list:
                     raise FileNotFoundError("No local HOScrcpy video so candidates were found")
@@ -368,17 +379,19 @@ class Device(object):
                 attempt["local_md5"] = self.device_helper._calculate_md5(path)
                 attempt["push_result"] = self.device_helper.init_video_so_resource(path)
                 attempt["start_output"] = self.start_video_so_server(video_params)
-                pid_list = self.device_helper.get_video_pid_list()
+                pid_list = self._wait_for_video_pid()
                 attempt["pid_list"] = pid_list
                 attempt["unix_socket"] = "unix" in forced_so
             except Exception as exc:
                 attempt["error"] = repr(exc)
+                attempts.append(attempt)
                 raise RuntimeError(
                     "Forced HOScrcpy video so failed: {}".format(
                         _format_video_attempt(attempt)
                     )
                 ) from exc
             if not pid_list:
+                attempts.append(attempt)
                 raise RuntimeError(
                     "Forced HOScrcpy video so did not expose a process: {}".format(
                         _format_video_attempt(attempt)
@@ -387,6 +400,7 @@ class Device(object):
             self.selected_video_so = forced_so
             self.selected_video_so_source = "forced"
             self.video_start_pids = list(pid_list)
+            attempts.append(attempt)
             self.is_use_unix_socket_video_so = "unix" in forced_so
             logger.info(
                 "Video server started with forced so=%s pid_list=%s",
@@ -395,12 +409,15 @@ class Device(object):
             )
             return
 
-        if device_so_md5_info in self.so_md5_map:
+        if device_so_md5_info in self.so_md5_map and not (
+            auto_mode and matched_so_name in excluded_video_sos
+        ):
             current_so_name = matched_so_name
+            attempted_video_sos.add(current_so_name)
             logger.info("try to use exist so: md5=%s so=%s", device_so_md5_info, current_so_name)
             # 直接进行启动
             start_output = self.start_video_so_server(video_params)
-            pid_list = self.device_helper.get_video_pid_list()
+            pid_list = self._wait_for_video_pid()
             attempt = {
                 "source": "existing",
                 "so": current_so_name,
@@ -419,6 +436,19 @@ class Device(object):
                 self.video_start_pids = list(pid_list)
                 return
             logger.warning("Existing scrcpy so did not expose process: %s", _format_video_attempt(attempt))
+        elif device_so_md5_info in self.so_md5_map:
+            attempts.append(
+                {
+                    "source": "existing",
+                    "so": matched_so_name,
+                    "device_md5": device_so_md5_info,
+                    "skipped": "excluded_after_runtime_failure",
+                }
+            )
+            logger.info(
+                "Skip previously failed scrcpy so in auto mode: %s",
+                matched_so_name,
+            )
         else:
             logger.warning(
                 "Device scrcpy so is missing or unknown: parsed=%s raw=%s",
@@ -427,14 +457,21 @@ class Device(object):
             )
         # 启动不成功再逐个遍历尝试
         for so_name in reversed(self.so_name_list):
+            if auto_mode and (
+                so_name in excluded_video_sos or so_name in attempted_video_sos
+            ):
+                continue
             path = os.path.join(RESOURCE_PATH, "video" + os.path.sep + so_name)
-            attempt = {"source": "pushed", "so": so_name}
+            attempt = {
+                "source": "auto-pushed" if auto_mode else "pushed",
+                "so": so_name,
+            }
             try:
                 attempt["local_md5"] = self.device_helper._calculate_md5(path)
                 logger.info("try to use %s local_md5=%s path=%s", so_name, attempt["local_md5"], path)
                 attempt["push_result"] = self.device_helper.init_video_so_resource(path)
                 attempt["start_output"] = self.start_video_so_server(video_params)
-                pid_list = self.device_helper.get_video_pid_list()
+                pid_list = self._wait_for_video_pid()
                 attempt["pid_list"] = pid_list
                 attempt["unix_socket"] = "unix" in so_name
             except Exception as exc:
@@ -448,7 +485,7 @@ class Device(object):
                 # 判断当前推送的so是不是要使用unix_socket连接方式
                 self.is_use_unix_socket_video_so = "unix" in so_name
                 self.selected_video_so = so_name
-                self.selected_video_so_source = "pushed"
+                self.selected_video_so_source = attempt["source"]
                 self.video_start_pids = list(pid_list)
                 return
             logger.warning("Pushed scrcpy so did not expose process: %s", _format_video_attempt(attempt))
@@ -468,6 +505,15 @@ class Device(object):
         logger.info("Start video so command result: %s", _compact_log_value(result))
         return result
 
+    def _wait_for_video_pid(self):
+        timeout = max(0.0, VIDEO_PROCESS_START_TIMEOUT_SECONDS)
+        deadline = time.monotonic() + timeout
+        while True:
+            pid_list = self.device_helper.get_video_pid_list()
+            if pid_list or time.monotonic() >= deadline:
+                return pid_list
+            time.sleep(VIDEO_PROCESS_POLL_INTERVAL_SECONDS)
+
     def collect_disconnect_diagnostics(self, timeout: float = 1.0):
         """在清理抓流前采集设备端进程、视频端点和 HDC 转发状态。"""
         timeout = max(0.1, float(timeout))
@@ -480,6 +526,7 @@ class Device(object):
             "selected_video_so": self.selected_video_so,
             "selected_video_so_source": self.selected_video_so_source,
             "video_start_pids": list(self.video_start_pids),
+            "video_start_attempts": list(self.video_start_attempts),
             "video_local_port": self.video_port,
             "video_device_port": self.video_server_port,
             "video_remote_node": remote_node,

@@ -91,7 +91,7 @@ def key_name_from_event(event: QKeyEvent):
 
 
 def configure_fail_fast_stream(client):
-    """Game_Recording 专用：首次断连后立即停止，不做任何恢复。"""
+    """Game_Recording 专用：不重试同一 SO，auto 模式可继续换下一个候选。"""
     client.max_reconnect_attempts = 0
     # HOS 对 USB offline 和 cleanup 错误还有独立恢复分支，也在此模块禁用。
     client._hdc_recovery_attempted = True
@@ -105,7 +105,7 @@ class RecorderWindow(QMainWindow):
         output_root: Path,
         fps: float = 15.0,
         runtime_log_path: Path | None = None,
-        video_so: str = "latest",
+        video_so: str = "auto",
     ):
         super().__init__()
         # 先检查空工程，避免 info.py 尚未标注时被设备连接错误遮住。
@@ -123,7 +123,7 @@ class RecorderWindow(QMainWindow):
         self.output_root = Path(output_root)
         self.runtime_log_path = Path(runtime_log_path) if runtime_log_path else None
         self.buffer = FrameBuffer(size=5)
-        requested_video_so = str(video_so or "latest").strip()
+        requested_video_so = str(video_so or "auto").strip()
         force_video_so = "" if requested_video_so == "reuse" else requested_video_so
         self.stream_client = configure_fail_fast_stream(
             HOSScrcpyStreamClient(self.buffer, force_video_so=force_video_so)
@@ -165,7 +165,11 @@ class RecorderWindow(QMainWindow):
         self.stream_monitor_timer.start(50)
 
         self.frame_pump.start()
-        print("[Game Recording] HOS 已设为首次断连即停止，不自动重连。", flush=True)
+        print(
+            "[Game Recording] HOS 不重试同一 SO；auto 模式会换包，"
+            "所有候选失败后才停止。",
+            flush=True,
+        )
         print(
             "[Game Recording] HOS 投屏 SO 策略：%s"
             % (force_video_so or "reuse-device-existing"),
@@ -371,7 +375,7 @@ def run(
     output_root: Path,
     fps: float = 15.0,
     runtime_log_path: Path | None = None,
-    video_so: str = "latest",
+    video_so: str = "auto",
 ) -> int:
     _prefer_bundled_pyqt_plugins()
     app = QApplication.instance() or QApplication([])

@@ -1191,8 +1191,12 @@ class HOSScrcpyStreamClient:
         self.decoder = decoder
         self.device_factory = device_factory
         self.force_video_so = str(force_video_so or "").strip()
+        self._auto_video_so = self.force_video_so == "auto"
+        self._excluded_video_sos = []
+        self._video_so_attempt_history = []
         self.device = None
         self._last_error = None
+        self._candidate_stream_error = None
         self._first_frame_received = False
         self._capture_first_frame_event = threading.Event()
         self._diagnostic_stage = "initialized"
@@ -1267,6 +1271,9 @@ class HOSScrcpyStreamClient:
         )
         self._reconnect_attempt = 0
         self._pre_cleanup_disconnect_diagnostic = {}
+        self._excluded_video_sos = []
+        self._video_so_attempt_history = []
+        self._candidate_stream_error = None
         self.touch_replay_frame_grace_seconds = max(
             0.0,
             _resolve_float_option(
@@ -1331,6 +1338,9 @@ class HOSScrcpyStreamClient:
         self._reconnect_attempt = 0
         self._start_monotonic = time.monotonic()
         self._pre_cleanup_disconnect_diagnostic = {}
+        self._excluded_video_sos = []
+        self._video_so_attempt_history = []
+        self._candidate_stream_error = None
         if self.save_frame:
             self._start_save_worker()
 
@@ -1341,6 +1351,7 @@ class HOSScrcpyStreamClient:
                 cleanup_error = None
                 self._pre_cleanup_disconnect_diagnostic = {}
                 self._last_error = None
+                self._candidate_stream_error = None
                 self._stream_error_event.clear()
                 self._capture_first_frame_event.clear()
                 try:
@@ -1381,6 +1392,11 @@ class HOSScrcpyStreamClient:
                         self._stop_event.wait(0.2)
                     if not self.running or self._stop_event.is_set():
                         break
+                    if self._candidate_stream_error is not None:
+                        raise RuntimeError(
+                            "HOScrcpy candidate stream failed: %s"
+                            % self._candidate_stream_error
+                        )
                     if self._last_error is not None:
                         raise RuntimeError("HOScrcpy stream failed: %s" % self._last_error)
                     raise RuntimeError("HOScrcpy stream interrupted without error")
@@ -1388,7 +1404,41 @@ class HOSScrcpyStreamClient:
                     if not self.running or self._stop_event.is_set():
                         break
                     self._capture_pre_cleanup_disconnect_diagnostic(exc)
-                    if self._is_usb_offline_error(exc):
+                    candidate_so = self._pre_cleanup_disconnect_diagnostic.get(
+                        "selected_video_so",
+                        "",
+                    )
+                    use_next_auto_so = bool(
+                        self._auto_video_so
+                        and candidate_so
+                        and candidate_so not in self._excluded_video_sos
+                        and not self._is_usb_offline_error(exc)
+                    )
+                    if use_next_auto_so:
+                        failed_sos = [
+                            str(attempt.get("so") or "").strip()
+                            for attempt in self._pre_cleanup_disconnect_diagnostic.get(
+                                "video_start_attempts",
+                                (),
+                            )
+                            if not attempt.get("skipped")
+                        ]
+                        failed_sos.append(candidate_so)
+                        for failed_so in failed_sos:
+                            if (
+                                failed_so
+                                and failed_so not in self._excluded_video_sos
+                            ):
+                                self._excluded_video_sos.append(failed_so)
+                        retry_delay = 0.0
+                        self._diagnostic_stage = "video_so_fallback"
+                        print(
+                            "[HOS] Auto video SO failed; try next candidate: "
+                            "failed=%s excluded=%s"
+                            % (candidate_so, self._excluded_video_sos),
+                            flush=True,
+                        )
+                    elif self._is_usb_offline_error(exc):
                         try:
                             if self._hdc_recovery_attempted:
                                 raise RuntimeError(
@@ -1417,26 +1467,27 @@ class HOSScrcpyStreamClient:
                         )
                         continue
 
-                    reconnect_attempt += 1
-                    self._reconnect_attempt = reconnect_attempt
-                    if reconnect_attempt > self.max_reconnect_attempts:
-                        self._last_error = exc
-                        self._diagnostic_stage = "runtime_error"
-                        message = "[HOS] Runtime Error: %s" % exc
-                        print(message, flush=True)
-                        self._write_disconnect_signal(
-                            "hoscrcpy_runtime_error",
-                            message,
-                            reconnect_attempt,
+                    else:
+                        reconnect_attempt += 1
+                        self._reconnect_attempt = reconnect_attempt
+                        if reconnect_attempt > self.max_reconnect_attempts:
+                            self._last_error = exc
+                            self._diagnostic_stage = "runtime_error"
+                            message = "[HOS] Runtime Error: %s" % exc
+                            print(message, flush=True)
+                            self._write_disconnect_signal(
+                                "hoscrcpy_runtime_error",
+                                message,
+                                reconnect_attempt,
+                            )
+                            raise
+                        retry_delay = self._get_reconnect_delay(reconnect_attempt)
+                        self._diagnostic_stage = "reconnect_wait"
+                        print(
+                            "[HOS] Stream interrupted: %s. Reconnect in %.1fs (attempt=%d/%d)."
+                            % (exc, retry_delay, reconnect_attempt, self.max_reconnect_attempts),
+                            flush=True,
                         )
-                        raise
-                    retry_delay = self._get_reconnect_delay(reconnect_attempt)
-                    self._diagnostic_stage = "reconnect_wait"
-                    print(
-                        "[HOS] Stream interrupted: %s. Reconnect in %.1fs (attempt=%d/%d)."
-                        % (exc, retry_delay, reconnect_attempt, self.max_reconnect_attempts),
-                        flush=True,
-                    )
                 finally:
                     cleanup_error = self._stop_device()
                     self._close_decoder()
@@ -1552,6 +1603,7 @@ class HOSScrcpyStreamClient:
             encoder_type=self.encoder_type,
             cleanup_command_timeout_seconds=self.cleanup_command_timeout_seconds,
             force_video_so=self.force_video_so,
+            excluded_video_sos=self._excluded_video_sos,
         )
         return HosRemoteDevice(config)
 
@@ -1568,6 +1620,8 @@ class HOSScrcpyStreamClient:
         if device is None:
             diagnostic["device_available"] = False
             self._pre_cleanup_disconnect_diagnostic = diagnostic
+            if self._auto_video_so:
+                self._video_so_attempt_history.append(dict(diagnostic))
             return diagnostic
 
         diagnostic["device_available"] = True
@@ -1582,6 +1636,8 @@ class HOSScrcpyStreamClient:
                     flush=True,
                 )
         self._pre_cleanup_disconnect_diagnostic = diagnostic
+        if self._auto_video_so:
+            self._video_so_attempt_history.append(dict(diagnostic))
         print(
             "[HOS] Pre-cleanup disconnect diagnostic: %s" % diagnostic,
             flush=True,
@@ -1746,8 +1802,12 @@ class HOSScrcpyStreamClient:
                 return
         # 先保留设备现场，再暴露 _last_error；避免 GUI 线程先行 stop 后无法诊断。
         self._capture_pre_cleanup_disconnect_diagnostic(err)
-        self._last_error = err
-        self._diagnostic_stage = "stream_error"
+        if self._auto_video_so:
+            self._candidate_stream_error = err
+            self._diagnostic_stage = "video_so_candidate_error"
+        else:
+            self._last_error = err
+            self._diagnostic_stage = "stream_error"
         message = "[HOS] Stream Error: %s" % err
         print(message, flush=True)
         self._stream_error_event.set()
@@ -1803,6 +1863,8 @@ class HOSScrcpyStreamClient:
             "reconnect_attempt": self._reconnect_attempt,
             "max_reconnect_attempts": self.max_reconnect_attempts,
             "force_video_so": self.force_video_so,
+            "excluded_video_sos": list(self._excluded_video_sos),
+            "video_so_attempt_history": list(self._video_so_attempt_history),
             "pre_cleanup_disconnect": dict(self._pre_cleanup_disconnect_diagnostic),
             "capture_paused": self.is_capture_paused(),
             "touch_replay_active": touch_replay_active,

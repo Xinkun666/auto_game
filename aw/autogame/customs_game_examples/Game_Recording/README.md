@@ -20,7 +20,9 @@
 python aw/autogame/customs_game_examples/Game_Recording/start_record.py
 ```
 
-默认会强制推送本地 `res/video` 中按日期排序最新的 HOS 投屏 SO，避免继续复用手机上残留的旧版本。实际选中的文件名会写入运行日志。
+默认使用 `auto` 动态兼容模式：先尝试设备已有 SO，启动不成功就继续尝试本地 `res/video` 中的其他候选；某个 SO 能启动但运行中断流，也会记录并切换下一个。只有所有候选都失败后，程序才最终停止。
+
+每个候选的启动结果和断流现场会写入运行日志及 `video_so_attempt_history`。
 
 如需对比设备原有版本：
 
@@ -49,9 +51,10 @@ python aw/autogame/customs_game_examples/Game_Recording/start_record.py \
 
 ## 断连处理和日志
 
-`start_record.py` 启动后会立即开始记录运行日志，不需要先按 `q`。只要 HOS 出现第一次断连：
+`start_record.py` 启动后会立即开始记录运行日志，不需要先按 `q`。HOS 出现断连时：
 
-- 不会自动重连，程序会立即停止；
+- `auto` 模式不会重试已失败的 SO，而是切换到尚未尝试的候选；
+- 所有 SO 都启动失败或运行中断流后，程序才最终停止；
 - 如果已经按 `q` 开始录制，会先保存当前视频和动作，`session.json` 中的 `stop_reason` 为 `hos_disconnect`；
 - 无论是否按过 `q`，都会保存断连诊断和完整终端输出。
 - 清理 HOS 连接前会先采集投屏进程、设备端视频端点和 `hdc fport` 状态，写入 `diagnostic.pre_cleanup_disconnect`。

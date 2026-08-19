@@ -36,13 +36,36 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
+    output_root = args.output.expanduser().resolve()
+    from aw.autogame.customs_examples.Game_Recording.resource.runtime_log import (
+        RuntimeLogCapture,
     )
-    from aw.autogame.customs_examples.Game_Recording.resource.app import run
 
-    return run(output_root=args.output.expanduser().resolve(), fps=args.fps)
+    with RuntimeLogCapture(output_root) as runtime_log:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+            force=True,
+        )
+        print(f"[Game Recording] 运行日志：{runtime_log.path}", flush=True)
+        from aw.autogame.customs_examples.Game_Recording.resource.app import run
+
+        try:
+            return run(
+                output_root=output_root,
+                fps=args.fps,
+                runtime_log_path=runtime_log.path,
+            )
+        except SystemExit as exc:
+            if exc.code not in (None, 0):
+                print(f"[Game Recording] 启动或运行失败：{exc}", file=sys.stderr, flush=True)
+            raise
+        except Exception:
+            logging.exception("Game Recording 未处理异常")
+            raise
+        finally:
+            # logging handler 持有 TeeTextIO，需在日志文件关闭前先收尾。
+            logging.shutdown()
 
 
 if __name__ == "__main__":

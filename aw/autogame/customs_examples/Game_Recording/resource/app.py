@@ -19,6 +19,7 @@ from aw.autogame.tools.Utils import get_resolution
 
 from .layout import LayoutError, RESERVED_KEYS, load_key_layout
 from .recording import RecordingSession
+from .runtime_log import save_disconnect_report
 from .touch_controller import SingleTouchKeyboardController
 
 
@@ -89,8 +90,22 @@ def key_name_from_event(event: QKeyEvent):
     return text if len(text) == 1 else None
 
 
+def configure_fail_fast_stream(client):
+    """Game_Recording 专用：首次断连后立即停止，不做任何恢复。"""
+    client.max_reconnect_attempts = 0
+    # HOS 对 USB offline 和 cleanup 错误还有独立恢复分支，也在此模块禁用。
+    client._hdc_recovery_attempted = True
+    client._cleanup_hdc_recovery_attempted = True
+    return client
+
+
 class RecorderWindow(QMainWindow):
-    def __init__(self, output_root: Path, fps: float = 15.0):
+    def __init__(
+        self,
+        output_root: Path,
+        fps: float = 15.0,
+        runtime_log_path: Path | None = None,
+    ):
         super().__init__()
         # 先检查空工程，避免 info.py 尚未标注时被设备连接错误遮住。
         load_key_layout(info, 1, 1)
@@ -104,13 +119,16 @@ class RecorderWindow(QMainWindow):
         self.screen_size = (int(screen_width), int(screen_height))
         self.key_points = load_key_layout(info, *self.screen_size)
 
+        self.output_root = Path(output_root)
+        self.runtime_log_path = Path(runtime_log_path) if runtime_log_path else None
         self.buffer = FrameBuffer(size=5)
-        self.stream_client = HOSScrcpyStreamClient(self.buffer)
-        self.recorder = RecordingSession(output_root=output_root, fps=fps)
+        self.stream_client = configure_fail_fast_stream(HOSScrcpyStreamClient(self.buffer))
+        self.recorder = RecordingSession(output_root=self.output_root, fps=fps)
         self.frame_pump = FramePump(self.buffer, self.recorder)
         self.controller = SingleTouchKeyboardController(self.stream_client, self.key_points)
         self.pressed_keys = set()
         self._closed = False
+        self._disconnect_handled = False
 
         self.setWindowTitle("Game Recording - q 开始 / e 结束")
         self.resize(960, 620)
@@ -137,7 +155,12 @@ class RecorderWindow(QMainWindow):
         self.preview_timer.timeout.connect(self._refresh_preview)
         self.preview_timer.start(50)
 
+        self.stream_monitor_timer = QTimer(self)
+        self.stream_monitor_timer.timeout.connect(self._monitor_stream_health)
+        self.stream_monitor_timer.start(50)
+
         self.frame_pump.start()
+        print("[Game Recording] HOS 已设为首次断连即停止，不自动重连。", flush=True)
         self.stream_client.start_backend()
 
     def _set_status(self, text: str, error: bool = False):
@@ -170,6 +193,80 @@ class RecorderWindow(QMainWindow):
         self.preview_label.setPixmap(pixmap)
         if not self.recorder.is_recording and "等待" in self.status_label.text():
             self._set_status("控制已就绪：q 开始录制，e 停止并保存；请保持本窗口在前台。")
+
+    def _monitor_stream_health(self):
+        if self._closed or self._disconnect_handled:
+            return
+        stream_error = getattr(self.stream_client, "_last_error", None)
+        if stream_error is not None:
+            self._handle_hos_disconnect(stream_error)
+
+    def _diagnostic_snapshot(self, stream_error: Exception):
+        diagnostic = {"last_error": str(stream_error)}
+        snapshot = getattr(self.stream_client, "diagnostic_snapshot", None)
+        if callable(snapshot):
+            try:
+                diagnostic.update(snapshot() or {})
+            except Exception as exc:
+                diagnostic["snapshot_error"] = str(exc)
+                LOGGER.exception("获取 HOS 断连诊断失败")
+        return diagnostic
+
+    def _release_controls(self):
+        self.pressed_keys.clear()
+        try:
+            self.controller.release_all()
+        except Exception:
+            LOGGER.exception("停止时释放触控失败")
+
+    def _stop_stream(self):
+        self.frame_pump.stop()
+        self.stream_client.stop()
+        self.frame_pump.join(timeout=2.0)
+
+    def _handle_hos_disconnect(self, stream_error: Exception):
+        self._disconnect_handled = True
+        self._closed = True
+        self.preview_timer.stop()
+        self.stream_monitor_timer.stop()
+        diagnostic = self._diagnostic_snapshot(stream_error)
+        self._set_status("检测到 HOS 断连，正在停止并保存日志……", error=True)
+        print(f"[Game Recording] 检测到 HOS 断连：{stream_error}", flush=True)
+
+        self._release_controls()
+        recording_dir = self.recorder.session_dir
+        recording_error = ""
+        try:
+            saved_dir = self.recorder.stop(reason="hos_disconnect")
+            if saved_dir is not None:
+                recording_dir = saved_dir
+                print(f"[Game Recording] 断连前的录制已保存：{saved_dir}", flush=True)
+        except Exception as exc:
+            recording_error = str(exc)
+            LOGGER.exception("HOS 断连后保存录制失败")
+
+        try:
+            self._stop_stream()
+        except Exception as exc:
+            diagnostic["stream_shutdown_error"] = str(exc)
+            LOGGER.exception("HOS 断连后停止抓流失败")
+        try:
+            report_paths = save_disconnect_report(
+                output_root=self.output_root,
+                diagnostic=diagnostic,
+                runtime_log_path=self.runtime_log_path,
+                recording_dir=recording_dir,
+                recording_error=recording_error,
+            )
+            print(
+                f"[Game Recording] 断连报告已保存：{report_paths['disconnect_report']}",
+                flush=True,
+            )
+        except Exception:
+            LOGGER.exception("保存 HOS 断连报告失败")
+        if self.runtime_log_path is not None:
+            print(f"[Game Recording] 完整运行日志：{self.runtime_log_path}", flush=True)
+        QTimer.singleShot(0, self.close)
 
     def _layout_for_metadata(self):
         return {
@@ -252,22 +349,27 @@ class RecorderWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent):
         if not self._closed:
             self._closed = True
-            try:
-                self.controller.release_all()
-            except Exception:
-                LOGGER.exception("关闭窗口时释放触控失败")
+            self.preview_timer.stop()
+            self.stream_monitor_timer.stop()
+            self._release_controls()
             self._stop_recording(reason="window_closed")
-            self.frame_pump.stop()
-            self.stream_client.stop()
-            self.frame_pump.join(timeout=2.0)
+            self._stop_stream()
         event.accept()
 
 
-def run(output_root: Path, fps: float = 15.0) -> int:
+def run(
+    output_root: Path,
+    fps: float = 15.0,
+    runtime_log_path: Path | None = None,
+) -> int:
     _prefer_bundled_pyqt_plugins()
     app = QApplication.instance() or QApplication([])
     try:
-        window = RecorderWindow(output_root=output_root, fps=fps)
+        window = RecorderWindow(
+            output_root=output_root,
+            fps=fps,
+            runtime_log_path=runtime_log_path,
+        )
     except LayoutError as exc:
         raise SystemExit(f"键位布局不可用：{exc}") from exc
     except RuntimeError as exc:

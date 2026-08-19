@@ -32,6 +32,20 @@ python aw/autogame/customs_game_examples/Game_Recording/start_record.py
 
 每次结果包括 `video.mp4`、`initial_view.png`、`action_raw.json`、`action_step.json` 和 `session.json`。
 
+## 断连处理和日志
+
+`start_record.py` 启动后会立即开始记录运行日志，不需要先按 `q`。只要 HOS 出现第一次断连：
+
+- 不会自动重连，程序会立即停止；
+- 如果已经按 `q` 开始录制，会先保存当前视频和动作，`session.json` 中的 `stop_reason` 为 `hos_disconnect`；
+- 无论是否按过 `q`，都会保存断连诊断和完整终端输出。
+
+日志位置：
+
+- 运行日志：`records/runtime_logs/start_record_<时间戳>.log`
+- 断连报告：`records/disconnect_logs/<时间戳>/hos_disconnect.json`
+- 若断连时正在录制，录制目录内也会多一份 `hos_disconnect.json`
+
 ## 华为单框架说明
 
 该入口直接使用项目已有的 HOScrcpy 视频流和 HOS 触控通道。HOS 官方通道当前只暴露单指操作，所以：

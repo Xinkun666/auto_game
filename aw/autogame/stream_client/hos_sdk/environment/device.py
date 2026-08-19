@@ -119,6 +119,9 @@ class Device(object):
         self._video_has_retried = False
         self._screen_cap_callback = None
         self.cleanup_command_timeout_seconds = 5.0
+        self.selected_video_so = ""
+        self.selected_video_so_source = ""
+        self.video_start_pids = []
 
     def _init_so_md5_map(self):
         folder_path = os.path.join(RESOURCE_PATH)
@@ -341,6 +344,57 @@ class Device(object):
             matched_so_name,
             _compact_log_value(device_so_md5_output),
         )
+        forced_so = str(getattr(config, "get_force_video_so", lambda: "")() or "").strip()
+        if forced_so:
+            if forced_so == "latest":
+                if not self.so_name_list:
+                    raise FileNotFoundError("No local HOScrcpy video so candidates were found")
+                forced_so = self.so_name_list[-1]
+            if os.path.basename(forced_so) != forced_so or forced_so not in self.so_name_list:
+                raise ValueError(
+                    "Forced HOScrcpy video so is unavailable: {}. candidates={}".format(
+                        forced_so,
+                        self.so_name_list,
+                    )
+                )
+            logger.info(
+                "Force push scrcpy so requested: requested=%s resolved=%s",
+                config.get_force_video_so(),
+                forced_so,
+            )
+            path = os.path.join(RESOURCE_PATH, "video" + os.path.sep + forced_so)
+            attempt = {"source": "forced", "so": forced_so}
+            try:
+                attempt["local_md5"] = self.device_helper._calculate_md5(path)
+                attempt["push_result"] = self.device_helper.init_video_so_resource(path)
+                attempt["start_output"] = self.start_video_so_server(video_params)
+                pid_list = self.device_helper.get_video_pid_list()
+                attempt["pid_list"] = pid_list
+                attempt["unix_socket"] = "unix" in forced_so
+            except Exception as exc:
+                attempt["error"] = repr(exc)
+                raise RuntimeError(
+                    "Forced HOScrcpy video so failed: {}".format(
+                        _format_video_attempt(attempt)
+                    )
+                ) from exc
+            if not pid_list:
+                raise RuntimeError(
+                    "Forced HOScrcpy video so did not expose a process: {}".format(
+                        _format_video_attempt(attempt)
+                    )
+                )
+            self.selected_video_so = forced_so
+            self.selected_video_so_source = "forced"
+            self.video_start_pids = list(pid_list)
+            self.is_use_unix_socket_video_so = "unix" in forced_so
+            logger.info(
+                "Video server started with forced so=%s pid_list=%s",
+                forced_so,
+                pid_list,
+            )
+            return
+
         if device_so_md5_info in self.so_md5_map:
             current_so_name = matched_so_name
             logger.info("try to use exist so: md5=%s so=%s", device_so_md5_info, current_so_name)
@@ -360,6 +414,9 @@ class Device(object):
                 logger.info("Video server started with existing so=%s pid_list=%s", current_so_name, pid_list)
                 # 判断当前推送的so是不是要使用unix_socket连接方式
                 self.is_use_unix_socket_video_so = "unix" in current_so_name
+                self.selected_video_so = current_so_name
+                self.selected_video_so_source = "existing"
+                self.video_start_pids = list(pid_list)
                 return
             logger.warning("Existing scrcpy so did not expose process: %s", _format_video_attempt(attempt))
         else:
@@ -390,6 +447,9 @@ class Device(object):
                 logger.info("Video server started with pushed so=%s pid_list=%s", so_name, pid_list)
                 # 判断当前推送的so是不是要使用unix_socket连接方式
                 self.is_use_unix_socket_video_so = "unix" in so_name
+                self.selected_video_so = so_name
+                self.selected_video_so_source = "pushed"
+                self.video_start_pids = list(pid_list)
                 return
             logger.warning("Pushed scrcpy so did not expose process: %s", _format_video_attempt(attempt))
         # 全部试完都不行就报错
@@ -406,6 +466,64 @@ class Device(object):
         )
         result = self.connector_shell_command(command)
         logger.info("Start video so command result: %s", _compact_log_value(result))
+        return result
+
+    def collect_disconnect_diagnostics(self, timeout: float = 1.0):
+        """在清理抓流前采集设备端进程、视频端点和 HDC 转发状态。"""
+        timeout = max(0.1, float(timeout))
+        remote_node = (
+            "localabstract:scrcpy_grpc_socket"
+            if self.is_use_unix_socket_video_so
+            else "tcp:{}".format(self.video_server_port)
+        )
+        result = {
+            "selected_video_so": self.selected_video_so,
+            "selected_video_so_source": self.selected_video_so_source,
+            "video_start_pids": list(self.video_start_pids),
+            "video_local_port": self.video_port,
+            "video_device_port": self.video_server_port,
+            "video_remote_node": remote_node,
+            "unix_socket": self.is_use_unix_socket_video_so,
+        }
+
+        try:
+            process_output = self.connector_shell_command(
+                '"ps -ef | grep singleness"',
+                timeout=timeout,
+            )
+            result["video_process_listing"] = _compact_log_value(process_output, limit=4000)
+            result["video_pid_list_at_disconnect"] = [
+                line.split()[1]
+                for line in str(process_output or "").splitlines()
+                if "libscreen_casting" in line
+                and "extension-name" in line
+                and len(line.split()) > 1
+            ]
+            result["video_process_alive"] = bool(result["video_pid_list_at_disconnect"])
+        except Exception as exc:
+            result["video_process_error"] = str(exc)
+
+        endpoint_command = (
+            '"cat /proc/net/unix | grep scrcpy_grpc_socket"'
+            if self.is_use_unix_socket_video_so
+            else '"netstat -an | grep :{}"'.format(self.video_server_port)
+        )
+        try:
+            endpoint_output = self.connector_shell_command(endpoint_command, timeout=timeout)
+            result["video_endpoint_listing"] = _compact_log_value(endpoint_output, limit=4000)
+            result["video_endpoint_present"] = bool(str(endpoint_output or "").strip())
+        except Exception as exc:
+            result["video_endpoint_error"] = str(exc)
+
+        try:
+            fport_output = self.connector_command("fport ls", timeout=timeout)
+            result["hdc_fport_listing"] = _compact_log_value(fport_output, limit=4000)
+            local_marker = "tcp:{}".format(self.video_port) if self.video_port else ""
+            result["video_fport_present"] = bool(
+                local_marker and local_marker in str(fport_output or "")
+            )
+        except Exception as exc:
+            result["hdc_fport_error"] = str(exc)
         return result
 
     def _exec_cmd(self, command: Union[str, list], timeout: int = 5 * 60):

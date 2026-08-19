@@ -28,6 +28,7 @@ class HosRemoteConfig:
             "cleanup_command_timeout_seconds",
             5.0,
         )
+        self.force_video_so = str(kwargs.get("force_video_so", "") or "").strip()
         self.use_old_version = kwargs.get("use_old_version", False)
         if not self.sn:
             raise ValueError("sn cannot be empty")
@@ -111,6 +112,9 @@ class HosRemoteConfig:
 
     def get_cleanup_command_timeout_seconds(self) -> float:
         return float(self.cleanup_command_timeout_seconds)
+
+    def get_force_video_so(self) -> str:
+        return self.force_video_so
 
     def get_use_old_version(self) -> bool:
         return self.use_old_version

@@ -20,6 +20,21 @@
 python aw/autogame/customs_game_examples/Game_Recording/start_record.py
 ```
 
+默认会强制推送本地 `res/video` 中按日期排序最新的 HOS 投屏 SO，避免继续复用手机上残留的旧版本。实际选中的文件名会写入运行日志。
+
+如需对比设备原有版本：
+
+```bash
+python aw/autogame/customs_game_examples/Game_Recording/start_record.py --video-so reuse
+```
+
+也可以指定本地已存在的完整文件名：
+
+```bash
+python aw/autogame/customs_game_examples/Game_Recording/start_record.py \
+  --video-so libscrcpy_server_unix_6.3.1-20260113.z.so
+```
+
 录制窗口出现手机画面后：
 
 - 按 `q`：开始录制
@@ -39,6 +54,7 @@ python aw/autogame/customs_game_examples/Game_Recording/start_record.py
 - 不会自动重连，程序会立即停止；
 - 如果已经按 `q` 开始录制，会先保存当前视频和动作，`session.json` 中的 `stop_reason` 为 `hos_disconnect`；
 - 无论是否按过 `q`，都会保存断连诊断和完整终端输出。
+- 清理 HOS 连接前会先采集投屏进程、设备端视频端点和 `hdc fport` 状态，写入 `diagnostic.pre_cleanup_disconnect`。
 
 日志位置：
 

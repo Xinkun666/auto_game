@@ -28,9 +28,20 @@ def parse_args(argv=None):
     )
     parser.add_argument("--output", type=Path, default=default_output, help="录制结果目录")
     parser.add_argument("--fps", type=float, default=15.0, help="本地 MP4 帧率，默认 15")
+    parser.add_argument(
+        "--video-so",
+        default="latest",
+        help=(
+            "HOS 投屏 SO：latest 强制推送本地最新候选（默认）；"
+            "reuse 复用设备现有版本；也可填写完整 SO 文件名"
+        ),
+    )
     args = parser.parse_args(argv)
     if args.fps <= 0:
         parser.error("--fps 必须大于 0")
+    args.video_so = str(args.video_so or "").strip()
+    if not args.video_so:
+        parser.error("--video-so 不能为空")
     return args
 
 
@@ -55,6 +66,7 @@ def main(argv=None) -> int:
                 output_root=output_root,
                 fps=args.fps,
                 runtime_log_path=runtime_log.path,
+                video_so=args.video_so,
             )
         except SystemExit as exc:
             if exc.code not in (None, 0):

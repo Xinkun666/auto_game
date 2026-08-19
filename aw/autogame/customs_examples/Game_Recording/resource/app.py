@@ -105,6 +105,7 @@ class RecorderWindow(QMainWindow):
         output_root: Path,
         fps: float = 15.0,
         runtime_log_path: Path | None = None,
+        video_so: str = "latest",
     ):
         super().__init__()
         # 先检查空工程，避免 info.py 尚未标注时被设备连接错误遮住。
@@ -122,7 +123,11 @@ class RecorderWindow(QMainWindow):
         self.output_root = Path(output_root)
         self.runtime_log_path = Path(runtime_log_path) if runtime_log_path else None
         self.buffer = FrameBuffer(size=5)
-        self.stream_client = configure_fail_fast_stream(HOSScrcpyStreamClient(self.buffer))
+        requested_video_so = str(video_so or "latest").strip()
+        force_video_so = "" if requested_video_so == "reuse" else requested_video_so
+        self.stream_client = configure_fail_fast_stream(
+            HOSScrcpyStreamClient(self.buffer, force_video_so=force_video_so)
+        )
         self.recorder = RecordingSession(output_root=self.output_root, fps=fps)
         self.frame_pump = FramePump(self.buffer, self.recorder)
         self.controller = SingleTouchKeyboardController(self.stream_client, self.key_points)
@@ -161,6 +166,11 @@ class RecorderWindow(QMainWindow):
 
         self.frame_pump.start()
         print("[Game Recording] HOS 已设为首次断连即停止，不自动重连。", flush=True)
+        print(
+            "[Game Recording] HOS 投屏 SO 策略：%s"
+            % (force_video_so or "reuse-device-existing"),
+            flush=True,
+        )
         self.stream_client.start_backend()
 
     def _set_status(self, text: str, error: bool = False):
@@ -361,6 +371,7 @@ def run(
     output_root: Path,
     fps: float = 15.0,
     runtime_log_path: Path | None = None,
+    video_so: str = "latest",
 ) -> int:
     _prefer_bundled_pyqt_plugins()
     app = QApplication.instance() or QApplication([])
@@ -369,6 +380,7 @@ def run(
             output_root=output_root,
             fps=fps,
             runtime_log_path=runtime_log_path,
+            video_so=video_so,
         )
     except LayoutError as exc:
         raise SystemExit(f"键位布局不可用：{exc}") from exc

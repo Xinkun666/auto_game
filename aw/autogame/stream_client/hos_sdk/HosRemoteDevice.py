@@ -42,6 +42,9 @@ class HosRemoteDevice:
         self.device.is_setup = False
         self.device.stop_video_screen_copy()
 
+    def collect_disconnect_diagnostics(self, timeout: float = 1.0):
+        return self.device.collect_disconnect_diagnostics(timeout=timeout)
+
     def get_sn(self) -> str:
         """
         返回设备sn号

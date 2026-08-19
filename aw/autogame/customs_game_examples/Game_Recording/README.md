@@ -55,6 +55,7 @@ python aw/autogame/customs_game_examples/Game_Recording/start_record.py \
 
 - `auto` 模式不会重试已失败的 SO，而是切换到尚未尝试的候选；
 - 所有 SO 都启动失败或运行中断流后，程序才最终停止；
+- 程序从启动时就持续抓取 `hdc hilog`，避免手机掉线后无法补抓；
 - 如果已经按 `q` 开始录制，会先保存当前视频和动作，`session.json` 中的 `stop_reason` 为 `hos_disconnect`；
 - 无论是否按过 `q`，都会保存断连诊断和完整终端输出。
 - 清理 HOS 连接前会先采集投屏进程、设备端视频端点和 `hdc fport` 状态，写入 `diagnostic.pre_cleanup_disconnect`。
@@ -62,7 +63,11 @@ python aw/autogame/customs_game_examples/Game_Recording/start_record.py \
 日志位置：
 
 - 运行日志：`records/runtime_logs/start_record_<时间戳>.log`
+- 实时 hilog：`records/runtime_logs/hilog_<时间戳>.txt`
 - 断连报告：`records/disconnect_logs/<时间戳>/hos_disconnect.json`
+- 断连 hilog 快照：`records/disconnect_logs/<时间戳>/hilog.txt`
+
+如果断连时正在录制，`hilog.txt` 也会复制到当次录制目录。如果 `hdc hilog` 无法启动，运行日志和 hilog 文件头部会记录失败原因。
 - 若断连时正在录制，录制目录内也会多一份 `hos_disconnect.json`
 
 ## 华为单框架说明

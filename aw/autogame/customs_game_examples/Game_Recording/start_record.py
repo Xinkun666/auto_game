@@ -50,16 +50,27 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     output_root = args.output.expanduser().resolve()
     from aw.autogame.customs_examples.Game_Recording.resource.runtime_log import (
+        HilogCapture,
         RuntimeLogCapture,
     )
 
-    with RuntimeLogCapture(output_root) as runtime_log:
+    with (
+        RuntimeLogCapture(output_root) as runtime_log,
+        HilogCapture(output_root) as hilog,
+    ):
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s [%(levelname)s] %(message)s",
             force=True,
         )
         print(f"[Game Recording] 运行日志：{runtime_log.path}", flush=True)
+        print(f"[Game Recording] hilog 实时抓取：{hilog.path}", flush=True)
+        if hilog.start_error:
+            print(
+                f"[Game Recording] hilog 抓取启动失败：{hilog.start_error}",
+                file=sys.stderr,
+                flush=True,
+            )
         from aw.autogame.customs_examples.Game_Recording.resource.app import run
 
         try:
@@ -67,6 +78,7 @@ def main(argv=None) -> int:
                 output_root=output_root,
                 fps=args.fps,
                 runtime_log_path=runtime_log.path,
+                hilog_capture=hilog,
                 video_so=args.video_so,
             )
         except SystemExit as exc:

@@ -105,6 +105,7 @@ class RecorderWindow(QMainWindow):
         output_root: Path,
         fps: float = 15.0,
         runtime_log_path: Path | None = None,
+        hilog_capture=None,
         video_so: str = "auto",
     ):
         super().__init__()
@@ -122,6 +123,7 @@ class RecorderWindow(QMainWindow):
 
         self.output_root = Path(output_root)
         self.runtime_log_path = Path(runtime_log_path) if runtime_log_path else None
+        self.hilog_capture = hilog_capture
         self.buffer = FrameBuffer(size=5)
         requested_video_so = str(video_so or "auto").strip()
         force_video_so = "" if requested_video_so == "reuse" else requested_video_so
@@ -264,6 +266,15 @@ class RecorderWindow(QMainWindow):
         except Exception as exc:
             diagnostic["stream_shutdown_error"] = str(exc)
             LOGGER.exception("HOS 断连后停止抓流失败")
+        hilog_path = None
+        if self.hilog_capture is not None:
+            try:
+                self.hilog_capture.stop()
+                hilog_path = self.hilog_capture.path
+                print(f"[Game Recording] hilog 抓取已停止：{hilog_path}", flush=True)
+            except Exception as exc:
+                diagnostic["hilog_capture_stop_error"] = str(exc)
+                LOGGER.exception("HOS 断连后停止 hilog 抓取失败")
         try:
             report_paths = save_disconnect_report(
                 output_root=self.output_root,
@@ -271,11 +282,22 @@ class RecorderWindow(QMainWindow):
                 runtime_log_path=self.runtime_log_path,
                 recording_dir=recording_dir,
                 recording_error=recording_error,
+                hilog_path=hilog_path,
             )
             print(
                 f"[Game Recording] 断连报告已保存：{report_paths['disconnect_report']}",
                 flush=True,
             )
+            if "hilog_log" in report_paths:
+                print(
+                    f"[Game Recording] hilog 已保存：{report_paths['hilog_log']}",
+                    flush=True,
+                )
+            elif "hilog_error" in report_paths:
+                print(
+                    f"[Game Recording] hilog 抓取失败说明：{report_paths['hilog_error']}",
+                    flush=True,
+                )
         except Exception:
             LOGGER.exception("保存 HOS 断连报告失败")
         if self.runtime_log_path is not None:
@@ -375,6 +397,7 @@ def run(
     output_root: Path,
     fps: float = 15.0,
     runtime_log_path: Path | None = None,
+    hilog_capture=None,
     video_so: str = "auto",
 ) -> int:
     _prefer_bundled_pyqt_plugins()
@@ -384,6 +407,7 @@ def run(
             output_root=output_root,
             fps=fps,
             runtime_log_path=runtime_log_path,
+            hilog_capture=hilog_capture,
             video_so=video_so,
         )
     except LayoutError as exc:

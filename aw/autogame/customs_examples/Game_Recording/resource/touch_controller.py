@@ -37,6 +37,8 @@ class SingleTouchKeyboardController:
         movement_transition_seconds: float = 0.01,
         screen_size: Optional[Tuple[int, int]] = None,
         drag_step_ratio: float = 0.08,
+        drag_duration_seconds: float = 0.12,
+        drag_move_steps: int = 6,
     ):
         self.stream_client = stream_client
         self.key_points = dict(key_points)
@@ -53,6 +55,8 @@ class SingleTouchKeyboardController:
         self._joystick_center, self._joystick_radius = self._infer_joystick_geometry()
         self.screen_size = self._resolve_screen_size(screen_size)
         self.drag_step_ratio = min(max(float(drag_step_ratio), 0.005), 0.5)
+        self.drag_duration_seconds = max(0.0, float(drag_duration_seconds))
+        self.drag_move_steps = max(2, int(drag_move_steps))
 
     def _resolve_screen_size(self, screen_size: Optional[Tuple[int, int]]) -> Tuple[int, int]:
         if screen_size and int(screen_size[0]) > 0 and int(screen_size[1]) > 0:
@@ -228,7 +232,19 @@ class SingleTouchKeyboardController:
             if self.movement_transition_seconds:
                 time.sleep(self.movement_transition_seconds)
             actions.append(self._touch_down(anchor))
-        actions.append(self._touch_move(target))
+            if self.movement_transition_seconds:
+                time.sleep(self.movement_transition_seconds)
+
+        per_step_seconds = self.drag_duration_seconds / self.drag_move_steps
+        for step in range(1, self.drag_move_steps + 1):
+            if per_step_seconds:
+                time.sleep(per_step_seconds)
+            ratio = step / self.drag_move_steps
+            position = (
+                int(round(anchor[0] + (target[0] - anchor[0]) * ratio)),
+                int(round(anchor[1] + (target[1] - anchor[1]) * ratio)),
+            )
+            actions.append(self._touch_move(position))
         return actions
 
     def release_all(self) -> List[dict]:

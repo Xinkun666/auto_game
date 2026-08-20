@@ -254,11 +254,11 @@ class ReplayThread(QThread):
                     self.controller.tap(event.key)
                 else:
                     if event.normalized_position is not None:
-                        self.controller.move_active_button_to_normalized(
+                        self.controller.move_active_control_to_normalized(
                             *event.normalized_position
                         )
                     else:
-                        self.controller.nudge_active_button(event.key)
+                        self.controller.nudge_active_control(event.key)
                 progress = (
                     event.timestamp / self.duration_seconds
                     if self.duration_seconds > 0

@@ -403,10 +403,11 @@ class RecorderWindow(QMainWindow):
         key = key_name_from_event(event)
         if not key or key in RESERVED_KEYS:
             return
-        if key in DRAG_DIRECTIONS and self.controller.active_button_key is not None:
+        if key in DRAG_DIRECTIONS and self.controller.active_control_key is not None:
             direction_label = DIRECTION_LABELS.get(key, key)
             try:
-                actions = self.controller.nudge_active_button(key)
+                active_control_key = self.controller.active_control_key
+                actions = self.controller.nudge_active_control(key)
                 if actions:
                     self.recorder.record_key_event(
                         "drag",
@@ -415,7 +416,7 @@ class RecorderWindow(QMainWindow):
                         actions,
                     )
                     self._set_status(
-                        f"按住 {self.controller.active_button_key} 向{direction_label}滑动一次。"
+                        f"按住 {active_control_key} 向{direction_label}滑动一次。"
                     )
                 else:
                     self._set_status(

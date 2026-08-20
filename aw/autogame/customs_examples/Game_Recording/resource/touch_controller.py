@@ -25,8 +25,8 @@ class SingleTouchKeyboardController:
     w/a/s/d 被视为同一个摇杆的四个方向点。每次启动方向时，
     先在摇杆中心落指，再滑动到目标方向。切换方向会先抬起旧触点。
 
-    其他键位从键盘按下到松开期间保持同一触点。按住这类键位时，
-    每次新按下一次键盘方向键，可以将当前触点离散移动一次。
+    所有绑定键按住期间，每次新按下一次键盘方向键，
+    都可以将当前触点离散移动一次。
     """
 
     def __init__(
@@ -180,13 +180,13 @@ class SingleTouchKeyboardController:
         actions.extend(self.release(key))
         return actions
 
-    def nudge_active_button(self, direction: str) -> List[dict]:
-        """将当前按住的普通控点向指定方向离散滑动一次。"""
+    def nudge_active_control(self, direction: str) -> List[dict]:
+        """将当前按住的任意控点向指定方向离散滑动一次。"""
         with self._lock:
             vector = DRAG_DIRECTIONS.get(str(direction or "").lower())
             if (
                 vector is None
-                or self._active_button_key is None
+                or self.active_control_key is None
                 or self._active_position is None
             ):
                 return []
@@ -200,10 +200,10 @@ class SingleTouchKeyboardController:
                 return []
             return [self._touch_move(target)]
 
-    def move_active_button_to_normalized(self, norm_x: float, norm_y: float) -> List[dict]:
+    def move_active_control_to_normalized(self, norm_x: float, norm_y: float) -> List[dict]:
         """回放时按录制的归一化坐标恢复一次离散滑动。"""
         with self._lock:
-            if self._active_button_key is None or self._active_position is None:
+            if self.active_control_key is None or self._active_position is None:
                 return []
             width, height = self.screen_size
             target = (
@@ -228,3 +228,11 @@ class SingleTouchKeyboardController:
     @property
     def active_button_key(self) -> Optional[str]:
         return self._active_button_key
+
+    @property
+    def active_control_key(self) -> Optional[str]:
+        if self._active_button_key is not None:
+            return self._active_button_key
+        if self._active_position is not None and self.pressed_movement:
+            return sorted(self.pressed_movement)[-1]
+        return None

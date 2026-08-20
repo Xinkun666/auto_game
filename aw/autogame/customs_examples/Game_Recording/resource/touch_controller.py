@@ -16,14 +16,25 @@ MOVEMENT_KEYS = frozenset({"w", "a", "s", "d"})
 class SingleTouchKeyboardController:
     """适配 HOS 官方单指接口的键盘控制器。
 
-    w/a/s/d 被视为同一个摇杆的四个方向点；组合键会合成为一条
-    对角方向，仍只占用一个手机触点。其他键位按一次会执行一次短按。
+    w/a/s/d 被视为同一个摇杆的四个方向点。每次启动方向时，
+    先在摇杆中心落指，再滑动到目标方向。切换方向会先抬起旧触点，
+    新方向键会替换旧方向键。其他键位按一次会执行一次短按。
     """
 
-    def __init__(self, stream_client, key_points: Dict[str, KeyPoint], tap_seconds: float = 0.05):
+    def __init__(
+        self,
+        stream_client,
+        key_points: Dict[str, KeyPoint],
+        tap_seconds: float = 0.05,
+        movement_transition_seconds: float = 0.01,
+    ):
         self.stream_client = stream_client
         self.key_points = dict(key_points)
         self.tap_seconds = max(0.01, float(tap_seconds))
+        self.movement_transition_seconds = max(
+            0.0,
+            float(movement_transition_seconds),
+        )
         self.pressed_movement: Set[str] = set()
         self._active_position: Optional[Tuple[int, int]] = None
         self._lock = threading.RLock()
@@ -45,19 +56,15 @@ class SingleTouchKeyboardController:
         available = [key for key in self.pressed_movement if key in self.key_points]
         if not available:
             return None
-        if len(available) == 1 or self._joystick_center is None or self._joystick_radius <= 0:
-            return self.key_points[available[-1]].position
+        return self.key_points[available[-1]].position
 
-        center_x, center_y = self._joystick_center
-        vector_x = sum(self.key_points[key].position[0] - center_x for key in available)
-        vector_y = sum(self.key_points[key].position[1] - center_y for key in available)
-        length = math.hypot(vector_x, vector_y)
-        if length <= 1e-6:
-            return None
-        return (
-            int(round(center_x + vector_x / length * self._joystick_radius)),
-            int(round(center_y + vector_y / length * self._joystick_radius)),
-        )
+    def _movement_origin(self, target: Tuple[int, int]) -> Tuple[int, int]:
+        if self._joystick_center is not None:
+            center = tuple(int(round(value)) for value in self._joystick_center)
+            if center != target:
+                return center
+        fallback_offset = max(1, int(round(self._joystick_radius or 30.0)))
+        return target[0], target[1] + fallback_offset
 
     def _touch_down(self, position: Tuple[int, int]) -> dict:
         self.stream_client.touch_down(*position)
@@ -77,24 +84,43 @@ class SingleTouchKeyboardController:
         self._active_position = None
         return {"method": "touch_up", "position": list(position)}
 
-    def _sync_movement(self) -> List[dict]:
+    def _sync_movement(self, force_restart: bool = False) -> List[dict]:
         target = self._movement_target()
         if target is None:
             released = self._touch_up()
             return [released] if released else []
         if self._active_position is None:
-            return [self._touch_down(target)]
-        if self._active_position != target:
-            return [self._touch_move(target)]
+            return self._start_movement(target)
+        if force_restart or self._active_position != target:
+            actions: List[dict] = []
+            released = self._touch_up()
+            if released:
+                actions.append(released)
+                if self.movement_transition_seconds:
+                    time.sleep(self.movement_transition_seconds)
+            actions.extend(self._start_movement(target))
+            return actions
         return []
+
+    def _start_movement(self, target: Tuple[int, int]) -> List[dict]:
+        origin = self._movement_origin(target)
+        actions = [self._touch_down(origin)]
+        if self.movement_transition_seconds:
+            time.sleep(self.movement_transition_seconds)
+        actions.append(self._touch_move(target))
+        return actions
 
     def press(self, key: str) -> List[dict]:
         with self._lock:
             if key not in self.key_points:
                 return []
             if key in MOVEMENT_KEYS:
+                if self.pressed_movement == {key}:
+                    return self._sync_movement()
+                force_restart = bool(self.pressed_movement)
+                self.pressed_movement.clear()
                 self.pressed_movement.add(key)
-                return self._sync_movement()
+                return self._sync_movement(force_restart=force_restart)
 
             actions: List[dict] = []
             resume_movement = bool(self.pressed_movement)

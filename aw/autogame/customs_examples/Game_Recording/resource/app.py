@@ -20,7 +20,7 @@ from aw.autogame.tools.Utils import get_resolution
 from .layout import LayoutError, RESERVED_KEYS, load_key_layout
 from .recording import RecordingSession
 from .runtime_log import save_disconnect_report
-from .touch_controller import SingleTouchKeyboardController
+from .touch_controller import MOVEMENT_KEYS, SingleTouchKeyboardController
 
 
 LOGGER = logging.getLogger("GameRecording")
@@ -353,12 +353,16 @@ class RecorderWindow(QMainWindow):
             self._set_status(f"键位 {key} 未在 info.py 中标注，已忽略。", error=True)
             return
 
+        previous_pressed_keys = set(self.pressed_keys)
+        if key in MOVEMENT_KEYS:
+            self.pressed_keys.difference_update(MOVEMENT_KEYS)
         self.pressed_keys.add(key)
         try:
             actions = self.controller.press(key)
             self.recorder.record_key_event("press", key, self.pressed_keys, actions)
         except Exception as exc:
-            self.pressed_keys.discard(key)
+            self.pressed_keys.clear()
+            self.pressed_keys.update(previous_pressed_keys)
             self._set_status(f"发送键位 {key} 失败：{exc}", error=True)
         event.accept()
 

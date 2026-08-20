@@ -25,6 +25,7 @@ python aw/autogame/customs_game_examples/Game_Recording/start_record.py
 启动后会先弹出“按键绑定与控点调整”窗口：
 
 - 左侧选中标注控点后，直接按一下键盘按键完成绑定；
+- 标注控点的名称不会自动当成键盘绑定；`KEY_BINDINGS` 中没有记录的控点会用红色显示“还没绑定”；
 - 多场景可通过顶部的上一个/下一个按钮切换；
 - 场景图上的蓝色控点可拖动，保存时会同步修改 `info.py` 的阶段场景和 `SCENE_POOL`；
 - 上次的绑定保存在 `info.py` 的 `KEY_BINDINGS` 中，每次会自动加载。如果无需修改，直接点击“保存并进入录制”即可。

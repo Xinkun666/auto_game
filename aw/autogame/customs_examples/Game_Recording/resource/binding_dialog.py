@@ -23,7 +23,6 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QVBoxLayout,
-    QWidget,
 )
 
 from .binding_config import BindingConfigError, BindingConfiguration, BindingScene
@@ -309,8 +308,12 @@ class BindingDialog(QDialog):
         if scene is None:
             return
         point_name = str(item.data(Qt.ItemDataRole.UserRole))
-        key = self.config.binding_for(scene, point_name) or "未绑定"
+        bound_key = self.config.binding_for(scene, point_name)
+        key = bound_key or "还没绑定"
         item.setText(f"{point_name}    →    {key}")
+        item.setForeground(
+            QBrush(QColor("#202020" if bound_key else "#b00020"))
+        )
 
     def _list_selection_changed(self, current, previous):
         del previous

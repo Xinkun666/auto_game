@@ -118,8 +118,8 @@ def load_key_layout(
         if not isinstance(scene_bindings, Mapping):
             scene_bindings = {}
         for raw_name, point_data in points.items():
-            # 旧工程没有 KEY_BINDINGS 时继续使用控点名作为键位。
-            bound_name = scene_bindings.get(raw_name, raw_name)
+            # 控点名不等于键盘绑定；缺少明确记录时必须先绑定。
+            bound_name = scene_bindings.get(raw_name, "")
             key = normalize_key_name(bound_name)
             if not key:
                 raise LayoutError(f"控点“{raw_name}”还没有绑定键盘按键。")

@@ -140,8 +140,8 @@ class BindingConfiguration:
             mapping = self._scene_bindings(scene.name)
             for raw_name in scene.points:
                 if raw_name not in mapping:
-                    default_key = normalize_key_name(raw_name)
-                    mapping[raw_name] = "" if default_key in RESERVED_KEYS else default_key
+                    # 控点名只是标注名称；用户在绑定窗口按过键盘后才算已绑定。
+                    mapping[raw_name] = ""
 
     def binding_for(self, scene: BindingScene, point_name: str) -> str:
         return str(self._scene_bindings(scene.name).get(point_name) or "")

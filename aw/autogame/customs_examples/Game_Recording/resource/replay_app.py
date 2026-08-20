@@ -248,8 +248,17 @@ class ReplayThread(QThread):
                     return
                 if event.event == "press":
                     self.controller.press(event.key)
-                else:
+                elif event.event == "release":
                     self.controller.release(event.key)
+                elif event.event == "tap":
+                    self.controller.tap(event.key)
+                else:
+                    if event.normalized_position is not None:
+                        self.controller.move_active_button_to_normalized(
+                            *event.normalized_position
+                        )
+                    else:
+                        self.controller.nudge_active_button(event.key)
                 progress = (
                     event.timestamp / self.duration_seconds
                     if self.duration_seconds > 0
@@ -336,7 +345,11 @@ class ReplayWindow(QMainWindow):
             touch_client = self.sendevent_touch
         elif self.touch_backend_name != "hos":
             raise ValueError(f"不支持的触控后端：{self.touch_backend_name}")
-        self.controller = SingleTouchKeyboardController(touch_client, self.key_points)
+        self.controller = SingleTouchKeyboardController(
+            touch_client,
+            self.key_points,
+            screen_size=self.screen_size,
+        )
         self.frame_pump = PreviewFramePump(self.buffer)
         self.replay_thread = ReplayThread(
             events=self.events,

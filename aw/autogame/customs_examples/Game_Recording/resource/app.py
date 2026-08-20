@@ -22,7 +22,7 @@ from .binding_dialog import BindingDialog
 from .layout import LayoutError, RESERVED_KEYS, load_key_layout
 from .recording import RecordingSession
 from .runtime_log import save_disconnect_report
-from .touch_controller import MOVEMENT_KEYS, SingleTouchKeyboardController
+from .touch_controller import DRAG_DIRECTIONS, MOVEMENT_KEYS, SingleTouchKeyboardController
 
 
 LOGGER = logging.getLogger("GameRecording")
@@ -41,6 +41,7 @@ SPECIAL_KEYS = {
     Qt.Key.Key_Backspace: "backspace",
     Qt.Key.Key_Escape: "escape",
 }
+DIRECTION_LABELS = {"up": "上", "down": "下", "left": "左", "right": "右"}
 
 
 def _prefer_bundled_pyqt_plugins():
@@ -159,7 +160,11 @@ class RecorderWindow(QMainWindow):
             fps=fps,
         )
         self.frame_pump = FramePump(self.buffer, self.recorder)
-        self.controller = SingleTouchKeyboardController(touch_client, self.key_points)
+        self.controller = SingleTouchKeyboardController(
+            touch_client,
+            self.key_points,
+            screen_size=self.screen_size,
+        )
         self.pressed_keys = set()
         self._closed = False
         self._disconnect_handled = False
@@ -398,6 +403,30 @@ class RecorderWindow(QMainWindow):
         key = key_name_from_event(event)
         if not key or key in RESERVED_KEYS:
             return
+        if key in DRAG_DIRECTIONS and self.controller.active_button_key is not None:
+            direction_label = DIRECTION_LABELS.get(key, key)
+            try:
+                actions = self.controller.nudge_active_button(key)
+                if actions:
+                    self.recorder.record_key_event(
+                        "drag",
+                        key,
+                        self.pressed_keys,
+                        actions,
+                    )
+                    self._set_status(
+                        f"按住 {self.controller.active_button_key} 向{direction_label}滑动一次。"
+                    )
+                else:
+                    self._set_status(
+                        f"已到达画面边界，无法继续向{direction_label}滑动。",
+                        error=True,
+                    )
+            except Exception as exc:
+                LOGGER.exception("按住控点向 %s 滑动失败", key)
+                self._set_status(f"向{direction_label}滑动失败：{exc}", error=True)
+            event.accept()
+            return
         if key in self.pressed_keys:
             return
         if key not in self.key_points:
@@ -407,6 +436,10 @@ class RecorderWindow(QMainWindow):
         previous_pressed_keys = set(self.pressed_keys)
         if key in MOVEMENT_KEYS:
             self.pressed_keys.difference_update(MOVEMENT_KEYS)
+        else:
+            active_button = self.controller.active_button_key
+            if active_button is not None:
+                self.pressed_keys.discard(active_button)
         self.pressed_keys.add(key)
         try:
             actions = self.controller.press(key)

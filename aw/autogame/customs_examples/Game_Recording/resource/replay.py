@@ -12,6 +12,11 @@ from typing import Any, Iterable, Mapping, Sequence
 from .layout import KeyPoint, RESERVED_KEYS, load_key_layout, normalize_key_name
 
 
+MOVEMENT_KEYS = frozenset({"w", "a", "s", "d"})
+DRAG_KEYS = frozenset({"up", "down", "left", "right"})
+HOLD_AND_DRAG_SEMANTICS_VERSION = 2
+
+
 class ReplayError(ValueError):
     """录制记录无法用于回放。"""
 
@@ -21,6 +26,7 @@ class ReplayEvent:
     timestamp: float
     event: str
     key: str
+    normalized_position: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -156,7 +162,10 @@ def _validate_timestamp(value: Any, index: int) -> float:
     return timestamp
 
 
-def _events_from_raw(payload: Sequence[Any]) -> list[ReplayEvent]:
+def _events_from_raw(
+    payload: Sequence[Any],
+    input_semantics_version: int,
+) -> list[ReplayEvent]:
     events = []
     previous_time = -1.0
     for index, item in enumerate(payload):
@@ -167,16 +176,46 @@ def _events_from_raw(payload: Sequence[Any]) -> list[ReplayEvent]:
             raise ReplayError("原始动作的时间戳不是单调递增。")
         previous_time = timestamp
         event = str(item.get("event") or "").strip().lower()
-        if event not in {"press", "release"}:
+        if event not in {"press", "release", "drag"}:
             raise ReplayError(f"第 {index + 1} 个原始动作类型无效：{event or '空'}。")
         key = normalize_key_name(item.get("key"))
         if not key or key in RESERVED_KEYS:
             raise ReplayError(f"第 {index + 1} 个原始动作键位无效：{key or '空'}。")
+        if event == "drag":
+            if key not in DRAG_KEYS:
+                raise ReplayError(f"第 {index + 1} 个离散滑动方向无效：{key}。")
+            normalized_position = None
+            device_actions = item.get("device_actions", [])
+            if isinstance(device_actions, list):
+                for action in reversed(device_actions):
+                    if not isinstance(action, Mapping) or action.get("method") != "touch_move":
+                        continue
+                    raw_position = action.get("normalized_position")
+                    if isinstance(raw_position, (list, tuple)) and len(raw_position) == 2:
+                        try:
+                            norm_x, norm_y = float(raw_position[0]), float(raw_position[1])
+                        except (TypeError, ValueError):
+                            break
+                        if 0.0 <= norm_x <= 1.0 and 0.0 <= norm_y <= 1.0:
+                            normalized_position = (norm_x, norm_y)
+                    break
+            events.append(ReplayEvent(timestamp, event, key, normalized_position))
+            continue
+        if (
+            input_semantics_version < HOLD_AND_DRAG_SEMANTICS_VERSION
+            and key not in MOVEMENT_KEYS
+        ):
+            if event == "press":
+                events.append(ReplayEvent(timestamp, "tap", key))
+            continue
         events.append(ReplayEvent(timestamp, event, key))
     return events
 
 
-def _events_from_steps(payload: Sequence[Any]) -> list[ReplayEvent]:
+def _events_from_steps(
+    payload: Sequence[Any],
+    input_semantics_version: int,
+) -> list[ReplayEvent]:
     events = []
     previous_time = -1.0
     pressed: set[str] = set()
@@ -197,14 +236,28 @@ def _events_from_steps(payload: Sequence[Any]) -> list[ReplayEvent]:
             raise ReplayError(f"第 {index + 1} 个回放步骤占用了 q/e。")
         # 先松开旧键再按下新键，与录制窗口的切向语义一致。
         for key in sorted(pressed - target):
-            events.append(ReplayEvent(timestamp, "release", key))
+            if (
+                input_semantics_version >= HOLD_AND_DRAG_SEMANTICS_VERSION
+                or key in MOVEMENT_KEYS
+            ):
+                events.append(ReplayEvent(timestamp, "release", key))
         for key in sorted(target - pressed):
-            events.append(ReplayEvent(timestamp, "press", key))
+            event = (
+                "press"
+                if input_semantics_version >= HOLD_AND_DRAG_SEMANTICS_VERSION
+                or key in MOVEMENT_KEYS
+                else "tap"
+            )
+            events.append(ReplayEvent(timestamp, event, key))
         pressed = target
     if pressed:
         final_time = previous_time if previous_time >= 0 else 0.0
         for key in sorted(pressed):
-            events.append(ReplayEvent(final_time, "release", key))
+            if (
+                input_semantics_version >= HOLD_AND_DRAG_SEMANTICS_VERSION
+                or key in MOVEMENT_KEYS
+            ):
+                events.append(ReplayEvent(final_time, "release", key))
     return events
 
 
@@ -212,7 +265,25 @@ def load_replay_events(record: ReplayRecord) -> list[ReplayEvent]:
     payload = _read_json(record.action_path)
     if not isinstance(payload, list) or not payload:
         raise ReplayError(f"回放文件为空或格式错误：{record.action_path}")
-    events = _events_from_raw(payload) if record.action_format == "raw" else _events_from_steps(payload)
+    session = _read_json(record.session_path, {}) if record.session_path is not None else {}
+    input_semantics_version = _safe_nonnegative_int(
+        session.get("input_semantics_version") if isinstance(session, Mapping) else 0
+    )
+    if (
+        record.action_format == "step"
+        and input_semantics_version >= HOLD_AND_DRAG_SEMANTICS_VERSION
+        and isinstance(session, Mapping)
+        and bool(session.get("contains_drag_events"))
+    ):
+        raise ReplayError(
+            "该记录包含按住后的离散滑动，但 action_raw.json 已缺失，"
+            "action_step.json 无法完整恢复这段轨迹。"
+        )
+    events = (
+        _events_from_raw(payload, input_semantics_version)
+        if record.action_format == "raw"
+        else _events_from_steps(payload, input_semantics_version)
+    )
     if not events:
         raise ReplayError(f"回放文件中没有可执行动作：{record.action_path}")
     return events
@@ -276,7 +347,9 @@ def load_replay_layout(
             scene=str(raw_point.get("scene") or record.directory.name),
         )
 
-    required_keys = {event.key for event in load_replay_events(record)}
+    required_keys = {
+        event.key for event in load_replay_events(record) if event.event != "drag"
+    }
     missing = required_keys.difference(result)
     if missing:
         current_layout = load_key_layout(info_module, screen_width, screen_height)

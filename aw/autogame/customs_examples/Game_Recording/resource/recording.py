@@ -39,6 +39,7 @@ MOVEMENT_VECTORS = {
     "s": (0.0, 1.0),
     "d": (1.0, 0.0),
 }
+INPUT_SEMANTICS_VERSION = 2
 
 
 def _movement_direction(keys: Iterable[str]) -> Tuple[int, int]:
@@ -184,13 +185,30 @@ class RecordingSession:
         with self._lock:
             if self._started_at is None:
                 return False
+            normalized_actions = []
+            for action in device_actions or []:
+                item = dict(action) if isinstance(action, dict) else action
+                if isinstance(item, dict):
+                    position = item.get("position")
+                    if (
+                        isinstance(position, (list, tuple))
+                        and len(position) == 2
+                        and self._screen_size
+                        and self._screen_size[0] > 0
+                        and self._screen_size[1] > 0
+                    ):
+                        item["normalized_position"] = [
+                            float(position[0]) / self._screen_size[0],
+                            float(position[1]) / self._screen_size[1],
+                        ]
+                normalized_actions.append(item)
             self._raw_events.append(
                 {
                     "time": self._elapsed(),
                     "event": str(event_type),
                     "key": str(key),
                     "pressed_keys": sorted(set(pressed_keys)),
-                    "device_actions": list(device_actions or []),
+                    "device_actions": normalized_actions,
                 }
             )
             self._append_step(pressed_keys)
@@ -218,6 +236,10 @@ class RecordingSession:
                 encoding="utf-8",
             )
             metadata = {
+                "input_semantics_version": INPUT_SEMANTICS_VERSION,
+                "contains_drag_events": any(
+                    event.get("event") == "drag" for event in self._raw_events
+                ),
                 "duration_seconds": duration,
                 "frame_count": self._frame_count,
                 "fps": self.fps,

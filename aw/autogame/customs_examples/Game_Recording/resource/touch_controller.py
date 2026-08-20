@@ -11,14 +11,22 @@ from .layout import KeyPoint
 
 
 MOVEMENT_KEYS = frozenset({"w", "a", "s", "d"})
+DRAG_DIRECTIONS = {
+    "up": (0, -1),
+    "down": (0, 1),
+    "left": (-1, 0),
+    "right": (1, 0),
+}
 
 
 class SingleTouchKeyboardController:
     """适配 HOS 官方单指接口的键盘控制器。
 
     w/a/s/d 被视为同一个摇杆的四个方向点。每次启动方向时，
-    先在摇杆中心落指，再滑动到目标方向。切换方向会先抬起旧触点，
-    新方向键会替换旧方向键。其他键位按一次会执行一次短按。
+    先在摇杆中心落指，再滑动到目标方向。切换方向会先抬起旧触点。
+
+    其他键位从键盘按下到松开期间保持同一触点。按住这类键位时，
+    每次新按下一次键盘方向键，可以将当前触点离散移动一次。
     """
 
     def __init__(
@@ -27,6 +35,8 @@ class SingleTouchKeyboardController:
         key_points: Dict[str, KeyPoint],
         tap_seconds: float = 0.05,
         movement_transition_seconds: float = 0.01,
+        screen_size: Optional[Tuple[int, int]] = None,
+        drag_step_ratio: float = 0.08,
     ):
         self.stream_client = stream_client
         self.key_points = dict(key_points)
@@ -36,9 +46,19 @@ class SingleTouchKeyboardController:
             float(movement_transition_seconds),
         )
         self.pressed_movement: Set[str] = set()
+        self._active_button_key: Optional[str] = None
         self._active_position: Optional[Tuple[int, int]] = None
         self._lock = threading.RLock()
         self._joystick_center, self._joystick_radius = self._infer_joystick_geometry()
+        self.screen_size = self._resolve_screen_size(screen_size)
+        self.drag_step_ratio = min(max(float(drag_step_ratio), 0.005), 0.5)
+
+    def _resolve_screen_size(self, screen_size: Optional[Tuple[int, int]]) -> Tuple[int, int]:
+        if screen_size and int(screen_size[0]) > 0 and int(screen_size[1]) > 0:
+            return int(screen_size[0]), int(screen_size[1])
+        max_x = max((point.position[0] for point in self.key_points.values()), default=0)
+        max_y = max((point.position[1] for point in self.key_points.values()), default=0)
+        return max(max_x + 1, 1), max(max_y + 1, 1)
 
     def _infer_joystick_geometry(self):
         points = [self.key_points[key].position for key in MOVEMENT_KEYS if key in self.key_points]
@@ -85,6 +105,8 @@ class SingleTouchKeyboardController:
         return {"method": "touch_up", "position": list(position)}
 
     def _sync_movement(self, force_restart: bool = False) -> List[dict]:
+        if self._active_button_key is not None:
+            return []
         target = self._movement_target()
         if target is None:
             released = self._touch_up()
@@ -123,34 +145,86 @@ class SingleTouchKeyboardController:
                 return self._sync_movement(force_restart=force_restart)
 
             actions: List[dict] = []
-            resume_movement = bool(self.pressed_movement)
             released = self._touch_up()
             if released:
                 actions.append(released)
-
+            self._active_button_key = key
             position = self.key_points[key].position
             actions.append(self._touch_down(position))
-            time.sleep(self.tap_seconds)
-            released = self._touch_up()
-            if released:
-                actions.append(released)
-            if resume_movement:
-                actions.extend(self._sync_movement())
             return actions
 
     def release(self, key: str) -> List[dict]:
         with self._lock:
             if key not in MOVEMENT_KEYS:
-                return []
+                if key != self._active_button_key:
+                    return []
+                self._active_button_key = None
+                actions = []
+                released = self._touch_up()
+                if released:
+                    actions.append(released)
+                actions.extend(self._sync_movement())
+                return actions
             self.pressed_movement.discard(key)
+            if self._active_button_key is not None:
+                return []
             return self._sync_movement()
+
+    def tap(self, key: str) -> List[dict]:
+        """兼容旧录制：非摇杆键仍执行固定时长的短按。"""
+        if key in MOVEMENT_KEYS:
+            return []
+        actions = self.press(key)
+        if actions:
+            time.sleep(self.tap_seconds)
+        actions.extend(self.release(key))
+        return actions
+
+    def nudge_active_button(self, direction: str) -> List[dict]:
+        """将当前按住的普通控点向指定方向离散滑动一次。"""
+        with self._lock:
+            vector = DRAG_DIRECTIONS.get(str(direction or "").lower())
+            if (
+                vector is None
+                or self._active_button_key is None
+                or self._active_position is None
+            ):
+                return []
+            width, height = self.screen_size
+            distance = max(1, int(round(min(width, height) * self.drag_step_ratio)))
+            target = (
+                min(max(self._active_position[0] + vector[0] * distance, 0), width - 1),
+                min(max(self._active_position[1] + vector[1] * distance, 0), height - 1),
+            )
+            if target == self._active_position:
+                return []
+            return [self._touch_move(target)]
+
+    def move_active_button_to_normalized(self, norm_x: float, norm_y: float) -> List[dict]:
+        """回放时按录制的归一化坐标恢复一次离散滑动。"""
+        with self._lock:
+            if self._active_button_key is None or self._active_position is None:
+                return []
+            width, height = self.screen_size
+            target = (
+                min(max(int(round(float(norm_x) * width)), 0), width - 1),
+                min(max(int(round(float(norm_y) * height)), 0), height - 1),
+            )
+            if target == self._active_position:
+                return []
+            return [self._touch_move(target)]
 
     def release_all(self) -> List[dict]:
         with self._lock:
             self.pressed_movement.clear()
+            self._active_button_key = None
             released = self._touch_up()
             return [released] if released else []
 
     @property
     def active_movement_keys(self) -> Iterable[str]:
         return tuple(sorted(self.pressed_movement))
+
+    @property
+    def active_button_key(self) -> Optional[str]:
+        return self._active_button_key

@@ -12,11 +12,13 @@ import numpy as np
 import PyQt6
 from PyQt6.QtCore import QCoreApplication, Qt, QTimer
 from PyQt6.QtGui import QCloseEvent, QImage, QKeyEvent, QPixmap
-from PyQt6.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QDialog, QLabel, QMainWindow, QVBoxLayout, QWidget
 
 from aw.autogame.customs_examples.Game_Recording import info
 from aw.autogame.tools.Utils import get_resolution
 
+from .binding_config import BindingConfigError
+from .binding_dialog import BindingDialog
 from .layout import LayoutError, RESERVED_KEYS, load_key_layout
 from .recording import RecordingSession
 from .runtime_log import save_disconnect_report
@@ -36,6 +38,8 @@ SPECIAL_KEYS = {
     Qt.Key.Key_Control: "ctrl",
     Qt.Key.Key_Alt: "alt",
     Qt.Key.Key_Tab: "tab",
+    Qt.Key.Key_Backspace: "backspace",
+    Qt.Key.Key_Escape: "escape",
 }
 
 
@@ -467,6 +471,13 @@ def run(
     _prefer_bundled_pyqt_plugins()
     app = QApplication.instance() or QApplication([])
     try:
+        binding_dialog = BindingDialog(info)
+        binding_dialog.show()
+        binding_dialog.raise_()
+        binding_dialog.activateWindow()
+        if binding_dialog.exec() != QDialog.DialogCode.Accepted:
+            print("[Game Recording] 已取消按键绑定，未启动抓流。", flush=True)
+            return 0
         window = RecorderWindow(
             output_root=output_root,
             fps=fps,
@@ -478,7 +489,7 @@ def run(
             sendevent_max_x=sendevent_max_x,
             sendevent_max_y=sendevent_max_y,
         )
-    except LayoutError as exc:
+    except (BindingConfigError, LayoutError) as exc:
         raise SystemExit(f"键位布局不可用：{exc}") from exc
     except (RuntimeError, ValueError) as exc:
         raise SystemExit(f"录制启动失败：{exc}") from exc

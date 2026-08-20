@@ -23,3 +23,6 @@ SCENE_POOL = {
     "groups": {"未分组场景": []},
     "scenes": {},
 }
+
+# start_record 的按键绑定窗口会自动读写此字段。
+KEY_BINDINGS = {}

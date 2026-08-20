@@ -97,6 +97,13 @@ def load_key_layout(
     if not isinstance(stage_data, Mapping):
         raise LayoutError(f"阶段“{stage_name}”的数据格式不正确。")
 
+    all_bindings = getattr(info_module, "KEY_BINDINGS", {})
+    stage_bindings = (
+        all_bindings.get(stage_name, {}) if isinstance(all_bindings, Mapping) else {}
+    )
+    if not isinstance(stage_bindings, Mapping):
+        stage_bindings = {}
+
     result: Dict[str, KeyPoint] = {}
     for scene_name, scene_data in _iter_selected_scenes(
         stage_name,
@@ -107,10 +114,15 @@ def load_key_layout(
         points = scene_data.get("points", {})
         if not isinstance(points, Mapping):
             continue
+        scene_bindings = stage_bindings.get(scene_name, {})
+        if not isinstance(scene_bindings, Mapping):
+            scene_bindings = {}
         for raw_name, point_data in points.items():
-            key = normalize_key_name(raw_name)
+            # 旧工程没有 KEY_BINDINGS 时继续使用控点名作为键位。
+            bound_name = scene_bindings.get(raw_name, raw_name)
+            key = normalize_key_name(bound_name)
             if not key:
-                continue
+                raise LayoutError(f"控点“{raw_name}”还没有绑定键盘按键。")
             if key in RESERVED_KEYS:
                 raise LayoutError(f"控点“{raw_name}”占用了录制键 {key}，请改用其他键名。")
             rect = point_data.get("rect") if isinstance(point_data, Mapping) else None

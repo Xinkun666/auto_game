@@ -60,6 +60,7 @@ EDITOR_STATE_FILENAME = ".label_project_state.json"
 EDITOR_STATE_VERSION = 1
 INFO_EDITOR_STATE_NAME = "LABEL_EDITOR_STATE"
 INFO_SCENE_POOL_NAME = "SCENE_POOL"
+INFO_KEY_BINDINGS_NAME = "KEY_BINDINGS"
 SCENE_POOL_INFO_VERSION = 1
 ITEM_TYPE_LABELS = {
     "area": "区域",
@@ -5509,6 +5510,19 @@ class AutoStudioWindow(QMainWindow):
         original_project_name = self.project.name
         project_name = self.project.name
         project_dir = os.path.join(export_dir, project_name)
+        preserved_key_bindings = {}
+        existing_info_path = os.path.join(project_dir, "info.py")
+        if os.path.isfile(existing_info_path):
+            try:
+                existing_info_env = {}
+                with open(existing_info_path, "r", encoding="utf-8") as existing_info_file:
+                    exec(existing_info_file.read(), existing_info_env)
+                existing_bindings = existing_info_env.get(INFO_KEY_BINDINGS_NAME, {})
+                if isinstance(existing_bindings, dict):
+                    preserved_key_bindings = existing_bindings
+            except Exception:
+                # 绑定记录不影响标注工程本身的导出。
+                preserved_key_bindings = {}
         preserved_handler_content = None
         imported_resource_source = self.imported_resource_dir if (
             self.imported_resource_dir and os.path.isdir(self.imported_resource_dir)
@@ -5809,6 +5823,7 @@ class AutoStudioWindow(QMainWindow):
                 code_lines.append(f"    {repr(stage_name)}: {repr(data)},")
             code_lines.append("}")
             code_lines.append(f"\n{INFO_SCENE_POOL_NAME} = {repr(scene_pool_info)}")
+            code_lines.append(f"\n{INFO_KEY_BINDINGS_NAME} = {repr(preserved_key_bindings)}")
 
             with open(file_path, "w", encoding='utf-8') as f:
                 f.write("\n".join(code_lines))

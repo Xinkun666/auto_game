@@ -77,6 +77,25 @@ python aw/autogame/customs_game_examples/Game_Recording/start_record.py \
 
 按 `q` 后的录制子目录包括 `video.mp4`、`initial_view.png`、`action_raw.json`、`action_step.json` 和 `session.json`。
 
+## 回放
+
+在仓库根目录执行：
+
+```bash
+python aw/autogame/customs_game_examples/Game_Recording/start_replay.py
+```
+
+启动后先弹出历史记录选择窗口，记录按录制时间从新到旧排列。选中后可查看初始画面、时长、动作数、视频帧数和结束原因；双击记录或点击“开始回放”后，程序才会连接手机。手机画面首帧到达后自动按原时间执行动作。
+
+回放优先使用 `action_raw.json` 中精确的按下/松开事件；如果该文件为空或不存在，则使用 `action_step.json` 恢复键位状态。触控坐标优先使用该次录制 `session.json` 中的布局，并自动缩放到当前手机分辨率。回放完成、失败或中途取消时都会强制释放触点。
+
+`start_replay.py` 与录制脚本一样支持 `--video-so`、`--touch-backend sendevent` 及手动 sendevent 设备参数。如果记录位于其他目录，可使用：
+
+```bash
+python aw/autogame/customs_game_examples/Game_Recording/start_replay.py \
+  --records /path/to/records
+```
+
 ## 断连处理和日志
 
 `start_record.py` 每启动一次，都会先在 `records` 下创建一个唯一时间目录。本次运行的成功或失败日志、hilog、录制文件和诊断报告都只保存在该目录中。日志在脚本启动时就开始记录，不需要先按 `q`。HOS 出现断连时：

@@ -48,6 +48,7 @@ class SingleTouchKeyboardController:
         self.pressed_movement: Set[str] = set()
         self._active_button_key: Optional[str] = None
         self._active_position: Optional[Tuple[int, int]] = None
+        self._active_anchor_position: Optional[Tuple[int, int]] = None
         self._lock = threading.RLock()
         self._joystick_center, self._joystick_radius = self._infer_joystick_geometry()
         self.screen_size = self._resolve_screen_size(screen_size)
@@ -110,6 +111,7 @@ class SingleTouchKeyboardController:
         target = self._movement_target()
         if target is None:
             released = self._touch_up()
+            self._active_anchor_position = None
             return [released] if released else []
         if self._active_position is None:
             return self._start_movement(target)
@@ -130,6 +132,7 @@ class SingleTouchKeyboardController:
         if self.movement_transition_seconds:
             time.sleep(self.movement_transition_seconds)
         actions.append(self._touch_move(target))
+        self._active_anchor_position = target
         return actions
 
     def press(self, key: str) -> List[dict]:
@@ -151,6 +154,7 @@ class SingleTouchKeyboardController:
             self._active_button_key = key
             position = self.key_points[key].position
             actions.append(self._touch_down(position))
+            self._active_anchor_position = position
             return actions
 
     def release(self, key: str) -> List[dict]:
@@ -161,6 +165,7 @@ class SingleTouchKeyboardController:
                 self._active_button_key = None
                 actions = []
                 released = self._touch_up()
+                self._active_anchor_position = None
                 if released:
                     actions.append(released)
                 actions.extend(self._sync_movement())
@@ -184,40 +189,53 @@ class SingleTouchKeyboardController:
         """将当前按住的任意控点向指定方向离散滑动一次。"""
         with self._lock:
             vector = DRAG_DIRECTIONS.get(str(direction or "").lower())
-            if (
-                vector is None
-                or self.active_control_key is None
-                or self._active_position is None
-            ):
+            anchor = self._active_anchor_position
+            if vector is None or self.active_control_key is None or anchor is None:
                 return []
             width, height = self.screen_size
             distance = max(1, int(round(min(width, height) * self.drag_step_ratio)))
             target = (
-                min(max(self._active_position[0] + vector[0] * distance, 0), width - 1),
-                min(max(self._active_position[1] + vector[1] * distance, 0), height - 1),
+                min(max(anchor[0] + vector[0] * distance, 0), width - 1),
+                min(max(anchor[1] + vector[1] * distance, 0), height - 1),
             )
-            if target == self._active_position:
+            if target == anchor:
                 return []
-            return [self._touch_move(target)]
+            return self._move_from_anchor(target)
 
     def move_active_control_to_normalized(self, norm_x: float, norm_y: float) -> List[dict]:
         """回放时按录制的归一化坐标恢复一次离散滑动。"""
         with self._lock:
-            if self.active_control_key is None or self._active_position is None:
+            if self.active_control_key is None or self._active_anchor_position is None:
                 return []
             width, height = self.screen_size
             target = (
                 min(max(int(round(float(norm_x) * width)), 0), width - 1),
                 min(max(int(round(float(norm_y) * height)), 0), height - 1),
             )
-            if target == self._active_position:
+            if target == self._active_anchor_position:
                 return []
-            return [self._touch_move(target)]
+            return self._move_from_anchor(target)
+
+    def _move_from_anchor(self, target: Tuple[int, int]) -> List[dict]:
+        anchor = self._active_anchor_position
+        if anchor is None:
+            return []
+        actions: List[dict] = []
+        if self._active_position != anchor:
+            released = self._touch_up()
+            if released:
+                actions.append(released)
+            if self.movement_transition_seconds:
+                time.sleep(self.movement_transition_seconds)
+            actions.append(self._touch_down(anchor))
+        actions.append(self._touch_move(target))
+        return actions
 
     def release_all(self) -> List[dict]:
         with self._lock:
             self.pressed_movement.clear()
             self._active_button_key = None
+            self._active_anchor_position = None
             released = self._touch_up()
             return [released] if released else []
 

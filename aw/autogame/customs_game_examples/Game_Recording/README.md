@@ -109,6 +109,8 @@ python aw/autogame/customs_game_examples/Game_Recording/start_replay.py \
 - 无论是否按过 `q`，都会保存断连诊断和完整终端输出。
 - 清理 HOS 连接前会先采集投屏进程、设备端视频端点和 `hdc fport` 状态，写入 `diagnostic.pre_cleanup_disconnect`。
 
+手动关闭录制窗口、按 `Ctrl+C`、IDE 停止或普通异常退出时，hilog 抓取进程也会立即结束，不会留在后台继续写日志。
+
 每次启动的目录结构：
 
 - 本次运行目录：`records/<启动时间>/`

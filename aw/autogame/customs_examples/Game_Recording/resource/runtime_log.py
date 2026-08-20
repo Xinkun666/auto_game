@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import atexit
 import json
+import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -123,6 +126,8 @@ class HilogCapture:
         self._file = None
         self._process = None
         self._stopped = False
+        self._stop_lock = threading.RLock()
+        self._atexit_callback = None
         self.start_error = ""
 
     def __enter__(self):
@@ -156,13 +161,23 @@ class HilogCapture:
             hilog_command = hdc_command_args("hdc hilog")
             if not hilog_command:
                 raise RuntimeError("无法构造 hdc hilog 命令")
+            process_kwargs = hidden_subprocess_kwargs()
+            if os.name == "nt":
+                process_kwargs["creationflags"] = (
+                    process_kwargs.get("creationflags", 0)
+                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                )
+            else:
+                process_kwargs["start_new_session"] = True
             self._process = subprocess.Popen(
                 hilog_command,
                 stdin=subprocess.DEVNULL,
                 stdout=self._file,
                 stderr=subprocess.STDOUT,
-                **hidden_subprocess_kwargs(),
+                **process_kwargs,
             )
+            self._atexit_callback = self.stop
+            atexit.register(self._atexit_callback)
             self._write_line(
                 "[Game Recording] hdc hilog pid=%s command=%r"
                 % (self._process.pid, hilog_command)
@@ -172,6 +187,9 @@ class HilogCapture:
             self._write_line(
                 "[Game Recording] hilog capture start failed: %s" % exc
             )
+        except BaseException:
+            self.stop()
+            raise
         return self
 
     @staticmethod
@@ -185,28 +203,52 @@ class HilogCapture:
             self._file.write((str(text) + "\n").encode("utf-8", errors="replace"))
 
     def stop(self):
-        if self._stopped:
-            return
-        self._stopped = True
-        process = self._process
-        if process is not None and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=2)
-        returncode = process.poll() if process is not None else None
-        self._write_line(
-            "[Game Recording] hilog capture stopped_at=%s returncode=%s"
-            % (
-                datetime.now().astimezone().isoformat(timespec="milliseconds"),
-                returncode,
+        with self._stop_lock:
+            if self._stopped:
+                return
+            self._stopped = True
+            callback = self._atexit_callback
+            self._atexit_callback = None
+            if callback is not None:
+                atexit.unregister(callback)
+
+            process = self._process
+            if process is not None and process.poll() is None:
+                self._terminate_process(process, force=False)
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self._terminate_process(process, force=True)
+                    process.wait(timeout=2)
+            returncode = process.poll() if process is not None else None
+            self._write_line(
+                "[Game Recording] hilog capture stopped_at=%s returncode=%s"
+                % (
+                    datetime.now().astimezone().isoformat(timespec="milliseconds"),
+                    returncode,
+                )
             )
-        )
-        if self._file is not None:
-            self._file.close()
-            self._file = None
+            if self._file is not None:
+                self._file.close()
+                self._file = None
+
+    @staticmethod
+    def _terminate_process(process, force: bool):
+        if os.name != "nt":
+            try:
+                os.killpg(
+                    process.pid,
+                    signal.SIGKILL if force else signal.SIGTERM,
+                )
+                return
+            except ProcessLookupError:
+                return
+            except OSError:
+                pass
+        if force:
+            process.kill()
+        else:
+            process.terminate()
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.stop()

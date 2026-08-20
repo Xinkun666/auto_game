@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import sys
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -13,6 +15,27 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+
+@contextmanager
+def _stop_cleanly_on_termination_signals():
+    """将 IDE 停止、终端关闭等终止信号转为可收尾的 SystemExit。"""
+    previous_handlers = {}
+
+    def request_exit(signum, _frame):
+        raise SystemExit(128 + int(signum))
+
+    for signal_name in ("SIGTERM", "SIGHUP"):
+        signum = getattr(signal, signal_name, None)
+        if signum is None:
+            continue
+        previous_handlers[signum] = signal.getsignal(signum)
+        signal.signal(signum, request_exit)
+    try:
+        yield
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
 
 def parse_args(argv=None):
@@ -108,6 +131,7 @@ def main(argv=None) -> int:
     run_error = ""
     try:
         with (
+            _stop_cleanly_on_termination_signals(),
             RuntimeLogCapture(run_dir) as runtime_log,
             HilogCapture(run_dir) as hilog,
         ):

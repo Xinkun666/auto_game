@@ -294,6 +294,15 @@ class RecorderWindow(QMainWindow):
         self.sendevent_touch = None
         backend.close()
 
+    def _stop_hilog(self):
+        if self.hilog_capture is None:
+            return None
+        capture = self.hilog_capture
+        self.hilog_capture = None
+        capture.stop()
+        print(f"[Game Recording] hilog 抓取已停止：{capture.path}", flush=True)
+        return capture.path
+
     def _handle_hos_disconnect(self, stream_error: Exception):
         self._disconnect_handled = True
         self._closed = True
@@ -326,14 +335,11 @@ class RecorderWindow(QMainWindow):
             diagnostic["stream_shutdown_error"] = str(exc)
             LOGGER.exception("HOS 断连后停止抓流失败")
         hilog_path = None
-        if self.hilog_capture is not None:
-            try:
-                self.hilog_capture.stop()
-                hilog_path = self.hilog_capture.path
-                print(f"[Game Recording] hilog 抓取已停止：{hilog_path}", flush=True)
-            except Exception as exc:
-                diagnostic["hilog_capture_stop_error"] = str(exc)
-                LOGGER.exception("HOS 断连后停止 hilog 抓取失败")
+        try:
+            hilog_path = self._stop_hilog()
+        except Exception as exc:
+            diagnostic["hilog_capture_stop_error"] = str(exc)
+            LOGGER.exception("HOS 断连后停止 hilog 抓取失败")
         try:
             report_paths = save_disconnect_report(
                 output_root=self.output_root,
@@ -481,6 +487,10 @@ class RecorderWindow(QMainWindow):
             self._closed = True
             self.preview_timer.stop()
             self.stream_monitor_timer.stop()
+            try:
+                self._stop_hilog()
+            except Exception:
+                LOGGER.exception("关闭窗口时停止 hilog 抓取失败")
             self._release_controls()
             self._stop_recording(reason="window_closed")
             try:

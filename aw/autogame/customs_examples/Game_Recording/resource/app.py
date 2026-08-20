@@ -130,7 +130,10 @@ class RecorderWindow(QMainWindow):
         self.stream_client = configure_fail_fast_stream(
             HOSScrcpyStreamClient(self.buffer, force_video_so=force_video_so)
         )
-        self.recorder = RecordingSession(output_root=self.output_root, fps=fps)
+        self.recorder = RecordingSession(
+            output_root=self.output_root / "recordings",
+            fps=fps,
+        )
         self.frame_pump = FramePump(self.buffer, self.recorder)
         self.controller = SingleTouchKeyboardController(self.stream_client, self.key_points)
         self.pressed_keys = set()

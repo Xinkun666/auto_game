@@ -51,7 +51,7 @@ python aw/autogame/customs_game_examples/Game_Recording/start_record.py \
 
 ## 断连处理和日志
 
-`start_record.py` 启动后会立即开始记录运行日志，不需要先按 `q`。HOS 出现断连时：
+`start_record.py` 每启动一次，都会先在 `records` 下创建一个唯一时间目录。本次运行的成功或失败日志、hilog、录制文件和诊断报告都只保存在该目录中。日志在脚本启动时就开始记录，不需要先按 `q`。HOS 出现断连时：
 
 - `auto` 模式不会重试已失败的 SO，而是切换到尚未尝试的候选；
 - 所有 SO 都启动失败或运行中断流后，程序才最终停止；
@@ -60,14 +60,16 @@ python aw/autogame/customs_game_examples/Game_Recording/start_record.py \
 - 无论是否按过 `q`，都会保存断连诊断和完整终端输出。
 - 清理 HOS 连接前会先采集投屏进程、设备端视频端点和 `hdc fport` 状态，写入 `diagnostic.pre_cleanup_disconnect`。
 
-日志位置：
+每次启动的目录结构：
 
-- 运行日志：`records/runtime_logs/start_record_<时间戳>.log`
-- 实时 hilog：`records/runtime_logs/hilog_<时间戳>.txt`
-- 断连报告：`records/disconnect_logs/<时间戳>/hos_disconnect.json`
-- 断连 hilog 快照：`records/disconnect_logs/<时间戳>/hilog.txt`
+- 本次运行目录：`records/<启动时间>/`
+- 完整终端日志：`records/<启动时间>/start_record.log`
+- 实时 hilog：`records/<启动时间>/hilog.txt`
+- 无论成功失败都生成：`records/<启动时间>/run_summary.json`
+- 按 `q` 产生的录制：`records/<启动时间>/recordings/<录制时间>/`
+- 最终断连时额外生成：`records/<启动时间>/hos_disconnect.json`
 
-如果断连时正在录制，`hilog.txt` 也会复制到当次录制目录。如果 `hdc hilog` 无法启动，运行日志和 hilog 文件头部会记录失败原因。
+如果断连时正在录制，`hilog.txt` 也会复制到当次录制子目录。如果 `hdc hilog` 无法启动，运行日志和 hilog 文件头部会记录失败原因。
 - 若断连时正在录制，录制目录内也会多一份 `hos_disconnect.json`
 
 ## 华为单框架说明

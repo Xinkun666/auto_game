@@ -14,6 +14,38 @@ from typing import Any, Dict, Optional, TextIO
 from aw.autogame.tools.ProcessUtils import hdc_command_args, hidden_subprocess_kwargs
 
 
+def create_run_directory(records_root: Path, now: Optional[datetime] = None) -> Path:
+    """为每次 start_record 启动创建唯一时间目录。"""
+    stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S-%f")
+    run_dir = Path(records_root) / stamp
+    run_dir.mkdir(parents=True, exist_ok=False)
+    return run_dir
+
+
+def save_run_summary(
+    run_dir: Path,
+    started_at: datetime,
+    outcome: str,
+    exit_code: int,
+    error: str = "",
+) -> Path:
+    """无论成功失败，都为本次启动写入收尾摘要。"""
+    summary_path = Path(run_dir) / "run_summary.json"
+    payload = {
+        "started_at": started_at.astimezone().isoformat(timespec="milliseconds"),
+        "finished_at": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+        "outcome": str(outcome),
+        "exit_code": int(exit_code),
+        "error": str(error or ""),
+        "run_directory": str(Path(run_dir)),
+    }
+    summary_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return summary_path
+
+
 class TeeTextIO:
     """将终端输出同时写入日志文件。"""
 
@@ -58,8 +90,7 @@ class RuntimeLogCapture:
     """在 start_record 整个运行期间保存 stdout/stderr。"""
 
     def __init__(self, output_root: Path):
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        self.path = Path(output_root) / "runtime_logs" / f"start_record_{stamp}.log"
+        self.path = Path(output_root) / "start_record.log"
         self._file: Optional[TextIO] = None
         self._stdout: Optional[TextIO] = None
         self._stderr: Optional[TextIO] = None
@@ -88,8 +119,7 @@ class HilogCapture:
     """start_record 启动时持续抓取 hilog，避免断连后手机已离线无法补抓。"""
 
     def __init__(self, output_root: Path):
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        self.path = Path(output_root) / "runtime_logs" / f"hilog_{stamp}.txt"
+        self.path = Path(output_root) / "hilog.txt"
         self._file = None
         self._process = None
         self._stopped = False
@@ -192,9 +222,8 @@ def save_disconnect_report(
 ) -> Dict[str, Path]:
     """保存首次断连的独立诊断报告，并关联已收尾的录制目录。"""
 
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    report_dir = Path(output_root) / "disconnect_logs" / stamp
-    report_dir.mkdir(parents=True, exist_ok=False)
+    report_dir = Path(output_root)
+    report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / "hos_disconnect.json"
     paths = {"disconnect_report": report_path}
     hilog_source = Path(hilog_path) if hilog_path else None
@@ -203,7 +232,10 @@ def save_disconnect_report(
     if hilog_source is not None:
         try:
             hilog_report_path = report_dir / "hilog.txt"
-            shutil.copy2(hilog_source, hilog_report_path)
+            if not hilog_source.is_file():
+                raise FileNotFoundError(f"hilog 源文件不存在：{hilog_source}")
+            if hilog_source.resolve() != hilog_report_path.resolve():
+                shutil.copy2(hilog_source, hilog_report_path)
             paths["hilog_log"] = hilog_report_path
         except Exception as exc:
             hilog_report_path = None

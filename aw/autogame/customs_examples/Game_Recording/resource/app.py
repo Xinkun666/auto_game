@@ -107,6 +107,10 @@ class RecorderWindow(QMainWindow):
         runtime_log_path: Path | None = None,
         hilog_capture=None,
         video_so: str = "auto",
+        touch_backend: str = "hos",
+        sendevent_device: str = "",
+        sendevent_max_x: int | None = None,
+        sendevent_max_y: int | None = None,
     ):
         super().__init__()
         # 先检查空工程，避免 info.py 尚未标注时被设备连接错误遮住。
@@ -130,12 +134,28 @@ class RecorderWindow(QMainWindow):
         self.stream_client = configure_fail_fast_stream(
             HOSScrcpyStreamClient(self.buffer, force_video_so=force_video_so)
         )
+        self.touch_backend_name = str(touch_backend or "hos").strip().lower()
+        self.sendevent_touch = None
+        touch_client = self.stream_client
+        if self.touch_backend_name == "sendevent":
+            from .sendevent_controller import SendeventTouchAdapter
+
+            self.sendevent_touch = SendeventTouchAdapter(
+                screen_size=self.screen_size,
+                device_id=getattr(self.stream_client, "sn", ""),
+                input_device=sendevent_device,
+                abs_max_x=sendevent_max_x,
+                abs_max_y=sendevent_max_y,
+            )
+            touch_client = self.sendevent_touch
+        elif self.touch_backend_name != "hos":
+            raise ValueError("不支持的触控后端：%s" % self.touch_backend_name)
         self.recorder = RecordingSession(
             output_root=self.output_root / "recordings",
             fps=fps,
         )
         self.frame_pump = FramePump(self.buffer, self.recorder)
-        self.controller = SingleTouchKeyboardController(self.stream_client, self.key_points)
+        self.controller = SingleTouchKeyboardController(touch_client, self.key_points)
         self.pressed_keys = set()
         self._closed = False
         self._disconnect_handled = False
@@ -180,6 +200,16 @@ class RecorderWindow(QMainWindow):
             % (force_video_so or "reuse-device-existing"),
             flush=True,
         )
+        print(
+            "[Game Recording] 触控后端：%s" % self.touch_backend_name,
+            flush=True,
+        )
+        if self.sendevent_touch is not None:
+            print(
+                "[Game Recording] sendevent 配置：%s"
+                % self.sendevent_touch.diagnostic_snapshot(),
+                flush=True,
+            )
         self.stream_client.start_backend()
 
     def _set_status(self, text: str, error: bool = False):
@@ -221,7 +251,12 @@ class RecorderWindow(QMainWindow):
             self._handle_hos_disconnect(stream_error)
 
     def _diagnostic_snapshot(self, stream_error: Exception):
-        diagnostic = {"last_error": str(stream_error)}
+        diagnostic = {
+            "last_error": str(stream_error),
+            "touch_backend": self.touch_backend_name,
+        }
+        if self.sendevent_touch is not None:
+            diagnostic["sendevent"] = self.sendevent_touch.diagnostic_snapshot()
         snapshot = getattr(self.stream_client, "diagnostic_snapshot", None)
         if callable(snapshot):
             try:
@@ -243,6 +278,13 @@ class RecorderWindow(QMainWindow):
         self.stream_client.stop()
         self.frame_pump.join(timeout=2.0)
 
+    def _close_touch_backend(self):
+        if self.sendevent_touch is None:
+            return
+        backend = self.sendevent_touch
+        self.sendevent_touch = None
+        backend.close()
+
     def _handle_hos_disconnect(self, stream_error: Exception):
         self._disconnect_handled = True
         self._closed = True
@@ -253,6 +295,11 @@ class RecorderWindow(QMainWindow):
         print(f"[Game Recording] 检测到 HOS 断连：{stream_error}", flush=True)
 
         self._release_controls()
+        try:
+            self._close_touch_backend()
+        except Exception as exc:
+            diagnostic["touch_backend_close_error"] = str(exc)
+            LOGGER.exception("HOS 断连后关闭触控后端失败")
         recording_dir = self.recorder.session_dir
         recording_error = ""
         try:
@@ -363,6 +410,7 @@ class RecorderWindow(QMainWindow):
         except Exception as exc:
             self.pressed_keys.clear()
             self.pressed_keys.update(previous_pressed_keys)
+            LOGGER.exception("发送键位 %s 失败", key)
             self._set_status(f"发送键位 {key} 失败：{exc}", error=True)
         event.accept()
 
@@ -386,6 +434,7 @@ class RecorderWindow(QMainWindow):
             actions = self.controller.release(key)
             self.recorder.record_key_event("release", key, self.pressed_keys, actions)
         except Exception as exc:
+            LOGGER.exception("释放键位 %s 失败", key)
             self._set_status(f"释放键位 {key} 失败：{exc}", error=True)
         event.accept()
 
@@ -396,6 +445,10 @@ class RecorderWindow(QMainWindow):
             self.stream_monitor_timer.stop()
             self._release_controls()
             self._stop_recording(reason="window_closed")
+            try:
+                self._close_touch_backend()
+            except Exception:
+                LOGGER.exception("关闭 sendevent 触控后端失败")
             self._stop_stream()
         event.accept()
 
@@ -406,6 +459,10 @@ def run(
     runtime_log_path: Path | None = None,
     hilog_capture=None,
     video_so: str = "auto",
+    touch_backend: str = "hos",
+    sendevent_device: str = "",
+    sendevent_max_x: int | None = None,
+    sendevent_max_y: int | None = None,
 ) -> int:
     _prefer_bundled_pyqt_plugins()
     app = QApplication.instance() or QApplication([])
@@ -416,10 +473,14 @@ def run(
             runtime_log_path=runtime_log_path,
             hilog_capture=hilog_capture,
             video_so=video_so,
+            touch_backend=touch_backend,
+            sendevent_device=sendevent_device,
+            sendevent_max_x=sendevent_max_x,
+            sendevent_max_y=sendevent_max_y,
         )
     except LayoutError as exc:
         raise SystemExit(f"键位布局不可用：{exc}") from exc
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         raise SystemExit(f"录制启动失败：{exc}") from exc
     window.show()
     window.activateWindow()

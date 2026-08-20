@@ -43,12 +43,51 @@ def parse_args(argv=None):
             "也可填写完整 SO 文件名"
         ),
     )
+    parser.add_argument(
+        "--touch-backend",
+        choices=("hos", "sendevent"),
+        default="hos",
+        help="触控后端：hos（默认）或 sendevent",
+    )
+    parser.add_argument(
+        "--sendevent-device",
+        default="",
+        help="手动指定触摸设备，例如 event2；留空自动探测",
+    )
+    parser.add_argument(
+        "--sendevent-max-x",
+        type=int,
+        default=None,
+        help="手动指定触摸面板 ABS X 最大值",
+    )
+    parser.add_argument(
+        "--sendevent-max-y",
+        type=int,
+        default=None,
+        help="手动指定触摸面板 ABS Y 最大值",
+    )
     args = parser.parse_args(argv)
     if args.fps <= 0:
         parser.error("--fps 必须大于 0")
     args.video_so = str(args.video_so or "").strip()
     if not args.video_so:
         parser.error("--video-so 不能为空")
+    sendevent_manual = (
+        bool(str(args.sendevent_device or "").strip()),
+        args.sendevent_max_x is not None,
+        args.sendevent_max_y is not None,
+    )
+    if any(sendevent_manual) and not all(sendevent_manual):
+        parser.error(
+            "手动配置 sendevent 时必须同时提供 "
+            "--sendevent-device、--sendevent-max-x 和 --sendevent-max-y"
+        )
+    if all(sendevent_manual) and args.touch_backend != "sendevent":
+        parser.error("sendevent 设备参数只能和 --touch-backend sendevent 一起使用")
+    if args.sendevent_max_x is not None and args.sendevent_max_x <= 0:
+        parser.error("--sendevent-max-x 必须大于 0")
+    if args.sendevent_max_y is not None and args.sendevent_max_y <= 0:
+        parser.error("--sendevent-max-y 必须大于 0")
     return args
 
 
@@ -96,6 +135,10 @@ def main(argv=None) -> int:
                         runtime_log_path=runtime_log.path,
                         hilog_capture=hilog,
                         video_so=args.video_so,
+                        touch_backend=args.touch_backend,
+                        sendevent_device=args.sendevent_device,
+                        sendevent_max_x=args.sendevent_max_x,
+                        sendevent_max_y=args.sendevent_max_y,
                     )
                 )
                 if (run_dir / "hos_disconnect.json").is_file():

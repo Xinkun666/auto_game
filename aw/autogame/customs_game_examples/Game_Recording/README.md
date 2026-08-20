@@ -37,17 +37,36 @@ python aw/autogame/customs_game_examples/Game_Recording/start_record.py \
   --video-so libscrcpy_server_unix_6.3.1-20260113.z.so
 ```
 
+默认使用 HOS 触控。如需改用 `sendevent`：
+
+```bash
+python aw/autogame/customs_game_examples/Game_Recording/start_record.py \
+  --touch-backend sendevent
+```
+
+程序会依次尝试设备端 `getevent -lp`、`getevent -p` 和 `/data/test/getevent -p`，自动识别触摸设备及 ABS 坐标范围。如果该手机无法自动探测，可以手动指定：
+
+```bash
+python aw/autogame/customs_game_examples/Game_Recording/start_record.py \
+  --touch-backend sendevent \
+  --sendevent-device event2 \
+  --sendevent-max-x 10799 \
+  --sendevent-max-y 23999
+```
+
+手动值必须以该手机 `getevent -p` 的实际结果为准，上面只是格式示例。`sendevent` 还需要 HDC Shell 具有写入 `/dev/input/eventX` 的权限；权限不足时错误会进入本次 `start_record.log` 和 `run_summary.json`。
+
 录制窗口出现手机画面后：
 
 - 按 `q`：开始录制
 - 按 `e`：停止并保存
 - 中间按已标注的键位：控制手机并写入动作记录
 
-结果默认保存到：
+本次运行默认保存到：
 
 `aw/autogame/customs_examples/Game_Recording/records/<时间戳>/`
 
-每次结果包括 `video.mp4`、`initial_view.png`、`action_raw.json`、`action_step.json` 和 `session.json`。
+按 `q` 后的录制子目录包括 `video.mp4`、`initial_view.png`、`action_raw.json`、`action_step.json` 和 `session.json`。
 
 ## 断连处理和日志
 
@@ -72,9 +91,9 @@ python aw/autogame/customs_game_examples/Game_Recording/start_record.py \
 如果断连时正在录制，`hilog.txt` 也会复制到当次录制子目录。如果 `hdc hilog` 无法启动，运行日志和 hilog 文件头部会记录失败原因。
 - 若断连时正在录制，录制目录内也会多一份 `hos_disconnect.json`
 
-## 华为单框架说明
+## 触控后端说明
 
-该入口直接使用项目已有的 HOScrcpy 视频流和 HOS 触控通道。HOS 官方通道当前只暴露单指操作，所以：
+该入口的视频流始终使用 HOScrcpy，触控可选 HOS 或 `sendevent`。当前键盘控制逻辑仍按单指摇杆设计，所以：
 
 - `w/a/s/d` 开始时会先在摇杆中心落指，再滑动到标注方向；
 - 新方向键会替换旧方向键，切换时必定执行“旧触点抬起 → 中心落指 → 滑动到新方向”；

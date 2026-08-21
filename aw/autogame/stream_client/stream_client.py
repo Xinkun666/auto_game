@@ -92,6 +92,25 @@ def _resolve_int_option(env_name, config, config_name, default):
     return _config_int(config, config_name, default)
 
 
+HOSCRCPY_FRAME_RATE_OPTIONS = (15, 30, 60, 120)
+
+
+def _resolve_hoscrcpy_frame_rate(config):
+    """Use only frame rates offered by the launcher, including env overrides."""
+    configured = _config_int(config, "hoscrcpy_frame_rate", 15)
+    if configured not in HOSCRCPY_FRAME_RATE_OPTIONS:
+        configured = 15
+
+    env_value = os.environ.get("AUTOGAME_HOSCRCPY_FRAME_RATE")
+    if env_value is None:
+        return configured
+    try:
+        overridden = int(env_value)
+    except (TypeError, ValueError):
+        return configured
+    return overridden if overridden in HOSCRCPY_FRAME_RATE_OPTIONS else configured
+
+
 def _resolve_str_option(env_name, config, config_name, default=""):
     value = os.environ.get(env_name)
     if value is not None:
@@ -1232,7 +1251,7 @@ class HOSScrcpyStreamClient:
         self.ip = _resolve_str_option("AUTOGAME_HOSCRCPY_IP", config, "hoscrcpy_ip", "127.0.0.1") or "127.0.0.1"
         self.port = _resolve_int_option("AUTOGAME_HOSCRCPY_PORT", config, "hoscrcpy_port", 8710)
         self.scale = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_SCALE", config, "hoscrcpy_scale", 2))
-        self.frame_rate = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_FRAME_RATE", config, "hoscrcpy_frame_rate", 5))
+        self.frame_rate = _resolve_hoscrcpy_frame_rate(config)
         self.bit_rate = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_BIT_RATE", config, "hoscrcpy_bit_rate", 1))
         self.device_port = max(1, _resolve_int_option("AUTOGAME_HOSCRCPY_DEVICE_PORT", config, "hoscrcpy_device_port", 5000))
         self.encoder_type = _resolve_str_option("AUTOGAME_HOSCRCPY_ENCODER_TYPE", config, "hoscrcpy_encoder_type", "0") or "0"

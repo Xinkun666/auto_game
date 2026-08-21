@@ -1619,12 +1619,13 @@ class HOSScrcpyStreamClient:
         }
         if device is None:
             diagnostic["device_available"] = False
+            diagnostic["device_object_available"] = False
             self._pre_cleanup_disconnect_diagnostic = diagnostic
             if self._auto_video_so:
                 self._video_so_attempt_history.append(dict(diagnostic))
             return diagnostic
 
-        diagnostic["device_available"] = True
+        diagnostic["device_object_available"] = True
         collect = getattr(device, "collect_disconnect_diagnostics", None)
         if callable(collect):
             try:
@@ -1635,6 +1636,10 @@ class HOSScrcpyStreamClient:
                     "[HOS] Pre-cleanup disconnect diagnostic failed: %s" % exc,
                     flush=True,
                 )
+        if "hdc_target_reachable" in diagnostic:
+            diagnostic["device_available"] = bool(diagnostic["hdc_target_reachable"])
+        else:
+            diagnostic["device_available"] = None
         self._pre_cleanup_disconnect_diagnostic = diagnostic
         if self._auto_video_so:
             self._video_so_attempt_history.append(dict(diagnostic))

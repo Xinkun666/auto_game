@@ -850,7 +850,9 @@ def get_resolution(r=True, rotation=None):
 
     rotation 参数仅保留旧调用兼容，不再参与宽高换算。
     """
-    command = 'hdc shell hidumper -s DisplayManagerService -a -a'
+    command = build_hos_hdc_shell_command(
+        "hidumper -s DisplayManagerService -a -a"
+    )
     resolution_mode = run_shell(command, r)
     resolution = _parse_screen_resolution(resolution_mode)
     if resolution is None:
@@ -862,6 +864,47 @@ def get_resolution(r=True, rotation=None):
 
     width, height = resolution
     return int(width), int(height)
+
+
+def _resolve_hos_hdc_target():
+    """Return the configured HDC server and device target for HOS commands.
+
+    A bare ``hdc shell`` relies on HDC's mutable default-target state. That
+    state may be absent even though ``hdc list targets`` can enumerate the
+    phone, which led the recorder to fail before HOScrcpy itself started.
+    Keep the legacy command only for projects that have not configured a HOS
+    device yet; the Game Recording configuration supplies all three values.
+    """
+    config = _read_autogame_config()
+    config = config if isinstance(config, dict) else {}
+    sn = str(
+        os.environ.get("AUTOGAME_HOSCRCPY_SN", config.get("hoscrcpy_sn", ""))
+        or ""
+    ).strip()
+    host = str(
+        os.environ.get("AUTOGAME_HOSCRCPY_IP", config.get("hoscrcpy_ip", "127.0.0.1"))
+        or "127.0.0.1"
+    ).strip()
+    port = str(
+        os.environ.get("AUTOGAME_HOSCRCPY_PORT", config.get("hoscrcpy_port", "8710"))
+        or "8710"
+    ).strip()
+    return host, port, sn
+
+
+def build_hos_hdc_shell_command(remote_command: str) -> str:
+    """Build an HDC shell command bound to the configured HOS device.
+
+    The returned text stays compatible with :func:`run_shell`, which converts
+    HDC commands to argument lists before invoking ``subprocess``.
+    """
+    remote_command = str(remote_command or "").strip()
+    if not remote_command:
+        raise ValueError("remote_command cannot be empty")
+    host, port, sn = _resolve_hos_hdc_target()
+    if not sn:
+        return "hdc shell {}".format(remote_command)
+    return "hdc -s {}:{} -t {} shell {}".format(host, port, sn, remote_command)
 
 
 def set_runtime_screen_resolution_env(width=None, height=None):
@@ -1623,19 +1666,25 @@ def get_display_rotation():
     """
     candidates = (
         (
-            ["hdc", "shell", "hidumper", "-s", "DisplayManagerService", "-a", "-a"],
+            build_hos_hdc_shell_command(
+                "hidumper -s DisplayManagerService -a -a"
+            ),
             "DisplayManagerService",
         ),
         (
-            ["hdc", "shell", "hidumper", "-s", "WindowManagerService", "-a", "-a"],
+            build_hos_hdc_shell_command(
+                "hidumper -s WindowManagerService -a -a"
+            ),
             "WindowManagerService",
         ),
         (
-            ["hdc", "shell", "snapshot_display"],
+            build_hos_hdc_shell_command("snapshot_display"),
             "snapshot_display",
         ),
         (
-            ["hdc", "shell", "hidumper", "-s", "RenderService", "-a", "screen"],
+            build_hos_hdc_shell_command(
+                "hidumper -s RenderService -a screen"
+            ),
             "RenderService",
         ),
     )
@@ -1644,8 +1693,10 @@ def get_display_rotation():
 
     for cmd, source in candidates:
         try:
+            command_args = hdc_command_args(cmd)
             result = subprocess.run(
-                cmd,
+                command_args or cmd,
+                shell=command_args is None,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

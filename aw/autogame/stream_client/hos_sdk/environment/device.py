@@ -534,6 +534,19 @@ class Device(object):
         }
 
         try:
+            target_probe = self.connector_shell_command(
+                "echo __AUTOGAME_HDC_TARGET_OK__",
+                timeout=timeout,
+            )
+            result["hdc_target_probe"] = _compact_log_value(target_probe, limit=1000)
+            result["hdc_target_reachable"] = "__AUTOGAME_HDC_TARGET_OK__" in str(
+                target_probe or ""
+            )
+        except Exception as exc:
+            result["hdc_target_reachable"] = False
+            result["hdc_target_probe_error"] = str(exc)
+
+        try:
             process_output = self.connector_shell_command(
                 '"ps -ef | grep singleness"',
                 timeout=timeout,

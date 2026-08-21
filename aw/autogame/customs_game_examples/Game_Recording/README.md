@@ -10,7 +10,7 @@
 3. 使用“控点”标注要操作的位置；控点名可以是 `w`、`a`、`s`、`d`，也可以是“前进”、“跳跃”等业务名称。
 4. 导出时仍选择 `Game_Recording` 工程。
 
-`q` 和 `e` 已被录制开关占用，不要标成游戏控点。`w/a/s/d` 应标在同一个移动摇杆的上、左、下、右四个方向。
+`q` 和 `e` 不再是录制开关，可以正常标成游戏控点。`w/a/s/d` 应标在同一个移动摇杆的上、左、下、右四个方向。
 
 ## 运行
 
@@ -68,8 +68,10 @@ python aw/autogame/customs_game_examples/Game_Recording/start_record.py \
 
 录制窗口出现手机画面后：
 
-- 按 `q`：开始录制
-- 按 `e`：停止并保存
+- 在“录制名称”中可选输入名称；留空时继续使用默认时间戳目录
+- 点击“开启录制”：开始录制，按钮同时变为“关闭录制”
+- 点击“关闭录制”：停止并保存
+- `q/e` 不再控制录制，可以在绑定界面中当作普通游戏键使用
 - 中间按已标注的键位：控制手机并写入动作记录
 - 按住任意已绑定控点（包括 `w/a/s/d`）时，每次新按一次键盘方向键，都会从该控点的初始位置执行一次约 0.12 秒的短滑动轨迹；长按方向键不会连续滑动
 
@@ -77,7 +79,7 @@ python aw/autogame/customs_game_examples/Game_Recording/start_record.py \
 
 `aw/autogame/customs_examples/Game_Recording/records/<时间戳>/`
 
-按 `q` 后的录制子目录包括 `video.mp4`、`initial_view.png`、`action_raw.json`、`action_step.json` 和 `session.json`。
+开启录制后的子目录包括 `video.mp4`、`initial_view.png`、`action_raw.json`、`action_step.json` 和 `session.json`。如果填写了录制名称，该子目录就使用所填名称；同名目录不会被覆盖。
 
 ## 回放
 
@@ -100,13 +102,13 @@ python aw/autogame/customs_game_examples/Game_Recording/start_replay.py \
 
 ## 断连处理和日志
 
-`start_record.py` 每启动一次，都会先在 `records` 下创建一个唯一时间目录。本次运行的成功或失败日志、hilog、录制文件和诊断报告都只保存在该目录中。日志在脚本启动时就开始记录，不需要先按 `q`。HOS 出现断连时：
+`start_record.py` 每启动一次，都会先在 `records` 下创建一个唯一时间目录。本次运行的成功或失败日志、hilog、录制文件和诊断报告都只保存在该目录中。日志在脚本启动时就开始记录，不需要先开启录制。HOS 出现断连时：
 
 - `auto` 模式不会重试已失败的 SO，而是切换到尚未尝试的候选；
 - 所有 SO 都启动失败或运行中断流后，程序才最终停止；
 - 程序从启动时就持续抓取 `hdc hilog`，避免手机掉线后无法补抓；
-- 如果已经按 `q` 开始录制，会先保存当前视频和动作，`session.json` 中的 `stop_reason` 为 `hos_disconnect`；
-- 无论是否按过 `q`，都会保存断连诊断和完整终端输出。
+- 如果已经通过按钮开始录制，会先保存当前视频和动作，`session.json` 中的 `stop_reason` 为 `hos_disconnect`；
+- 无论是否开始过录制，都会保存断连诊断和完整终端输出。
 - 清理 HOS 连接前会先采集投屏进程、设备端视频端点和 `hdc fport` 状态，写入 `diagnostic.pre_cleanup_disconnect`。
 
 手动关闭录制窗口、按 `Ctrl+C`、IDE 停止或普通异常退出时，hilog 抓取进程也会立即结束，不会留在后台继续写日志。
@@ -117,7 +119,7 @@ python aw/autogame/customs_game_examples/Game_Recording/start_replay.py \
 - 完整终端日志：`records/<启动时间>/start_record.log`
 - 实时 hilog：`records/<启动时间>/hilog.txt`
 - 无论成功失败都生成：`records/<启动时间>/run_summary.json`
-- 按 `q` 产生的录制：`records/<启动时间>/recordings/<录制时间>/`
+- 按钮产生的录制：`records/<启动时间>/recordings/<自定义名称或录制时间>/`
 - 最终断连时额外生成：`records/<启动时间>/hos_disconnect.json`
 
 如果断连时正在录制，`hilog.txt` 也会复制到当次录制子目录。如果 `hdc hilog` 无法启动，运行日志和 hilog 文件头部会记录失败原因。

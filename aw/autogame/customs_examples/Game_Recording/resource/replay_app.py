@@ -100,7 +100,7 @@ class ReplaySelectionDialog(QDialog):
         if not self.records:
             self.empty_label.setText(
                 "没有找到可回放的记录。请先运行 start_record.py，"
-                "按 q 开始录制、按 e 停止并保存。"
+                "在录制窗口中点击“开启录制”和“关闭录制”。"
             )
 
         self.buttons = QDialogButtonBox(

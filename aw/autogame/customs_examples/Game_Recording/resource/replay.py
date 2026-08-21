@@ -48,7 +48,10 @@ class ReplayRecord:
 
     @property
     def title(self) -> str:
-        return f"{self.display_time}    {self.duration_seconds:.1f} 秒    {self.action_count} 个动作"
+        return (
+            f"{self.directory.name}    {self.display_time}    "
+            f"{self.duration_seconds:.1f} 秒    {self.action_count} 个动作"
+        )
 
 
 def _read_json(path: Path, default: Any = None) -> Any:
@@ -233,7 +236,7 @@ def _events_from_steps(
         target = {normalize_key_name(key) for key in keys}
         target.discard("")
         if target.intersection(RESERVED_KEYS):
-            raise ReplayError(f"第 {index + 1} 个回放步骤占用了 q/e。")
+            raise ReplayError(f"第 {index + 1} 个回放步骤占用了保留键。")
         # 先松开旧键再按下新键，与录制窗口的切向语义一致。
         for key in sorted(pressed - target):
             if (

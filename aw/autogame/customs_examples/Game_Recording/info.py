@@ -6,7 +6,7 @@
 2. 把键盘键位标为“控点”，名称直接写 w、a、s、d、space、f 等；
 3. 导出回本工程。
 
-q 和 e 是录制开关，不能作为游戏控点使用。
+录制由 start_record 窗口中的按钮开关，q 和 e 也可以作为普通游戏控点使用。
 """
 
 PROJECT_NAME = "Game_Recording"

@@ -8,7 +8,8 @@ from typing import Any, Dict, Iterable, Mapping, Tuple
 from aw.autogame.tools.Utils import select_scene_resolution
 
 
-RESERVED_KEYS = frozenset({"q", "e"})
+# 录制已由界面按钮控制，q/e 不再是保留键。
+RESERVED_KEYS = frozenset()
 REQUIRED_MOVEMENT_KEYS = frozenset({"w", "a", "s", "d"})
 KEY_ALIASES = {
     "空格": "space",

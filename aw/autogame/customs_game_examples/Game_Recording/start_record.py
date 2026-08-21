@@ -48,7 +48,7 @@ def parse_args(argv=None):
         / "records"
     )
     parser = argparse.ArgumentParser(
-        description="读取 Game_Recording/info.py，按 q 开始、按 e 停止录制。",
+        description="读取 Game_Recording/info.py，通过录制窗口的按钮开始和停止录制。",
     )
     parser.add_argument(
         "--output",

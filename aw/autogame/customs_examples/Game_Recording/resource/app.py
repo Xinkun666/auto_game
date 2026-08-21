@@ -12,7 +12,17 @@ import numpy as np
 import PyQt6
 from PyQt6.QtCore import QCoreApplication, Qt, QTimer
 from PyQt6.QtGui import QCloseEvent, QImage, QKeyEvent, QPixmap
-from PyQt6.QtWidgets import QApplication, QDialog, QLabel, QMainWindow, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from aw.autogame.customs_examples.Game_Recording import info
 from aw.autogame.tools.Utils import get_resolution
@@ -169,7 +179,7 @@ class RecorderWindow(QMainWindow):
         self._closed = False
         self._disconnect_handled = False
 
-        self.setWindowTitle("Game Recording - q 开始 / e 结束")
+        self.setWindowTitle("Game Recording - 录制控制")
         self.resize(960, 620)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -177,6 +187,16 @@ class RecorderWindow(QMainWindow):
         self.status_label.setWordWrap(True)
         self.keys_label = QLabel("已加载键位：" + "、".join(sorted(self.key_points)))
         self.keys_label.setWordWrap(True)
+        self.record_name_edit = QLineEdit()
+        self.record_name_edit.setPlaceholderText("留空则使用默认时间名称")
+        self.record_name_edit.setMaxLength(120)
+        self.record_button = QPushButton("开启录制")
+        self.record_button.setEnabled(False)
+        self.record_button.clicked.connect(self._toggle_recording)
+        recording_controls = QHBoxLayout()
+        recording_controls.addWidget(QLabel("录制名称："))
+        recording_controls.addWidget(self.record_name_edit, 1)
+        recording_controls.addWidget(self.record_button)
         self.preview_label = QLabel("等待 HOScrcpy 首帧")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setMinimumSize(640, 360)
@@ -185,6 +205,7 @@ class RecorderWindow(QMainWindow):
         layout = QVBoxLayout()
         layout.addWidget(self.status_label)
         layout.addWidget(self.keys_label)
+        layout.addLayout(recording_controls)
         layout.addWidget(self.preview_label, 1)
         container = QWidget()
         container.setLayout(layout)
@@ -249,8 +270,10 @@ class RecorderWindow(QMainWindow):
             Qt.TransformationMode.SmoothTransformation,
         )
         self.preview_label.setPixmap(pixmap)
-        if not self.recorder.is_recording and "等待" in self.status_label.text():
-            self._set_status("控制已就绪：q 开始录制，e 停止并保存；请保持本窗口在前台。")
+        if not self.recorder.is_recording:
+            self.record_button.setEnabled(True)
+            if "等待" in self.status_label.text():
+                self._set_status("控制已就绪；输入可选名称后，点击“开启录制”。")
 
     def _monitor_stream_health(self):
         if self._closed or self._disconnect_handled:
@@ -380,26 +403,47 @@ class RecorderWindow(QMainWindow):
             for key, point in self.key_points.items()
         }
 
+    def _set_recording_controls(self, recording: bool):
+        self.record_name_edit.setEnabled(not recording)
+        self.record_button.setText("关闭录制" if recording else "开启录制")
+        self.record_button.setStyleSheet(
+            "background: #b00020; color: white; font-weight: 600;" if recording else ""
+        )
+
+    def _toggle_recording(self):
+        if self.recorder.is_recording:
+            self._stop_recording(reason="button")
+        else:
+            self._start_recording()
+        self.setFocus()
+
     def _start_recording(self):
         if self.recorder.is_recording:
-            self._set_status("已经在录制中；按 e 结束。")
+            self._set_status("已经在录制中；点击“关闭录制”后保存。")
             return
         frame = self.frame_pump.latest_frame()
         if frame is None:
-            self._set_status("还没有收到手机画面，请等待首帧后再按 q。", error=True)
+            self._set_status("还没有收到手机画面，请等待首帧后再开启录制。", error=True)
             return
-        session_dir = self.recorder.start(
-            frame,
-            self.screen_size,
-            self._layout_for_metadata(),
-            pressed_keys=self.pressed_keys,
-        )
-        self._set_status(f"● 正在录制：{session_dir.name}（按 e 结束）")
+        try:
+            session_dir = self.recorder.start(
+                frame,
+                self.screen_size,
+                self._layout_for_metadata(),
+                pressed_keys=self.pressed_keys,
+                session_name=self.record_name_edit.text(),
+            )
+        except (ValueError, FileExistsError, OSError, RuntimeError) as exc:
+            self._set_status(f"无法开启录制：{exc}", error=True)
+            return
+        self._set_recording_controls(True)
+        self._set_status(f"● 正在录制：{session_dir.name}（点击“关闭录制”保存）")
 
-    def _stop_recording(self, reason: str = "e"):
+    def _stop_recording(self, reason: str = "button"):
         session_dir = self.recorder.stop(reason=reason)
+        self._set_recording_controls(False)
         if session_dir is None:
-            self._set_status("当前没有正在进行的录制；按 q 开始。")
+            self._set_status("当前没有正在进行的录制。")
             return
         self._set_status(f"录制已保存：{session_dir}")
 
@@ -462,14 +506,6 @@ class RecorderWindow(QMainWindow):
         if event.isAutoRepeat():
             return
         key = key_name_from_event(event)
-        if key == "q":
-            self._start_recording()
-            event.accept()
-            return
-        if key == "e":
-            self._stop_recording()
-            event.accept()
-            return
         if not key or key not in self.pressed_keys:
             return
 

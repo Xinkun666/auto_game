@@ -40,6 +40,31 @@ MOVEMENT_VECTORS = {
     "d": (1.0, 0.0),
 }
 INPUT_SEMANTICS_VERSION = 2
+INVALID_RECORDING_NAME_CHARS = frozenset('<>:"/\\|?*')
+WINDOWS_RESERVED_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{index}" for index in range(1, 10)}
+    | {f"lpt{index}" for index in range(1, 10)}
+)
+
+
+def normalize_recording_name(value: Any) -> str:
+    """验证用户输入的录制目录名，空字符串表示使用默认时间戳。"""
+    name = str(value or "").strip()
+    if not name:
+        return ""
+    if len(name) > 120:
+        raise ValueError("录制名称不能超过 120 个字符。")
+    if name in {".", ".."}:
+        raise ValueError("录制名称不能是 . 或 ..。")
+    invalid = sorted({char for char in name if char in INVALID_RECORDING_NAME_CHARS or ord(char) < 32})
+    if invalid:
+        raise ValueError("录制名称不能包含这些字符：" + " ".join(invalid))
+    if name.endswith("."):
+        raise ValueError("录制名称不能以句点结尾。")
+    if name.split(".", 1)[0].lower() in WINDOWS_RESERVED_NAMES:
+        raise ValueError(f"录制名称不能使用系统保留名：{name}。")
+    return name
 
 
 def _movement_direction(keys: Iterable[str]) -> Tuple[int, int]:
@@ -72,6 +97,7 @@ class RecordingSession:
         self._raw_events = []
         self._steps = []
         self._frame_count = 0
+        self._custom_recording_name = False
 
     @property
     def is_recording(self) -> bool:
@@ -96,13 +122,19 @@ class RecordingSession:
         screen_size: Tuple[int, int],
         layout: Dict[str, Any],
         pressed_keys: Iterable[str] = (),
+        session_name: str = "",
     ) -> Path:
         with self._lock:
             if self._started_at is not None:
                 raise RuntimeError("当前已经在录制")
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-            self._session_dir = self.output_root / stamp
-            self._session_dir.mkdir(parents=True, exist_ok=False)
+            custom_name = normalize_recording_name(session_name)
+            directory_name = custom_name or datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            session_dir = self.output_root / directory_name
+            if session_dir.exists():
+                raise FileExistsError(f"录制名称已存在：{directory_name}，请换一个名称。")
+            session_dir.mkdir(parents=True, exist_ok=False)
+            self._session_dir = session_dir
+            self._custom_recording_name = bool(custom_name)
             self._started_at = time.monotonic()
             self._screen_size = (int(screen_size[0]), int(screen_size[1]))
             self._layout = dict(layout)
@@ -214,7 +246,7 @@ class RecordingSession:
             self._append_step(pressed_keys)
             return True
 
-    def stop(self, reason: str = "e") -> Optional[Path]:
+    def stop(self, reason: str = "button") -> Optional[Path]:
         with self._lock:
             if self._started_at is None or self._session_dir is None:
                 return None
@@ -246,6 +278,8 @@ class RecordingSession:
                 "screen_size": list(self._screen_size or ()),
                 "layout": self._layout,
                 "stop_reason": reason,
+                "recording_name": session_dir.name,
+                "custom_recording_name": self._custom_recording_name,
             }
             (session_dir / "session.json").write_text(
                 json.dumps(metadata, ensure_ascii=False, indent=2),
@@ -255,4 +289,5 @@ class RecordingSession:
             self._started_at = None
             self._session_dir = None
             self._screen_size = None
+            self._custom_recording_name = False
             return session_dir

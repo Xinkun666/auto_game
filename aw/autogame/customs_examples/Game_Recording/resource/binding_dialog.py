@@ -160,7 +160,7 @@ class BindingDialog(QDialog):
 
         self.help_label = QLabel(
             "先在左侧选中一个控点，再按下要绑定的键盘按键；"
-            "画面中的蓝色控点可直接拖动。q/e 保留给录制开关。"
+            "画面中的蓝色控点可直接拖动。q/e 现在也可以绑定为普通游戏键。"
         )
         self.help_label.setWordWrap(True)
         self.help_label.setStyleSheet("color: #555;")

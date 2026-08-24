@@ -117,12 +117,13 @@ python aw/autogame/customs_game_examples/Game_Recording/start_replay.py \
 
 - 本次运行目录：`records/<启动时间>/`
 - 完整终端日志：`records/<启动时间>/start_record.log`
+- HDC DEBUG 日志：`records/<启动时间>/hdc.log`（启动前执行 `hdc kill && hdc -l 5 start`，在 HOScrcpy 重新建立 fport 前开启；结束时从 `%TEMP%\\hdc.log` 归档）
 - 实时 hilog：`records/<启动时间>/hilog.txt`
 - 无论成功失败都生成：`records/<启动时间>/run_summary.json`
 - 按钮产生的录制：`records/<启动时间>/recordings/<自定义名称或录制时间>/`
 - 最终断连时额外生成：`records/<启动时间>/hos_disconnect.json`
 
-如果断连时正在录制，`hilog.txt` 也会复制到当次录制子目录。如果 `hdc hilog` 无法启动，运行日志和 hilog 文件头部会记录失败原因。
+如果断连时正在录制，`hilog.txt` 也会复制到当次录制子目录。如果 `hdc hilog` 无法启动，运行日志和 hilog 文件头部会记录失败原因；若 HDC DEBUG 原始日志无法归档，会额外写入 `hdc_capture_error.txt` 说明原因。
 - 若断连时正在录制，录制目录内也会多一份 `hos_disconnect.json`
 
 ## 触控后端说明

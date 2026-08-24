@@ -118,6 +118,7 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     records_root = args.output.expanduser().resolve()
     from aw.autogame.customs_examples.Game_Recording.resource.runtime_log import (
+        HdcDebugLogCapture,
         HilogCapture,
         RuntimeLogCapture,
         create_run_directory,
@@ -133,6 +134,7 @@ def main(argv=None) -> int:
         with (
             _stop_cleanly_on_termination_signals(),
             RuntimeLogCapture(run_dir) as runtime_log,
+            HdcDebugLogCapture(run_dir) as hdc_debug,
             HilogCapture(run_dir) as hilog,
         ):
             logging.basicConfig(
@@ -142,6 +144,18 @@ def main(argv=None) -> int:
             )
             print(f"[Game Recording] 本次记录目录：{run_dir}", flush=True)
             print(f"[Game Recording] 运行日志：{runtime_log.path}", flush=True)
+            print(
+                "[Game Recording] HDC DEBUG：已在建立 fport 前执行 "
+                "hdc kill && hdc -l 5 start；结束后归档至 %s（来源：%s）"
+                % (hdc_debug.path, hdc_debug.source_path),
+                flush=True,
+            )
+            if hdc_debug.start_error:
+                print(
+                    f"[Game Recording] HDC DEBUG 启动失败：{hdc_debug.start_error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             print(f"[Game Recording] hilog 实时抓取：{hilog.path}", flush=True)
             if hilog.start_error:
                 print(

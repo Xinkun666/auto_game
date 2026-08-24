@@ -9,7 +9,9 @@ import signal
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, TextIO
@@ -116,6 +118,82 @@ class RuntimeLogCapture:
         if self._file is not None:
             self._file.flush()
             self._file.close()
+
+
+class HdcDebugLogCapture:
+    """为一次录制重启 HDC DEBUG，并归档其原始日志。"""
+
+    COPY_ATTEMPTS = 3
+    COPY_RETRY_SECONDS = 0.2
+
+    def __init__(self, output_root: Path):
+        self.path = Path(output_root) / "hdc.log"
+        temp_root = os.environ.get("TEMP") or os.environ.get("TMP") or tempfile.gettempdir()
+        self.source_path = Path(temp_root) / "hdc.log"
+        self.start_error = ""
+        self.copy_error = ""
+        self.captured = False
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self._run_hdc_command("hdc kill")
+            self._run_hdc_command("hdc -l 5 start")
+        except Exception as exc:
+            self.start_error = str(exc)
+        return self
+
+    def _run_hdc_command(self, command_text: str):
+        command = hdc_command_args(command_text)
+        if not command:
+            raise RuntimeError(f"无法构造 HDC DEBUG 命令：{command_text}")
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            **hidden_subprocess_kwargs(),
+        )
+        if completed.returncode == 0:
+            return
+        stdout = self._decode(completed.stdout).strip()
+        stderr = self._decode(completed.stderr).strip()
+        raise RuntimeError(
+            "HDC DEBUG 命令失败：%s returncode=%s stdout=%r stderr=%r"
+            % (command_text, completed.returncode, stdout, stderr)
+        )
+
+    @staticmethod
+    def _decode(value) -> str:
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="ignore")
+        return str(value or "")
+
+    def stop(self):
+        if self.captured or self.copy_error:
+            return
+        for attempt in range(self.COPY_ATTEMPTS):
+            try:
+                if not self.source_path.is_file():
+                    raise FileNotFoundError(f"HDC DEBUG 源日志不存在：{self.source_path}")
+                shutil.copy2(self.source_path, self.path)
+                self.captured = True
+                return
+            except Exception as exc:
+                self.copy_error = str(exc)
+                if attempt + 1 < self.COPY_ATTEMPTS:
+                    time.sleep(self.COPY_RETRY_SECONDS)
+
+        error_path = self.path.parent / "hdc_capture_error.txt"
+        error_path.write_text(
+            "HDC DEBUG 日志归档失败\nsource=%s\ndestination=%s\nstart_error=%s\nerror=%s\n"
+            % (self.source_path, self.path, self.start_error, self.copy_error),
+            encoding="utf-8",
+        )
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.stop()
 
 
 class HilogCapture:

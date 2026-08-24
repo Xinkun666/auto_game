@@ -118,6 +118,8 @@ DEFAULT_HOSCRCPY_FRAME_RATE = HOSCRCPY_FRAME_RATE_OPTIONS[0]
 TESTCASES_DIR = APP_DIR / "testcases"
 CUSTOMS_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_examples"
 CUSTOMS_GAME_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_game_examples"
+GAME_RECORDING_PROJECT_DIR = CUSTOMS_EXAMPLES_DIR / "Game_Recording"
+GAME_RECORDING_MAIN_PATH = CUSTOMS_GAME_EXAMPLES_DIR / "Game_Recording" / "main.py"
 TEMP_DIR = resolve_runtime_temp_dir(APP_DIR)
 PREVIEW_DIR = resolve_preview_frame_dir(APP_DIR)
 LOG_DIR = TEMP_DIR / "logs"
@@ -2358,6 +2360,13 @@ def run_direct_entry(project_case: str, target_case: str):
     automator.start()
 
 
+def run_game_recording_entry() -> int:
+    """由 Launcher 子进程启动独立的录制回放 Qt 窗口。"""
+    from aw.autogame.customs_game_examples.Game_Recording.main import main as game_recording_main
+
+    return int(game_recording_main())
+
+
 def run_hdc_shell(command: str) -> Optional[str]:
     hdc_executable = resolve_hdc_executable()
     cmd = [hdc_executable, "shell", command]
@@ -2812,6 +2821,7 @@ class LauncherWindow(QWidget):
         self.inputs_enabled = True
         self.label_tool = None
         self.label_tool_project_dir: Optional[Path] = None
+        self.game_recording_process: Optional[QProcess] = None
         self.history_records: list[dict] = []
         self.selected_history_record: Optional[dict] = None
         self.selected_history_batch_dir: Optional[Path] = None
@@ -2835,6 +2845,14 @@ class LauncherWindow(QWidget):
         self.browse_button = QPushButton("选择用例")
         self.clear_button = QPushButton("重选")
         self.open_label_tool_button = QPushButton("打开标注工具")
+        self.open_game_recording_button = QPushButton("录制回放")
+        self.open_game_recording_button.setToolTip(
+            "打开 Game_Recording 的专用录制、回放和对比界面"
+        )
+        self.open_game_recording_label_button = QPushButton("修改录制控点")
+        self.open_game_recording_label_button.setToolTip(
+            "直接加载 Game_Recording 标注工程，可修改并导出控点"
+        )
         self.refresh_button = QPushButton("刷新")
         self.refresh_button.setToolTip("刷新配置")
         self.refresh_button.setFixedWidth(64)
@@ -3759,6 +3777,14 @@ class LauncherWindow(QWidget):
         testcase_layout.addWidget(self.open_label_tool_button)
         testcase_layout.addWidget(self.refresh_button)
         launch_row.addWidget(testcase_group, 2)
+
+        recording_group = QGroupBox("录制回放")
+        recording_layout = QVBoxLayout(recording_group)
+        recording_layout.setContentsMargins(12, 8, 12, 10)
+        recording_layout.setSpacing(6)
+        recording_layout.addWidget(self.open_game_recording_button)
+        recording_layout.addWidget(self.open_game_recording_label_button)
+        launch_row.addWidget(recording_group, 1)
         controls_layout.addLayout(launch_row)
 
         config_panel = QWidget()
@@ -4137,6 +4163,10 @@ class LauncherWindow(QWidget):
         self.browse_button.clicked.connect(self._choose_testcase_file)
         self.clear_button.clicked.connect(self._reselect_testcase_file)
         self.open_label_tool_button.clicked.connect(self._open_label_tool_for_selected_case)
+        self.open_game_recording_button.clicked.connect(self._open_game_recording)
+        self.open_game_recording_label_button.clicked.connect(
+            self._open_game_recording_label_tool
+        )
         self.back_to_launcher_button.clicked.connect(self._show_launcher_page)
         self.refresh_button.clicked.connect(self._refresh_config_choices)
         self.project_combo.currentTextChanged.connect(self._on_project_changed)
@@ -4580,6 +4610,10 @@ class LauncherWindow(QWidget):
         project_case = self.project_combo.currentText().strip()
         return resolve_label_project_dir(project_case) is not None
 
+    def _game_recording_is_running(self) -> bool:
+        process = self.game_recording_process
+        return process is not None and process.state() != QProcess.ProcessState.NotRunning
+
     def _sync_testcase_controls_state(self):
         testcase_mode = self.mode_testcase.isChecked()
         has_selection = self.selected_testcase_file is not None
@@ -4594,6 +4628,20 @@ class LauncherWindow(QWidget):
         self.open_label_tool_button.setEnabled(
             can_use_testcase_controls and self._can_open_label_tool_for_selection()
         )
+        game_recording_ready = (
+            self.inputs_enabled
+            and not self._game_recording_is_running()
+            and (
+                bool(getattr(sys, "frozen", False))
+                or (
+                    GAME_RECORDING_PROJECT_DIR.is_dir()
+                    and (GAME_RECORDING_PROJECT_DIR / "info.py").is_file()
+                    and GAME_RECORDING_MAIN_PATH.is_file()
+                )
+            )
+        )
+        self.open_game_recording_button.setEnabled(game_recording_ready)
+        self.open_game_recording_label_button.setEnabled(game_recording_ready)
 
     def _set_combo_value(self, combo: QComboBox, value: str):
         if not value:
@@ -4738,6 +4786,105 @@ class LauncherWindow(QWidget):
         self.label_tool.setWindowFlags(Qt.WindowType.Widget)
         self.label_tool_host_layout.addWidget(self.label_tool)
 
+    def _open_game_recording(self):
+        if self._game_recording_is_running():
+            QMessageBox.information(self, "录制回放已打开", "Game Recording 正在运行。")
+            return
+        if (
+            not getattr(sys, "frozen", False)
+            and (
+                not GAME_RECORDING_MAIN_PATH.is_file()
+                or not (GAME_RECORDING_PROJECT_DIR / "info.py").is_file()
+            )
+        ):
+            QMessageBox.warning(
+                self,
+                "无法打开录制回放",
+                "未找到 Game_Recording 的 main.py 或 info.py，请检查工程文件。",
+            )
+            return
+
+        process = QProcess(self)
+        process.setProgram(sys.executable)
+        process.setArguments(build_launcher_process_args("--run-game-recording"))
+        process.setWorkingDirectory(str(APP_DIR))
+        process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        process.readyReadStandardOutput.connect(self._read_game_recording_output)
+        process.finished.connect(self._game_recording_finished)
+        process.errorOccurred.connect(self._game_recording_error)
+        self.game_recording_process = process
+        process.start()
+        if not process.waitForStarted(3000):
+            error_text = process.errorString() or "未知启动错误"
+            self.game_recording_process = None
+            process.deleteLater()
+            QMessageBox.warning(self, "无法打开录制回放", f"Game Recording 启动失败：{error_text}")
+            self._sync_testcase_controls_state()
+            return
+        self._set_status("已打开 Game Recording 专用录制回放窗口。")
+        self._log_message(
+            f"[Launcher] 已启动 Game Recording：pid={process.processId()} project={GAME_RECORDING_PROJECT_DIR}\n"
+        )
+        self._sync_testcase_controls_state()
+
+    def _read_game_recording_output(self):
+        process = self.game_recording_process
+        if process is None:
+            return
+        output = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        if output:
+            self._log_message(f"[Game Recording] {output}")
+
+    def _game_recording_error(self, error):
+        process = self.game_recording_process
+        detail = process.errorString() if process is not None else str(error)
+        LOGGER.warning("Game Recording process error: %s", detail)
+
+    def _game_recording_finished(self, exit_code: int, exit_status):
+        process = self.game_recording_process
+        if process is not None:
+            trailing = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace")
+            if trailing:
+                self._log_message(f"[Game Recording] {trailing}")
+            process.deleteLater()
+        self.game_recording_process = None
+        self._sync_testcase_controls_state()
+        self._set_status(f"Game Recording 已关闭（退出码 {exit_code}）。")
+        LOGGER.info(
+            "Game Recording process finished: exit_code=%s exit_status=%s",
+            exit_code,
+            exit_status,
+        )
+
+    def _open_label_project(self, project_case: str, project_dir: Path):
+        try:
+            self._ensure_label_tool()
+            self.label_tool.load_project_from_dir(str(project_dir))
+        except Exception as exc:
+            log_exception(f"open label tool failed: project_dir={project_dir}")
+            issues = ValidationIssues()
+            issues.add_error("打开失败", f"无法打开标注工具：{exc}")
+            self._show_validation_issues("无法打开标注工具", issues)
+            return False
+
+        self.label_tool_project_dir = project_dir
+        self.label_tool_project_label.setText(
+            f"当前标注项目：{project_case}    {project_dir}"
+        )
+        self.page_stack.setCurrentWidget(self.label_tool_page)
+        self._set_status(f"已打开标注工具：{project_case}")
+        return True
+
+    def _open_game_recording_label_tool(self):
+        if not (GAME_RECORDING_PROJECT_DIR / "info.py").is_file():
+            QMessageBox.warning(
+                self,
+                "无法打开标注工具",
+                "未找到 Game_Recording/info.py，请先确认工程已导出。",
+            )
+            return
+        self._open_label_project("Game_Recording", GAME_RECORDING_PROJECT_DIR)
+
     def _open_label_tool_for_selected_case(self):
         LOGGER.info(
             "open_label_tool_for_selected_case: testcase=%s project=%s",
@@ -4760,21 +4907,7 @@ class LauncherWindow(QWidget):
             self._sync_testcase_controls_state()
             return
 
-        try:
-            self._ensure_label_tool()
-            self.label_tool.load_project_from_dir(str(project_dir))
-        except Exception as exc:
-            log_exception(f"open label tool failed: project_dir={project_dir}")
-            issues.add_error("打开失败", f"无法打开标注工具：{exc}")
-            self._show_validation_issues("无法打开标注工具", issues)
-            return
-
-        self.label_tool_project_dir = project_dir
-        self.label_tool_project_label.setText(
-            f"当前标注项目：{project_case}    {project_dir}"
-        )
-        self.page_stack.setCurrentWidget(self.label_tool_page)
-        self._set_status(f"已打开标注工具：{project_case}")
+        self._open_label_project(project_case, project_dir)
 
     def _show_launcher_page(self):
         LOGGER.info("show launcher page")
@@ -7658,6 +7791,9 @@ def _run_helper_command(args: argparse.Namespace) -> int:
             run_direct_entry(project_case, target_case)
             return exit_code
 
+        if args.run_game_recording:
+            return run_game_recording_entry()
+
         return exit_code
     except Exception:
         log_exception("helper command failed")
@@ -7715,8 +7851,9 @@ def main():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--run-testcase")
     parser.add_argument("--run-direct", nargs=2, metavar=("PROJECT_CASE", "TARGET_CASE"))
+    parser.add_argument("--run-game-recording", action="store_true")
     args, unknown_args = parser.parse_known_args()
-    is_helper = bool(args.run_testcase or args.run_direct)
+    is_helper = bool(args.run_testcase or args.run_direct or args.run_game_recording)
     LOGGER.info(
         "parsed args: %s unknown_args=%s is_helper=%s",
         args,

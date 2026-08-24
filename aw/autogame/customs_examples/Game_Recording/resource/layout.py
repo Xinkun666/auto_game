@@ -132,18 +132,33 @@ def joystick_direction_points(
         points[markers[JOYSTICK_BOUNDARY_POINT_NAME]],
         markers[JOYSTICK_BOUNDARY_POINT_NAME],
     )
-    center_x = min(max(int(round(center_norm[0] * screen_width)), 0), screen_width - 1)
-    center_y = min(max(int(round(center_norm[1] * screen_height)), 0), screen_height - 1)
-    boundary_x = min(max(int(round(boundary_norm[0] * screen_width)), 0), screen_width - 1)
-    boundary_y = min(max(int(round(boundary_norm[1] * screen_height)), 0), screen_height - 1)
-    radius = math.hypot(boundary_x - center_x, boundary_y - center_y)
-    if radius <= 0:
-        raise ValueError("center 与 boundary 不能重合；boundary 必须标在摇杆边界上。")
+    center_x_float = center_norm[0] * screen_width
+    center_y_float = center_norm[1] * screen_height
+    boundary_x_float = boundary_norm[0] * screen_width
+    boundary_y_float = boundary_norm[1] * screen_height
+    radius = math.hypot(
+        boundary_x_float - center_x_float,
+        boundary_y_float - center_y_float,
+    )
+    if radius <= 1e-9:
+        raise ValueError(
+            "center 与 boundary 的标注中心重合：center=(%.6f, %.6f)，"
+            "boundary=(%.6f, %.6f)。boundary 必须标在摇杆边界上。"
+            % (*center_norm, *boundary_norm)
+        )
+    center_x = min(max(int(round(center_x_float)), 0), screen_width - 1)
+    center_y = min(max(int(round(center_y_float)), 0), screen_height - 1)
 
     result = []
     for binding_name, display_name, (vector_x, vector_y) in JOYSTICK_DIRECTION_SPECS:
-        target_x = min(max(int(round(center_x + radius * vector_x)), 0), screen_width - 1)
-        target_y = min(max(int(round(center_y + radius * vector_y)), 0), screen_height - 1)
+        target_x = min(
+            max(int(round(center_x_float + radius * vector_x)), 0),
+            screen_width - 1,
+        )
+        target_y = min(
+            max(int(round(center_y_float + radius * vector_y)), 0),
+            screen_height - 1,
+        )
         result.append(
             JoystickDirectionPoint(
                 binding_name=binding_name,

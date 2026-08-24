@@ -275,7 +275,7 @@ class RecorderWindow(QMainWindow):
         if not self.recorder.is_recording:
             self.record_button.setEnabled(True)
             if "等待" in self.status_label.text():
-                self._set_status("控制已就绪；输入可选名称后，点击“开启录制”。")
+                self._set_status("画面已就绪；点击“开启录制”后才开始监听键盘。")
 
     def _monitor_stream_health(self):
         if self._closed or self._disconnect_handled:
@@ -437,6 +437,8 @@ class RecorderWindow(QMainWindow):
             self._set_status("还没有收到手机画面，请等待首帧后再开启录制。", error=True)
             return
         try:
+            # 未录制期间不会接收键盘；开始新录制前也确保没有遗留触点。
+            self._release_controls()
             session_dir = self.recorder.start(
                 frame,
                 self.screen_size,
@@ -452,6 +454,7 @@ class RecorderWindow(QMainWindow):
 
     def _stop_recording(self, reason: str = "button"):
         session_dir = self.recorder.stop(reason=reason)
+        self._release_controls()
         self._set_recording_controls(False)
         if session_dir is None:
             self._set_status("当前没有正在进行的录制。")
@@ -460,6 +463,9 @@ class RecorderWindow(QMainWindow):
 
     def keyPressEvent(self, event: QKeyEvent):
         if event.isAutoRepeat():
+            return
+        if not self.recorder.is_recording:
+            event.ignore()
             return
         key = key_name_from_event(event)
         if not key or key in RESERVED_KEYS:
@@ -519,6 +525,9 @@ class RecorderWindow(QMainWindow):
 
     def keyReleaseEvent(self, event: QKeyEvent):
         if event.isAutoRepeat():
+            return
+        if not self.recorder.is_recording:
+            event.ignore()
             return
         key = key_name_from_event(event)
         if not key or key not in self.pressed_keys:

@@ -19,9 +19,7 @@ def parse_args(argv=None):
         REPO_ROOT
         / "aw"
         / "autogame"
-        / "customs_examples"
-        / "Game_Recording"
-        / "records"
+        / "Game_Recording_records"
     )
     parser = argparse.ArgumentParser(
         description="弹窗选择 Game_Recording 历史记录并回放。",

@@ -43,9 +43,7 @@ def parse_args(argv=None):
         REPO_ROOT
         / "aw"
         / "autogame"
-        / "customs_examples"
-        / "Game_Recording"
-        / "records"
+        / "Game_Recording_records"
     )
     parser = argparse.ArgumentParser(
         description="读取 Game_Recording/info.py，通过录制窗口的按钮开始和停止录制。",
@@ -54,7 +52,7 @@ def parse_args(argv=None):
         "--output",
         type=Path,
         default=default_output,
-        help="录制批次根目录，每次启动会在其下创建时间目录",
+        help="录制历史根目录（默认位于 Label 工程目录外），每次启动会在其下创建时间目录",
     )
     parser.add_argument("--fps", type=float, default=15.0, help="本地 MP4 帧率，默认 15")
     parser.add_argument(

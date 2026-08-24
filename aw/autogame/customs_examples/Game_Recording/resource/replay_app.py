@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QVBoxLayout,
@@ -69,6 +70,9 @@ class ReplaySelectionWidget(QWidget):
         self.record_list = QListWidget()
         self.record_list.currentItemChanged.connect(self._selection_changed)
         self.record_list.itemDoubleClicked.connect(lambda _item: self.recordActivated.emit())
+        self.delete_button = QPushButton("删除所选记录")
+        self.delete_button.clicked.connect(self._delete_selected_record)
+        self.delete_button.setEnabled(False)
 
         self.preview_label = QLabel("无初始画面")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -81,6 +85,7 @@ class ReplaySelectionWidget(QWidget):
         left = QVBoxLayout()
         left.addWidget(QLabel("可回放记录（新的在前）"))
         left.addWidget(self.record_list, 1)
+        left.addWidget(self.delete_button)
         left_widget = QWidget()
         left_widget.setLayout(left)
 
@@ -122,11 +127,13 @@ class ReplaySelectionWidget(QWidget):
         del previous
         record = self.selected_record if current is not None else None
         if record is None:
+            self.delete_button.setEnabled(False)
             self.detail_label.clear()
             self.preview_label.setText("无初始画面")
             self.preview_label.setPixmap(QPixmap())
             self.selectionChanged.emit()
             return
+        self.delete_button.setEnabled(True)
         source_label = "精确键盘事件" if record.action_format == "raw" else "状态化回放步骤"
         self.detail_label.setText(
             f"录制时间：{record.display_time}\n"
@@ -144,6 +151,36 @@ class ReplaySelectionWidget(QWidget):
         )
         self._refresh_preview()
         self.selectionChanged.emit()
+
+    def _delete_selected_record(self):
+        record = self.selected_record
+        if record is None:
+            return
+        answer = QMessageBox.warning(
+            self,
+            "删除回放记录",
+            "确定删除所选录制记录吗？\n\n"
+            f"{record.directory.name}\n\n"
+            "该记录中的视频、动作和元数据将被永久删除，无法恢复。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            root = self.records_root.expanduser().resolve()
+            directory = record.directory.resolve()
+            if directory == root or root not in directory.parents:
+                raise RuntimeError("所选记录不在当前记录目录内，已拒绝删除。")
+            shutil.rmtree(directory)
+        except OSError as exc:
+            LOGGER.exception("删除回放记录失败：%s", record.directory)
+            QMessageBox.critical(self, "删除失败", f"无法删除该记录：{exc}")
+            return
+        except RuntimeError as exc:
+            QMessageBox.critical(self, "删除失败", str(exc))
+            return
+        self.refresh_records()
 
     def refresh_records(self):
         """重新扫描，以便同一主窗口内刚完成的录制立即可回放。"""

@@ -395,6 +395,7 @@ class GameRecordingMainWindow(QMainWindow):
         sendevent_device: str = "",
         sendevent_max_x: int | None = None,
         sendevent_max_y: int | None = None,
+        open_label_tool_callback=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -402,6 +403,7 @@ class GameRecordingMainWindow(QMainWindow):
         self.resize(1280, 820)
         self._shutdown_complete = False
         self.label_tool_window = None
+        self.open_label_tool_callback = open_label_tool_callback
 
         central = QWidget(self)
         root_layout = QVBoxLayout(central)
@@ -453,7 +455,12 @@ class GameRecordingMainWindow(QMainWindow):
         self.label_tool_window = None
 
     def _open_label_tool(self):
-        """在当前 Qt 进程中打开标注工具，并固定加载 Game_Recording。"""
+        """请求打开 Game_Recording 标注工具。"""
+        if callable(self.open_label_tool_callback):
+            self.open_label_tool_callback()
+            return
+
+        # 独立运行 main.py 时没有 Launcher 页面，保留独立窗口兜底。
         if not (GAME_RECORDING_PROJECT_DIR / "info.py").is_file():
             QMessageBox.warning(
                 self,
@@ -519,6 +526,7 @@ def create_main_window(
     sendevent_device: str = "",
     sendevent_max_x: int | None = None,
     sendevent_max_y: int | None = None,
+    open_label_tool_callback=None,
     parent=None,
 ) -> GameRecordingMainWindow | None:
     """创建统一窗口，可供独立入口或 Launcher 页面复用。"""
@@ -540,6 +548,7 @@ def create_main_window(
             sendevent_device=sendevent_device,
             sendevent_max_x=sendevent_max_x,
             sendevent_max_y=sendevent_max_y,
+            open_label_tool_callback=open_label_tool_callback,
             parent=parent,
         )
     except (BindingConfigError, LayoutError) as exc:

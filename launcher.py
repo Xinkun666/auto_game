@@ -2823,6 +2823,7 @@ class LauncherWindow(QWidget):
         self.inputs_enabled = True
         self.label_tool = None
         self.label_tool_project_dir: Optional[Path] = None
+        self.label_tool_return_page = None
         self.game_recording_window = None
         self.game_recording_run_dir: Optional[Path] = None
         self.game_recording_started_at = None
@@ -4024,7 +4025,7 @@ class LauncherWindow(QWidget):
         title_column.addWidget(self.label_tool_project_label)
         header_layout.addLayout(title_column, 1)
 
-        self.back_to_launcher_button = QPushButton("返回启动器")
+        self.back_to_launcher_button = QPushButton("返回主界面")
         header_layout.addWidget(self.back_to_launcher_button)
         layout.addWidget(header_bar, 0)
 
@@ -4206,7 +4207,7 @@ class LauncherWindow(QWidget):
         self.clear_button.clicked.connect(self._reselect_testcase_file)
         self.open_label_tool_button.clicked.connect(self._open_label_tool_for_selected_case)
         self.open_game_recording_button.clicked.connect(self._open_game_recording)
-        self.back_to_launcher_button.clicked.connect(self._show_launcher_page)
+        self.back_to_launcher_button.clicked.connect(self._return_from_label_tool)
         self.refresh_button.clicked.connect(self._refresh_config_choices)
         self.project_combo.currentTextChanged.connect(self._on_project_changed)
         self.target_combo.currentTextChanged.connect(self._on_target_changed)
@@ -4874,6 +4875,7 @@ class LauncherWindow(QWidget):
                 output_root=run_dir,
                 runtime_log_path=runtime_log_path,
                 hilog_capture=hilog_capture,
+                open_label_tool_callback=self._open_game_recording_label_tool,
                 parent=self,
             )
             if window is None:
@@ -4952,7 +4954,22 @@ class LauncherWindow(QWidget):
             self.game_recording_empty_label.setText("录制回放已关闭。")
             self._show_launcher_page()
 
-    def _open_label_project(self, project_case: str, project_dir: Path):
+    def _open_game_recording_label_tool(self):
+        """从录制回放页进入标注页，返回时恢复到原录制回放页。"""
+        if not (GAME_RECORDING_PROJECT_DIR / "info.py").is_file():
+            QMessageBox.warning(
+                self,
+                "无法打开标注工具",
+                "未找到 Game_Recording/info.py，请检查工程文件。",
+            )
+            return False
+        return self._open_label_project(
+            "Game_Recording",
+            GAME_RECORDING_PROJECT_DIR,
+            return_page=self.game_recording_page,
+        )
+
+    def _open_label_project(self, project_case: str, project_dir: Path, return_page=None):
         try:
             self._ensure_label_tool()
             self.label_tool.load_project_from_dir(str(project_dir))
@@ -4966,6 +4983,10 @@ class LauncherWindow(QWidget):
         self.label_tool_project_dir = project_dir
         self.label_tool_project_label.setText(
             f"当前标注项目：{project_case}    {project_dir}"
+        )
+        self.label_tool_return_page = return_page
+        self.back_to_launcher_button.setText(
+            "返回录制回放" if return_page is self.game_recording_page else "返回主界面"
         )
         self.page_stack.setCurrentWidget(self.label_tool_page)
         self._set_status(f"已打开标注工具：{project_case}")
@@ -4994,6 +5015,20 @@ class LauncherWindow(QWidget):
             return
 
         self._open_label_project(project_case, project_dir)
+
+    def _return_from_label_tool(self):
+        return_page = self.label_tool_return_page
+        self.label_tool_return_page = None
+        self.back_to_launcher_button.setText("返回主界面")
+        if (
+            return_page is self.game_recording_page
+            and self._game_recording_is_running()
+        ):
+            self.page_stack.setCurrentWidget(self.game_recording_page)
+            self.game_recording_window.recorder_window.setFocus()
+            self._set_status("已返回录制回放。")
+            return
+        self._show_launcher_page()
 
     def _show_launcher_page(self):
         LOGGER.info("show launcher page")

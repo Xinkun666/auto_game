@@ -3667,7 +3667,7 @@ class AutoStudioWindow(QMainWindow):
             self.current_stage = self._find_stage_for_scene(data)
             self.set_current_work_stage(self.current_stage)
             self.current_scene = data
-            self.show_scene_image(data)
+            self.refresh_scene_display(data)
             if is_pool_scene:
                 action_scene_group = self._find_scene_pool_group_for_scene(data)
                 btn_cap = QPushButton("📷 抓图")
@@ -3773,6 +3773,12 @@ class AutoStudioWindow(QMainWindow):
         self.canvas.crosshair_v = None
         self.canvas.hide_crosshair()
         self.update_coord_display(None, None)
+    def refresh_scene_display(self, scene_data: SceneData):
+        """刷新标注时保留当前场景的视图缩放和位置。"""
+        if self.canvas.active_scene_data is scene_data and self.canvas.current_pixmap:
+            self.canvas.redraw_overlays(scene_data)
+            return
+        self.show_scene_image(scene_data)
     def update_coord_display(self, x, y):
         if x is None or y is None:
             self.coord_label.setText("坐标: (-,-)")
@@ -4052,7 +4058,7 @@ class AutoStudioWindow(QMainWindow):
         elif isinstance(data, ItemData):
             parent_data.items.remove(data)
             self.sync_deleted_item_to_scene_peers(parent_data, data)
-            self.show_scene_image(parent_data)  # refresh view
+            self.refresh_scene_display(parent_data)
             restore_scene = parent_data
         self.update_tree_view()
         if restore_scene:

@@ -254,6 +254,7 @@ class PreviewFramePump(threading.Thread):
 
 
 class ReplayThread(QThread):
+    timelineStarted = pyqtSignal(float)
     progressChanged = pyqtSignal(float, str)
     replayEnded = pyqtSignal(bool, str)
 
@@ -291,6 +292,7 @@ class ReplayThread(QThread):
             if callable(begin_guard):
                 guard_started = bool(begin_guard("Game Recording replay"))
             started_at = time.monotonic()
+            self.timelineStarted.emit(started_at)
             for index, event in enumerate(self.events):
                 if not self._wait_until(started_at + event.timestamp):
                     return

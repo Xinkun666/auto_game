@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
 import cv2
@@ -46,6 +47,11 @@ class SharedReplayPanel(QWidget):
         self.replay_thread = None
         self._replay_controller = None
         self._recorded_capture = None
+        self._recorded_frame_count = 0
+        self._recorded_frame_index = -1
+        self._recorded_duration_seconds = 0.0
+        self._comparison_started_at = None
+        self._pending_recorded_video = None
         self._closing = False
 
         self.selector = ReplaySelectionWidget(self.records_root, self)
@@ -152,8 +158,13 @@ class SharedReplayPanel(QWidget):
             )
         )
 
-    def _start_recorded_video(self, video_path: Path):
-        """从回放动作开始时播放同一条录制视频，不影响实时回放。"""
+    def _start_recorded_video(
+        self,
+        video_path: Path,
+        duration_seconds: float,
+        timeline_started_at: float,
+    ):
+        """按回放时间轴播放视频，而非按视频文件标称 FPS 播放。"""
         self._stop_recorded_video()
         self.recorded_video_label.setPixmap(QPixmap())
         if not video_path.is_file():
@@ -165,19 +176,47 @@ class SharedReplayPanel(QWidget):
             self.recorded_video_label.setText("无法打开该记录的 video.mp4，仍会继续实时回放。")
             return
         self._recorded_capture = capture
-        fps = float(capture.get(cv2.CAP_PROP_FPS) or 15.0)
-        interval_ms = max(15, min(1000, int(round(1000 / max(1.0, fps)))))
-        self.recorded_video_timer.start(interval_ms)
+        self._recorded_frame_count = max(0, int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0))
+        if self._recorded_frame_count <= 0:
+            self._stop_recorded_video()
+            self.recorded_video_label.setText("原录制视频没有可播放帧，仍会继续实时回放。")
+            return
+        self._recorded_duration_seconds = max(0.001, float(duration_seconds))
+        self._recorded_frame_index = -1
+        self._comparison_started_at = float(timeline_started_at)
+        # 每次按相同的已过回放时间定位视频帧，避免实际取帧率低于标称 FPS 时越播越慢。
+        self.recorded_video_timer.start(30)
         self._refresh_recorded_video()
+
+    def _start_pending_recorded_video(self, timeline_started_at: float):
+        pending = self._pending_recorded_video
+        if pending is None or self._closing:
+            return
+        self._start_recorded_video(*pending, timeline_started_at)
 
     def _refresh_recorded_video(self):
         capture = self._recorded_capture
         if capture is None:
             return
+        started_at = self._comparison_started_at
+        if started_at is None:
+            return
+        progress = min(
+            1.0,
+            max(0.0, (time.monotonic() - started_at) / self._recorded_duration_seconds),
+        )
+        target_index = min(
+            self._recorded_frame_count - 1,
+            int(progress * self._recorded_frame_count),
+        )
+        if target_index == self._recorded_frame_index:
+            return
+        capture.set(cv2.CAP_PROP_POS_FRAMES, target_index)
         ok, frame = capture.read()
         if not ok:
             self._stop_recorded_video()
             return
+        self._recorded_frame_index = target_index
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         height, width = frame_rgb.shape[:2]
         image = QImage(
@@ -199,6 +238,10 @@ class SharedReplayPanel(QWidget):
     def _stop_recorded_video(self):
         self.recorded_video_timer.stop()
         capture, self._recorded_capture = self._recorded_capture, None
+        self._recorded_frame_count = 0
+        self._recorded_frame_index = -1
+        self._recorded_duration_seconds = 0.0
+        self._comparison_started_at = None
         if capture is not None:
             capture.release()
 
@@ -207,6 +250,7 @@ class SharedReplayPanel(QWidget):
             self._set_status("回放进行中，请等待结束后再返回选择。", error=True)
             return
         self._stop_recorded_video()
+        self._pending_recorded_video = None
         self.pages.setCurrentWidget(self.selection_page)
         self.selector.refresh_records()
         self._update_start_state()
@@ -242,12 +286,17 @@ class SharedReplayPanel(QWidget):
                 stream_client=self.recorder_window.stream_client,
                 parent=self,
             )
+            self._pending_recorded_video = (
+                record.directory / "video.mp4",
+                record.duration_seconds,
+            )
+            self.replay_thread.timelineStarted.connect(self._start_pending_recorded_video)
             self.replay_thread.progressChanged.connect(self._update_progress)
             self.replay_thread.replayEnded.connect(self._replay_ended)
             self.progress_bar.setValue(0)
             self.action_label.setText("正在等待第一条动作")
             self.pages.setCurrentWidget(self.comparison_page)
-            self._start_recorded_video(record.directory / "video.mp4")
+            self.recorded_video_label.setText("正在与回放时间轴同步…")
             self._set_status(f"正在回放：{record.directory.name}")
             self._update_start_state()
             self.replay_thread.start()
@@ -263,6 +312,7 @@ class SharedReplayPanel(QWidget):
             return
         self.progress_bar.setValue(1000 if success else self.progress_bar.value())
         self._stop_recorded_video()
+        self._pending_recorded_video = None
         self._set_status(message, error=not success)
         self._update_start_state()
 
@@ -270,6 +320,7 @@ class SharedReplayPanel(QWidget):
         self._closing = True
         self.preview_timer.stop()
         self._stop_recorded_video()
+        self._pending_recorded_video = None
         thread = self.replay_thread
         if thread is not None and thread.isRunning():
             thread.requestInterruption()

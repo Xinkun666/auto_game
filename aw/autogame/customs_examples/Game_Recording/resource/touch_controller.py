@@ -47,6 +47,11 @@ class SingleTouchKeyboardController:
             0.0,
             float(movement_transition_seconds),
         )
+        self._movement_keys = frozenset(
+            key
+            for key, point in self.key_points.items()
+            if key in MOVEMENT_KEYS or point.is_joystick_direction
+        )
         self.pressed_movement: Set[str] = set()
         self._active_button_key: Optional[str] = None
         self._active_position: Optional[Tuple[int, int]] = None
@@ -66,7 +71,24 @@ class SingleTouchKeyboardController:
         return max(max_x + 1, 1), max(max_y + 1, 1)
 
     def _infer_joystick_geometry(self):
-        points = [self.key_points[key].position for key in MOVEMENT_KEYS if key in self.key_points]
+        generated_points = [
+            point
+            for point in self.key_points.values()
+            if point.is_joystick_direction and point.joystick_center is not None
+        ]
+        if generated_points:
+            center = generated_points[0].joystick_center
+            if center is not None:
+                radii = [
+                    math.hypot(point.position[0] - center[0], point.position[1] - center[1])
+                    for point in generated_points
+                ]
+                return center, (sum(radii) / len(radii) if radii else 0.0)
+        points = [
+            self.key_points[key].position
+            for key in self._movement_keys
+            if key in self.key_points
+        ]
         if not points:
             return None, 0.0
         center = (
@@ -143,7 +165,7 @@ class SingleTouchKeyboardController:
         with self._lock:
             if key not in self.key_points:
                 return []
-            if key in MOVEMENT_KEYS:
+            if self.is_movement_key(key):
                 if self.pressed_movement == {key}:
                     return self._sync_movement()
                 force_restart = bool(self.pressed_movement)
@@ -163,7 +185,7 @@ class SingleTouchKeyboardController:
 
     def release(self, key: str) -> List[dict]:
         with self._lock:
-            if key not in MOVEMENT_KEYS:
+            if not self.is_movement_key(key):
                 if key != self._active_button_key:
                     return []
                 self._active_button_key = None
@@ -181,7 +203,7 @@ class SingleTouchKeyboardController:
 
     def tap(self, key: str) -> List[dict]:
         """兼容旧录制：非摇杆键仍执行固定时长的短按。"""
-        if key in MOVEMENT_KEYS:
+        if self.is_movement_key(key):
             return []
         actions = self.press(key)
         if actions:
@@ -258,6 +280,13 @@ class SingleTouchKeyboardController:
     @property
     def active_movement_keys(self) -> Iterable[str]:
         return tuple(sorted(self.pressed_movement))
+
+    @property
+    def movement_keys(self) -> frozenset[str]:
+        return self._movement_keys
+
+    def is_movement_key(self, key: str) -> bool:
+        return str(key or "") in self._movement_keys
 
     @property
     def active_button_key(self) -> Optional[str]:

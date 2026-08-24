@@ -339,6 +339,18 @@ def load_replay_layout(
             norm_y = float(position[1]) / recorded_screen[1]
         if not (0.0 <= norm_x <= 1.0 and 0.0 <= norm_y <= 1.0):
             continue
+        joystick_center = None
+        raw_center = raw_point.get("joystick_center_normalized")
+        if isinstance(raw_center, (list, tuple)) and len(raw_center) == 2:
+            try:
+                center_x, center_y = float(raw_center[0]), float(raw_center[1])
+            except (TypeError, ValueError):
+                center_x, center_y = -1.0, -1.0
+            if 0.0 <= center_x <= 1.0 and 0.0 <= center_y <= 1.0:
+                joystick_center = (
+                    min(max(int(round(center_x * screen_width)), 0), screen_width - 1),
+                    min(max(int(round(center_y * screen_height)), 0), screen_height - 1),
+                )
         result[key] = KeyPoint(
             key=key,
             position=(
@@ -348,6 +360,8 @@ def load_replay_layout(
             normalized_position=(norm_x, norm_y),
             stage=str(raw_point.get("stage") or "录制记录"),
             scene=str(raw_point.get("scene") or record.directory.name),
+            is_joystick_direction=bool(raw_point.get("is_joystick_direction")),
+            joystick_center=joystick_center,
         )
 
     required_keys = {

@@ -34,6 +34,12 @@ python aw/autogame/customs_game_examples/Game_Recording/start_record.py
 
 每个候选的启动结果和断流现场会写入运行日志及 `video_so_attempt_history`。
 
+### 摇杆快捷标注
+
+除了逐个标注 `w/a/s/d`，还可在同一场景标两个控点：`center` 和 `boundary`（这两个英文拼写就是标准写法，大小写不敏感）。`center` 是摇杆落指中心，`boundary` 是摇杆圆周上的任一点；两点距离就是摇杆半径。
+
+按键绑定窗口会以 `center` 为圆心生成绿色的 `↑ ↓ ← → ↖ ↗ ↙ ↘` 八个虚拟方向。它们不是额外写入标注图的控点，可以只绑定需要使用的方向；保存后，录制和回放都会按已绑定方向使用同一中心与半径。`center` 和 `boundary` 自身无需绑定键盘按键。
+
 如需对比设备原有版本：
 
 ```bash

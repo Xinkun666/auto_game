@@ -32,7 +32,7 @@ from .binding_dialog import BindingDialog
 from .layout import LayoutError, RESERVED_KEYS, load_key_layout
 from .recording import RecordingSession
 from .runtime_log import save_disconnect_report
-from .touch_controller import DRAG_DIRECTIONS, MOVEMENT_KEYS, SingleTouchKeyboardController
+from .touch_controller import DRAG_DIRECTIONS, SingleTouchKeyboardController
 
 
 LOGGER = logging.getLogger("GameRecording")
@@ -399,6 +399,15 @@ class RecorderWindow(QMainWindow):
                 "normalized_position": list(point.normalized_position),
                 "stage": point.stage,
                 "scene": point.scene,
+                "is_joystick_direction": point.is_joystick_direction,
+                "joystick_center_normalized": (
+                    [
+                        point.joystick_center[0] / self.screen_size[0],
+                        point.joystick_center[1] / self.screen_size[1],
+                    ]
+                    if point.joystick_center is not None
+                    else None
+                ),
             }
             for key, point in self.key_points.items()
         }
@@ -453,7 +462,11 @@ class RecorderWindow(QMainWindow):
         key = key_name_from_event(event)
         if not key or key in RESERVED_KEYS:
             return
-        if key in DRAG_DIRECTIONS and self.controller.active_control_key is not None:
+        if (
+            key in DRAG_DIRECTIONS
+            and not self.controller.is_movement_key(key)
+            and self.controller.active_control_key is not None
+        ):
             direction_label = DIRECTION_LABELS.get(key, key)
             try:
                 active_control_key = self.controller.active_control_key
@@ -485,8 +498,8 @@ class RecorderWindow(QMainWindow):
             return
 
         previous_pressed_keys = set(self.pressed_keys)
-        if key in MOVEMENT_KEYS:
-            self.pressed_keys.difference_update(MOVEMENT_KEYS)
+        if self.controller.is_movement_key(key):
+            self.pressed_keys.difference_update(self.controller.movement_keys)
         else:
             active_button = self.controller.active_button_key
             if active_button is not None:

@@ -160,7 +160,8 @@ class BindingDialog(QDialog):
 
         self.help_label = QLabel(
             "先在左侧选中一个控点，再按下要绑定的键盘按键；"
-            "画面中的蓝色控点可直接拖动。q/e 现在也可以绑定为普通游戏键。"
+            "画面中的蓝色控点可直接拖动。若标注了 center 和 boundary，"
+            "会自动生成 8 个绿色摇杆方向供选择性绑定。q/e 现在也可以绑定为普通游戏键。"
         )
         self.help_label.setWordWrap(True)
         self.help_label.setStyleSheet("color: #555;")
@@ -275,6 +276,9 @@ class BindingDialog(QDialog):
             self.status_label.setText("场景图片缺失，仍可绑定和拖动控点。")
             self.status_label.setStyleSheet("color: #a05a00;")
 
+        controls = {
+            control.name: control for control in self.config.bindable_controls(scene)
+        }
         for point_name, point_data in scene.points.items():
             rect = point_data.get("rect") if isinstance(point_data, dict) else None
             if not isinstance(rect, (list, tuple)) or len(rect) != 4:
@@ -284,10 +288,11 @@ class BindingDialog(QDialog):
                 norm_y = (float(rect[1]) + float(rect[3])) / 2.0
             except (TypeError, ValueError):
                 continue
-            item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, str(point_name))
-            self.binding_list.addItem(item)
-            self._refresh_list_item(item)
+            if str(point_name) in controls:
+                item = QListWidgetItem()
+                item.setData(Qt.ItemDataRole.UserRole, str(point_name))
+                self.binding_list.addItem(item)
+                self._refresh_list_item(item)
             point_item = PointItem(
                 str(point_name),
                 QPointF(norm_x * scene_width, norm_y * scene_height),
@@ -298,6 +303,41 @@ class BindingDialog(QDialog):
             )
             self.graphics_scene.addItem(point_item)
             self.point_items[str(point_name)] = point_item
+
+        for control in controls.values():
+            if not control.is_virtual_joystick_direction:
+                continue
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, control.name)
+            self.binding_list.addItem(item)
+            self._refresh_list_item(item)
+
+            position = QPointF(
+                control.normalized_position[0] * scene_width,
+                control.normalized_position[1] * scene_height,
+            )
+            marker = self.graphics_scene.addEllipse(
+                -9,
+                -9,
+                18,
+                18,
+                QPen(QColor("#d8ffe3"), 2),
+                QBrush(QColor(30, 170, 90, 220)),
+            )
+            marker.setPos(position)
+            marker.setZValue(11)
+            marker.setFlag(
+                QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations,
+                True,
+            )
+            label = self.graphics_scene.addSimpleText(control.display_name)
+            label.setBrush(QBrush(QColor("#d8ffe3")))
+            label.setPos(position + QPointF(12, -10))
+            label.setZValue(11)
+            label.setFlag(
+                QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations,
+                True,
+            )
 
         if self.binding_list.count():
             self.binding_list.setCurrentRow(0)
@@ -310,7 +350,9 @@ class BindingDialog(QDialog):
         point_name = str(item.data(Qt.ItemDataRole.UserRole))
         bound_key = self.config.binding_for(scene, point_name)
         key = bound_key or "还没绑定"
-        item.setText(f"{point_name}    →    {key}")
+        control = self.config.control_for(scene, point_name)
+        display_name = control.display_name if control is not None else point_name
+        item.setText(f"{display_name}    →    {key}")
         item.setForeground(
             QBrush(QColor("#202020" if bound_key else "#b00020"))
         )

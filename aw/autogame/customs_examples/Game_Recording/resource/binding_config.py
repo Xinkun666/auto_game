@@ -11,7 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, MutableMapping
 
-from .layout import RESERVED_KEYS, normalize_key_name
+from .layout import (
+    RESERVED_KEYS,
+    is_joystick_geometry_point,
+    joystick_direction_points,
+    normalize_key_name,
+)
 
 
 BINDINGS_NAME = "KEY_BINDINGS"
@@ -72,6 +77,14 @@ class BindingScene:
     def display_name(self) -> str:
         suffix = f"  {self.width}x{self.height}" if self.resolution_key else ""
         return f"{self.name}{suffix}"
+
+
+@dataclass(frozen=True)
+class BindingControl:
+    name: str
+    display_name: str
+    normalized_position: tuple[float, float]
+    is_virtual_joystick_direction: bool = False
 
 
 class BindingConfiguration:
@@ -138,10 +151,61 @@ class BindingConfiguration:
     def _ensure_default_bindings(self):
         for scene in self.scenes:
             mapping = self._scene_bindings(scene.name)
-            for raw_name in scene.points:
-                if raw_name not in mapping:
+            for control in self.bindable_controls(scene):
+                if control.name not in mapping:
                     # 控点名只是标注名称；用户在绑定窗口按过键盘后才算已绑定。
-                    mapping[raw_name] = ""
+                    mapping[control.name] = ""
+
+    def joystick_geometry_error(self, scene: BindingScene) -> str:
+        try:
+            joystick_direction_points(scene.points, scene.width, scene.height)
+        except ValueError as exc:
+            return str(exc)
+        return ""
+
+    def bindable_controls(self, scene: BindingScene) -> list[BindingControl]:
+        controls = []
+        for raw_name, point_data in scene.points.items():
+            if is_joystick_geometry_point(raw_name):
+                continue
+            rect = point_data.get("rect") if isinstance(point_data, Mapping) else None
+            if not isinstance(rect, (list, tuple)) or len(rect) != 4:
+                continue
+            try:
+                norm_x = (float(rect[0]) + float(rect[2])) / 2.0
+                norm_y = (float(rect[1]) + float(rect[3])) / 2.0
+            except (TypeError, ValueError):
+                continue
+            controls.append(
+                BindingControl(
+                    name=str(raw_name),
+                    display_name=str(raw_name),
+                    normalized_position=(norm_x, norm_y),
+                )
+            )
+        try:
+            directions = joystick_direction_points(scene.points, scene.width, scene.height)
+        except ValueError:
+            directions = ()
+        controls.extend(
+            BindingControl(
+                name=direction.binding_name,
+                display_name=direction.display_name,
+                normalized_position=direction.normalized_position,
+                is_virtual_joystick_direction=True,
+            )
+            for direction in directions
+        )
+        return controls
+
+    def is_bindable_control(self, scene: BindingScene, point_name: str) -> bool:
+        return self.control_for(scene, point_name) is not None
+
+    def control_for(self, scene: BindingScene, point_name: str) -> BindingControl | None:
+        return next(
+            (control for control in self.bindable_controls(scene) if control.name == point_name),
+            None,
+        )
 
     def binding_for(self, scene: BindingScene, point_name: str) -> str:
         return str(self._scene_bindings(scene.name).get(point_name) or "")
@@ -152,7 +216,7 @@ class BindingConfiguration:
             raise BindingConfigError("没有识别到可绑定的键。")
         if normalized in RESERVED_KEYS:
             raise BindingConfigError(f"{normalized} 是开始/结束录制键，不能绑定为游戏控点。")
-        if point_name not in scene.points:
+        if not self.is_bindable_control(scene, point_name):
             raise BindingConfigError(f"场景“{scene.name}”中不存在控点“{point_name}”。")
         mapping = self._scene_bindings(scene.name)
         for other_name, other_key in list(mapping.items()):
@@ -187,13 +251,24 @@ class BindingConfiguration:
             )
         all_keys = set()
         positions_by_key: Dict[str, Dict[str, set[tuple[float, float]]]] = {}
+        uses_generated_joystick = False
         for scene in self.scenes:
             seen = set()
-            for point_name in scene.points:
+            geometry_error = self.joystick_geometry_error(scene)
+            if geometry_error:
+                raise BindingConfigError(f"场景“{scene.display_name}”的{geometry_error}")
+            controls = self.bindable_controls(scene)
+            uses_generated_joystick = uses_generated_joystick or any(
+                control.is_virtual_joystick_direction for control in controls
+            )
+            for control in controls:
+                point_name = control.name
                 key = normalize_key_name(self.binding_for(scene, point_name))
                 if not key:
+                    if control.is_virtual_joystick_direction:
+                        continue
                     raise BindingConfigError(
-                        f"场景“{scene.display_name}”的控点“{point_name}”还没有绑定键盘按键。"
+                        f"场景“{scene.display_name}”的控点“{control.display_name}”还没有绑定键盘按键。"
                     )
                 if key in RESERVED_KEYS:
                     raise BindingConfigError(f"控点“{point_name}”占用了录制键 {key}。")
@@ -203,20 +278,11 @@ class BindingConfiguration:
                     )
                 seen.add(key)
                 all_keys.add(key)
-                point_data = scene.points.get(point_name)
-                rect = point_data.get("rect") if isinstance(point_data, Mapping) else None
-                if isinstance(rect, (list, tuple)) and len(rect) == 4:
-                    try:
-                        center = (
-                            (float(rect[0]) + float(rect[2])) / 2.0,
-                            (float(rect[1]) + float(rect[3])) / 2.0,
-                        )
-                    except (TypeError, ValueError):
-                        center = None
-                    if center is not None:
-                        positions_by_key.setdefault(key, {}).setdefault(scene.name, set()).add(center)
+                positions_by_key.setdefault(key, {}).setdefault(scene.name, set()).add(
+                    control.normalized_position
+                )
         missing = sorted({"w", "a", "s", "d"}.difference(all_keys))
-        if missing:
+        if missing and not uses_generated_joystick:
             raise BindingConfigError("移动键还缺少：" + "、".join(missing))
         for key, scene_positions in positions_by_key.items():
             if len(scene_positions) <= 1:

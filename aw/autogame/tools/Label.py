@@ -3659,12 +3659,52 @@ class AutoStudioWindow(QMainWindow):
             )
             btn_import.setEnabled(bool(first_scene))
             self.action_layout.addWidget(btn_import)
+            btn_manage_stages = QPushButton("管理场景所在阶段")
+            btn_manage_stages.clicked.connect(
+                lambda: self.manage_pool_scene_stages(action_scene_group, scene_name)
+            )
+            btn_manage_stages.setEnabled(bool(action_scene_group and self.project and self.project.stages))
+            self.action_layout.addWidget(btn_manage_stages)
+            btn_rename = QPushButton("✏️ 修改场景名称（同步所有阶段）")
+            btn_rename.clicked.connect(
+                lambda: self.rename_pool_scene_group(action_scene_group, scene_name)
+            )
+            btn_rename.setEnabled(bool(action_scene_group))
+            self.action_layout.addWidget(btn_rename)
+            btn_move = QPushButton("移动到其他场景分组")
+            btn_move.clicked.connect(
+                lambda: self.move_pool_scene_group(action_scene_group, scene_name)
+            )
+            btn_move.setEnabled(bool(action_scene_group))
+            self.action_layout.addWidget(btn_move)
+            btn_delete_pool = QPushButton("🗑 从场景池删除（同步所有阶段）")
+            btn_delete_pool.clicked.connect(
+                lambda: self.delete_pool_scene_group(action_scene_group, scene_name)
+            )
+            btn_delete_pool.setEnabled(bool(action_scene_group))
+            self.action_layout.addWidget(btn_delete_pool)
+            btn_copy_resolution = QPushButton("复制控件到不同分辨率")
+            btn_copy_resolution.clicked.connect(
+                lambda: self.copy_scene_to_different_resolution(
+                    self.current_stage,
+                    scene_name,
+                    first_scene,
+                    scene_group=action_scene_group,
+                )
+            )
+            btn_copy_resolution.setEnabled(bool(action_scene_group))
+            self.action_layout.addWidget(btn_copy_resolution)
             btn_delete = QPushButton("从当前阶段移除")
             btn_delete.clicked.connect(lambda: self.delete_scene_group(self.current_stage, scene_name))
             self.action_layout.addWidget(btn_delete)
         elif isinstance(data, SceneData):
             is_pool_scene = item.treeWidget() is getattr(self, "scene_pool_tree", None)
-            self.current_stage = self._find_stage_for_scene(data)
+            parent_data = item.parent().data(0, Qt.ItemDataRole.UserRole) if item.parent() else None
+            self.current_stage = (
+                parent_data.get("stage")
+                if isinstance(parent_data, dict) and parent_data.get("kind") == "scene_group"
+                else self._find_stage_for_scene(data)
+            )
             self.set_current_work_stage(self.current_stage)
             self.current_scene = data
             self.refresh_scene_display(data)
@@ -3703,8 +3743,81 @@ class AutoStudioWindow(QMainWindow):
                 btn_copy_scene.clicked.connect(lambda: self.copy_scene(data))
                 self.action_layout.addWidget(btn_copy_scene)
             else:
-                lbl = QLabel("当前为阶段引用。请在场景池中修改场景本体。")
+                action_scene_group = self._find_scene_pool_group_for_scene(data)
+                lbl = QLabel("当前为阶段引用；下面对场景本体的修改会同步到所有引用该场景的阶段。")
                 self.action_layout.addWidget(lbl)
+                btn_cap = QPushButton("📷 抓图")
+                btn_cap.clicked.connect(
+                    lambda: self.capture_image(
+                        data,
+                        scene_group=action_scene_group,
+                        stage_context=self.current_stage,
+                    )
+                )
+                btn_cap.setEnabled(bool(action_scene_group))
+                self.action_layout.addWidget(btn_cap)
+                btn_import = QPushButton("🖼 导入图片")
+                btn_import.clicked.connect(
+                    lambda: self.import_image(
+                        data,
+                        scene_group=action_scene_group,
+                        stage_context=self.current_stage,
+                    )
+                )
+                btn_import.setEnabled(bool(action_scene_group))
+                self.action_layout.addWidget(btn_import)
+                btn_area = QPushButton("🟦 添加区域 (Area)")
+                btn_area.clicked.connect(lambda: self.prepare_draw('area'))
+                self.action_layout.addWidget(btn_area)
+                btn_ctrl = QPushButton("🟥 添加控点 (Control)")
+                btn_ctrl.clicked.connect(lambda: self.prepare_draw('control'))
+                self.action_layout.addWidget(btn_ctrl)
+                btn_sp_area = QPushButton("🟧 添加特殊区域 (Special)")
+                btn_sp_area.clicked.connect(lambda: self.prepare_draw('special_area'))
+                self.action_layout.addWidget(btn_sp_area)
+                btn_manage_stages = QPushButton("管理场景所在阶段")
+                btn_manage_stages.clicked.connect(
+                    lambda: self.manage_pool_scene_stages(action_scene_group, data.name)
+                )
+                btn_manage_stages.setEnabled(bool(action_scene_group and self.project and self.project.stages))
+                self.action_layout.addWidget(btn_manage_stages)
+                btn_rename = QPushButton("✏️ 修改场景名称（同步所有阶段）")
+                btn_rename.clicked.connect(
+                    lambda: self.rename_pool_scene_group(action_scene_group, data.name)
+                )
+                btn_rename.setEnabled(bool(action_scene_group))
+                self.action_layout.addWidget(btn_rename)
+                btn_move = QPushButton("移动到其他场景分组")
+                btn_move.clicked.connect(
+                    lambda: self.move_pool_scene_group(action_scene_group, data.name)
+                )
+                btn_move.setEnabled(bool(action_scene_group))
+                self.action_layout.addWidget(btn_move)
+                btn_delete_pool = QPushButton("🗑 从场景池删除（同步所有阶段）")
+                btn_delete_pool.clicked.connect(
+                    lambda: self.delete_pool_scene_group(action_scene_group, data.name)
+                )
+                btn_delete_pool.setEnabled(bool(action_scene_group))
+                self.action_layout.addWidget(btn_delete_pool)
+                btn_copy_scene = QPushButton("📋 复制场景")
+                btn_copy_scene.clicked.connect(lambda: self.copy_scene(data))
+                self.action_layout.addWidget(btn_copy_scene)
+                btn_copy_resolution = QPushButton("复制控件到不同分辨率")
+                btn_copy_resolution.clicked.connect(
+                    lambda: self.copy_scene_to_different_resolution(
+                        self.current_stage,
+                        data.name,
+                        data,
+                        scene_group=action_scene_group,
+                    )
+                )
+                btn_copy_resolution.setEnabled(bool(action_scene_group))
+                self.action_layout.addWidget(btn_copy_resolution)
+                btn_remove_reference = QPushButton("从当前阶段移除")
+                btn_remove_reference.clicked.connect(
+                    lambda: self.delete_scene_group(self.current_stage, data.name)
+                )
+                self.action_layout.addWidget(btn_remove_reference)
         elif isinstance(data, ItemData):
             scene_node = item.parent()
             self.current_scene = scene_node.data(0, Qt.ItemDataRole.UserRole) if scene_node else None
@@ -3928,6 +4041,30 @@ class AutoStudioWindow(QMainWindow):
                 lambda: self.copy_scene_to_different_resolution(stage, scene_name)
             )
             menu.addAction(copy_resolution_action)
+            manage_stage_action = QAction("管理场景所在阶段", self)
+            manage_stage_action.setEnabled(bool(action_scene_group and self.project and self.project.stages))
+            manage_stage_action.triggered.connect(
+                lambda: self.manage_pool_scene_stages(action_scene_group, scene_name)
+            )
+            menu.addAction(manage_stage_action)
+            rename_pool_action = QAction("修改场景名称（同步所有阶段）", self)
+            rename_pool_action.setEnabled(bool(action_scene_group))
+            rename_pool_action.triggered.connect(
+                lambda: self.rename_pool_scene_group(action_scene_group, scene_name)
+            )
+            menu.addAction(rename_pool_action)
+            move_pool_action = QAction("移动到其他场景分组", self)
+            move_pool_action.setEnabled(bool(action_scene_group))
+            move_pool_action.triggered.connect(
+                lambda: self.move_pool_scene_group(action_scene_group, scene_name)
+            )
+            menu.addAction(move_pool_action)
+            delete_pool_action = QAction("从场景池删除（同步所有阶段）", self)
+            delete_pool_action.setEnabled(bool(action_scene_group))
+            delete_pool_action.triggered.connect(
+                lambda: self.delete_pool_scene_group(action_scene_group, scene_name)
+            )
+            menu.addAction(delete_pool_action)
             remove_reference_action = QAction("从当前阶段移除", self)
             remove_reference_action.triggered.connect(
                 lambda: self.delete_scene_group(data.get("stage"), data.get("scene_name", ""))
@@ -3961,6 +4098,65 @@ class AutoStudioWindow(QMainWindow):
                     )
                 )
                 menu.addAction(copy_resolution_action)
+                menu.addSeparator()
+            else:
+                action_scene_group = self._find_scene_pool_group_for_scene(data)
+                stage_context = None
+                parent_data = item.parent().data(0, Qt.ItemDataRole.UserRole) if item.parent() else None
+                if isinstance(parent_data, dict) and parent_data.get("kind") == "scene_group":
+                    stage_context = parent_data.get("stage")
+                capture_action = QAction("📷 抓图", self)
+                capture_action.setEnabled(bool(action_scene_group))
+                capture_action.triggered.connect(
+                    lambda: self.capture_image(
+                        data,
+                        scene_group=action_scene_group,
+                        stage_context=stage_context,
+                    )
+                )
+                menu.addAction(capture_action)
+                import_image_action = QAction("🖼 导入图片", self)
+                import_image_action.setEnabled(bool(action_scene_group))
+                import_image_action.triggered.connect(
+                    lambda: self.import_image(
+                        data,
+                        scene_group=action_scene_group,
+                        stage_context=stage_context,
+                    )
+                )
+                menu.addAction(import_image_action)
+                copy_action = QAction("复制场景", self)
+                copy_action.triggered.connect(lambda: self.copy_scene(data))
+                menu.addAction(copy_action)
+                copy_resolution_action = QAction("复制控件到不同分辨率", self)
+                copy_resolution_action.setEnabled(bool(action_scene_group))
+                copy_resolution_action.triggered.connect(
+                    lambda: self.copy_scene_to_different_resolution(
+                        stage_context,
+                        data.name,
+                        data,
+                        scene_group=action_scene_group,
+                    )
+                )
+                menu.addAction(copy_resolution_action)
+                rename_pool_action = QAction("修改场景名称（同步所有阶段）", self)
+                rename_pool_action.setEnabled(bool(action_scene_group))
+                rename_pool_action.triggered.connect(
+                    lambda: self.rename_pool_scene_group(action_scene_group, data.name)
+                )
+                menu.addAction(rename_pool_action)
+                move_pool_action = QAction("移动到其他场景分组", self)
+                move_pool_action.setEnabled(bool(action_scene_group))
+                move_pool_action.triggered.connect(
+                    lambda: self.move_pool_scene_group(action_scene_group, data.name)
+                )
+                menu.addAction(move_pool_action)
+                delete_pool_action = QAction("从场景池删除（同步所有阶段）", self)
+                delete_pool_action.setEnabled(bool(action_scene_group))
+                delete_pool_action.triggered.connect(
+                    lambda: self.delete_pool_scene_group(action_scene_group, data.name)
+                )
+                menu.addAction(delete_pool_action)
                 menu.addSeparator()
         if isinstance(data, ItemData):  # 添加节点复制名称按钮
             if data.item_type in ('area', 'special_area', 'control'):

@@ -31,6 +31,8 @@ from .binding_dialog import BindingDialog
 from .layout import LayoutError
 from .replay import ReplayError, load_replay_events, load_replay_layout
 from .replay_app import ReplaySelectionWidget, ReplayThread
+from .replay_compare import ReplayComparisonPanel
+from .replay_video import ReplayVideoRecorder
 from .touch_controller import SingleTouchKeyboardController
 
 
@@ -52,6 +54,8 @@ class SharedReplayPanel(QWidget):
         self._recorded_duration_seconds = 0.0
         self._comparison_started_at = None
         self._pending_recorded_video = None
+        self._replay_video_recorder = None
+        self._active_source_record = None
         self._closing = False
 
         self.selector = ReplaySelectionWidget(self.records_root, self)
@@ -141,6 +145,14 @@ class SharedReplayPanel(QWidget):
             if stream_error is not None:
                 self.preview_label.setText(f"HOS 画面不可用：{stream_error}")
             return
+        if self._replay_video_recorder is not None:
+            try:
+                self._replay_video_recorder.accept_frame(frame)
+            except (OSError, RuntimeError, ValueError) as exc:
+                LOGGER.exception("保存回放视频失败")
+                self._set_status(f"回放仍在继续，但视频保存失败：{exc}", error=True)
+                self._replay_video_recorder.stop(success=False)
+                self._replay_video_recorder = None
         height, width = frame.shape[:2]
         image = QImage(
             frame.data,
@@ -193,6 +205,23 @@ class SharedReplayPanel(QWidget):
         if pending is None or self._closing:
             return
         self._start_recorded_video(*pending, timeline_started_at)
+        source_record = self._active_source_record
+        if source_record is None:
+            return
+        try:
+            recorder = ReplayVideoRecorder(
+                self.records_root / "replays",
+                source_record,
+                fps=self.recorder_window.recorder.fps,
+            )
+            recorder.start(
+                self.recorder_window.frame_pump.latest_frame(),
+                timeline_started_at,
+            )
+            self._replay_video_recorder = recorder
+        except (OSError, RuntimeError, ValueError) as exc:
+            LOGGER.exception("初始化回放视频保存失败")
+            self._set_status(f"回放继续执行，但无法保存回放视频：{exc}", error=True)
 
     def _refresh_recorded_video(self):
         capture = self._recorded_capture
@@ -251,6 +280,7 @@ class SharedReplayPanel(QWidget):
             return
         self._stop_recorded_video()
         self._pending_recorded_video = None
+        self._active_source_record = None
         self.pages.setCurrentWidget(self.selection_page)
         self.selector.refresh_records()
         self._update_start_state()
@@ -290,6 +320,7 @@ class SharedReplayPanel(QWidget):
                 record.directory / "video.mp4",
                 record.duration_seconds,
             )
+            self._active_source_record = record
             self.replay_thread.timelineStarted.connect(self._start_pending_recorded_video)
             self.replay_thread.progressChanged.connect(self._update_progress)
             self.replay_thread.replayEnded.connect(self._replay_ended)
@@ -313,6 +344,17 @@ class SharedReplayPanel(QWidget):
         self.progress_bar.setValue(1000 if success else self.progress_bar.value())
         self._stop_recorded_video()
         self._pending_recorded_video = None
+        replay_video = self._replay_video_recorder
+        self._replay_video_recorder = None
+        if replay_video is not None:
+            try:
+                saved_directory = replay_video.stop(success=success)
+                if saved_directory is not None:
+                    message = f"{message} 已保存回放视频：{saved_directory.name}"
+            except OSError as exc:
+                LOGGER.exception("完成回放视频保存失败")
+                message = f"{message} 回放视频保存失败：{exc}"
+        self._active_source_record = None
         self._set_status(message, error=not success)
         self._update_start_state()
 
@@ -321,6 +363,11 @@ class SharedReplayPanel(QWidget):
         self.preview_timer.stop()
         self._stop_recorded_video()
         self._pending_recorded_video = None
+        self._active_source_record = None
+        replay_video = self._replay_video_recorder
+        self._replay_video_recorder = None
+        if replay_video is not None:
+            replay_video.stop(success=False)
         thread = self.replay_thread
         if thread is not None and thread.isRunning():
             thread.requestInterruption()
@@ -369,18 +416,26 @@ class GameRecordingMainWindow(QMainWindow):
             records_root=Path(output_root).parent,
             parent=self.tabs,
         )
+        self.comparison_panel = ReplayComparisonPanel(
+            records_root=Path(output_root).parent,
+            parent=self.tabs,
+        )
         self.tabs.addTab(self.recorder_window, "录制")
         self.tabs.addTab(self.replay_panel, "回放")
+        self.tabs.addTab(self.comparison_panel, "对比")
         self.tabs.currentChanged.connect(self._tab_changed)
 
     def _tab_changed(self, index: int):
         if index == 0:
             self.recorder_window.setFocus()
-        else:
+        elif index == 1:
             self.replay_panel.selector.refresh_records()
+        else:
+            self.comparison_panel.refresh_records()
 
     def closeEvent(self, event: QCloseEvent):
         self.replay_panel.stop()
+        self.comparison_panel.stop()
         if not self.recorder_window._closed:
             self.recorder_window.close()
         event.accept()

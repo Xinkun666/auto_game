@@ -36,6 +36,7 @@ python aw/autogame/customs_game_examples/Game_Recording/main.py
 
 - `录制` 页：显示手机画面，可开启/关闭录制并保存新的记录；
 - `回放` 页：选择历史记录并执行回放，同时复用录制页已经建立的 HOS 投屏与触控连接，不会再创建第二套 fport/HOScrcpy。开始回放后自动进入左右对比：左侧同步播放该条记录保存的 `video.mp4`，右侧显示当前手机的实时回放画面；若历史记录缺少或无法打开视频，右侧实时回放仍会正常继续。
+- `对比` 页：加载已完整完成的历史回放记录，自动识别其对应的源录制；左侧播放回放视频，右侧播放源录制视频。两侧共用同一时间轴，播放、暂停、拖动进度和倍速（0.25x～3x）都会同步生效。
 
 `start_record.py` 和 `start_replay.py` 仍保留，供旧脚本或只需要单项功能时使用；推荐日常使用统一的 `main.py`。
 
@@ -134,6 +135,7 @@ python aw/autogame/customs_game_examples/Game_Recording/start_replay.py \
 - 实时 hilog：`records/<启动时间>/hilog.txt`
 - 无论成功失败都生成：`records/<启动时间>/run_summary.json`
 - 按钮产生的录制：`records/<启动时间>/recordings/<自定义名称或录制时间>/`
+- 完整回放视频：`records/replays/<回放时间>/video.mp4`，同目录的 `replay_session.json` 会保存它对应的源录制目录和时长；未完整结束的回放不会保留在这里。
 - 最终断连时额外生成：`records/<启动时间>/hos_disconnect.json`
 
 如果断连时正在录制，`hilog.txt` 也会复制到当次录制子目录。如果 `hdc hilog` 无法启动，运行日志和 hilog 文件头部会记录失败原因；若 HDC DEBUG 原始日志无法归档，会额外写入 `hdc_capture_error.txt` 说明原因。

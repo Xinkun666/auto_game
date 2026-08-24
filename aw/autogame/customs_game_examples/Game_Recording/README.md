@@ -91,9 +91,9 @@ python aw/autogame/customs_game_examples/Game_Recording/main.py \
 
 本次运行默认保存到：
 
-`aw/autogame/Game_Recording_records/<时间戳>/`
+`aw/autogame/records/Game_Recording/<时间戳>/`
 
-这个历史目录刻意放在 `Game_Recording` 标注工程之外：重新用 Label 导入、修改并导出控点时，只会更新标注工程，不会清空此前的录制、回放和对比视频。旧版本如果还有保存在 `aw/autogame/customs_examples/Game_Recording/records/` 下的历史，可用 `--output` 或 `--records` 指向该目录查看；新的历史都会写入上述固定目录。
+这个历史目录刻意放在 `Game_Recording` 标注工程之外，同时归入 `aw/autogame/records` 统一管理：重新用 Label 导入、修改并导出控点时，只会更新标注工程，不会清空此前的录制、回放和对比视频。旧版本如果还有保存在 `aw/autogame/customs_examples/Game_Recording/records/` 或 `aw/autogame/Game_Recording_records/` 下的历史，可用 `--output` 或 `--records` 指向该目录查看；新的历史都会写入上述固定目录。
 
 开启录制后的子目录包括 `video.mp4`、`initial_view.png`、`action_raw.json`、`action_step.json` 和 `session.json`。如果填写了录制名称，该子目录就使用所填名称；同名目录不会被覆盖。
 

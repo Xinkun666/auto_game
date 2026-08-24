@@ -43,7 +43,8 @@ def parse_args(argv=None):
         REPO_ROOT
         / "aw"
         / "autogame"
-        / "Game_Recording_records"
+        / "records"
+        / "Game_Recording"
     )
     parser = argparse.ArgumentParser(
         description="读取 Game_Recording/info.py，通过录制窗口的按钮开始和停止录制。",

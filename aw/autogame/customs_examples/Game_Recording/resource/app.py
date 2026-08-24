@@ -421,6 +421,21 @@ class RecorderWindow(QMainWindow):
             "background: #b00020; color: white; font-weight: 600;" if recording else ""
         )
 
+    def reload_key_layout(self):
+        """标注工具导出后，用当前 info.py 的控点和绑定替换键盘控制器。"""
+        if self.recorder.is_recording:
+            raise RuntimeError("正在录制，不能重新加载控点")
+        self._release_controls()
+        key_points = load_key_layout(info, *self.screen_size)
+        self.key_points = key_points
+        self.controller = SingleTouchKeyboardController(
+            self.touch_client,
+            self.key_points,
+            screen_size=self.screen_size,
+        )
+        self.keys_label.setText("已加载键位：" + "、".join(sorted(self.key_points)))
+        self._set_status("控点和键位绑定已重新加载；可开始新的录制。")
+
     def _toggle_recording(self):
         if self.recorder.is_recording:
             self._stop_recording(reason="button")

@@ -41,6 +41,42 @@ LOGGER = logging.getLogger("GameRecordingMain")
 GAME_RECORDING_PROJECT_DIR = Path(__file__).resolve().parents[1]
 
 
+def confirm_bindings(parent=None) -> bool:
+    """重新扫描已导出的 info.py，并让用户确认本次按键绑定。"""
+    try:
+        info_path = Path(info.__file__).resolve()
+        source_namespace = {
+            "__file__": str(info_path),
+            "__name__": info.__name__,
+            "__package__": info.__package__,
+        }
+        # 直接读取源码而不是依赖 pyc 时间戳，确保刚从标注工具导出的
+        # 同秒修改也能被重新扫描到。
+        exec(
+            compile(info_path.read_text(encoding="utf-8"), str(info_path), "exec"),
+            source_namespace,
+        )
+        for field_name in (
+            "PROJECT_NAME",
+            "STAGE_DICT",
+            "STAGE_INFO",
+            "SCENE_POOL",
+            "KEY_BINDINGS",
+        ):
+            if field_name in source_namespace:
+                setattr(info, field_name, source_namespace[field_name])
+            elif hasattr(info, field_name):
+                delattr(info, field_name)
+        binding_dialog = BindingDialog(info, parent=parent)
+        binding_dialog.show()
+        binding_dialog.raise_()
+        binding_dialog.activateWindow()
+        return binding_dialog.exec() == QDialog.DialogCode.Accepted
+    except (BindingConfigError, LayoutError) as exc:
+        raise RuntimeError(f"键位布局不可用：{exc}") from exc
+
+
+
 class SharedReplayPanel(QWidget):
     """回放页：选择历史记录后复用录制页的 HOS 流与触控后端。"""
 
@@ -500,6 +536,20 @@ class GameRecordingMainWindow(QMainWindow):
         else:
             self.comparison_panel.refresh_records()
 
+    def refresh_bindings(self, parent=None) -> bool:
+        """标注导出后重新扫描控点，并以确认后的绑定替换录制控制器。"""
+        if self.recorder_window.recorder.is_recording:
+            raise RuntimeError("请先关闭当前录制，再重新扫描控点和确认键位绑定。")
+        if not confirm_bindings(parent=parent or self):
+            return False
+        try:
+            self.recorder_window.reload_key_layout()
+        except (LayoutError, RuntimeError, ValueError) as exc:
+            raise RuntimeError(f"重新加载控点失败：{exc}") from exc
+        self.tabs.setCurrentWidget(self.recorder_window)
+        self.recorder_window.setFocus()
+        return True
+
     def shutdown(self):
         """统一窗口关闭和 Qt 应用退出共用同一套资源收尾。"""
         if self._shutdown_complete:
@@ -531,11 +581,7 @@ def create_main_window(
 ) -> GameRecordingMainWindow | None:
     """创建统一窗口，可供独立入口或 Launcher 页面复用。"""
     try:
-        binding_dialog = BindingDialog(info, parent=parent)
-        binding_dialog.show()
-        binding_dialog.raise_()
-        binding_dialog.activateWindow()
-        if binding_dialog.exec() != QDialog.DialogCode.Accepted:
+        if not confirm_bindings(parent=parent):
             print("[Game Recording] 已取消按键绑定，未启动抓流。", flush=True)
             return None
         return GameRecordingMainWindow(
@@ -551,8 +597,6 @@ def create_main_window(
             open_label_tool_callback=open_label_tool_callback,
             parent=parent,
         )
-    except (BindingConfigError, LayoutError) as exc:
-        raise RuntimeError(f"键位布局不可用：{exc}") from exc
     except (ReplayError, RuntimeError, ValueError, OSError) as exc:
         raise RuntimeError(f"统一界面启动失败：{exc}") from exc
 

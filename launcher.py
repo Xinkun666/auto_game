@@ -4956,6 +4956,17 @@ class LauncherWindow(QWidget):
 
     def _open_game_recording_label_tool(self):
         """从录制回放页进入标注页，返回时恢复到原录制回放页。"""
+        recording_window = self.game_recording_window
+        if (
+            recording_window is not None
+            and recording_window.recorder_window.recorder.is_recording
+        ):
+            QMessageBox.information(
+                self,
+                "请先结束录制",
+                "请先点击“关闭录制”保存当前记录，再修改控点和确认新的键位绑定。",
+            )
+            return False
         if not (GAME_RECORDING_PROJECT_DIR / "info.py").is_file():
             QMessageBox.warning(
                 self,
@@ -5018,16 +5029,29 @@ class LauncherWindow(QWidget):
 
     def _return_from_label_tool(self):
         return_page = self.label_tool_return_page
-        self.label_tool_return_page = None
-        self.back_to_launcher_button.setText("返回主界面")
         if (
             return_page is self.game_recording_page
             and self._game_recording_is_running()
         ):
+            try:
+                if not self.game_recording_window.refresh_bindings(parent=self):
+                    return
+            except Exception as exc:
+                LOGGER.exception("重新扫描 Game Recording 控点或确认绑定失败")
+                QMessageBox.critical(
+                    self,
+                    "无法返回录制回放",
+                    f"重新扫描控点或确认键位绑定失败：{exc}",
+                )
+                return
+            self.label_tool_return_page = None
+            self.back_to_launcher_button.setText("返回主界面")
             self.page_stack.setCurrentWidget(self.game_recording_page)
             self.game_recording_window.recorder_window.setFocus()
             self._set_status("已返回录制回放。")
             return
+        self.label_tool_return_page = None
+        self.back_to_launcher_button.setText("返回主界面")
         self._show_launcher_page()
 
     def _show_launcher_page(self):

@@ -2364,7 +2364,9 @@ def run_game_recording_entry() -> int:
     """由 Launcher 子进程启动独立的录制回放 Qt 窗口。"""
     from aw.autogame.customs_game_examples.Game_Recording.main import main as game_recording_main
 
-    return int(game_recording_main())
+    # ``--run-game-recording`` 是 Launcher 自己的 helper 参数，不能泄漏给
+    # Game Recording 的 argparse；后者只应接收其自身的可选启动参数。
+    return int(game_recording_main(argv=[]))
 
 
 def run_hdc_shell(command: str) -> Optional[str]:
@@ -7773,8 +7775,18 @@ def _run_helper_command(args: argparse.Namespace) -> int:
             return exit_code
 
         if args.run_game_recording:
-            return run_game_recording_entry()
+            exit_code = run_game_recording_entry()
+            return exit_code
 
+        return exit_code
+    except SystemExit as exc:
+        raw_code = exc.code
+        if raw_code is None:
+            exit_code = 0
+        elif isinstance(raw_code, int):
+            exit_code = int(raw_code)
+        else:
+            exit_code = 1
         return exit_code
     except Exception:
         log_exception("helper command failed")

@@ -44,7 +44,12 @@ from .touch_controller import SingleTouchKeyboardController
 LOGGER = logging.getLogger("GameReplay")
 
 
-class ReplaySelectionDialog(QDialog):
+class ReplaySelectionWidget(QWidget):
+    """可嵌入页面或对话框的历史回放记录选择器。"""
+
+    selectionChanged = pyqtSignal()
+    recordActivated = pyqtSignal()
+
     def __init__(self, records_root: Path, parent=None):
         super().__init__(parent)
         self.records_root = Path(records_root)
@@ -63,12 +68,7 @@ class ReplaySelectionDialog(QDialog):
 
         self.record_list = QListWidget()
         self.record_list.currentItemChanged.connect(self._selection_changed)
-        self.record_list.itemDoubleClicked.connect(lambda _item: self._accept_selected())
-        for index, record in enumerate(self.records):
-            item = QListWidgetItem(record.title)
-            item.setData(Qt.ItemDataRole.UserRole, index)
-            item.setToolTip(str(record.directory))
-            self.record_list.addItem(item)
+        self.record_list.itemDoubleClicked.connect(lambda _item: self.recordActivated.emit())
 
         self.preview_label = QLabel("无初始画面")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -103,23 +103,12 @@ class ReplaySelectionDialog(QDialog):
                 "在录制窗口中点击“开启录制”和“关闭录制”。"
             )
 
-        self.buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("开始回放")
-        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
-        self.buttons.accepted.connect(self._accept_selected)
-        self.buttons.rejected.connect(self.reject)
-        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
-
         root = QVBoxLayout(self)
         root.addWidget(title)
         root.addWidget(root_hint)
         root.addLayout(content, 1)
         root.addWidget(self.empty_label)
-        root.addWidget(self.buttons)
-        if self.records:
-            self.record_list.setCurrentRow(0)
+        self.refresh_records()
 
     @property
     def selected_record(self) -> ReplayRecord | None:
@@ -132,11 +121,11 @@ class ReplaySelectionDialog(QDialog):
     def _selection_changed(self, current, previous):
         del previous
         record = self.selected_record if current is not None else None
-        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(record is not None)
         if record is None:
             self.detail_label.clear()
             self.preview_label.setText("无初始画面")
             self.preview_label.setPixmap(QPixmap())
+            self.selectionChanged.emit()
             return
         source_label = "精确键盘事件" if record.action_format == "raw" else "状态化回放步骤"
         self.detail_label.setText(
@@ -154,6 +143,32 @@ class ReplaySelectionDialog(QDialog):
             else QPixmap()
         )
         self._refresh_preview()
+        self.selectionChanged.emit()
+
+    def refresh_records(self):
+        """重新扫描，以便同一主窗口内刚完成的录制立即可回放。"""
+        selected = self.selected_record
+        selected_path = selected.directory if selected is not None else None
+        self.records = discover_replay_records(self.records_root)
+        self.record_list.blockSignals(True)
+        self.record_list.clear()
+        selected_index = 0
+        for index, record in enumerate(self.records):
+            item = QListWidgetItem(record.title)
+            item.setData(Qt.ItemDataRole.UserRole, index)
+            item.setToolTip(str(record.directory))
+            self.record_list.addItem(item)
+            if selected_path is not None and record.directory == selected_path:
+                selected_index = index
+        if self.records:
+            self.record_list.setCurrentRow(selected_index)
+        self.record_list.blockSignals(False)
+        self.empty_label.setText(
+            ""
+            if self.records
+            else "没有找到可回放的记录。请先在“录制”页完成一次录制。"
+        )
+        self._selection_changed(self.record_list.currentItem(), None)
 
     def _refresh_preview(self):
         if self._preview_pixmap.isNull():
@@ -172,6 +187,39 @@ class ReplaySelectionDialog(QDialog):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._refresh_preview()
+
+class ReplaySelectionDialog(QDialog):
+    """兼容旧 start_replay.py 的独立选择对话框。"""
+
+    def __init__(self, records_root: Path, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Game Recording - 选择回放记录")
+        self.resize(980, 620)
+        self.setMinimumSize(760, 480)
+        self.selector = ReplaySelectionWidget(records_root, self)
+        self.selector.selectionChanged.connect(self._update_start_button)
+        self.selector.recordActivated.connect(self._accept_selected)
+
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.start_button = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self.start_button.setText("开始回放")
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        self.buttons.accepted.connect(self._accept_selected)
+        self.buttons.rejected.connect(self.reject)
+
+        root = QVBoxLayout(self)
+        root.addWidget(self.selector, 1)
+        root.addWidget(self.buttons)
+        self._update_start_button()
+
+    @property
+    def selected_record(self) -> ReplayRecord | None:
+        return self.selector.selected_record
+
+    def _update_start_button(self):
+        self.start_button.setEnabled(self.selected_record is not None)
 
     def _accept_selected(self):
         if self.selected_record is not None:

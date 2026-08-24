@@ -17,7 +17,7 @@
 在仓库根目录执行：
 
 ```bash
-python aw/autogame/customs_game_examples/Game_Recording/start_record.py
+python aw/autogame/customs_game_examples/Game_Recording/main.py
 ```
 
 默认使用 `auto` 动态兼容模式：先尝试设备已有 SO，启动不成功就继续尝试本地 `res/video` 中的其他候选；某个 SO 能启动但运行中断流，也会记录并切换下一个。只有所有候选都失败后，程序才最终停止。
@@ -32,6 +32,13 @@ python aw/autogame/customs_game_examples/Game_Recording/start_record.py
 
 在该窗口点击保存之前不会启动 HOS 视频抓流；取消则直接结束本次运行。
 
+保存后会打开一个统一窗口：
+
+- `录制` 页：显示手机画面，可开启/关闭录制并保存新的记录；
+- `回放` 页：选择历史记录并执行回放，同时复用录制页已经建立的 HOS 投屏与触控连接，不会再创建第二套 fport/HOScrcpy。
+
+`start_record.py` 和 `start_replay.py` 仍保留，供旧脚本或只需要单项功能时使用；推荐日常使用统一的 `main.py`。
+
 每个候选的启动结果和断流现场会写入运行日志及 `video_so_attempt_history`。
 
 ### 摇杆快捷标注
@@ -43,27 +50,27 @@ python aw/autogame/customs_game_examples/Game_Recording/start_record.py
 如需对比设备原有版本：
 
 ```bash
-python aw/autogame/customs_game_examples/Game_Recording/start_record.py --video-so reuse
+python aw/autogame/customs_game_examples/Game_Recording/main.py --video-so reuse
 ```
 
 也可以指定本地已存在的完整文件名：
 
 ```bash
-python aw/autogame/customs_game_examples/Game_Recording/start_record.py \
+python aw/autogame/customs_game_examples/Game_Recording/main.py \
   --video-so libscrcpy_server_unix_6.3.1-20260113.z.so
 ```
 
 默认使用 HOS 触控。如需改用 `sendevent`：
 
 ```bash
-python aw/autogame/customs_game_examples/Game_Recording/start_record.py \
+python aw/autogame/customs_game_examples/Game_Recording/main.py \
   --touch-backend sendevent
 ```
 
 程序会依次尝试设备端 `getevent -lp`、`getevent -p` 和 `/data/test/getevent -p`，自动识别触摸设备及 ABS 坐标范围。如果该手机无法自动探测，可以手动指定：
 
 ```bash
-python aw/autogame/customs_game_examples/Game_Recording/start_record.py \
+python aw/autogame/customs_game_examples/Game_Recording/main.py \
   --touch-backend sendevent \
   --sendevent-device event2 \
   --sendevent-max-x 10799 \
@@ -87,7 +94,7 @@ python aw/autogame/customs_game_examples/Game_Recording/start_record.py \
 
 开启录制后的子目录包括 `video.mp4`、`initial_view.png`、`action_raw.json`、`action_step.json` 和 `session.json`。如果填写了录制名称，该子目录就使用所填名称；同名目录不会被覆盖。
 
-## 回放
+## 单独回放（兼容入口）
 
 在仓库根目录执行：
 
@@ -108,7 +115,7 @@ python aw/autogame/customs_game_examples/Game_Recording/start_replay.py \
 
 ## 断连处理和日志
 
-`start_record.py` 每启动一次，都会先在 `records` 下创建一个唯一时间目录。本次运行的成功或失败日志、hilog、录制文件和诊断报告都只保存在该目录中。日志在脚本启动时就开始记录，不需要先开启录制。HOS 出现断连时：
+`main.py` 每启动一次，都会先在 `records` 下创建一个唯一时间目录。本次运行的成功或失败日志、hilog、录制文件和诊断报告都只保存在该目录中。日志在脚本启动时就开始记录，不需要先开启录制。HOS 出现断连时：
 
 - `auto` 模式不会重试已失败的 SO，而是切换到尚未尝试的候选；
 - 所有 SO 都启动失败或运行中断流后，程序才最终停止；

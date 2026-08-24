@@ -114,7 +114,7 @@ def parse_args(argv=None):
     return args
 
 
-def main(argv=None) -> int:
+def main(argv=None, runner=None) -> int:
     args = parse_args(argv)
     records_root = args.output.expanduser().resolve()
     from aw.autogame.customs_examples.Game_Recording.resource.runtime_log import (
@@ -163,11 +163,16 @@ def main(argv=None) -> int:
                     file=sys.stderr,
                     flush=True,
                 )
-            from aw.autogame.customs_examples.Game_Recording.resource.app import run
+            if runner is None:
+                from aw.autogame.customs_examples.Game_Recording.resource.app import run
+
+                active_runner = run
+            else:
+                active_runner = runner
 
             try:
                 app_exit_code = int(
-                    run(
+                    active_runner(
                         output_root=run_dir,
                         fps=args.fps,
                         runtime_log_path=runtime_log.path,

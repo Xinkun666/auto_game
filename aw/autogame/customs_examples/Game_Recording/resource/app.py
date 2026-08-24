@@ -126,8 +126,9 @@ class RecorderWindow(QMainWindow):
         sendevent_device: str = "",
         sendevent_max_x: int | None = None,
         sendevent_max_y: int | None = None,
+        parent=None,
     ):
-        super().__init__()
+        super().__init__(parent)
         # 先检查空工程，避免 info.py 尚未标注时被设备连接错误遮住。
         load_key_layout(info, 1, 1)
         if shutil.which("hdc") is None:
@@ -165,6 +166,7 @@ class RecorderWindow(QMainWindow):
             touch_client = self.sendevent_touch
         elif self.touch_backend_name != "hos":
             raise ValueError("不支持的触控后端：%s" % self.touch_backend_name)
+        self.touch_client = touch_client
         self.recorder = RecordingSession(
             output_root=self.output_root / "recordings",
             fps=fps,

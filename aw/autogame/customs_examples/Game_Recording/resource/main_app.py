@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import cv2
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QCloseEvent, QImage, QPixmap
 from PyQt6.QtWidgets import (
@@ -15,6 +16,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QProgressBar,
     QPushButton,
+    QStackedWidget,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -43,6 +45,7 @@ class SharedReplayPanel(QWidget):
         self.records_root = Path(records_root)
         self.replay_thread = None
         self._replay_controller = None
+        self._recorded_capture = None
         self._closing = False
 
         self.selector = ReplaySelectionWidget(self.records_root, self)
@@ -59,32 +62,52 @@ class SharedReplayPanel(QWidget):
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setMinimumSize(420, 236)
         self.preview_label.setStyleSheet("background: #15191e; color: #ddd;")
+        self.recorded_video_label = QLabel("尚未开始原录制视频播放")
+        self.recorded_video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.recorded_video_label.setMinimumSize(420, 236)
+        self.recorded_video_label.setStyleSheet("background: #15191e; color: #ddd;")
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1000)
         self.action_label = QLabel("尚未开始回放")
 
-        right = QVBoxLayout()
-        right.addWidget(QLabel("当前手机画面"))
-        right.addWidget(self.preview_label, 1)
-        right.addWidget(self.progress_bar)
-        right.addWidget(self.action_label)
-        right_widget = QWidget()
-        right_widget.setLayout(right)
+        self.selection_page = QWidget()
+        selection_layout = QVBoxLayout(self.selection_page)
+        selection_layout.addWidget(self.selector)
 
-        content = QHBoxLayout()
-        content.addWidget(self.selector, 3)
-        content.addWidget(right_widget, 2)
+        self.comparison_page = QWidget()
+        comparison_layout = QVBoxLayout(self.comparison_page)
+        videos = QHBoxLayout()
+        recorded_column = QVBoxLayout()
+        recorded_column.addWidget(QLabel("原录制视频"))
+        recorded_column.addWidget(self.recorded_video_label, 1)
+        current_column = QVBoxLayout()
+        current_column.addWidget(QLabel("当前回放画面"))
+        current_column.addWidget(self.preview_label, 1)
+        videos.addLayout(recorded_column, 1)
+        videos.addLayout(current_column, 1)
+        comparison_layout.addLayout(videos, 1)
+        comparison_layout.addWidget(self.progress_bar)
+        comparison_layout.addWidget(self.action_label)
+        self.return_button = QPushButton("返回记录选择")
+        self.return_button.clicked.connect(self._return_to_selection)
+        comparison_layout.addWidget(self.return_button, alignment=Qt.AlignmentFlag.AlignRight)
+
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self.selection_page)
+        self.pages.addWidget(self.comparison_page)
         controls = QHBoxLayout()
         controls.addWidget(self.status_label, 1)
         controls.addWidget(self.start_button)
 
         root = QVBoxLayout(self)
-        root.addLayout(content, 1)
+        root.addWidget(self.pages, 1)
         root.addLayout(controls)
 
         self.preview_timer = QTimer(self)
         self.preview_timer.timeout.connect(self._refresh_preview)
         self.preview_timer.start(50)
+        self.recorded_video_timer = QTimer(self)
+        self.recorded_video_timer.timeout.connect(self._refresh_recorded_video)
         self._update_start_state()
 
     def _set_status(self, text: str, error: bool = False):
@@ -129,6 +152,65 @@ class SharedReplayPanel(QWidget):
             )
         )
 
+    def _start_recorded_video(self, video_path: Path):
+        """从回放动作开始时播放同一条录制视频，不影响实时回放。"""
+        self._stop_recorded_video()
+        self.recorded_video_label.setPixmap(QPixmap())
+        if not video_path.is_file():
+            self.recorded_video_label.setText("该记录没有 video.mp4，仍会继续实时回放。")
+            return
+        capture = cv2.VideoCapture(str(video_path))
+        if not capture.isOpened():
+            capture.release()
+            self.recorded_video_label.setText("无法打开该记录的 video.mp4，仍会继续实时回放。")
+            return
+        self._recorded_capture = capture
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 15.0)
+        interval_ms = max(15, min(1000, int(round(1000 / max(1.0, fps)))))
+        self.recorded_video_timer.start(interval_ms)
+        self._refresh_recorded_video()
+
+    def _refresh_recorded_video(self):
+        capture = self._recorded_capture
+        if capture is None:
+            return
+        ok, frame = capture.read()
+        if not ok:
+            self._stop_recorded_video()
+            return
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        height, width = frame_rgb.shape[:2]
+        image = QImage(
+            frame_rgb.data,
+            width,
+            height,
+            int(frame_rgb.strides[0]),
+            QImage.Format.Format_RGB888,
+        ).copy()
+        self.recorded_video_label.setText("")
+        self.recorded_video_label.setPixmap(
+            QPixmap.fromImage(image).scaled(
+                self.recorded_video_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+
+    def _stop_recorded_video(self):
+        self.recorded_video_timer.stop()
+        capture, self._recorded_capture = self._recorded_capture, None
+        if capture is not None:
+            capture.release()
+
+    def _return_to_selection(self):
+        if self.replay_thread is not None and self.replay_thread.isRunning():
+            self._set_status("回放进行中，请等待结束后再返回选择。", error=True)
+            return
+        self._stop_recorded_video()
+        self.pages.setCurrentWidget(self.selection_page)
+        self.selector.refresh_records()
+        self._update_start_state()
+
     def start_replay(self):
         record = self.selector.selected_record
         if record is None:
@@ -164,6 +246,8 @@ class SharedReplayPanel(QWidget):
             self.replay_thread.replayEnded.connect(self._replay_ended)
             self.progress_bar.setValue(0)
             self.action_label.setText("正在等待第一条动作")
+            self.pages.setCurrentWidget(self.comparison_page)
+            self._start_recorded_video(record.directory / "video.mp4")
             self._set_status(f"正在回放：{record.directory.name}")
             self._update_start_state()
             self.replay_thread.start()
@@ -178,12 +262,14 @@ class SharedReplayPanel(QWidget):
         if self._closing:
             return
         self.progress_bar.setValue(1000 if success else self.progress_bar.value())
+        self._stop_recorded_video()
         self._set_status(message, error=not success)
         self._update_start_state()
 
     def stop(self):
         self._closing = True
         self.preview_timer.stop()
+        self._stop_recorded_video()
         thread = self.replay_thread
         if thread is not None and thread.isRunning():
             thread.requestInterruption()

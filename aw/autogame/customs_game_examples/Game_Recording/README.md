@@ -35,7 +35,7 @@ python aw/autogame/customs_game_examples/Game_Recording/main.py
 保存后会打开一个统一窗口：
 
 - `录制` 页：显示手机画面，可开启/关闭录制并保存新的记录；
-- `回放` 页：选择历史记录并执行回放，同时复用录制页已经建立的 HOS 投屏与触控连接，不会再创建第二套 fport/HOScrcpy。
+- `回放` 页：选择历史记录并执行回放，同时复用录制页已经建立的 HOS 投屏与触控连接，不会再创建第二套 fport/HOScrcpy。开始回放后自动进入左右对比：左侧同步播放该条记录保存的 `video.mp4`，右侧显示当前手机的实时回放画面；若历史记录缺少或无法打开视频，右侧实时回放仍会正常继续。
 
 `start_record.py` 和 `start_replay.py` 仍保留，供旧脚本或只需要单项功能时使用；推荐日常使用统一的 `main.py`。
 

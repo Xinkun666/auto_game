@@ -395,8 +395,9 @@ class GameRecordingMainWindow(QMainWindow):
         sendevent_device: str = "",
         sendevent_max_x: int | None = None,
         sendevent_max_y: int | None = None,
+        parent=None,
     ):
-        super().__init__()
+        super().__init__(parent)
         self.setWindowTitle("Game Recording - 录制与回放")
         self.resize(1280, 820)
         self._shutdown_complete = False
@@ -508,6 +509,45 @@ class GameRecordingMainWindow(QMainWindow):
         event.accept()
 
 
+def create_main_window(
+    output_root: Path,
+    fps: float = 15.0,
+    runtime_log_path: Path | None = None,
+    hilog_capture=None,
+    video_so: str = "auto",
+    touch_backend: str = "hos",
+    sendevent_device: str = "",
+    sendevent_max_x: int | None = None,
+    sendevent_max_y: int | None = None,
+    parent=None,
+) -> GameRecordingMainWindow | None:
+    """创建统一窗口，可供独立入口或 Launcher 页面复用。"""
+    try:
+        binding_dialog = BindingDialog(info, parent=parent)
+        binding_dialog.show()
+        binding_dialog.raise_()
+        binding_dialog.activateWindow()
+        if binding_dialog.exec() != QDialog.DialogCode.Accepted:
+            print("[Game Recording] 已取消按键绑定，未启动抓流。", flush=True)
+            return None
+        return GameRecordingMainWindow(
+            output_root=Path(output_root),
+            fps=fps,
+            runtime_log_path=runtime_log_path,
+            hilog_capture=hilog_capture,
+            video_so=video_so,
+            touch_backend=touch_backend,
+            sendevent_device=sendevent_device,
+            sendevent_max_x=sendevent_max_x,
+            sendevent_max_y=sendevent_max_y,
+            parent=parent,
+        )
+    except (BindingConfigError, LayoutError) as exc:
+        raise RuntimeError(f"键位布局不可用：{exc}") from exc
+    except (ReplayError, RuntimeError, ValueError, OSError) as exc:
+        raise RuntimeError(f"统一界面启动失败：{exc}") from exc
+
+
 def run(
     output_root: Path,
     fps: float = 15.0,
@@ -519,19 +559,12 @@ def run(
     sendevent_max_x: int | None = None,
     sendevent_max_y: int | None = None,
 ) -> int:
-    """统一入口：先绑定，再进入录制/回放标签页。"""
+    """独立入口：先绑定，再显示统一录制/回放窗口。"""
     _prefer_bundled_pyqt_plugins()
     app = QApplication.instance() or QApplication([])
     try:
-        binding_dialog = BindingDialog(info)
-        binding_dialog.show()
-        binding_dialog.raise_()
-        binding_dialog.activateWindow()
-        if binding_dialog.exec() != QDialog.DialogCode.Accepted:
-            print("[Game Recording] 已取消按键绑定，未启动抓流。", flush=True)
-            return 0
-        window = GameRecordingMainWindow(
-            output_root=Path(output_root),
+        window = create_main_window(
+            output_root=output_root,
             fps=fps,
             runtime_log_path=runtime_log_path,
             hilog_capture=hilog_capture,
@@ -541,10 +574,10 @@ def run(
             sendevent_max_x=sendevent_max_x,
             sendevent_max_y=sendevent_max_y,
         )
-    except (BindingConfigError, LayoutError) as exc:
-        raise SystemExit(f"键位布局不可用：{exc}") from exc
-    except (ReplayError, RuntimeError, ValueError, OSError) as exc:
-        raise SystemExit(f"统一界面启动失败：{exc}") from exc
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+    if window is None:
+        return 0
     window.show()
     window.activateWindow()
     window.recorder_window.setFocus()

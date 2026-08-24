@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 import traceback
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, NamedTuple, Optional
 
@@ -119,7 +120,6 @@ TESTCASES_DIR = APP_DIR / "testcases"
 CUSTOMS_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_examples"
 CUSTOMS_GAME_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_game_examples"
 GAME_RECORDING_PROJECT_DIR = CUSTOMS_EXAMPLES_DIR / "Game_Recording"
-GAME_RECORDING_MAIN_PATH = CUSTOMS_GAME_EXAMPLES_DIR / "Game_Recording" / "main.py"
 TEMP_DIR = resolve_runtime_temp_dir(APP_DIR)
 PREVIEW_DIR = resolve_preview_frame_dir(APP_DIR)
 LOG_DIR = TEMP_DIR / "logs"
@@ -2823,7 +2823,11 @@ class LauncherWindow(QWidget):
         self.inputs_enabled = True
         self.label_tool = None
         self.label_tool_project_dir: Optional[Path] = None
-        self.game_recording_process: Optional[QProcess] = None
+        self.game_recording_window = None
+        self.game_recording_run_dir: Optional[Path] = None
+        self.game_recording_started_at = None
+        self.game_recording_hdc_capture = None
+        self.game_recording_hilog_capture = None
         self.history_records: list[dict] = []
         self.selected_history_record: Optional[dict] = None
         self.selected_history_batch_dir: Optional[Path] = None
@@ -3958,6 +3962,8 @@ class LauncherWindow(QWidget):
         self.page_stack.addWidget(self.preview_fullscreen_page)
         self.label_tool_page = self._build_label_tool_page()
         self.page_stack.addWidget(self.label_tool_page)
+        self.game_recording_page = self._build_game_recording_page()
+        self.page_stack.addWidget(self.game_recording_page)
         self.history_page = self._build_history_page()
         self.page_stack.addWidget(self.history_page)
         self._update_header_badges()
@@ -4031,6 +4037,45 @@ class LauncherWindow(QWidget):
         self.label_tool_empty_label.setObjectName("previewSurface")
         self.label_tool_host_layout.addWidget(self.label_tool_empty_label)
         layout.addWidget(self.label_tool_host, 1)
+        return page
+
+    def _build_game_recording_page(self) -> QWidget:
+        """与标注工具相同：把录制回放作为 Launcher 内的专用页面。"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setSpacing(10)
+
+        header_bar = QWidget()
+        header_bar.setObjectName("headerBar")
+        header_layout = QHBoxLayout(header_bar)
+        header_layout.setContentsMargins(18, 13, 18, 13)
+        title_column = QVBoxLayout()
+        title = QLabel("Game Recording")
+        title.setObjectName("launcherTitle")
+        self.game_recording_page_status = QLabel(
+            "录制、回放与对比；标注入口位于页面内。"
+        )
+        self.game_recording_page_status.setObjectName("launcherSubtitle")
+        title_column.addWidget(title)
+        title_column.addWidget(self.game_recording_page_status)
+        header_layout.addLayout(title_column, 1)
+        self.game_recording_back_button = QPushButton("返回启动器")
+        self.game_recording_back_button.clicked.connect(
+            self._close_embedded_game_recording
+        )
+        header_layout.addWidget(self.game_recording_back_button)
+        layout.addWidget(header_bar, 0)
+
+        self.game_recording_host = QWidget()
+        self.game_recording_host_layout = QVBoxLayout(self.game_recording_host)
+        self.game_recording_host_layout.setContentsMargins(0, 0, 0, 0)
+        self.game_recording_host_layout.setSpacing(0)
+        self.game_recording_empty_label = QLabel("正在准备录制回放界面……")
+        self.game_recording_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.game_recording_empty_label.setObjectName("previewSurface")
+        self.game_recording_host_layout.addWidget(self.game_recording_empty_label)
+        layout.addWidget(self.game_recording_host, 1)
         return page
 
     def _build_history_page(self) -> QWidget:
@@ -4563,6 +4608,8 @@ class LauncherWindow(QWidget):
             self._stop_run()
             event.ignore()
             return
+        if self._game_recording_is_running():
+            self._close_embedded_game_recording()
         self.process_launch_tracer.stop()
         super().closeEvent(event)
 
@@ -4605,8 +4652,7 @@ class LauncherWindow(QWidget):
         return resolve_label_project_dir(project_case) is not None
 
     def _game_recording_is_running(self) -> bool:
-        process = self.game_recording_process
-        return process is not None and process.state() != QProcess.ProcessState.NotRunning
+        return self.game_recording_window is not None
 
     def _sync_testcase_controls_state(self):
         testcase_mode = self.mode_testcase.isChecked()
@@ -4630,7 +4676,6 @@ class LauncherWindow(QWidget):
                 or (
                     GAME_RECORDING_PROJECT_DIR.is_dir()
                     and (GAME_RECORDING_PROJECT_DIR / "info.py").is_file()
-                    and GAME_RECORDING_MAIN_PATH.is_file()
                 )
             )
         )
@@ -4781,73 +4826,131 @@ class LauncherWindow(QWidget):
 
     def _open_game_recording(self):
         if self._game_recording_is_running():
-            QMessageBox.information(self, "录制回放已打开", "Game Recording 正在运行。")
+            self.page_stack.setCurrentWidget(self.game_recording_page)
             return
         if (
             not getattr(sys, "frozen", False)
             and (
-                not GAME_RECORDING_MAIN_PATH.is_file()
-                or not (GAME_RECORDING_PROJECT_DIR / "info.py").is_file()
+                not (GAME_RECORDING_PROJECT_DIR / "info.py").is_file()
             )
         ):
             QMessageBox.warning(
                 self,
                 "无法打开录制回放",
-                "未找到 Game_Recording 的 main.py 或 info.py，请检查工程文件。",
+                "未找到 Game_Recording/info.py，请检查工程文件。",
             )
             return
+        self.page_stack.setCurrentWidget(self.game_recording_page)
+        self.game_recording_empty_label.setText("正在启动录制回放和日志采集……")
+        QApplication.processEvents()
 
-        process = QProcess(self)
-        process.setProgram(sys.executable)
-        process.setArguments(build_launcher_process_args("--run-game-recording"))
-        process.setWorkingDirectory(str(APP_DIR))
-        process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        process.readyReadStandardOutput.connect(self._read_game_recording_output)
-        process.finished.connect(self._game_recording_finished)
-        process.errorOccurred.connect(self._game_recording_error)
-        self.game_recording_process = process
-        process.start()
-        if not process.waitForStarted(3000):
-            error_text = process.errorString() or "未知启动错误"
-            self.game_recording_process = None
-            process.deleteLater()
-            QMessageBox.warning(self, "无法打开录制回放", f"Game Recording 启动失败：{error_text}")
-            self._sync_testcase_controls_state()
-            return
-        self._set_status("已打开 Game Recording 专用录制回放窗口。")
-        self._log_message(
-            f"[Launcher] 已启动 Game Recording：pid={process.processId()} project={GAME_RECORDING_PROJECT_DIR}\n"
+        from aw.autogame.customs_examples.Game_Recording.resource.main_app import (
+            create_main_window,
         )
+        from aw.autogame.customs_examples.Game_Recording.resource.runtime_log import (
+            HdcDebugLogCapture,
+            HilogCapture,
+            create_run_directory,
+            save_run_summary,
+        )
+
+        started_at = datetime.now().astimezone()
+        records_root = ROOT_DIR / "aw" / "autogame" / "records" / "Game_Recording"
+        run_dir = None
+        hdc_capture = None
+        hilog_capture = None
+        try:
+            run_dir = create_run_directory(records_root, now=started_at)
+            runtime_log_path = run_dir / "start_record.log"
+            runtime_log_path.write_text(
+                "[Game Recording] Launcher 内嵌页面启动\n",
+                encoding="utf-8",
+            )
+            hdc_capture = HdcDebugLogCapture(run_dir)
+            hdc_capture.__enter__()
+            hilog_capture = HilogCapture(run_dir)
+            hilog_capture.__enter__()
+            window = create_main_window(
+                output_root=run_dir,
+                runtime_log_path=runtime_log_path,
+                hilog_capture=hilog_capture,
+                parent=self,
+            )
+            if window is None:
+                hilog_capture.stop()
+                hdc_capture.stop()
+                save_run_summary(run_dir, started_at, "cancelled", 0)
+                self._show_launcher_page()
+                return
+        except Exception as exc:
+            LOGGER.exception("无法启动 Launcher 内嵌 Game Recording 页面")
+            if hilog_capture is not None:
+                hilog_capture.stop()
+            if hdc_capture is not None:
+                hdc_capture.stop()
+            if run_dir is not None:
+                save_run_summary(run_dir, started_at, "failed", 1, str(exc))
+            self._show_launcher_page()
+            QMessageBox.critical(self, "无法打开录制回放", str(exc))
+            return
+
+        window.setWindowFlags(Qt.WindowType.Widget)
+        self.game_recording_empty_label.hide()
+        self.game_recording_host_layout.addWidget(window)
+        window.show()
+        window.recorder_window.setFocus()
+        self.game_recording_window = window
+        self.game_recording_run_dir = run_dir
+        self.game_recording_started_at = started_at
+        self.game_recording_hdc_capture = hdc_capture
+        self.game_recording_hilog_capture = hilog_capture
+        self.game_recording_page_status.setText(
+            f"记录目录：{run_dir}"
+        )
+        self._set_status("已进入 Game Recording 专用页面。")
         self._sync_testcase_controls_state()
 
-    def _read_game_recording_output(self):
-        process = self.game_recording_process
-        if process is None:
-            return
-        output = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace")
-        if output:
-            self._log_message(f"[Game Recording] {output}")
-
-    def _game_recording_error(self, error):
-        process = self.game_recording_process
-        detail = process.errorString() if process is not None else str(error)
-        LOGGER.warning("Game Recording process error: %s", detail)
-
-    def _game_recording_finished(self, exit_code: int, exit_status):
-        process = self.game_recording_process
-        if process is not None:
-            trailing = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace")
-            if trailing:
-                self._log_message(f"[Game Recording] {trailing}")
-            process.deleteLater()
-        self.game_recording_process = None
-        self._sync_testcase_controls_state()
-        self._set_status(f"Game Recording 已关闭（退出码 {exit_code}）。")
-        LOGGER.info(
-            "Game Recording process finished: exit_code=%s exit_status=%s",
-            exit_code,
-            exit_status,
-        )
+    def _close_embedded_game_recording(self):
+        """返回 Launcher 时同步停止抓流、hilog 和本次 HDC DEBUG 归档。"""
+        window = self.game_recording_window
+        run_dir = self.game_recording_run_dir
+        started_at = self.game_recording_started_at
+        hdc_capture = self.game_recording_hdc_capture
+        hilog_capture = self.game_recording_hilog_capture
+        error = ""
+        try:
+            if window is not None:
+                window.shutdown()
+                self.game_recording_host_layout.removeWidget(window)
+                window.setParent(None)
+                window.deleteLater()
+        except Exception as exc:
+            error = str(exc)
+            LOGGER.exception("关闭 Launcher 内嵌 Game Recording 失败")
+        finally:
+            if hilog_capture is not None:
+                hilog_capture.stop()
+            if hdc_capture is not None:
+                hdc_capture.stop()
+            if run_dir is not None and started_at is not None:
+                from aw.autogame.customs_examples.Game_Recording.resource.runtime_log import (
+                    save_run_summary,
+                )
+                save_run_summary(
+                    run_dir,
+                    started_at,
+                    "success" if not error else "failed",
+                    0 if not error else 1,
+                    error,
+                )
+            self.game_recording_window = None
+            self.game_recording_run_dir = None
+            self.game_recording_started_at = None
+            self.game_recording_hdc_capture = None
+            self.game_recording_hilog_capture = None
+            self.game_recording_empty_label.show()
+            self.game_recording_empty_label.setText("录制回放已关闭。")
+            self._show_launcher_page()
 
     def _open_label_project(self, project_case: str, project_dir: Path):
         try:

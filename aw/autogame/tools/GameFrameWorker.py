@@ -12,6 +12,7 @@ import importlib
 import multiprocessing as mp
 import queue
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Tuple
 
 import numpy as np
@@ -40,6 +41,7 @@ from aw.autogame.tools.GameLaunchProfile import (
 from aw.autogame.tools.ProcessUtils import hdc_command_args, hidden_subprocess_kwargs
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+GAME_RECORDING_RECORDS_ROOT = Path(BASE_DIR).parent / "records" / "Game_Recording"
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s",
@@ -64,6 +66,47 @@ def _unwrap_timed_special_info(value):
     if _is_timed_special_info(value):
         return value[0]
     return value
+
+
+def resolve_game_recording_replay_record(record_name, records_root=None):
+    """按目录名找到一条 Game Recording 录制记录。
+
+    ``record_name`` 只能是 ``records/Game_Recording`` 下实际录制目录的
+    名称，不能传路径，避免业务脚本误回放到工程外的文件。
+    """
+    name = str(record_name or "").strip()
+    if not name:
+        raise ValueError("w.replay(record_name) 需要传入录制目录名")
+    if name in {".", ".."} or "/" in name or "\\" in name:
+        raise ValueError("w.replay(record_name) 只接受 records/ 下的目录名，不能传路径")
+
+    from aw.autogame.customs_examples.Game_Recording.resource.replay import (
+        discover_replay_records,
+    )
+
+    root = Path(records_root or GAME_RECORDING_RECORDS_ROOT).expanduser().resolve()
+    records = discover_replay_records(root)
+    # 一次启动会先创建运行目录，实际动作记录位于其 recordings 子目录。
+    # 因此既支持传真正动作目录名，也支持传 records 下的那一级运行目录名。
+    requested_directory = root / name
+    if requested_directory.is_dir():
+        matches = [
+            record for record in records
+            if record.directory == requested_directory
+            or requested_directory in record.directory.parents
+        ]
+    else:
+        matches = [record for record in records if record.directory.name == name]
+    if not matches:
+        raise FileNotFoundError(
+            f"未找到 Game Recording 录制记录：{name}（目录：{root}）"
+        )
+    if len(matches) > 1:
+        paths = "、".join(str(record.directory) for record in matches)
+        raise ValueError(
+            f"找到多个同名录制目录：{name}；请先在 records 中保留唯一目录。{paths}"
+        )
+    return matches[0]
 
 
 class HdcDut:
@@ -2188,6 +2231,23 @@ class Controller:
             "executed": "True",
         }
 
+
+class _GameRecordingReplayTouchAdapter:
+    """把 Game Recording 的 touch_down/move/up 协议适配到 HOS 连续触控。"""
+
+    def __init__(self, touch_controller):
+        self.touch_controller = touch_controller
+
+    def touch_down(self, x, y):
+        self.touch_controller.move_press(0, (int(x), int(y)))
+
+    def touch_move(self, x, y):
+        self.touch_controller.move_to(0, (int(x), int(y)), duration_ms=0)
+
+    def touch_up(self, _x, _y):
+        self.touch_controller.move_up(0)
+
+
 class FrameWorker(threading.Thread):
     LAUNCHER_INACTIVITY_TIMEOUT_SECONDS = 5 * 60
     POWER_COLLECTION_DURATION_SECONDS = 0.0
@@ -2273,6 +2333,8 @@ class FrameWorker(threading.Thread):
         self.launcher_power_collection_duration_seconds = self._resolve_launcher_power_collection_duration_seconds()
         self._watchdog_stop_event = threading.Event()
         self._watchdog_thread = None
+        self._replay_lock = threading.Lock()
+        self._replay_cancel_event = threading.Event()
         self.stage_resolver = StageLogicController()
 
         # 触控后端统一从 config.json 读取，controller_backend 仅保留兼容旧调用签名。
@@ -2307,6 +2369,211 @@ class FrameWorker(threading.Thread):
             self,
             marathon_duration_minutes=self.marathon_time,
         )
+
+    def _replay_log(self, message):
+        """回放的过程日志；也兼容仅构造出来做单元测试的 Worker。"""
+        logger = getattr(self, "frame_log", None)
+        if callable(logger):
+            try:
+                logger(message, log_type=FrameLogType.SYSTEM)
+            except TypeError:
+                logger(message)
+        else:
+            print(message)
+
+    def _get_game_recording_replay_screen_size(self):
+        """优先取当前手机分辨率，失败时才退回到当前视频帧大小。"""
+        controller = getattr(self, "controller", None)
+        refresh_resolution = getattr(controller, "refresh_resolution", None)
+        if callable(refresh_resolution):
+            resolution = refresh_resolution()
+            if resolution is not None:
+                try:
+                    width, height = int(resolution[0]), int(resolution[1])
+                except (IndexError, TypeError, ValueError):
+                    width, height = 0, 0
+                if width > 0 and height > 0:
+                    return width, height
+
+        cached_resolution = getattr(controller, "_cached_resolution", None)
+        if cached_resolution is not None:
+            try:
+                width, height = int(cached_resolution[0]), int(cached_resolution[1])
+            except (IndexError, TypeError, ValueError):
+                width, height = 0, 0
+            if width > 0 and height > 0:
+                return width, height
+
+        frame = getattr(self, "frame", None)
+        try:
+            height, width = frame.shape[:2]
+        except (AttributeError, IndexError, TypeError):
+            width, height = 0, 0
+        if width > 0 and height > 0:
+            return int(width), int(height)
+        raise RuntimeError("无法获取当前手机分辨率，不能执行 Game Recording 回放")
+
+    def _replay_wait_until(self, deadline, cancel_event):
+        while not cancel_event.is_set():
+            if not getattr(self, "running", False):
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            cancel_event.wait(min(0.02, remaining))
+        return False
+
+    def replay(self, record_name):
+        """同步回放 ``records/Game_Recording`` 下指定目录名的录制。
+
+        该接口复用当前 FrameWorker 已建立的 HOScrcpy 流和单指触控通道，
+        不会启动第二条投屏连接。调用会阻塞至回放完成；成功返回 ``True``，
+        Worker 停止导致的取消返回 ``False``，记录或流异常则抛出异常。
+        """
+        record = resolve_game_recording_replay_record(record_name)
+        stream_client = getattr(self, "stream_client", None)
+        if stream_client is None:
+            raise RuntimeError("w.replay 需要当前 FrameWorker 的 HOScrcpy 流")
+
+        required_methods = ("touch_down", "touch_move", "touch_up")
+        missing_methods = [
+            method for method in required_methods
+            if not callable(getattr(stream_client, method, None))
+        ]
+        if missing_methods:
+            raise RuntimeError(
+                "w.replay 需要支持 HOS 单指触控的 stream_client，缺少："
+                + "、".join(missing_methods)
+            )
+
+        replay_lock = getattr(self, "_replay_lock", None)
+        if replay_lock is None:
+            replay_lock = threading.Lock()
+            self._replay_lock = replay_lock
+        if not replay_lock.acquire(blocking=False):
+            raise RuntimeError("已有 Game Recording 回放正在执行")
+
+        cancel_event = getattr(self, "_replay_cancel_event", None)
+        if cancel_event is None:
+            cancel_event = threading.Event()
+            self._replay_cancel_event = cancel_event
+        cancel_event.clear()
+
+        guard_started = False
+        touch = None
+        replay_controller = None
+        completed = False
+        try:
+            from aw.autogame.customs_examples.Game_Recording import info as recording_info
+            from aw.autogame.customs_examples.Game_Recording.resource.replay import (
+                load_replay_events,
+                load_replay_layout,
+            )
+            from aw.autogame.customs_examples.Game_Recording.resource.touch_controller import (
+                SingleTouchKeyboardController,
+            )
+
+            events = load_replay_events(record)
+            screen_width, screen_height = self._get_game_recording_replay_screen_size()
+            key_points = load_replay_layout(
+                record,
+                recording_info,
+                screen_width,
+                screen_height,
+            )
+            duration_seconds = max(
+                float(record.duration_seconds),
+                float(events[-1].timestamp),
+            )
+
+            begin_guard = getattr(stream_client, "begin_touch_replay", None)
+            if callable(begin_guard):
+                guard_started = bool(begin_guard("FrameWorker Game Recording replay"))
+                if not guard_started:
+                    raise RuntimeError("当前 HOScrcpy 流未就绪，无法开始回放")
+
+            # HOSTouchController 只包装现有 stream_client 的 touch_down/move/up；
+            # 它不会建立第二条 HOS 流，也不受 FrameWorker 默认 uinput 后端影响。
+            touch = HOSTouchController(stream_client)
+            replay_controller = SingleTouchKeyboardController(
+                _GameRecordingReplayTouchAdapter(touch),
+                key_points,
+                screen_size=(screen_width, screen_height),
+            )
+            self._replay_log(
+                "[GameRecording Replay] 开始：%s，动作=%d，时长=%.2fs，分辨率=%dx%d"
+                % (
+                    record.directory.name,
+                    len(events),
+                    duration_seconds,
+                    screen_width,
+                    screen_height,
+                )
+            )
+
+            started_at = time.monotonic()
+            for event in events:
+                if not self._replay_wait_until(started_at + event.timestamp, cancel_event):
+                    self._replay_log(
+                        "[GameRecording Replay] 已取消：%s" % record.directory.name
+                    )
+                    return False
+                if event.event == "press":
+                    replay_controller.press(event.key)
+                elif event.event == "release":
+                    replay_controller.release(event.key)
+                elif event.event == "tap":
+                    replay_controller.tap(event.key)
+                elif event.normalized_position is not None:
+                    replay_controller.move_active_control_to_normalized(
+                        *event.normalized_position
+                    )
+                else:
+                    replay_controller.nudge_active_control(event.key)
+
+            if not self._replay_wait_until(started_at + duration_seconds, cancel_event):
+                self._replay_log(
+                    "[GameRecording Replay] 已取消：%s" % record.directory.name
+                )
+                return False
+            completed = True
+            self._replay_log(
+                "[GameRecording Replay] 完成：%s，时长=%.2fs"
+                % (record.directory.name, duration_seconds)
+            )
+            return True
+        finally:
+            release_error = None
+            if replay_controller is not None:
+                try:
+                    replay_controller.release_all()
+                except Exception as exc:
+                    release_error = exc
+            if touch is not None:
+                try:
+                    touch.close()
+                except Exception as exc:
+                    if release_error is None:
+                        release_error = exc
+
+            if guard_started:
+                try:
+                    end_guard = getattr(stream_client, "end_touch_replay", None)
+                    if callable(end_guard):
+                        grace_seconds = None if completed else 0.0
+                        stream_healthy = bool(end_guard(grace_seconds=grace_seconds))
+                        self._replay_log(
+                            "[GameRecording Replay] HOS 触控结束：fresh_stream_frame=%s"
+                            % stream_healthy
+                        )
+                        if completed and not stream_healthy and release_error is None:
+                            release_error = RuntimeError("回放完成后 HOS 画面没有恢复")
+                except Exception as exc:
+                    if release_error is None:
+                        release_error = exc
+            replay_lock.release()
+            if release_error is not None:
+                raise release_error
 
     def _begin_frame_log_context(self):
         self.current_frame_logs = []
@@ -3127,6 +3394,7 @@ class FrameWorker(threading.Thread):
         self.last_control_action_time = time.monotonic()
         self._post_control_refresh_ready_at = 0.0
         self._stream_recovery_waiting = False
+        self._replay_cancel_event.clear()
         self.sp_controller.start_battery_monitor()
         self.thread = threading.Thread(target=self.loop, daemon=True)
         self.thread.start()
@@ -3148,6 +3416,9 @@ class FrameWorker(threading.Thread):
 
         self.running = False
         self.finished = True
+        replay_cancel_event = getattr(self, "_replay_cancel_event", None)
+        if replay_cancel_event is not None:
+            replay_cancel_event.set()
         self._watchdog_stop_event.set()
         sp_controller = getattr(self, "sp_controller", None)
         if sp_controller is not None:

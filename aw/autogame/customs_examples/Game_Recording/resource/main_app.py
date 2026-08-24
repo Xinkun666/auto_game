@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QStackedWidget,
@@ -37,6 +38,7 @@ from .touch_controller import SingleTouchKeyboardController
 
 
 LOGGER = logging.getLogger("GameRecordingMain")
+GAME_RECORDING_PROJECT_DIR = Path(__file__).resolve().parents[1]
 
 
 class SharedReplayPanel(QWidget):
@@ -398,8 +400,28 @@ class GameRecordingMainWindow(QMainWindow):
         self.setWindowTitle("Game Recording - 录制与回放")
         self.resize(1280, 820)
         self._shutdown_complete = False
+        self.label_tool_window = None
+
+        central = QWidget(self)
+        root_layout = QVBoxLayout(central)
+        root_layout.setContentsMargins(10, 8, 10, 10)
+        root_layout.setSpacing(8)
+        toolbar = QHBoxLayout()
+        project_hint = QLabel("当前标注工程：Game_Recording")
+        project_hint.setStyleSheet("color: #555;")
+        self.open_label_tool_button = QPushButton("打开标注工具")
+        self.open_label_tool_button.setToolTip(
+            "打开并自动加载 Game_Recording 的控点标注工程"
+        )
+        self.open_label_tool_button.clicked.connect(self._open_label_tool)
+        toolbar.addWidget(project_hint)
+        toolbar.addStretch(1)
+        toolbar.addWidget(self.open_label_tool_button)
+        root_layout.addLayout(toolbar)
+
         self.tabs = QTabWidget(self)
-        self.setCentralWidget(self.tabs)
+        root_layout.addWidget(self.tabs, 1)
+        self.setCentralWidget(central)
         self.recorder_window = RecorderWindow(
             output_root=output_root,
             fps=fps,
@@ -426,6 +448,42 @@ class GameRecordingMainWindow(QMainWindow):
         self.tabs.addTab(self.comparison_panel, "对比")
         self.tabs.currentChanged.connect(self._tab_changed)
 
+    def _label_tool_destroyed(self, *_args):
+        self.label_tool_window = None
+
+    def _open_label_tool(self):
+        """在当前 Qt 进程中打开标注工具，并固定加载 Game_Recording。"""
+        if not (GAME_RECORDING_PROJECT_DIR / "info.py").is_file():
+            QMessageBox.warning(
+                self,
+                "无法打开标注工具",
+                "未找到 Game_Recording/info.py，请检查标注工程。",
+            )
+            return
+
+        label_window = self.label_tool_window
+        if label_window is None:
+            try:
+                from aw.autogame.tools.Label import AutoStudioWindow
+
+                label_window = AutoStudioWindow()
+                label_window.load_project_from_dir(str(GAME_RECORDING_PROJECT_DIR))
+                label_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+                label_window.destroyed.connect(self._label_tool_destroyed)
+                self.label_tool_window = label_window
+            except Exception as exc:
+                LOGGER.exception("打开 Game_Recording 标注工具失败")
+                QMessageBox.critical(
+                    self,
+                    "无法打开标注工具",
+                    f"无法加载 Game_Recording 标注工程：{exc}",
+                )
+                return
+
+        label_window.show()
+        label_window.raise_()
+        label_window.activateWindow()
+
     def _tab_changed(self, index: int):
         if index == 0:
             self.recorder_window.setFocus()
@@ -442,6 +500,8 @@ class GameRecordingMainWindow(QMainWindow):
         self.replay_panel.stop()
         self.comparison_panel.stop()
         self.recorder_window.shutdown()
+        if self.label_tool_window is not None:
+            self.label_tool_window.close()
 
     def closeEvent(self, event: QCloseEvent):
         self.shutdown()

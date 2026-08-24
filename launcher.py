@@ -2849,10 +2849,6 @@ class LauncherWindow(QWidget):
         self.open_game_recording_button.setToolTip(
             "打开 Game_Recording 的专用录制、回放和对比界面"
         )
-        self.open_game_recording_label_button = QPushButton("修改录制控点")
-        self.open_game_recording_label_button.setToolTip(
-            "直接加载 Game_Recording 标注工程，可修改并导出控点"
-        )
         self.refresh_button = QPushButton("刷新")
         self.refresh_button.setToolTip("刷新配置")
         self.refresh_button.setFixedWidth(64)
@@ -3783,7 +3779,6 @@ class LauncherWindow(QWidget):
         recording_layout.setContentsMargins(12, 8, 12, 10)
         recording_layout.setSpacing(6)
         recording_layout.addWidget(self.open_game_recording_button)
-        recording_layout.addWidget(self.open_game_recording_label_button)
         launch_row.addWidget(recording_group, 1)
         controls_layout.addLayout(launch_row)
 
@@ -4164,9 +4159,6 @@ class LauncherWindow(QWidget):
         self.clear_button.clicked.connect(self._reselect_testcase_file)
         self.open_label_tool_button.clicked.connect(self._open_label_tool_for_selected_case)
         self.open_game_recording_button.clicked.connect(self._open_game_recording)
-        self.open_game_recording_label_button.clicked.connect(
-            self._open_game_recording_label_tool
-        )
         self.back_to_launcher_button.clicked.connect(self._show_launcher_page)
         self.refresh_button.clicked.connect(self._refresh_config_choices)
         self.project_combo.currentTextChanged.connect(self._on_project_changed)
@@ -4641,7 +4633,6 @@ class LauncherWindow(QWidget):
             )
         )
         self.open_game_recording_button.setEnabled(game_recording_ready)
-        self.open_game_recording_label_button.setEnabled(game_recording_ready)
 
     def _set_combo_value(self, combo: QComboBox, value: str):
         if not value:
@@ -4874,16 +4865,6 @@ class LauncherWindow(QWidget):
         self.page_stack.setCurrentWidget(self.label_tool_page)
         self._set_status(f"已打开标注工具：{project_case}")
         return True
-
-    def _open_game_recording_label_tool(self):
-        if not (GAME_RECORDING_PROJECT_DIR / "info.py").is_file():
-            QMessageBox.warning(
-                self,
-                "无法打开标注工具",
-                "未找到 Game_Recording/info.py，请先确认工程已导出。",
-            )
-            return
-        self._open_label_project("Game_Recording", GAME_RECORDING_PROJECT_DIR)
 
     def _open_label_tool_for_selected_case(self):
         LOGGER.info(

@@ -77,7 +77,8 @@ class PointItem(QGraphicsEllipseItem):
         changed: Callable[[str, QPointF], None],
         selected: Callable[[str], None],
     ):
-        super().__init__(-16, -16, 32, 32)
+        # 绑定窗口按“屏幕像素”显示标记；32px 在缩放后的手机截图上过于遮挡。
+        super().__init__(-7, -7, 14, 14)
         self.point_name = name
         self.scene_width = scene_width
         self.scene_height = scene_height
@@ -85,7 +86,7 @@ class PointItem(QGraphicsEllipseItem):
         self.selected = selected
         self._initialized = False
         self.setBrush(QBrush(QColor(40, 146, 255, 210)))
-        self.setPen(QPen(QColor("white"), 2))
+        self.setPen(QPen(QColor("white"), 1.5))
         self.setZValue(10)
         self.setFlags(
             QGraphicsItem.GraphicsItemFlag.ItemIsMovable
@@ -95,7 +96,7 @@ class PointItem(QGraphicsEllipseItem):
         )
         label = QGraphicsSimpleTextItem(name, self)
         label.setBrush(QBrush(QColor("white")))
-        label.setPos(20, -10)
+        label.setPos(10, -7)
         self.setPos(position)
         self._initialized = True
 
@@ -317,11 +318,11 @@ class BindingDialog(QDialog):
                 control.normalized_position[1] * scene_height,
             )
             marker = self.graphics_scene.addEllipse(
-                -9,
-                -9,
-                18,
-                18,
-                QPen(QColor("#d8ffe3"), 2),
+                -5,
+                -5,
+                10,
+                10,
+                QPen(QColor("#d8ffe3"), 1.5),
                 QBrush(QColor(30, 170, 90, 220)),
             )
             marker.setPos(position)
@@ -332,7 +333,7 @@ class BindingDialog(QDialog):
             )
             label = self.graphics_scene.addSimpleText(control.display_name)
             label.setBrush(QBrush(QColor("#d8ffe3")))
-            label.setPos(position + QPointF(12, -10))
+            label.setPos(position + QPointF(8, -7))
             label.setZValue(11)
             label.setFlag(
                 QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations,

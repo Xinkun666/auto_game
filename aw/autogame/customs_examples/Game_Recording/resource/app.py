@@ -533,7 +533,8 @@ class RecorderWindow(QMainWindow):
             self._set_status(f"释放键位 {key} 失败：{exc}", error=True)
         event.accept()
 
-    def closeEvent(self, event: QCloseEvent):
+    def shutdown(self):
+        """无论由自身、统一窗口还是应用退出触发，都只收尾一次。"""
         if not self._closed:
             self._closed = True
             self.preview_timer.stop()
@@ -549,6 +550,9 @@ class RecorderWindow(QMainWindow):
             except Exception:
                 LOGGER.exception("关闭 sendevent 触控后端失败")
             self._stop_stream()
+
+    def closeEvent(self, event: QCloseEvent):
+        self.shutdown()
         event.accept()
 
 

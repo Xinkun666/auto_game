@@ -397,6 +397,7 @@ class GameRecordingMainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Game Recording - 录制与回放")
         self.resize(1280, 820)
+        self._shutdown_complete = False
         self.tabs = QTabWidget(self)
         self.setCentralWidget(self.tabs)
         self.recorder_window = RecorderWindow(
@@ -433,11 +434,17 @@ class GameRecordingMainWindow(QMainWindow):
         else:
             self.comparison_panel.refresh_records()
 
-    def closeEvent(self, event: QCloseEvent):
+    def shutdown(self):
+        """统一窗口关闭和 Qt 应用退出共用同一套资源收尾。"""
+        if self._shutdown_complete:
+            return
+        self._shutdown_complete = True
         self.replay_panel.stop()
         self.comparison_panel.stop()
-        if not self.recorder_window._closed:
-            self.recorder_window.close()
+        self.recorder_window.shutdown()
+
+    def closeEvent(self, event: QCloseEvent):
+        self.shutdown()
         event.accept()
 
 
@@ -481,4 +488,6 @@ def run(
     window.show()
     window.activateWindow()
     window.recorder_window.setFocus()
+    # 用户点右上角关闭、系统请求退出、或其他代码调用 app.quit() 都必须停止 hilog。
+    app.aboutToQuit.connect(window.shutdown)
     return int(app.exec())

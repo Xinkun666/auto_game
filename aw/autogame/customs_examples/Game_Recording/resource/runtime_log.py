@@ -312,6 +312,20 @@ class HilogCapture:
 
     @staticmethod
     def _terminate_process(process, force: bool):
+        if os.name == "nt":
+            # hdc hilog 有时会派生子进程；只 terminate 父进程会遗留子进程继续占用 hilog.txt。
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    **hidden_subprocess_kwargs(),
+                )
+                return
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         if os.name != "nt":
             try:
                 os.killpg(

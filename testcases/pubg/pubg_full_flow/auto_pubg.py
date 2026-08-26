@@ -44,6 +44,10 @@ class auto_pubg(TestCase):
         TestCase.__init__(self, self.TAG, controllers)
 
         self.tests = ["test_step"]
+        self.device_sn = str(getattr(self.device1, "device_sn", "") or "").strip()
+        if self.device_sn:
+            os.environ["AUTOGAME_HOSCRCPY_SN"] = self.device_sn
+            print(f"[Device] 本轮 xDevice 设备 SN: {self.device_sn}")
         self.driver = UiDriver(self.device1)
         self.automator = None
         self.task_name = os.environ.get("TARGET_GAME_CASE") or target_case
@@ -265,7 +269,11 @@ class auto_pubg(TestCase):
             return
 
         self._wait_for_game_rotation()
-        self.automator = GameAutomator(driver=self.driver, logger=self.log)
+        self.automator = GameAutomator(
+            driver=self.driver,
+            logger=self.log,
+            device_sn=self.device_sn or None,
+        )
 
     def test_step(self):
         automation_completed = False

@@ -4,7 +4,7 @@
     "stream_disable_save_frames": true,
     "stream_diagnostics": true,
     "stream_diagnostics_interval": 1.0,
-    "hoscrcpy_sn": "3KP0224B15000196",
+    "hoscrcpy_sn": "",
     "hoscrcpy_ip": "127.0.0.1",
     "hoscrcpy_port": 8710,
     "hoscrcpy_scale": 2,

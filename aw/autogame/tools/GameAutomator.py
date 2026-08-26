@@ -36,11 +36,14 @@ def create_stream_client_for_mode(
     raise ValueError(f"unsupported screen_mode: {screen_mode}")
 
 class GameAutomator:
-    def __init__(self, driver, logger):
+    def __init__(self, driver, logger, device_sn=None):
         self.driver = driver
         self.logger = logger
+        self.device_sn = str(device_sn or "").strip()
 
-        self.screen_w, self.screen_h = get_resolution()
+        self.screen_w, self.screen_h = get_resolution(
+            device_sn=self.device_sn or None
+        )
         set_runtime_screen_resolution_env(self.screen_w, self.screen_h)
         self.W, self.H = get_wh()
         self.screen_mode = get_screen_mode()

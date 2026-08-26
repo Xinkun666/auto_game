@@ -825,45 +825,76 @@ def _parse_screen_resolution(screen_info: str):
     if not screen_info:
         return None
 
-    display_info_match = re.search(
-        r'\[DISPLAY INFO]\s*\r?\nWidth:\s*(\d+)\s*\r?\nHeight:\s*(\d+)',
+    display_info_sections = re.findall(
+        r'\[DISPLAY INFO\](.*?)(?=\r?\n-+\s|\Z)',
         screen_info,
+        re.IGNORECASE | re.DOTALL,
     )
-    if display_info_match:
-        return int(display_info_match.group(1)), int(display_info_match.group(2))
+    for section in reversed(display_info_sections):
+        width_match = re.search(r'^\s*Width:\s*(\d+)\s*$', section, re.MULTILINE)
+        height_match = re.search(r'^\s*Height:\s*(\d+)\s*$', section, re.MULTILINE)
+        if width_match and height_match:
+            return int(width_match.group(1)), int(height_match.group(1))
 
     patterns = (
+        r'activeModes<id,\s*W,\s*H,\s*RS>:\s*\d+\s*,\s*(\d+)\s*,\s*(\d+)',
+        r'^\s*Bounds<L,T,W,H>:\s*-?\d+\s*,\s*-?\d+\s*,\s*(\d+)\s*,\s*(\d+)',
         r'activeMode:\s*(\d+)\s*x\s*(\d+)',
         r'render\s+resolution\s*=\s*(\d+)\s*x\s*(\d+)',
         r'physical\s+resolution\s*=\s*(\d+)\s*x\s*(\d+)',
         r'supportedMode\[\d+\]:\s*(\d+)\s*x\s*(\d+)',
     )
     for pattern in patterns:
-        match = re.search(pattern, screen_info, re.IGNORECASE)
+        match = re.search(pattern, screen_info, re.IGNORECASE | re.MULTILINE)
         if match:
             return int(match.group(1)), int(match.group(2))
     return None
 
 
-def get_resolution(r=True, rotation=None):
+def get_resolution(r=True, rotation=None, device_sn=None):
     """读取 DisplayManagerService 报告的当前屏幕分辨率。
 
-    rotation 参数仅保留旧调用兼容，不再参与宽高换算。
+    优先使用本轮 xDevice 明确传入的设备 SN；指定设备失败时回退到
+    ``hdc shell`` 的当前默认设备。rotation 参数仅保留旧调用兼容，
+    不再参与宽高换算。
     """
-    command = build_hos_hdc_shell_command(
-        "hidumper -s DisplayManagerService -a -a"
+    remote_command = "hidumper -s DisplayManagerService -a -a"
+    current_device_sn = str(device_sn or "").strip()
+    if current_device_sn:
+        os.environ["AUTOGAME_HOSCRCPY_SN"] = current_device_sn
+
+    primary_command = build_hos_hdc_shell_command(
+        remote_command,
+        device_sn=current_device_sn or None,
     )
-    resolution_mode = run_shell(command, r)
-    resolution = _parse_screen_resolution(resolution_mode)
-    if resolution is None:
+    fallback_command = f"hdc shell {remote_command}"
+    commands = [primary_command]
+    if fallback_command != primary_command:
+        commands.append(fallback_command)
+
+    attempts = []
+    for index, command in enumerate(commands):
+        resolution_mode = run_shell(command, r)
+        resolution = _parse_screen_resolution(resolution_mode)
+        if resolution is not None:
+            if index > 0:
+                print(
+                    "[Resolution] 指定 HDC 设备未返回有效分辨率，"
+                    "已回退到当前默认设备。"
+                )
+            width, height = resolution
+            return int(width), int(height)
+
         output_snippet = str(resolution_mode or "").strip()[:500]
-        detail = f"，输出片段={output_snippet}" if output_snippet else "，命令无输出"
-        raise RuntimeError(
-            f"[Resolution] 获取分辨率失败：{command} 未返回可解析的分辨率{detail}"
+        attempts.append(
+            f"command={command}，"
+            + (f"输出片段={output_snippet}" if output_snippet else "命令无输出")
         )
 
-    width, height = resolution
-    return int(width), int(height)
+    raise RuntimeError(
+        "[Resolution] 获取分辨率失败：DisplayManagerService 未返回可解析的分辨率；"
+        + "；".join(attempts)
+    )
 
 
 def _resolve_hos_hdc_target():
@@ -892,7 +923,7 @@ def _resolve_hos_hdc_target():
     return host, port, sn
 
 
-def build_hos_hdc_shell_command(remote_command: str) -> str:
+def build_hos_hdc_shell_command(remote_command: str, device_sn=None) -> str:
     """Build an HDC shell command bound to the configured HOS device.
 
     The returned text stays compatible with :func:`run_shell`, which converts
@@ -901,7 +932,8 @@ def build_hos_hdc_shell_command(remote_command: str) -> str:
     remote_command = str(remote_command or "").strip()
     if not remote_command:
         raise ValueError("remote_command cannot be empty")
-    host, port, sn = _resolve_hos_hdc_target()
+    host, port, configured_sn = _resolve_hos_hdc_target()
+    sn = str(device_sn if device_sn is not None else configured_sn).strip()
     if not sn:
         return "hdc shell {}".format(remote_command)
     return "hdc -s {}:{} -t {} shell {}".format(host, port, sn, remote_command)

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Mapping
 
 import cv2
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
@@ -20,7 +21,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .replay import ReplayRecord, discover_replay_records
+from .replay import (
+    ReplayRecord,
+    discover_replay_records,
+    load_recorded_control_points,
+)
 
 
 def format_replay_time(seconds: float) -> str:
@@ -47,6 +52,7 @@ class LauncherReplayPanel(QWidget):
         self._video_frame_count = 0
         self._video_frame_index = -1
         self._video_duration_seconds = 0.0
+        self._binding_pixmap = QPixmap()
         self._playing = False
         self._replay_active = False
 
@@ -107,18 +113,41 @@ class LauncherReplayPanel(QWidget):
         video_layout.addWidget(self.video_label, 1)
         video_layout.addLayout(video_controls)
 
-        self.binding_empty_label = QLabel(
-            "当前录制记录尚未保存标注图片和控点绑定数据。\n"
-            "这里已预留控点绑定区域，后续完善录制保存数据后再自动加载。"
-        )
+        self.binding_empty_label = QLabel("该录制记录没有保存场景图和控点数据。")
         self.binding_empty_label.setObjectName("previewTemplate")
         self.binding_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.binding_empty_label.setWordWrap(True)
         self.binding_empty_label.setMinimumHeight(110)
+
+        self.binding_preview_label = QLabel("暂无录制场景图")
+        self.binding_preview_label.setObjectName("previewTemplate")
+        self.binding_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.binding_preview_label.setMinimumSize(260, 150)
+        self.binding_preview_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self.binding_tree = QTreeWidget()
+        self.binding_tree.setObjectName("previewInfo")
+        self.binding_tree.setHeaderLabels(["按键", "场景", "录制时位置"])
+        self.binding_tree.setRootIsDecorated(False)
+        self.binding_tree.setUniformRowHeights(True)
+        self.binding_tree.setMinimumWidth(250)
+        self.binding_tree.setColumnWidth(0, 72)
+        self.binding_tree.setColumnWidth(1, 90)
+        self.binding_content = QWidget()
+        binding_content_layout = QHBoxLayout(self.binding_content)
+        binding_content_layout.setContentsMargins(0, 0, 0, 0)
+        binding_content_layout.setSpacing(10)
+        binding_content_layout.addWidget(self.binding_preview_label, 3)
+        binding_content_layout.addWidget(self.binding_tree, 2)
+        self.binding_content.hide()
+
         binding_group = QGroupBox("控点绑定")
         binding_layout = QVBoxLayout(binding_group)
         binding_layout.setContentsMargins(12, 10, 12, 12)
         binding_layout.addWidget(self.binding_empty_label)
+        binding_layout.addWidget(self.binding_content, 1)
 
         self.status_label = QLabel("选择一条记录，查看视频后即可开始回放。")
         self.status_label.setWordWrap(True)
@@ -205,6 +234,7 @@ class LauncherReplayPanel(QWidget):
             self.video_label.setText("暂无录制视频")
             self.video_progress_label.setText("00:00 / 00:00")
             self.start_replay_button.setEnabled(False)
+            self._clear_binding_snapshot()
             return
 
         self.record_detail_label.setText(
@@ -212,7 +242,132 @@ class LauncherReplayPanel(QWidget):
             f"{record.duration_seconds:.1f} 秒  ·  {record.action_count} 个动作"
         )
         self.start_replay_button.setEnabled(not self._replay_active)
+        self._load_binding_snapshot(record)
         self._load_video(record)
+
+    @staticmethod
+    def _normalized_position(
+        point: Mapping[str, Any], screen_size: tuple[int, int]
+    ) -> tuple[float, float] | None:
+        normalized = point.get("normalized_position")
+        if isinstance(normalized, (list, tuple)) and len(normalized) == 2:
+            try:
+                norm_x, norm_y = float(normalized[0]), float(normalized[1])
+            except (TypeError, ValueError):
+                return None
+        else:
+            position = point.get("position")
+            if (
+                not isinstance(position, (list, tuple))
+                or len(position) != 2
+                or screen_size[0] <= 0
+                or screen_size[1] <= 0
+            ):
+                return None
+            try:
+                norm_x = float(position[0]) / screen_size[0]
+                norm_y = float(position[1]) / screen_size[1]
+            except (TypeError, ValueError):
+                return None
+        if 0.0 <= norm_x <= 1.0 and 0.0 <= norm_y <= 1.0:
+            return norm_x, norm_y
+        return None
+
+    def _clear_binding_snapshot(self):
+        self._binding_pixmap = QPixmap()
+        self.binding_tree.clear()
+        self.binding_content.hide()
+        self.binding_empty_label.show()
+
+    def _load_binding_snapshot(self, record: ReplayRecord):
+        self._clear_binding_snapshot()
+        raw_points, screen_size = load_recorded_control_points(record)
+        scene_path = record.scene_view_path
+        scene_pixmap = QPixmap(str(scene_path)) if scene_path is not None else QPixmap()
+        valid_points = []
+        for raw_key, raw_point in raw_points.items():
+            if not isinstance(raw_point, Mapping):
+                continue
+            normalized = self._normalized_position(raw_point, screen_size)
+            if normalized is None:
+                continue
+            valid_points.append((str(raw_key), raw_point, normalized))
+
+        if scene_pixmap.isNull() and not valid_points:
+            self.status_label.setText("该记录没有可用的场景图或控点快照。")
+            return
+
+        if not scene_pixmap.isNull():
+            annotated = scene_pixmap.copy()
+            painter = QPainter(annotated)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            marker_radius = max(
+                10, int(round(min(annotated.width(), annotated.height()) * 0.018))
+            )
+            painter.setPen(QPen(QColor("#ffffff"), max(2, marker_radius // 5)))
+            painter.setBrush(QColor("#ff4d6d"))
+            label_font = QFont(painter.font())
+            label_font.setPixelSize(
+                max(16, int(round(min(annotated.width(), annotated.height()) * 0.025)))
+            )
+            label_font.setBold(True)
+            painter.setFont(label_font)
+            for key, _point, (norm_x, norm_y) in valid_points:
+                x = int(round(norm_x * max(annotated.width() - 1, 0)))
+                y = int(round(norm_y * max(annotated.height() - 1, 0)))
+                painter.drawEllipse(
+                    x - marker_radius,
+                    y - marker_radius,
+                    marker_radius * 2,
+                    marker_radius * 2,
+                )
+                painter.drawText(
+                    x + marker_radius + 5,
+                    y - marker_radius // 2,
+                    key,
+                )
+            painter.end()
+            self._binding_pixmap = annotated
+            self._render_binding_pixmap()
+        else:
+            self.binding_preview_label.setPixmap(QPixmap())
+            self.binding_preview_label.setText("该记录没有保存场景图")
+
+        for key, point, normalized in valid_points:
+            position = point.get("position")
+            if isinstance(position, (list, tuple)) and len(position) == 2:
+                try:
+                    position_text = f"{int(position[0])}, {int(position[1])}"
+                except (TypeError, ValueError):
+                    position_text = f"{normalized[0]:.3f}, {normalized[1]:.3f}"
+            else:
+                position_text = f"{normalized[0]:.3f}, {normalized[1]:.3f}"
+            self.binding_tree.addTopLevelItem(
+                QTreeWidgetItem(
+                    [key, str(point.get("scene") or "未命名"), position_text]
+                )
+            )
+        self.binding_empty_label.hide()
+        self.binding_content.show()
+        if valid_points:
+            self.status_label.setText(
+                f"已加载录制时保存的场景图和 {len(valid_points)} 个控点；"
+                "开始回放时优先使用这份记录级布局。"
+            )
+        else:
+            self.status_label.setText("已加载录制场景图，但该记录没有有效控点。")
+
+    def _render_binding_pixmap(self):
+        if self._binding_pixmap.isNull():
+            return
+        self.binding_preview_label.setText("")
+        self.binding_preview_label.setPixmap(
+            self._binding_pixmap.scaled(
+                self.binding_preview_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
 
     def _load_video(self, record: ReplayRecord):
         video_path = record.directory / "video.mp4"
@@ -366,6 +521,7 @@ class LauncherReplayPanel(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._render_video_pixmap()
+        self._render_binding_pixmap()
 
     def closeEvent(self, event):
         self.stop()

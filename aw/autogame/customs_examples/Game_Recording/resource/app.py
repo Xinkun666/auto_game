@@ -474,7 +474,7 @@ class RecorderWindow(QMainWindow):
         if session_dir is None:
             self._set_status("当前没有正在进行的录制。")
             return
-        self._set_status(f"录制已保存：{session_dir}")
+        self._set_status(f"录制、最终场景图和控点快照已保存：{session_dir}")
 
     def keyPressEvent(self, event: QKeyEvent):
         if event.isAutoRepeat():

@@ -53,6 +53,17 @@ class ReplayRecord:
             f"{self.duration_seconds:.1f} 秒    {self.action_count} 个动作"
         )
 
+    @property
+    def scene_view_path(self) -> Path | None:
+        """优先使用录制结束场景图，旧记录回退到开始画面。"""
+        scene_view = self.directory / "scene_view.png"
+        return scene_view if scene_view.is_file() else self.initial_view_path
+
+    @property
+    def control_points_path(self) -> Path | None:
+        snapshot = self.directory / "control_points.json"
+        return snapshot if snapshot.is_file() else None
+
 
 def _read_json(path: Path, default: Any = None) -> Any:
     try:
@@ -292,19 +303,35 @@ def load_replay_events(record: ReplayRecord) -> list[ReplayEvent]:
     return events
 
 
-def _recorded_layout(record: ReplayRecord) -> tuple[Mapping[str, Any], tuple[int, int]]:
+def _screen_size(value: Any) -> tuple[int, int]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return 0, 0
+    try:
+        width, height = int(value[0] or 0), int(value[1] or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+    return max(width, 0), max(height, 0)
+
+
+def load_recorded_control_points(
+    record: ReplayRecord,
+) -> tuple[Mapping[str, Any], tuple[int, int]]:
+    """读取记录级控点快照；旧记录继续兼容 session.json 内嵌布局。"""
+    if record.control_points_path is not None:
+        snapshot = _read_json(record.control_points_path, {})
+        if isinstance(snapshot, Mapping) and isinstance(
+            snapshot.get("points"), Mapping
+        ):
+            return snapshot["points"], _screen_size(snapshot.get("screen_size"))
     if record.session_path is None:
         return {}, (0, 0)
     session = _read_json(record.session_path, {})
     if not isinstance(session, Mapping):
         return {}, (0, 0)
     layout = session.get("layout", {})
-    screen_size = session.get("screen_size", [])
     if not isinstance(layout, Mapping):
         layout = {}
-    if not isinstance(screen_size, (list, tuple)) or len(screen_size) != 2:
-        screen_size = (0, 0)
-    return layout, (int(screen_size[0] or 0), int(screen_size[1] or 0))
+    return layout, _screen_size(session.get("screen_size"))
 
 
 def load_replay_layout(
@@ -314,7 +341,7 @@ def load_replay_layout(
     screen_height: int,
 ) -> dict[str, KeyPoint]:
     """优先恢复录制当时的布局，个别缺失键位再用当前 info.py 补齐。"""
-    recorded, recorded_screen = _recorded_layout(record)
+    recorded, recorded_screen = load_recorded_control_points(record)
     result: dict[str, KeyPoint] = {}
     for raw_key, raw_point in recorded.items():
         key = normalize_key_name(raw_key)

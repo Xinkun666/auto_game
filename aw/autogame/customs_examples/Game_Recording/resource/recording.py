@@ -94,6 +94,7 @@ class RecordingSession:
         self._session_dir: Optional[Path] = None
         self._screen_size: Optional[Tuple[int, int]] = None
         self._layout: Dict[str, Any] = {}
+        self._latest_frame: Optional[np.ndarray] = None
         self._raw_events = []
         self._steps = []
         self._frame_count = 0
@@ -143,9 +144,11 @@ class RecordingSession:
             self._frame_count = 0
             self._writer = None
             self._frame_size = None
+            self._latest_frame = None
 
             if initial_frame is not None:
                 rgb = self._as_rgb(initial_frame)
+                self._latest_frame = rgb.copy()
                 initial_path = self._session_dir / "initial_view.png"
                 if not cv2.imwrite(str(initial_path), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)):
                     raise OSError(f"初始画面保存失败：{initial_path}")
@@ -172,6 +175,7 @@ class RecordingSession:
             if self._started_at is None:
                 return False
             rgb = self._as_rgb(frame)
+            self._latest_frame = rgb.copy()
             self._ensure_writer(rgb)
             if (rgb.shape[1], rgb.shape[0]) != self._frame_size:
                 rgb = cv2.resize(rgb, self._frame_size)
@@ -267,6 +271,25 @@ class RecordingSession:
                 json.dumps(self._steps, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            scene_view_path = session_dir / "scene_view.png"
+            if self._latest_frame is not None and not cv2.imwrite(
+                str(scene_view_path),
+                cv2.cvtColor(self._latest_frame, cv2.COLOR_RGB2BGR),
+            ):
+                raise OSError(f"结束场景图保存失败：{scene_view_path}")
+            control_points_path = session_dir / "control_points.json"
+            control_points_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "screen_size": list(self._screen_size or ()),
+                        "points": self._layout,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
             metadata = {
                 "input_semantics_version": INPUT_SEMANTICS_VERSION,
                 "contains_drag_events": any(
@@ -277,6 +300,9 @@ class RecordingSession:
                 "fps": self.fps,
                 "screen_size": list(self._screen_size or ()),
                 "layout": self._layout,
+                "scene_view": scene_view_path.name,
+                "control_points_path": control_points_path.name,
+                "control_point_count": len(self._layout),
                 "stop_reason": reason,
                 "recording_name": session_dir.name,
                 "custom_recording_name": self._custom_recording_name,
@@ -289,5 +315,7 @@ class RecordingSession:
             self._started_at = None
             self._session_dir = None
             self._screen_size = None
+            self._layout = {}
+            self._latest_frame = None
             self._custom_recording_name = False
             return session_dir

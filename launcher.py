@@ -4090,7 +4090,7 @@ class LauncherWindow(QWidget):
         return page
 
     def _build_game_replay_page(self) -> QWidget:
-        """独立回放页：记录浏览、录制视频预览、控点预留和回放入口。"""
+        """独立回放页：记录浏览、视频预览、记录级控点校准和回放入口。"""
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(14, 12, 14, 14)
@@ -4107,7 +4107,7 @@ class LauncherWindow(QWidget):
         title = QLabel("Game Replay")
         title.setObjectName("launcherTitle")
         self.game_replay_page_status = QLabel(
-            "选择历史记录，先查看录制视频，再确认控点并开始回放。"
+            "选择历史记录，查看视频、校准该记录的控点后开始回放。"
         )
         self.game_replay_page_status.setObjectName("launcherSubtitle")
         title_column.addWidget(title)

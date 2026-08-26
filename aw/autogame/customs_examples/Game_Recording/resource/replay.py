@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -332,6 +334,58 @@ def load_recorded_control_points(
     if not isinstance(layout, Mapping):
         layout = {}
     return layout, _screen_size(session.get("screen_size"))
+
+
+def save_recorded_control_points(
+    record: ReplayRecord,
+    points: Mapping[str, Any],
+    screen_size: tuple[int, int],
+) -> Path:
+    """保存记录级控点，并同步 session.json 供旧版读取路径兼容。"""
+    width, height = _screen_size(screen_size)
+    if width <= 0 or height <= 0:
+        raise ReplayError("保存控点前必须先加载有效的场景图尺寸。")
+    if not isinstance(points, Mapping):
+        raise ReplayError("控点快照格式无效。")
+
+    saved_points = deepcopy(dict(points))
+    snapshot_path = record.directory / "control_points.json"
+    snapshot_temp_path = record.directory / ".control_points.json.tmp"
+    snapshot_temp_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "screen_size": [width, height],
+                "points": saved_points,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    os.replace(snapshot_temp_path, snapshot_path)
+
+    session_path = record.session_path or (record.directory / "session.json")
+    session = _read_json(session_path, {})
+    if not isinstance(session, Mapping):
+        session = {}
+    metadata = dict(session)
+    metadata.update(
+        {
+            "screen_size": [width, height],
+            "layout": saved_points,
+            "scene_view": "scene_view.png",
+            "control_points_path": snapshot_path.name,
+            "control_point_count": len(saved_points),
+        }
+    )
+    session_temp_path = record.directory / ".session.json.tmp"
+    session_temp_path.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(session_temp_path, session_path)
+    return snapshot_path
 
 
 def load_replay_layout(

@@ -2852,10 +2852,14 @@ class LauncherWindow(QWidget):
         self.browse_button = QPushButton("选择用例")
         self.clear_button = QPushButton("重选")
         self.open_label_tool_button = QPushButton("打开标注工具")
-        self.open_game_recording_button = QPushButton("录制回放")
+        self.open_game_recording_button = QPushButton("录制")
+        self.open_game_recording_button.setFixedWidth(72)
         self.open_game_recording_button.setToolTip(
-            "打开 Game_Recording 的专用录制、回放和对比界面"
+            "打开当前 Game_Recording 录制界面"
         )
+        self.open_game_replay_button = QPushButton("回放")
+        self.open_game_replay_button.setFixedWidth(72)
+        self.open_game_replay_button.setToolTip("回放功能后续完善")
         self.refresh_button = QPushButton("刷新")
         self.refresh_button.setToolTip("刷新配置")
         self.refresh_button.setFixedWidth(64)
@@ -3782,11 +3786,13 @@ class LauncherWindow(QWidget):
         launch_row.addWidget(testcase_group, 2)
 
         recording_group = QGroupBox("录制回放")
-        recording_layout = QVBoxLayout(recording_group)
+        recording_group.setFixedWidth(188)
+        recording_layout = QHBoxLayout(recording_group)
         recording_layout.setContentsMargins(12, 8, 12, 10)
-        recording_layout.setSpacing(6)
+        recording_layout.setSpacing(8)
         recording_layout.addWidget(self.open_game_recording_button)
-        launch_row.addWidget(recording_group, 1)
+        recording_layout.addWidget(self.open_game_replay_button)
+        launch_row.addWidget(recording_group, 0)
         controls_layout.addLayout(launch_row)
 
         config_panel = QWidget()
@@ -4207,6 +4213,7 @@ class LauncherWindow(QWidget):
         self.clear_button.clicked.connect(self._reselect_testcase_file)
         self.open_label_tool_button.clicked.connect(self._open_label_tool_for_selected_case)
         self.open_game_recording_button.clicked.connect(self._open_game_recording)
+        self.open_game_replay_button.clicked.connect(self._show_game_replay_placeholder)
         self.back_to_launcher_button.clicked.connect(self._return_from_label_tool)
         self.refresh_button.clicked.connect(self._refresh_config_choices)
         self.project_combo.currentTextChanged.connect(self._on_project_changed)
@@ -4681,6 +4688,7 @@ class LauncherWindow(QWidget):
             )
         )
         self.open_game_recording_button.setEnabled(game_recording_ready)
+        self.open_game_replay_button.setEnabled(self.inputs_enabled)
 
     def _set_combo_value(self, combo: QComboBox, value: str):
         if not value:
@@ -4911,6 +4919,13 @@ class LauncherWindow(QWidget):
         )
         self._set_status("已进入 Game Recording 专用页面。")
         self._sync_testcase_controls_state()
+
+    def _show_game_replay_placeholder(self):
+        QMessageBox.information(
+            self,
+            "回放",
+            "回放功能后续完善。",
+        )
 
     def _close_embedded_game_recording(self):
         """返回 Launcher 时同步停止抓流、hilog 和本次 HDC DEBUG 归档。"""

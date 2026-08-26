@@ -2829,6 +2829,8 @@ class LauncherWindow(QWidget):
         self.game_recording_started_at = None
         self.game_recording_hdc_capture = None
         self.game_recording_hilog_capture = None
+        self.game_replay_panel = None
+        self.game_replay_window = None
         self.history_records: list[dict] = []
         self.selected_history_record: Optional[dict] = None
         self.selected_history_batch_dir: Optional[Path] = None
@@ -2859,7 +2861,7 @@ class LauncherWindow(QWidget):
         )
         self.open_game_replay_button = QPushButton("回放")
         self.open_game_replay_button.setFixedWidth(72)
-        self.open_game_replay_button.setToolTip("回放功能后续完善")
+        self.open_game_replay_button.setToolTip("浏览历史录制并开始回放")
         self.refresh_button = QPushButton("刷新")
         self.refresh_button.setToolTip("刷新配置")
         self.refresh_button.setFixedWidth(64)
@@ -3971,6 +3973,8 @@ class LauncherWindow(QWidget):
         self.page_stack.addWidget(self.label_tool_page)
         self.game_recording_page = self._build_game_recording_page()
         self.page_stack.addWidget(self.game_recording_page)
+        self.game_replay_page = self._build_game_replay_page()
+        self.page_stack.addWidget(self.game_replay_page)
         self.history_page = self._build_history_page()
         self.page_stack.addWidget(self.history_page)
         self._update_header_badges()
@@ -4083,6 +4087,46 @@ class LauncherWindow(QWidget):
         self.game_recording_empty_label.setObjectName("previewSurface")
         self.game_recording_host_layout.addWidget(self.game_recording_empty_label)
         layout.addWidget(self.game_recording_host, 1)
+        return page
+
+    def _build_game_replay_page(self) -> QWidget:
+        """独立回放页：记录浏览、录制视频预览、控点预留和回放入口。"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setSpacing(10)
+
+        header_bar = QWidget()
+        header_bar.setObjectName("headerBar")
+        header_layout = QHBoxLayout(header_bar)
+        header_layout.setContentsMargins(18, 13, 18, 13)
+        header_layout.setSpacing(14)
+        title_column = QVBoxLayout()
+        title_column.setContentsMargins(0, 0, 0, 0)
+        title_column.setSpacing(3)
+        title = QLabel("Game Replay")
+        title.setObjectName("launcherTitle")
+        self.game_replay_page_status = QLabel(
+            "选择历史记录，先查看录制视频，再确认控点并开始回放。"
+        )
+        self.game_replay_page_status.setObjectName("launcherSubtitle")
+        title_column.addWidget(title)
+        title_column.addWidget(self.game_replay_page_status)
+        header_layout.addLayout(title_column, 1)
+        self.game_replay_back_button = QPushButton("返回启动器")
+        self.game_replay_back_button.clicked.connect(self._close_game_replay_page)
+        header_layout.addWidget(self.game_replay_back_button)
+        layout.addWidget(header_bar, 0)
+
+        self.game_replay_host = QWidget()
+        self.game_replay_host_layout = QVBoxLayout(self.game_replay_host)
+        self.game_replay_host_layout.setContentsMargins(0, 0, 0, 0)
+        self.game_replay_host_layout.setSpacing(0)
+        self.game_replay_empty_label = QLabel("正在加载回放记录……")
+        self.game_replay_empty_label.setObjectName("previewSurface")
+        self.game_replay_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.game_replay_host_layout.addWidget(self.game_replay_empty_label)
+        layout.addWidget(self.game_replay_host, 1)
         return page
 
     def _build_history_page(self) -> QWidget:
@@ -4213,7 +4257,7 @@ class LauncherWindow(QWidget):
         self.clear_button.clicked.connect(self._reselect_testcase_file)
         self.open_label_tool_button.clicked.connect(self._open_label_tool_for_selected_case)
         self.open_game_recording_button.clicked.connect(self._open_game_recording)
-        self.open_game_replay_button.clicked.connect(self._show_game_replay_placeholder)
+        self.open_game_replay_button.clicked.connect(self._open_game_replay)
         self.back_to_launcher_button.clicked.connect(self._return_from_label_tool)
         self.refresh_button.clicked.connect(self._refresh_config_choices)
         self.project_combo.currentTextChanged.connect(self._on_project_changed)
@@ -4618,6 +4662,9 @@ class LauncherWindow(QWidget):
             return
         if self._game_recording_is_running():
             self._close_embedded_game_recording()
+        self._close_game_replay_runtime()
+        if self.game_replay_panel is not None:
+            self.game_replay_panel.stop()
         self.process_launch_tracer.stop()
         super().closeEvent(event)
 
@@ -4920,12 +4967,92 @@ class LauncherWindow(QWidget):
         self._set_status("已进入 Game Recording 专用页面。")
         self._sync_testcase_controls_state()
 
-    def _show_game_replay_placeholder(self):
-        QMessageBox.information(
-            self,
-            "回放",
-            "回放功能后续完善。",
+    def _open_game_replay(self):
+        self.page_stack.setCurrentWidget(self.game_replay_page)
+        QApplication.processEvents()
+        if self.game_replay_panel is None:
+            try:
+                from aw.autogame.customs_examples.Game_Recording.resource.launcher_replay import (
+                    LauncherReplayPanel,
+                )
+
+                records_root = (
+                    ROOT_DIR / "aw" / "autogame" / "records" / "Game_Recording"
+                )
+                panel = LauncherReplayPanel(records_root, parent=self.game_replay_host)
+                panel.replayRequested.connect(self._start_selected_game_replay)
+                self.game_replay_empty_label.hide()
+                self.game_replay_host_layout.addWidget(panel)
+                self.game_replay_panel = panel
+            except Exception as exc:
+                LOGGER.exception("无法加载 Launcher 回放页面")
+                self.game_replay_empty_label.setText(f"回放页面加载失败：{exc}")
+                QMessageBox.critical(self, "无法打开回放页面", str(exc))
+                return
+        else:
+            self.game_replay_panel.refresh_records()
+        self.game_replay_panel.set_replay_active(self.game_replay_window is not None)
+        self.game_replay_page_status.setText(
+            f"记录目录：{self.game_replay_panel.records_root}"
         )
+        self._set_status("已进入独立回放页面。")
+
+    def _start_selected_game_replay(self, record):
+        active_window = self.game_replay_window
+        if active_window is not None:
+            active_window.show()
+            active_window.raise_()
+            active_window.activateWindow()
+            return
+        try:
+            from aw.autogame.customs_examples.Game_Recording.resource.replay_app import (
+                ReplayWindow,
+            )
+
+            window = ReplayWindow(record=record)
+            window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            window.destroyed.connect(self._on_game_replay_window_destroyed)
+            self.game_replay_window = window
+            if self.game_replay_panel is not None:
+                self.game_replay_panel.set_replay_active(True)
+            window.show()
+            window.raise_()
+            window.activateWindow()
+            self._set_status(f"正在回放记录：{record.directory.name}")
+        except Exception as exc:
+            LOGGER.exception("无法启动所选回放记录")
+            self.game_replay_window = None
+            if self.game_replay_panel is not None:
+                self.game_replay_panel.set_replay_active(False)
+            QMessageBox.critical(self, "无法开始回放", str(exc))
+
+    def _on_game_replay_window_destroyed(self, *_args):
+        self.game_replay_window = None
+        if self.game_replay_panel is not None:
+            self.game_replay_panel.set_replay_active(False)
+        self._sync_testcase_controls_state()
+
+    def _close_game_replay_runtime(self):
+        window, self.game_replay_window = self.game_replay_window, None
+        if window is not None:
+            window.close()
+        if self.game_replay_panel is not None:
+            self.game_replay_panel.set_replay_active(False)
+
+    def _close_game_replay_page(self):
+        if self.game_replay_window is not None:
+            self.game_replay_window.show()
+            self.game_replay_window.raise_()
+            self.game_replay_window.activateWindow()
+            QMessageBox.information(
+                self,
+                "回放正在进行",
+                "请先在回放窗口中结束或关闭当前回放，再返回启动器。",
+            )
+            return
+        if self.game_replay_panel is not None:
+            self.game_replay_panel.stop()
+        self._show_launcher_page()
 
     def _close_embedded_game_recording(self):
         """返回 Launcher 时同步停止抓流、hilog 和本次 HDC DEBUG 归档。"""

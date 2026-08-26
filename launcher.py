@@ -3131,8 +3131,8 @@ class LauncherWindow(QWidget):
         self.preview_info_template_label = QLabel("点击特殊区域或区域查看模板图片")
         self.preview_info_template_label.setObjectName("previewTemplate")
         self.preview_info_template_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_info_template_label.setMinimumHeight(120)
-        self.preview_info_template_label.setMaximumHeight(180)
+        self.preview_info_template_label.setMinimumHeight(60)
+        self.preview_info_template_label.setMaximumHeight(90)
         self.preview_info_template_label.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Preferred,

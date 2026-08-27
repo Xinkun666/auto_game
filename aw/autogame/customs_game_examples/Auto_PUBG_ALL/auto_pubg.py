@@ -71,6 +71,8 @@ DROP_TARGETS_BY_CITY = {
     "L城": DROP_TARGET_L_CITY_HOUSE,
     "G镇": DROP_TARGET_G_TOWN_HOUSE,
 }
+# L城落点暂时有问题；保留所有坐标和后续逻辑，只从本轮跳伞候选中排除。
+DISABLED_DROP_CITIES = {"L城"}
 DROP_TARGET_R_CITY_CAR_SEARCH = (1104, 790)
 DROP_TARGET_L_CITY_CAR_SEARCH = (1731, 910)
 DROP_TARGET_M_CITY_CAR_SEARCH = (1477, 1171)
@@ -81,6 +83,15 @@ DROP_CAR_SEARCH_TARGETS_BY_CITY = {
     "M城": DROP_TARGET_M_CITY_CAR_SEARCH,
     "G镇": DROP_TARGET_G_TOWN_CAR_SEARCH,
 }
+
+
+def _enabled_drop_target_candidates(candidates):
+    """Return a copy so temporarily disabled cities remain configured for later recovery."""
+    return {
+        city: target
+        for city, target in candidates.items()
+        if city not in DISABLED_DROP_CITIES
+    }
 DROP_TARGET_GARAGE = DROP_TARGET_R_CITY
 DROP_TARGET_CENTER = DROP_TARGET_R_CITY
 STAGE_PRIORITY_JUMP_FORWARD_Y_BIAS = -400
@@ -265,10 +276,10 @@ def prepare_round(w: "FrameWorker" = None):
     landing_stage = "搜房阶段" if need_searching else "跑图阶段"
     if need_searching:
         drop_target = None
-        drop_target_candidates = DROP_TARGETS_BY_CITY
+        drop_target_candidates = _enabled_drop_target_candidates(DROP_TARGETS_BY_CITY)
     else:
         drop_target = None
-        drop_target_candidates = DROP_CAR_SEARCH_TARGETS_BY_CITY
+        drop_target_candidates = _enabled_drop_target_candidates(DROP_CAR_SEARCH_TARGETS_BY_CITY)
 
     parachute_manager.reset()
     parachute_manager.configure(

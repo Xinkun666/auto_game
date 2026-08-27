@@ -4953,9 +4953,9 @@ class HouseSceneSearchManager(HouseSearchManager):
     SCENE_EXIT_SCAN_TURN_DEGREES = 60
     SCENE_EXIT_DOOR_ALIGN_TOLERANCE_PX = 120
     SCENE_EXIT_DOOR_ALIGN_MAX_STEPS = 2
-    SCENE_EXIT_DOOR_FORWARD_Y_BIAS = -520
-    SCENE_EXIT_DOOR_FORWARD_DURA = 5000
-    SCENE_EXIT_DOOR_FORWARD_WAIT = 5200
+    SCENE_EXIT_DOOR_FORWARD_Y_BIAS = -300
+    SCENE_EXIT_DOOR_FORWARD_DURA = 300
+    SCENE_EXIT_DOOR_FORWARD_WAIT = 5000
     SCENE_EXIT_DOOR_WALL_SIDE_X_BIAS = 260
     SCENE_EXIT_DOOR_WALL_SIDE_Y_BIAS = -520
     SCENE_EXIT_DOOR_WALL_SIDE_DURA = 2000
@@ -7411,7 +7411,7 @@ class HouseSceneSearchManager(HouseSearchManager):
             if self._is_out_of_house(w):
                 return True
         w.frame_log(
-            f"[SceneExit] {reason}：摇杆正前推5秒出房（不点自动前进） "
+            f"[SceneExit] {reason}：摇杆快速正前推并保持5秒出房（不点自动前进） "
             f"y={self.SCENE_EXIT_DOOR_FORWARD_Y_BIAS}，"
             f"dura={self.SCENE_EXIT_DOOR_FORWARD_DURA}，"
             f"wait={self.SCENE_EXIT_DOOR_FORWARD_WAIT}"

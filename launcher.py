@@ -57,6 +57,7 @@ from aw.autogame.tools.HdcDebugLog import (
     restart_hdc_debug_server,
     resolve_hdc_debug_level,
 )
+from aw.autogame.tools.HilogCapture import HilogRunCapture
 from aw.autogame.tools.Utils import LATEST_PREVIEW_POINTER_FILENAME, archive_run_artifacts, get_display_rotation, get_resolution, get_screen_mode, prune_run_archive_artifacts, resolve_run_archive_dir, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 from aw.autogame.common.SPController.SPArea import build_sp_save_shell_command
@@ -2826,6 +2827,7 @@ class LauncherWindow(QWidget):
         self.current_run_start_timestamp: Optional[str] = None
         self.current_run_archive_dir: Optional[Path] = None
         self.current_hdc_debug_capture: Optional[HdcDebugRunCapture] = None
+        self.current_hilog_capture: Optional[HilogRunCapture] = None
         # 真正启动任务时再校验环境变量，避免无效配置让 Launcher 初始化阶段崩溃。
         self.hdc_debug_level = 5
         self.preview_target_info_height = 64
@@ -5498,7 +5500,6 @@ class LauncherWindow(QWidget):
         env.insert("AUTOGAME_RUN_SOURCE", "launcher")
         env.insert("AUTOGAME_RUN_INDEX", str(int(run_no)))
         env.insert("AUTOGAME_HDC_DEBUG_LEVEL", str(self.hdc_debug_level))
-        env.insert("AUTOGAME_DEVICE_LOG_PATH", str(LOG_DIR / f"{target_case}.txt"))
         env.insert(
             "AUTOGAME_EXIT_ON_STREAM_DISCONNECT",
             "1" if self._stream_disconnect_recovery_enabled() else "0",
@@ -5530,8 +5531,13 @@ class LauncherWindow(QWidget):
             env.insert("AUTOGAME_PREVIEW_DIR", str(run_preview_dir))
             env.insert("AUTOGAME_RUN_ARCHIVE_DIR", str(run_archive_dir))
             env.insert("AUTOGAME_BATCH_ARCHIVE_DIR", str(run_archive_dir.parent))
+            env.insert(
+                "AUTOGAME_DEVICE_LOG_PATH",
+                str(run_archive_dir / "logs" / "hilog.txt"),
+            )
         except Exception:
             log_exception(f"resolve run archive dir failed: run_no={run_no}")
+            env.insert("AUTOGAME_DEVICE_LOG_PATH", str(LOG_DIR / f"{target_case}.txt"))
         if self.current_plan is not None:
             env.insert(
                 "AUTOGAME_LAUNCHER_INACTIVITY_TIMEOUT_MINUTES",
@@ -6325,6 +6331,7 @@ class LauncherWindow(QWidget):
     def _finish_batch(self, message: str):
         LOGGER.info("finish_batch: %s", message)
         self._stop_recovery_processes()
+        self._stop_current_hilog_capture()
         self._stop_current_hdc_debug_capture()
         restore_hiz = bool(
             self.stop_requested
@@ -6509,6 +6516,7 @@ class LauncherWindow(QWidget):
         self.current_run_archive_dir = None
         self.process_output_buffer = ""
         archive_dir = self._resolve_current_run_archive_dir()
+        self._stop_current_hilog_capture()
         self._stop_current_hdc_debug_capture()
         if archive_dir is not None:
             self.current_hdc_debug_capture = HdcDebugRunCapture(
@@ -6525,16 +6533,25 @@ class LauncherWindow(QWidget):
                     "[Launcher] HDC DEBUG 分轮日志：%s\n"
                     % self.current_hdc_debug_capture.path
                 )
+            self.current_hilog_capture = HilogRunCapture(
+                archive_dir / "logs" / "hilog.txt"
+            ).start()
+            if self.current_hilog_capture.start_error:
+                self._log_message(
+                    "[Launcher] hilog 分轮采集启动失败：%s\n"
+                    % self.current_hilog_capture.start_error,
+                    level=logging.ERROR,
+                )
+            else:
+                self._log_message(
+                    "[Launcher] hilog 分轮日志：%s\n"
+                    % self.current_hilog_capture.path
+                )
         self._clear_preview_files()
         self.current_run_output_start = self._current_output_offset()
 
         project_case = self.current_plan["project_case"]
         target_case = self.current_plan["target_case"]
-        try:
-            (LOG_DIR / f"{target_case}.txt").unlink(missing_ok=True)
-        except OSError:
-            log_exception(f"clear previous hilog failed: target_case={target_case}")
-
         self.process = HiddenSubprocess(self)
         self.process.setProgram(sys.executable)
         self.process.setWorkingDirectory(str(APP_DIR))
@@ -6633,6 +6650,8 @@ class LauncherWindow(QWidget):
             self.stream_disconnect_signal_timer.stop()
 
     def _resolve_current_device_log_path(self) -> Optional[Path]:
+        if self.current_run_archive_dir is not None:
+            return self.current_run_archive_dir / "logs" / "hilog.txt"
         if self.current_plan is None:
             return None
         target_case = str(self.current_plan.get("target_case") or "").strip()
@@ -7259,6 +7278,19 @@ class LauncherWindow(QWidget):
         except Exception:
             log_exception("stop current HDC DEBUG capture failed")
 
+    def _stop_current_hilog_capture(self):
+        capture, self.current_hilog_capture = self.current_hilog_capture, None
+        if capture is None:
+            return
+        try:
+            capture.stop()
+            self._log_message(
+                "[Launcher] hilog 分轮采集已收尾：returncode=%s path=%s\n"
+                % (capture.returncode, capture.path)
+            )
+        except Exception:
+            log_exception("stop current hilog capture failed")
+
     def _archive_run_outputs(self, run_no: int, exit_code: int):
         if self.current_plan is None:
             return
@@ -7273,7 +7305,13 @@ class LauncherWindow(QWidget):
                 )
             self._wait_for_device_log_stable(device_log_path)
             if device_log_path.exists() and device_log_path.is_file():
-                extra_log_files["hilog.txt"] = str(device_log_path)
+                direct_hilog_path = (
+                    self.current_run_archive_dir / "logs" / "hilog.txt"
+                    if self.current_run_archive_dir is not None
+                    else None
+                )
+                if direct_hilog_path is None or device_log_path != direct_hilog_path:
+                    extra_log_files["hilog.txt"] = str(device_log_path)
             else:
                 self._log_message(
                     "[Launcher] 本次运行未找到 hilog 日志文件。\n",
@@ -8049,6 +8087,7 @@ class LauncherWindow(QWidget):
         self._flush_process_output_buffer()
         self.run_timeout_timer.stop()
         self.stream_disconnect_signal_timer.stop()
+        self._stop_current_hilog_capture()
         self._stop_current_hdc_debug_capture()
         if not self.current_run_stream_disconnected:
             self._poll_stream_disconnect_signal()

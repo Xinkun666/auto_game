@@ -1583,13 +1583,16 @@ class Controller:
         )
 
     def __init__(self, driver, worker, stage_info_raw, backend="uinput", backend_options=None):
-        self.buttons = extract_absolute_points(stage_info_raw)
+        self.buttons = (
+            extract_absolute_points(stage_info_raw)
+            if stage_info_raw is not None
+            else {}
+        )
         self.driver = driver
         self.worker = worker
         self.backend = backend
         self.backend_options = backend_options or {}
         self.touch_backend = None
-        self._cached_resolution = None
         self._cached_rotation = None
 
         if self.backend == "sendevent":
@@ -1632,24 +1635,33 @@ class Controller:
         if self.touch_backend and hasattr(self.touch_backend, "close"):
             self.touch_backend.close()
 
-    def _get_cached_resolution(self):
-        if self._cached_resolution is None:
-            res_w, res_h = get_live_screen_resolution()
-            if res_w is not None and res_h is not None:
-                self._cached_resolution = (int(res_w), int(res_h))
-        return self._cached_resolution
+    def _get_screen_resolution(self):
+        """Return the device coordinate space fixed when this worker started.
+
+        Do not query the device here.  A template result is normalized against
+        the video frame, while touch commands must be mapped to the one device
+        coordinate space captured during ``FrameWorker`` initialization.
+        """
+        resolution = getattr(self.worker, "screen_resolution", None)
+        if not isinstance(resolution, (tuple, list)) or len(resolution) != 2:
+            return None
+        try:
+            width, height = int(resolution[0]), int(resolution[1])
+        except (TypeError, ValueError):
+            return None
+        return (width, height) if width > 0 and height > 0 else None
 
     def _get_cached_rotation(self):
         if self._cached_rotation is None:
             self._cached_rotation = normalize_rotation(get_display_rotation())
             if self._cached_rotation is None:
-                resolution = self._get_cached_resolution()
+                resolution = self._get_screen_resolution()
                 if resolution:
                     self._cached_rotation = infer_landscape_rotation(*resolution)
         return self._cached_rotation
 
     def refresh_resolution(self):
-        """强制重新读取手机当前分辨率，替换坐标换算缓存。"""
+        """Read the device coordinate space and update the owning worker."""
         res_w, res_h = get_resolution()
         if res_w is None or res_h is None:
             return None
@@ -1661,42 +1673,40 @@ class Controller:
         if resolution[0] <= 0 or resolution[1] <= 0:
             return None
 
-        self._cached_resolution = resolution
+        self.worker.screen_resolution = resolution
         # 宽高顺序直接以 DisplayManagerService 为准。旋转角只在
-        # sendevent 真正换算物理坐标时再按需读取，避免使用旧缓存。
+        # sendevent 真正换算物理坐标时再按需读取。
         self._cached_rotation = None
         set_runtime_screen_resolution_env(*resolution)
         return resolution
 
     def _get_current_frame_size(self):
-        frame = getattr(self.worker, "frame", None)
-        if frame is None:
+        resolution = getattr(self.worker, "frame_resolution", None)
+        if not isinstance(resolution, (tuple, list)) or len(resolution) != 2:
             return None
         try:
-            height, width = frame.shape[:2]
-        except Exception:
+            width, height = int(resolution[0]), int(resolution[1])
+        except (TypeError, ValueError):
             return None
         if width <= 0 or height <= 0:
             return None
-        return int(width), int(height)
+        return width, height
 
     def _transform_runtime_point(self, x, y, normalized=False, x_bias=0, y_bias=0, return_trace: bool = False):
-        current_res = self._get_cached_resolution()
-        frame_size = self._get_current_frame_size()
+        screen_resolution = self._get_screen_resolution()
+        frame_resolution = self._get_current_frame_size()
         trace = {
             "trace_type": "runtime_point",
             "input_xy": (x, y),
             "normalized": bool(normalized),
             "bias": (x_bias, y_bias),
-            "cached_resolution": current_res,
-            "frame_size": frame_size,
+            "screen_resolution": screen_resolution,
+            "frame_resolution": frame_resolution,
             "backend": self.backend,
         }
 
-        if current_res is not None and current_res[0] is not None and current_res[1] is not None:
-            screen_width, screen_height = int(current_res[0]), int(current_res[1])
-        elif frame_size is not None:
-            screen_width, screen_height = int(frame_size[0]), int(frame_size[1])
+        if screen_resolution is not None:
+            screen_width, screen_height = screen_resolution
         else:
             screen_width, screen_height = None, None
 
@@ -1833,8 +1843,9 @@ class Controller:
         rect = button_data.get("rect")
         if rect and len(rect) == 4:
             trace["rect"] = list(rect)
-        current_res = self._get_cached_resolution()
-        trace["cached_resolution"] = current_res
+        current_res = self._get_screen_resolution()
+        trace["screen_resolution"] = current_res
+        trace["frame_resolution"] = self._get_current_frame_size()
         if not current_res or current_res[0] is None or current_res[1] is None:
             result = (x + x_bias, y + y_bias)
             trace["display_output"] = result
@@ -2335,17 +2346,28 @@ class FrameWorker(threading.Thread):
         self._watchdog_thread = None
         self._replay_lock = threading.Lock()
         self._replay_cancel_event = threading.Event()
-        self.stage_resolver = StageLogicController()
+        # screen_resolution 是本轮触控坐标系；frame_resolution 是 frame 的派生属性。
+        self.screen_resolution = None
+        self._scene_resolution_initialized = False
 
         # 触控后端统一从 config.json 读取，controller_backend 仅保留兼容旧调用签名。
         touch_backend = get_touch_backend()
         self.controller = Controller(
             driver,
             self,
-            self.stage_resolver.stage_info,
+            None,
             backend=touch_backend,
             backend_options=controller_options,
         )
+        # 每次新建 FrameWorker 时只读取一次设备分辨率，后续点击一律使用
+        # screen_resolution，不在点击链路中做惰性读取或改用视频帧尺寸。
+        self.screen_resolution = self.controller.refresh_resolution()
+        if self.screen_resolution is None:
+            raise RuntimeError("初始化 FrameWorker 失败：无法读取设备屏幕分辨率")
+        self.stage_resolver = StageLogicController(
+            screen_resolution=self.screen_resolution,
+        )
+        self._sync_scene_resolution()
         self.stage_info = {}
         self.current_stage = None
         self.current_group = DEFAULT_GROUP_NAME
@@ -2370,6 +2392,20 @@ class FrameWorker(threading.Thread):
             marathon_duration_minutes=self.marathon_time,
         )
 
+    @property
+    def frame_resolution(self):
+        """当前视频帧的 (宽, 高)，直接由 ``frame.shape`` 推导。"""
+        frame = getattr(self, "frame", None)
+        if frame is None:
+            return None
+        try:
+            frame_height, frame_width = frame.shape[:2]
+        except (AttributeError, IndexError, TypeError):
+            return None
+        if frame_width <= 0 or frame_height <= 0:
+            return None
+        return int(frame_width), int(frame_height)
+
     def _replay_log(self, message):
         """回放的过程日志；也兼容仅构造出来做单元测试的 Worker。"""
         logger = getattr(self, "frame_log", None)
@@ -2382,36 +2418,16 @@ class FrameWorker(threading.Thread):
             print(message)
 
     def _get_game_recording_replay_screen_size(self):
-        """优先取当前手机分辨率，失败时才退回到当前视频帧大小。"""
-        controller = getattr(self, "controller", None)
-        refresh_resolution = getattr(controller, "refresh_resolution", None)
-        if callable(refresh_resolution):
-            resolution = refresh_resolution()
-            if resolution is not None:
-                try:
-                    width, height = int(resolution[0]), int(resolution[1])
-                except (IndexError, TypeError, ValueError):
-                    width, height = 0, 0
-                if width > 0 and height > 0:
-                    return width, height
-
-        cached_resolution = getattr(controller, "_cached_resolution", None)
-        if cached_resolution is not None:
+        """Game Recording 回放只使用本轮已固定的触控坐标系。"""
+        screen_resolution = getattr(self, "screen_resolution", None)
+        if screen_resolution is not None:
             try:
-                width, height = int(cached_resolution[0]), int(cached_resolution[1])
+                width, height = int(screen_resolution[0]), int(screen_resolution[1])
             except (IndexError, TypeError, ValueError):
                 width, height = 0, 0
             if width > 0 and height > 0:
                 return width, height
-
-        frame = getattr(self, "frame", None)
-        try:
-            height, width = frame.shape[:2]
-        except (AttributeError, IndexError, TypeError):
-            width, height = 0, 0
-        if width > 0 and height > 0:
-            return int(width), int(height)
-        raise RuntimeError("无法获取当前手机分辨率，不能执行 Game Recording 回放")
+        raise RuntimeError("screen_resolution 未初始化，不能执行 Game Recording 回放")
 
     def _replay_wait_until(self, deadline, cancel_event):
         while not cancel_event.is_set():
@@ -3366,6 +3382,12 @@ class FrameWorker(threading.Thread):
 
             try:
                 self.frame = np.array(frame, copy=True)
+                if (
+                    not self._scene_resolution_initialized
+                    and self.frame_resolution is not None
+                ):
+                    self._sync_scene_resolution()
+                    self._scene_resolution_initialized = True
                 self._sync_current_stage_and_group()
                 self.stage_info = self.stage_resolver.process_frame(
                     self.frame,
@@ -3583,23 +3605,44 @@ class FrameWorker(threading.Thread):
                 logging.info('fport rm ret: '+ ret)
 
     def refresh_resolution(self):
-        """刷新手机当前分辨率，并同步场景处理与触控坐标。"""
-        previous_resolution = getattr(self.controller, "_cached_resolution", None)
+        """显式刷新设备触控坐标系；frame_resolution 始终由当前帧派生。"""
+        previous_screen_resolution = getattr(self, "screen_resolution", None)
         resolution = self.controller.refresh_resolution()
         if resolution is None:
             self.frame_log(
-                f"[Resolution] 刷新失败，继续使用缓存分辨率={previous_resolution}"
+                f"[Resolution] 刷新失败，继续使用 screen_resolution="
+                f"{previous_screen_resolution}"
             )
             return None
 
-        screen_width, screen_height = resolution
-        self.stage_resolver.refresh_resolution(screen_width, screen_height)
-        self.controller.buttons = extract_absolute_points(self.stage_resolver.stage_info)
+        self._sync_scene_resolution()
+        self._scene_resolution_initialized = self.frame_resolution is not None
         self.frame_log(
-            f"[Resolution] 手机分辨率已刷新：{previous_resolution} -> "
-            f"{screen_width}x{screen_height}"
+            f"[Resolution] screen_resolution：{previous_screen_resolution} -> "
+            f"{self.screen_resolution}；当前 frame_resolution={self.frame_resolution}"
         )
         return resolution
+
+    def _sync_scene_resolution(self):
+        """按视频帧选场景配置；未收到首帧前才暂用设备屏幕尺寸。"""
+        resolution = getattr(self, "frame_resolution", None) or getattr(
+            self, "screen_resolution", None
+        )
+        if not isinstance(resolution, (tuple, list)) or len(resolution) != 2:
+            return None
+        try:
+            width, height = int(resolution[0]), int(resolution[1])
+        except (TypeError, ValueError):
+            return None
+        if width <= 0 or height <= 0:
+            return None
+        self.stage_resolver.refresh_resolution(width, height)
+        self.controller.buttons = extract_absolute_points(
+            self.stage_resolver.stage_info,
+            screen_resolution=self.screen_resolution,
+            lock_scene_resolution=False,
+        )
+        return width, height
 
     def refresh_frame(self, settle: bool = True):
         self._flush_current_frame_log()
@@ -3611,6 +3654,12 @@ class FrameWorker(threading.Thread):
             return False
 
         self.frame = np.array(frame, copy=True)
+        if (
+            not self._scene_resolution_initialized
+            and self.frame_resolution is not None
+        ):
+            self._sync_scene_resolution()
+            self._scene_resolution_initialized = True
         self._sync_current_stage_and_group()
         self.stage_info = self.stage_resolver.process_frame(
             self.frame,

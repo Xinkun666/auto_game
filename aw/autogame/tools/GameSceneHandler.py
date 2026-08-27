@@ -58,14 +58,21 @@ def load_special_handler(project_case):
         raise e
 
 class GameImageProcessor:
-    def __init__(self, project_name, special_handler=None):
+    def __init__(self, project_name, special_handler=None, screen_resolution=None):
         self.project_root = os.path.join(r"aw/autogame/customs_examples", project_name)
         self.template_cache = self._load_templates()
         self.special_handler = special_handler or load_special_handler(project_name)
         self.task_config = None
-        self.screen_w, self.screen_h = self._resolve_screen_resolution()
+        self.screen_w, self.screen_h = self._resolve_screen_resolution(screen_resolution)
 
-    def _resolve_screen_resolution(self):
+    def _resolve_screen_resolution(self, screen_resolution=None):
+        if isinstance(screen_resolution, (tuple, list)) and len(screen_resolution) == 2:
+            try:
+                width, height = int(screen_resolution[0]), int(screen_resolution[1])
+            except (TypeError, ValueError):
+                width, height = 0, 0
+            if width > 0 and height > 0:
+                return width, height
         env_w = os.environ.get("AUTOGAME_SCREEN_WIDTH")
         env_h = os.environ.get("AUTOGAME_SCREEN_HEIGHT")
         if env_w and env_h:
@@ -307,7 +314,7 @@ class GameImageProcessor:
         return results
 
 class StageLogicController:
-    def __init__(self):
+    def __init__(self, screen_resolution=None):
         """
         初始化：动态加载环境变量指定的项目配置
         """
@@ -321,7 +328,13 @@ class StageLogicController:
         info_mod = importlib.import_module(module_path)
 
         self.project_name = getattr(info_mod, "PROJECT_NAME")
-        self.processor = GameImageProcessor(project_case)
+        if screen_resolution is None:
+            self.processor = GameImageProcessor(project_case)
+        else:
+            self.processor = GameImageProcessor(
+                project_case,
+                screen_resolution=screen_resolution,
+            )
         self.raw_stage_info = load_stage_info(project_case, info_mod)
         self.stage_info = lock_stage_info_scene_resolutions(
             self.raw_stage_info,

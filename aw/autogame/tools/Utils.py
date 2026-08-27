@@ -1173,7 +1173,11 @@ def lock_stage_info_scene_resolutions(stage_info, screen_width=None, screen_heig
     return locked_stage_info
 
 
-def extract_absolute_points(stage_info):
+def extract_absolute_points(
+    stage_info,
+    screen_resolution=None,
+    lock_scene_resolution: bool = True,
+):
     """
     将游戏各阶段场景中的控点（Points）从百分比归一化坐标转换为屏幕绝对像素坐标。
 
@@ -1197,8 +1201,15 @@ def extract_absolute_points(stage_info):
               }
     """
     absolute_points = {}
-    screen_w, screen_h = get_live_screen_resolution()
-    stage_info = lock_stage_info_scene_resolutions(stage_info, screen_w, screen_h)
+    if screen_resolution is None:
+        screen_w, screen_h = get_live_screen_resolution()
+    else:
+        try:
+            screen_w, screen_h = int(screen_resolution[0]), int(screen_resolution[1])
+        except (IndexError, TypeError, ValueError):
+            screen_w, screen_h = None, None
+    if lock_scene_resolution:
+        stage_info = lock_stage_info_scene_resolutions(stage_info, screen_w, screen_h)
 
     for stage_name, stage_content in stage_info.items():
         scenes = stage_content.get('scenes', {})

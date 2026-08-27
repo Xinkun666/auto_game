@@ -409,15 +409,9 @@ class NandaYoloDoorPosePreparer(NandaEntryPosePreparer):
 
     @staticmethod
     def _screen_width(context: NandaSearchContext) -> Optional[float]:
-        controller = getattr(context.worker, "controller", None)
-        get_resolution = getattr(controller, "_get_cached_resolution", None)
-        if callable(get_resolution):
-            resolution = get_resolution()
-            if resolution and resolution[0]:
-                return float(resolution[0])
-        frame = context.frame
-        if frame is not None and getattr(frame, "shape", None) is not None:
-            return float(frame.shape[1])
+        resolution = getattr(context.worker, "screen_resolution", None)
+        if resolution and resolution[0]:
+            return float(resolution[0])
         return None
 
     def _duration_for_error(self, error: float, threshold: float, reference: float) -> int:
@@ -1255,17 +1249,10 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
 
     @staticmethod
     def _screen_size(context: NandaSearchContext) -> Tuple[int, int]:
-        controller = getattr(context.worker, "controller", None)
-        get_resolution = getattr(controller, "_get_cached_resolution", None)
-        resolution = get_resolution() if callable(get_resolution) else None
+        resolution = getattr(context.worker, "screen_resolution", None)
         if resolution and resolution[0] and resolution[1]:
             return int(resolution[0]), int(resolution[1])
-        frame = getattr(context.worker, "frame", None)
-        if frame is None:
-            frame = context.frame
-        if frame is None:
-            raise RuntimeError("无法取得 HOS 触控坐标尺寸")
-        return int(frame.shape[1]), int(frame.shape[0])
+        raise RuntimeError("screen_resolution 未初始化，无法取得 HOS 触控坐标尺寸")
 
     def _control_center(
         self,
@@ -2478,10 +2465,7 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
         context: NandaSearchContext,
     ) -> Tuple[Tuple[int, int], int]:
         controller = getattr(context.worker, "controller", None)
-        resolution = None
-        get_resolution = getattr(controller, "_get_cached_resolution", None)
-        if callable(get_resolution):
-            resolution = get_resolution()
+        resolution = getattr(context.worker, "screen_resolution", None)
 
         center = None
         resolve_pos = getattr(controller, "_resolve_pos", None)
@@ -2493,12 +2477,7 @@ class NandaHosJoystickReplayExecutor(NandaReplayExecutor):
         if resolution and resolution[0] and resolution[1]:
             screen_width, screen_height = int(resolution[0]), int(resolution[1])
         else:
-            frame = getattr(context.worker, "frame", None)
-            if frame is None:
-                frame = context.frame
-            if frame is None:
-                raise RuntimeError("无法取得 HOS 回放屏幕尺寸")
-            screen_height, screen_width = (int(value) for value in frame.shape[:2])
+            raise RuntimeError("screen_resolution 未初始化，无法取得 HOS 回放屏幕尺寸")
 
         if center is None:
             center = (

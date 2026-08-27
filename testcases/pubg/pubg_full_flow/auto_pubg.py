@@ -10,7 +10,7 @@ project_case = "Auto_PUBG_ALL"  # label-tool exported resource directory
 target_case = "auto_pubg"  # runtime script under customs_game_examples/<project_case>
 testcase_description = (
     "和平精英全流程自动化：单次循环包含10分钟搜房、10分钟开车和10分钟跑图；"
-    "默认循环2次，总运行时长约60分钟。"
+    "默认循环1次，总运行时长约30分钟。"
 )
 GAME_DISPLAY_NAME = "和平精英"  # name shown inside SP app selector
 GAME_PACKAGE_NAME = "com.tencent.tmgp.pubgmhd.hw"  # package launched for function tests

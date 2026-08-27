@@ -17,6 +17,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, NamedTuple, Optional
+from xml.etree import ElementTree
 
 from PyQt6.QtCore import QByteArray, QObject, QProcess, QProcessEnvironment, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextCursor
@@ -2348,7 +2349,32 @@ def discover_target_cases(project_case: str) -> list[str]:
     return cases
 
 
-def run_testcase_entry(testcase_label: str):
+def _xdevice_summary_exit_code(summary_path: Path) -> int:
+    """Translate an xDevice summary report into a process exit code."""
+    summary_path = Path(summary_path)
+    if not summary_path.is_file():
+        LOGGER.error("xDevice summary report is missing: %s", summary_path)
+        return 1
+
+    try:
+        summary = ElementTree.parse(summary_path).getroot()
+        counts = {
+            name: int(summary.get(name, "0") or 0)
+            for name in ("tests", "failures", "errors", "disabled", "unavailable")
+        }
+    except (OSError, ValueError, ElementTree.ParseError):
+        LOGGER.exception("failed to read xDevice summary report: %s", summary_path)
+        return 1
+
+    LOGGER.info("xDevice summary result: path=%s counts=%s", summary_path, counts)
+    if counts["tests"] <= 0:
+        return 1
+    if any(counts[name] > 0 for name in ("failures", "errors", "disabled", "unavailable")):
+        return 1
+    return 0
+
+
+def run_testcase_entry(testcase_label: str) -> int:
     install_hidden_subprocess_patch()
     start_hidden_subprocess_window_suppressor()
     LOGGER.info("run_testcase_entry: testcase_label=%s", testcase_label)
@@ -2359,6 +2385,15 @@ def run_testcase_entry(testcase_label: str):
         hide_all=True,
     ):
         main_process(f"run -l {testcase_label}")
+
+    from xdevice import Variables
+
+    report_dir = (
+        Path(Variables.exec_dir)
+        / Variables.report_vars.report_dir
+        / Variables.task_name
+    )
+    return _xdevice_summary_exit_code(report_dir / "summary_report.xml")
 
 
 def run_direct_entry(project_case: str, target_case: str):
@@ -5535,6 +5570,11 @@ class LauncherWindow(QWidget):
                 "AUTOGAME_DEVICE_LOG_PATH",
                 str(run_archive_dir / "logs" / "hilog.txt"),
             )
+            if (
+                self.current_hilog_capture is not None
+                and not self.current_hilog_capture.start_error
+            ):
+                env.insert("AUTOGAME_DEVICE_LOG_OWNER", "launcher")
         except Exception:
             log_exception(f"resolve run archive dir failed: run_no={run_no}")
             env.insert("AUTOGAME_DEVICE_LOG_PATH", str(LOG_DIR / f"{target_case}.txt"))
@@ -8098,6 +8138,14 @@ class LauncherWindow(QWidget):
         self._poll_preview_frame()
         self._refresh_current_run_sp_state()
         self._refresh_current_run_failure_signal()
+        if exit_code != 0 and not self.current_run_failure_code:
+            self.current_run_failure_code = "testcase_nonzero_exit"
+            self.current_run_failure_reason = f"xDevice testcase exit_code={exit_code}"
+            self.current_run_failure_details = {"exit_code": int(exit_code)}
+            self._log_message(
+                f"[Launcher] 本次用例执行失败：exit_code={exit_code}。\n",
+                level=logging.ERROR,
+            )
         if self.manual_stop_requested:
             self._preserve_manual_stop_run_state()
         if self._current_run_failed_by_inactivity_timeout():
@@ -8317,7 +8365,7 @@ def _run_helper_command(args: argparse.Namespace) -> int:
     exit_code = 0
     try:
         if args.run_testcase:
-            run_testcase_entry(args.run_testcase)
+            exit_code = run_testcase_entry(args.run_testcase)
             return exit_code
 
         if args.run_direct:

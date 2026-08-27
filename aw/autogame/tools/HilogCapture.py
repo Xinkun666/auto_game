@@ -96,6 +96,10 @@ class HilogRunCapture:
         except Exception as exc:
             self.start_error = str(exc)
             self._write_line("[AutoGame][HILOG] capture start failed: %s" % exc)
+            # ``start`` may fail after the output file has already been opened.
+            # Release every handle so the testcase can safely fall back to its
+            # own DeviceLogger on Windows.
+            self.stop()
         except BaseException:
             self.stop()
             raise

@@ -53,6 +53,7 @@ class auto_pubg(TestCase):
         self.task_name = os.environ.get("TARGET_GAME_CASE") or target_case
         self.device_logger = DeviceLogger(self.driver)
         self.device_log_started = False
+        self.device_log_available = False
         self.log_path = os.environ.get("AUTOGAME_DEVICE_LOG_PATH") or f"aw/autogame/temp/logs/{self.task_name}.txt"
         self.frame_path = str(resolve_process_save_frames_dir())
         self.game_display_name = GAME_DISPLAY_NAME
@@ -189,17 +190,31 @@ class auto_pubg(TestCase):
 
     def start_device_log(self):
         print('和平精英-启动日志采集!!!')
-        if os.path.exists(self.log_path):
-            os.remove(self.log_path)
-            print(f"检测到旧日志，已成功删除: {self.log_path}")
         if os.path.exists(f'aw/autogame/temp/results/{self.task_name}/time.txt'):
             os.remove(f'aw/autogame/temp/results/{self.task_name}/time.txt')
-            print(f'检测到旧的时间日志，已成功删除: {self.log_path}')
+            print(f'检测到旧的时间日志，已成功删除: aw/autogame/temp/results/{self.task_name}/time.txt')
 
-        print('开始抓取日志!')
-        self.device_logger.start_log(self.log_path)
-        self.device_log_started = True
-        self._write_device_log_state("device_log_started")
+        if os.environ.get("AUTOGAME_DEVICE_LOG_OWNER") == "launcher":
+            self.device_log_available = True
+            print(f'[DeviceLog] Launcher 已负责 hilog 采集，用例跳过重复启动: {self.log_path}')
+            self._write_device_log_state("device_log_managed_by_launcher")
+            return
+
+        try:
+            os.makedirs(os.path.dirname(self.log_path) or ".", exist_ok=True)
+            if os.path.exists(self.log_path):
+                os.remove(self.log_path)
+                print(f"检测到旧日志，已成功删除: {self.log_path}")
+            print('开始抓取日志!')
+            self.device_logger.start_log(self.log_path)
+            self.device_log_started = True
+            self.device_log_available = True
+            self._write_device_log_state("device_log_started")
+        except Exception as exc:
+            self.device_log_started = False
+            self.device_log_available = False
+            print(f'[DeviceLog] 日志采集启动失败，继续执行用例: {exc}')
+            self._write_device_log_state("device_log_start_failed", stop_ok=False, error=exc)
 
     def stop_device_log(self):
         if not self.device_log_started:
@@ -299,11 +314,16 @@ class auto_pubg(TestCase):
 
             if automation_completed and os.path.exists(f'aw/autogame/temp/results/{self.task_name}/time.txt'):
                 result_path = f'aw/autogame/temp/results/{self.task_name}/results.txt'
-                if os.path.exists(result_path):
-                    os.remove(result_path)
-                    print(f'检测到旧的结果日志，已成功删除: {result_path}')
-                analyze_txt(self.log_path, self.frame_path, time_txt_path=f'aw/autogame/temp/results/{self.task_name}/time.txt', result_path=result_path)
-                print(f'分析完成, 结果保存在 aw/autogame/temp/results/{self.task_name}/results.txt 中')
+                try:
+                    if not self.device_log_available or not os.path.exists(self.log_path):
+                        raise FileNotFoundError(f'hilog 不可用: {self.log_path}')
+                    if os.path.exists(result_path):
+                        os.remove(result_path)
+                        print(f'检测到旧的结果日志，已成功删除: {result_path}')
+                    analyze_txt(self.log_path, self.frame_path, time_txt_path=f'aw/autogame/temp/results/{self.task_name}/time.txt', result_path=result_path)
+                    print(f'分析完成, 结果保存在 aw/autogame/temp/results/{self.task_name}/results.txt 中')
+                except Exception as exc:
+                    print(f'[DeviceLog] 日志分析失败，不影响用例结果: {exc}')
 
             cleanup_apps = cleanup_packages_for_test_profile(
                 self.test_profile,

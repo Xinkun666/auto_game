@@ -1923,6 +1923,11 @@ def _compact_history_logic_logs(frame_logs: list) -> list[str]:
         unique_logs.append(text)
         seen_logs.add(text)
 
+    # 阻塞式转向每一步都是连续控制的关键证据；保留全过程，便于核对
+    # current_direction 到 target_direction 的实际收敛过程。
+    if any("视角调整" in text and "current_direction=" in text for text in unique_logs):
+        return [f"- {text}" for text in unique_logs]
+
     if len(unique_logs) <= HISTORY_MAX_VISIBLE_LOG_LINES:
         return [f"- {text}" for text in unique_logs]
 
@@ -4481,9 +4486,6 @@ class LauncherWindow(QWidget):
                 Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
             )
             for item in self.preview_info_items.values():
-                info_key = str(item.data(0, Qt.ItemDataRole.UserRole) or "")
-                if self.preview_info_item_types.get(info_key) == "other":
-                    continue
                 item.setCheckState(0, check_state)
         finally:
             self.preview_info_tree.blockSignals(previous_signals_blocked)
@@ -5840,30 +5842,25 @@ class LauncherWindow(QWidget):
         known_info_keys = {
             entry["info_key"] for entry in entries if entry["info_key"]
         }
-        for info_key in info_payload:
-            info_key = str(info_key)
-            if info_key in known_info_keys:
-                continue
-            entries.append(
-                {
-                    "key": f"other::{info_key}",
-                    "info_key": info_key,
-                    "item_type": "other",
-                    "type": "其他",
-                    "name": info_key,
-                    "template": "",
-                }
+        unknown_info_keys = [
+            str(info_key)
+            for info_key in info_payload
+            if str(info_key) not in known_info_keys
+        ]
+        if unknown_info_keys:
+            LOGGER.warning(
+                "preview info keys absent from current stage config; stage=%s keys=%s",
+                stage_name,
+                unknown_info_keys,
             )
-            known_info_keys.add(info_key)
 
         for entry in entries:
             item = QTreeWidgetItem(self.preview_info_tree)
             item.setText(0, entry["type"])
             item.setText(1, entry["name"])
             item.setText(2, "—")
-            if entry["item_type"] != "other":
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(0, Qt.CheckState.Checked)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(0, Qt.CheckState.Checked)
             item.setData(0, Qt.ItemDataRole.UserRole, entry["key"])
             self.preview_info_items[entry["key"]] = item
             self.preview_info_item_types[entry["key"]] = entry["item_type"]

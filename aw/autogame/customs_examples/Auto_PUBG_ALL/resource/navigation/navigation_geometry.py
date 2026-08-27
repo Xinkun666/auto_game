@@ -727,7 +727,15 @@ def execute_view_turn(
     log_prefix="[Turn]",
     use_uinput=False,
 ):
-    for _ in range(max_steps):
+    frame_log = getattr(w, "frame_log", None)
+
+    def emit_log(message):
+        if callable(frame_log):
+            frame_log(message)
+        else:
+            print(message)
+
+    for step_index in range(max_steps):
         if getattr(w, "failed", False) or not getattr(w, "running", True):
             return False
         motion = plan_view_turn_motion(
@@ -745,10 +753,12 @@ def execute_view_turn(
         if not motion["px"]:
             return True
 
-        print(
-            f"{log_prefix} current={current_angle}, target={target_angle}, "
-            f"diff={motion['diff']:.1f}, bin={motion['angle_key']}, "
-            f"x_bias={motion['x_bias']}, dura={motion['dura']}, "
+        emit_log(
+            f"{log_prefix} 视角调整 {step_index + 1}/{max_steps}: "
+            f"current_direction={float(current_angle) % 360.0:.1f}° -> "
+            f"target_direction={float(target_angle) % 360.0:.1f}°，"
+            f"差值={motion['diff']:.1f}°，方向={motion['turn_dir']}，"
+            f"x_bias={motion['x_bias']}，dura={motion['dura']}ms，"
             f"control={'uinput' if use_uinput else 'default'}"
         )
         turn_action = w.uinput_tap_single if use_uinput else w.tap_single
@@ -776,11 +786,7 @@ def execute_view_turn(
                 f"turn={motion['turn_dir']} {expected_delta:.1f}°, "
                 f"raw={float(observed_angle):.1f}°, corrected={float(corrected_angle):.1f}°"
             )
-            frame_log = getattr(w, "frame_log", None)
-            if callable(frame_log):
-                frame_log(message)
-            else:
-                print(message)
+            emit_log(message)
         current_angle = corrected_angle
     return False
 

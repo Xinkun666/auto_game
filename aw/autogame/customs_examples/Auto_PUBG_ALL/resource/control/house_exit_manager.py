@@ -61,17 +61,30 @@ class HouseExitManager:
     DEAD_END_ESCAPE_SIDE_DURA = 260
     DEAD_END_ESCAPE_SIDE_WAIT = 120
     TARGET_ALIGN_MAX_STEPS = 3
+    DOOR_SCAN_TURN_COUNT = 6
+    DOOR_SCAN_TURN_DEGREES = 60
+    AUTO_EXIT_TURN_COUNT = 10
+    AUTO_EXIT_TURN_DEGREES = 60
+    AUTO_EXIT_TURN_WAIT = 1000
+    EXIT_DOOR_PUSH_DURA = 5000
+    EXIT_DOOR_PUSH_WAIT = 5200
+    EXIT_DOOR_PUSH_Y_BIAS = -460
+    ENTRY_DOOR_SAM3_GROUP = "sam3"
+    ENTRY_DOOR_SAM3_INFO_NAME = "sam3"
+    ENTRY_DOOR_SAM3_PROMPT = "door frame"
 
     def __init__(self):
         self.screen_w, self.screen_h = get_resolution()
         self.scan_anchor_direction: Optional[float] = None
         self.scan_index = 0
+        self.auto_exit_turn_index = 0
         self.trusted_exit_signal = False
         self.auto_forward_enabled = False
 
     def reset(self):
         self.scan_anchor_direction = None
         self.scan_index = 0
+        self.auto_exit_turn_index = 0
         self.trusted_exit_signal = False
         self.auto_forward_enabled = False
 
@@ -82,39 +95,51 @@ class HouseExitManager:
 
         house_scene = self._get_house_scene(w)
         w.frame_log(
-            f"[HouseExit] 本帧状态: scene={house_scene}, scan={self.scan_index}/{len(self.SCAN_OFFSETS)}, "
-            f"auto_forward={self.auto_forward_enabled}"
+            f"[HouseExit] 本帧状态: scene={house_scene}, door_scan={self.scan_index}/{self.DOOR_SCAN_TURN_COUNT}, "
+            f"auto_turn={self.auto_exit_turn_index}/{self.AUTO_EXIT_TURN_COUNT}, auto_forward={self.auto_forward_enabled}"
         )
         if house_scene not in self.HOUSE_ACTIVE_EXIT_SCENES:
             if house_scene in self.HOUSE_EXIT_SCENES:
-                w.frame_log(f"[HouseExit] scene={house_scene}，检测到已在室外/楼顶，开始二次确认")
-                return self._verify_exit_success(w)
+                w.frame_log(f"[HouseExit] scene={house_scene}，中途已离开房屋，停止移动并交回上层判断")
+                self._stop_auto_forward(w)
+                self.reset()
+                return True
             w.frame_log(f"[HouseExit] scene={house_scene} 不属于出房处理场景，本帧不接管")
             return False
 
         self.trusted_exit_signal = False
-        self._ensure_scan_anchor(w)
+        if self.auto_forward_enabled:
+            return self._auto_forward_exit_step(w)
+
         visible_result = self._try_visible_exit_target(w)
         if visible_result is not None:
             return visible_result
 
-        w.frame_log(f"[HouseExit] scene={house_scene}，当前视野未发现门窗，转入视角扫描")
-        return self._search_for_exit(w)
+        if self.scan_index >= self.DOOR_SCAN_TURN_COUNT:
+            w.frame_log(
+                f"[HouseExit] 连续{self.DOOR_SCAN_TURN_COUNT}次转{self.DOOR_SCAN_TURN_DEGREES}度后"
+                "YOLO与SAM3均未定位到门，启动自动前进右转脱困"
+            )
+            self.auto_exit_turn_index = 0
+            self._start_auto_forward(w)
+            return False
+
+        return self._scan_next_door_direction(w)
 
     def _try_visible_exit_target(self, w: "FrameWorker") -> Optional[bool]:
         detections = self._get_forward_scene(w)
 
         door = self._find_largest_target(detections, self.DOOR_CLASS_IDS)
         if door:
-            w.frame_log(f"[HouseExit] 发现门: {self._describe_target(door)}，停止自动前进并对准出门")
+            w.frame_log(f"[HouseExit] YOLO发现门: {self._describe_target(door)}，停止自动前进并粗对准出门")
             self._stop_auto_forward(w)
-            return self._exit_via_door(w, door)
+            return self._exit_via_door(w, door, source="YOLO")
 
-        window = self._find_largest_target(detections, self.WINDOW_CLASS_IDS)
-        if window:
-            w.frame_log(f"[HouseExit] 发现窗: {self._describe_target(window)}，停止自动前进并对准翻窗")
+        w.frame_log("[HouseExit] YOLO未定位到门，改用SAM3门框分割")
+        sam3_door = self._find_exit_door_with_sam3(w)
+        if sam3_door:
             self._stop_auto_forward(w)
-            return self._exit_via_window(w, window)
+            return self._exit_via_door(w, sam3_door, source="SAM3")
 
         return None
 
@@ -134,6 +159,114 @@ class HouseExitManager:
         if not scene or isinstance(scene, bool):
             return []
         return list(scene)
+
+    @staticmethod
+    def _sam3_door_bbox_from_info(sam3_info):
+        if not isinstance(sam3_info, dict) or sam3_info.get("found") is not True:
+            return None
+        prompt = sam3_info.get("prompt")
+        if isinstance(prompt, str) and prompt.strip() and prompt.strip().casefold() != "door frame":
+            return None
+
+        visuals = sam3_info.get("__visualizations__")
+        if isinstance(visuals, list):
+            for visual in visuals:
+                if not isinstance(visual, dict) or visual.get("type") != "sam3_mask":
+                    continue
+                bbox = visual.get("bbox_xyxy")
+                if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+                    continue
+                try:
+                    x1, y1, x2, y2 = (float(value) for value in bbox[:4])
+                    if str(visual.get("coord") or "local") != "frame":
+                        crop = visual.get("source_crop_xyxy")
+                        if isinstance(crop, (list, tuple)) and len(crop) >= 2:
+                            x1 += float(crop[0])
+                            x2 += float(crop[0])
+                            y1 += float(crop[1])
+                            y2 += float(crop[1])
+                except (TypeError, ValueError):
+                    continue
+                if x2 > x1 and y2 > y1:
+                    return [x1, y1, x2, y2]
+
+        bbox = sam3_info.get("bbox_xyxy_local")
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            try:
+                x1, y1, x2, y2 = (float(value) for value in bbox[:4])
+            except (TypeError, ValueError):
+                return None
+            if x2 > x1 and y2 > y1:
+                return [x1, y1, x2, y2]
+        return None
+
+    def _configure_exit_door_sam3_prompt(self, w: "FrameWorker"):
+        resolver = getattr(w, "stage_resolver", None)
+        stage_info = getattr(resolver, "stage_info", None)
+        stage_name = str(getattr(w, "current_stage", None) or "").strip()
+        if not stage_name or not isinstance(stage_info, dict):
+            return None
+        stage_data = stage_info.get(stage_name)
+        scenes = stage_data.get("scenes") if isinstance(stage_data, dict) else None
+        if not isinstance(scenes, dict):
+            return None
+        for scene_data in scenes.values():
+            special_areas = scene_data.get("special_areas") if isinstance(scene_data, dict) else None
+            target_area = (
+                special_areas.get(self.ENTRY_DOOR_SAM3_INFO_NAME)
+                if isinstance(special_areas, dict)
+                else None
+            )
+            if not isinstance(target_area, dict):
+                continue
+            had_seg_name = "seg_name" in target_area
+            original_seg_name = target_area.get("seg_name")
+            target_area["seg_name"] = self.ENTRY_DOOR_SAM3_PROMPT
+            return target_area, had_seg_name, original_seg_name
+        return None
+
+    @staticmethod
+    def _restore_exit_door_sam3_prompt(prompt_restore):
+        if prompt_restore is None:
+            return
+        target_area, had_seg_name, original_seg_name = prompt_restore
+        if had_seg_name:
+            target_area["seg_name"] = original_seg_name
+        else:
+            target_area.pop("seg_name", None)
+
+    def _find_exit_door_with_sam3(self, w: "FrameWorker"):
+        change_group = getattr(w, "change_group", None)
+        if not callable(change_group):
+            w.frame_log("[HouseExit] FrameWorker不支持切换SAM3分组，跳过SAM3找门")
+            return None
+        original_group = str(getattr(w, "current_group", None) or "默认")
+        switched = False
+        prompt_restore = self._configure_exit_door_sam3_prompt(w)
+        try:
+            if change_group(self.ENTRY_DOOR_SAM3_GROUP) is not True:
+                w.frame_log(
+                    f"[HouseExit] 切换SAM3门分割分组失败: group={self.ENTRY_DOOR_SAM3_GROUP}"
+                )
+                return None
+            switched = True
+            door = self._sam3_door_bbox_from_info(w.get_info(self.ENTRY_DOOR_SAM3_INFO_NAME))
+            if door is None:
+                w.frame_log("[HouseExit] YOLO与SAM3均未定位到门")
+                return None
+            w.frame_log(f"[HouseExit] SAM3已定位门: door={door}")
+            return door
+        except Exception as exc:
+            w.frame_log(f"[HouseExit] SAM3门分割异常: {exc}")
+            return None
+        finally:
+            self._restore_exit_door_sam3_prompt(prompt_restore)
+            if switched:
+                try:
+                    if change_group(original_group) is not True:
+                        w.frame_log(f"[HouseExit] SAM3门分割后恢复感知分组失败: {original_group}")
+                except Exception as exc:
+                    w.frame_log(f"[HouseExit] SAM3门分割后恢复感知分组异常: {exc}")
 
     def _is_terminal_state(self, w: "FrameWorker") -> bool:
         return bool(
@@ -179,9 +312,11 @@ class HouseExitManager:
             f"size={width:.0f}x{height:.0f}, conf={confidence:.2f}"
         )
 
-    def _exit_via_door(self, w: "FrameWorker", door: Sequence[float]) -> bool:
+    def _exit_via_door(self, w: "FrameWorker", door: Sequence[float], source="YOLO") -> bool:
         self.trusted_exit_signal = False
-        self._align_to_target(w, door, max_steps=self.TARGET_ALIGN_MAX_STEPS)
+        align_target = list(door[:4]) + [1.0, 0]
+        w.frame_log(f"[HouseExit] {source}已定位门，进行大致微调和门对齐")
+        self._align_to_target(w, align_target, max_steps=2)
         w.refresh_frame()
         if self._handle_terminal_state(w, "对准门时检测到死亡或结算界面，结束出房流程"):
             return True
@@ -198,14 +333,93 @@ class HouseExitManager:
             w.frame_log("[HouseExit] 检测到关门按钮，门已打开，继续前推出门")
             self.trusted_exit_signal = True
 
-        approached = self._approach_door_with_recovery(w, door)
-        if self._handle_terminal_state(w, "靠近门过程中检测到死亡或结算界面，结束出房流程"):
+        w.frame_log(
+            f"[HouseExit] 门已大致对齐，摇杆正前推 {self.EXIT_DOOR_PUSH_DURA / 1000:.0f} 秒出房，"
+            "不启用自动前进"
+        )
+        w.tap_single(
+            "摇杆",
+            y_bias=self.EXIT_DOOR_PUSH_Y_BIAS,
+            dura=self.EXIT_DOOR_PUSH_DURA,
+            wait=self.EXIT_DOOR_PUSH_WAIT,
+        )
+        w.refresh_frame()
+        if self._handle_terminal_state(w, "对门前推时检测到死亡或结算界面，结束出房流程"):
             return True
-        if not approached:
+        if self._get_house_scene(w) in self.HOUSE_EXIT_SCENES:
+            w.frame_log("[HouseExit] 前推过程中已离开房屋，停止并交回上层判断")
+            self._stop_auto_forward(w)
+            self.reset()
+            return True
+        w.frame_log("[HouseExit] 5秒前推后仍在屋内，继续环视找门")
+        return False
+
+    def _scan_next_door_direction(self, w: "FrameWorker") -> bool:
+        current_dir = w.get_info("direction")
+        if current_dir is None:
+            w.frame_log("[HouseExit] 扫描门时方向无效，本帧不转动")
             return False
-        if self._verify_exit_success(w):
+        target_dir = (float(current_dir) + self.DOOR_SCAN_TURN_DEGREES) % 360
+        self.scan_index += 1
+        w.frame_log(
+            f"[HouseExit] 环视找门 {self.scan_index}/{self.DOOR_SCAN_TURN_COUNT}: "
+            f"向右转约{self.DOOR_SCAN_TURN_DEGREES}度，{current_dir}° -> {target_dir:.1f}°，随后YOLO→SAM3定位"
+        )
+        self._align_direction_blocking(
+            w, current_dir, target_dir, tolerance=10, max_steps=2, dura=450, wait=500
+        )
+        w.refresh_frame()
+        if self._handle_terminal_state(w, "环视找门时检测到死亡或结算界面，结束出房流程"):
             return True
-        return self._door_diagonal_sweep(w)
+        if self._get_house_scene(w) in self.HOUSE_EXIT_SCENES:
+            self._stop_auto_forward(w)
+            self.reset()
+            return True
+        visible_result = self._try_visible_exit_target(w)
+        return False if visible_result is None else visible_result
+
+    def _auto_forward_exit_step(self, w: "FrameWorker") -> bool:
+        if self.auto_exit_turn_index >= self.AUTO_EXIT_TURN_COUNT:
+            self._stop_auto_forward(w)
+            self.scan_index = 0
+            self.auto_exit_turn_index = 0
+            w.frame_log(
+                f"[HouseExit] 自动前进右转{self.AUTO_EXIT_TURN_COUNT}次仍未出房，停止自动前进并重新环视一周找门"
+            )
+            return False
+
+        current_dir = w.get_info("direction")
+        if current_dir is None:
+            w.frame_log("[HouseExit] 自动前进脱困时方向无效，停止后重新环视找门")
+            self._stop_auto_forward(w)
+            self.scan_index = 0
+            self.auto_exit_turn_index = 0
+            return False
+
+        target_dir = (float(current_dir) + self.AUTO_EXIT_TURN_DEGREES) % 360
+        self.auto_exit_turn_index += 1
+        w.frame_log(
+            f"[HouseExit] 自动前进右转 {self.auto_exit_turn_index}/{self.AUTO_EXIT_TURN_COUNT}: "
+            f"{current_dir}° -> {target_dir:.1f}°，间隔1秒"
+        )
+        self._align_direction_blocking(
+            w,
+            current_dir,
+            target_dir,
+            tolerance=10,
+            max_steps=2,
+            dura=450,
+            wait=self.AUTO_EXIT_TURN_WAIT,
+        )
+        w.refresh_frame()
+        if self._handle_terminal_state(w, "自动前进右转时检测到死亡或结算界面，结束出房流程"):
+            return True
+        if self._get_house_scene(w) in self.HOUSE_EXIT_SCENES:
+            w.frame_log("[HouseExit] 自动前进过程中已出房，立即停止并交回上层判断")
+            self._stop_auto_forward(w)
+            self.reset()
+            return True
+        return False
 
     def _approach_door_with_recovery(self, w: "FrameWorker", door: Sequence[float]) -> bool:
         for step in range(3):

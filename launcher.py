@@ -52,6 +52,11 @@ from aw.autogame.tools.GameLaunchProfile import (
     should_use_sp_recording_for_profile,
 )
 from aw.autogame.tools.FrameLog import FrameLogType, parse_frame_log_transport
+from aw.autogame.tools.HdcDebugLog import (
+    HdcDebugRunCapture,
+    restart_hdc_debug_server,
+    resolve_hdc_debug_level,
+)
 from aw.autogame.tools.Utils import LATEST_PREVIEW_POINTER_FILENAME, archive_run_artifacts, get_display_rotation, get_resolution, get_screen_mode, prune_run_archive_artifacts, resolve_run_archive_dir, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 from aw.autogame.common.SPController.SPArea import build_sp_save_shell_command
@@ -2806,6 +2811,9 @@ class LauncherWindow(QWidget):
         self.current_batch_start_timestamp: Optional[str] = None
         self.current_run_start_timestamp: Optional[str] = None
         self.current_run_archive_dir: Optional[Path] = None
+        self.current_hdc_debug_capture: Optional[HdcDebugRunCapture] = None
+        # 真正启动任务时再校验环境变量，避免无效配置让 Launcher 初始化阶段崩溃。
+        self.hdc_debug_level = 5
         self.preview_target_info_height = 64
         self.preview_target_info_width = 300
         self._adjusting_preview_splitter = False
@@ -5478,6 +5486,7 @@ class LauncherWindow(QWidget):
         env.insert("AUTOGAME_VIS_MODE", "launcher")
         env.insert("AUTOGAME_RUN_SOURCE", "launcher")
         env.insert("AUTOGAME_RUN_INDEX", str(int(run_no)))
+        env.insert("AUTOGAME_HDC_DEBUG_LEVEL", str(self.hdc_debug_level))
         env.insert("AUTOGAME_DEVICE_LOG_PATH", str(LOG_DIR / f"{target_case}.txt"))
         env.insert(
             "AUTOGAME_EXIT_ON_STREAM_DISCONNECT",
@@ -6308,6 +6317,7 @@ class LauncherWindow(QWidget):
 
     def _finish_batch(self, message: str):
         LOGGER.info("finish_batch: %s", message)
+        self._stop_current_hdc_debug_capture()
         restore_hiz = bool(
             self.stop_requested
             or self.current_run_timed_out
@@ -6490,7 +6500,23 @@ class LauncherWindow(QWidget):
         self.current_run_start_timestamp = time.strftime("%Y%m%d%H%M%S")
         self.current_run_archive_dir = None
         self.process_output_buffer = ""
-        self._resolve_current_run_archive_dir()
+        archive_dir = self._resolve_current_run_archive_dir()
+        self._stop_current_hdc_debug_capture()
+        if archive_dir is not None:
+            self.current_hdc_debug_capture = HdcDebugRunCapture(
+                archive_dir / "logs" / "hdc_debug.log"
+            ).start()
+            if self.current_hdc_debug_capture.start_error:
+                self._log_message(
+                    "[Launcher] HDC DEBUG 分轮采集启动失败：%s\n"
+                    % self.current_hdc_debug_capture.start_error,
+                    level=logging.ERROR,
+                )
+            else:
+                self._log_message(
+                    "[Launcher] HDC DEBUG 分轮日志：%s\n"
+                    % self.current_hdc_debug_capture.path
+                )
         self._clear_preview_files()
         self.current_run_output_start = self._current_output_offset()
 
@@ -7159,6 +7185,23 @@ class LauncherWindow(QWidget):
 
         self._mark_stream_disconnected(message, "signal_file")
 
+    def _stop_current_hdc_debug_capture(self):
+        capture, self.current_hdc_debug_capture = (
+            self.current_hdc_debug_capture,
+            None,
+        )
+        if capture is None:
+            return
+        try:
+            capture.stop()
+            self._log_message(
+                "[Launcher] HDC DEBUG 分轮采集已收尾："
+                "bytes=%s rotations=%s path=%s\n"
+                % (capture.bytes_captured, capture.rotation_count, capture.path)
+            )
+        except Exception:
+            log_exception("stop current HDC DEBUG capture failed")
+
     def _archive_run_outputs(self, run_no: int, exit_code: int):
         if self.current_plan is None:
             return
@@ -7603,7 +7646,18 @@ class LauncherWindow(QWidget):
         issues = ValidationIssues()
         plan = self._collect_plan(issues)
         if plan is not None:
-            self._prepare_capture_mode_for_plan(plan, issues)
+            try:
+                self.hdc_debug_level = resolve_hdc_debug_level()
+                source_path = restart_hdc_debug_server(self.hdc_debug_level)
+                self._log_message(
+                    "[Launcher] HDC DEBUG server 已以 level=%s 启动，source=%s\n"
+                    % (self.hdc_debug_level, source_path)
+                )
+            except Exception as exc:
+                log_exception("start HDC DEBUG server failed")
+                issues.add_error("HDC DEBUG 启动失败", str(exc))
+            else:
+                self._prepare_capture_mode_for_plan(plan, issues)
 
         if self._show_validation_issues("无法启动任务", issues):
             LOGGER.info("start_run aborted because validation failed")
@@ -7859,6 +7913,7 @@ class LauncherWindow(QWidget):
         self._flush_process_output_buffer()
         self.run_timeout_timer.stop()
         self.stream_disconnect_signal_timer.stop()
+        self._stop_current_hdc_debug_capture()
         if not self.current_run_stream_disconnected:
             self._poll_stream_disconnect_signal()
         finish_prefix = "进程结束"
@@ -7879,10 +7934,8 @@ class LauncherWindow(QWidget):
             self.current_run_stream_disconnected
             and self.current_run_stream_disconnect_startup
         )
-        if startup_stream_disconnect:
-            self._discard_startup_disconnect_archive_dir()
-        else:
-            self._archive_run_outputs(run_no, exit_code)
+        self._archive_run_outputs(run_no, exit_code)
+        if not startup_stream_disconnect:
             self._pull_current_run_sp_artifacts(run_no)
         self.preview_timer.stop()
         if self.process is not None:

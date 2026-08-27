@@ -136,7 +136,7 @@ class Device(object):
             self.so_md5_map[self.device_helper._calculate_md5(path)] = so_name
 
     def _check_device_status(self) -> bool:
-        ret = self.connector_command(["list", "targets"])
+        ret = self.connector_server_command(["list", "targets"])
         logger.info("Device list: %s", ret)
         if "\r\n" in ret:
             device_list = ret.strip().split("\r\n")
@@ -158,10 +158,10 @@ class Device(object):
         if not self._check_device_status():
             logger.error("Can not find device [%s], please check...", self.device_sn)
             return False
-        # 杀进程
-        # 查找指定的so进程
+        # transport/session reset 后不复用旧 video server。
         pid_list = self.device_helper.get_video_pid_list()
         for pid in pid_list:
+            logger.info("Kill stale HOS video server before setup: pid=%s", pid)
             self.connector_shell_command("kill -9 {}".format(pid))
         start_result = self._start_uitest()
         self._start_video_server(config)
@@ -531,7 +531,49 @@ class Device(object):
             "video_device_port": self.video_server_port,
             "video_remote_node": remote_node,
             "unix_socket": self.is_use_unix_socket_video_so,
+            "captured_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
+
+        target_started = time.monotonic()
+        try:
+            target_output = self.connector_server_command(
+                "list targets -v",
+                timeout=timeout,
+            )
+            target_text = str(target_output or "")
+            result["hdc_target_listing"] = _compact_log_value(target_text, limit=4000)
+            result["hdc_target_visible"] = self.device_sn in target_text
+        except Exception as exc:
+            result["hdc_target_visible"] = False
+            result["hdc_target_listing_error"] = str(exc)
+        result["hdc_target_listing_elapsed_seconds"] = round(
+            time.monotonic() - target_started,
+            3,
+        )
+
+        try:
+            try:
+                fport_output = self.connector_server_command("fport ls", timeout=timeout)
+                result["hdc_fport_command_scope"] = "server"
+            except Exception as server_exc:
+                # 兼容要求 fport 命令携带 target 的旧版 HDC。
+                fport_output = self.connector_command("fport ls", timeout=timeout)
+                result["hdc_fport_command_scope"] = "target_fallback"
+                result["hdc_fport_server_error"] = str(server_exc)
+            fport_text = str(fport_output or "")
+            result["hdc_fport_listing"] = _compact_log_value(fport_text, limit=4000)
+            fport_lower = fport_text.strip().lower()
+            result["hdc_fport_empty"] = (
+                not fport_lower
+                or fport_lower == "[empty]"
+            )
+            local_marker = "tcp:{}".format(self.video_port) if self.video_port else ""
+            result["video_fport_present"] = bool(
+                local_marker and local_marker in fport_text
+            )
+        except Exception as exc:
+            result["hdc_fport_empty"] = None
+            result["hdc_fport_error"] = str(exc)
 
         try:
             target_probe = self.connector_shell_command(
@@ -575,15 +617,6 @@ class Device(object):
         except Exception as exc:
             result["video_endpoint_error"] = str(exc)
 
-        try:
-            fport_output = self.connector_command("fport ls", timeout=timeout)
-            result["hdc_fport_listing"] = _compact_log_value(fport_output, limit=4000)
-            local_marker = "tcp:{}".format(self.video_port) if self.video_port else ""
-            result["video_fport_present"] = bool(
-                local_marker and local_marker in str(fport_output or "")
-            )
-        except Exception as exc:
-            result["hdc_fport_error"] = str(exc)
         return result
 
     def _exec_cmd(self, command: Union[str, list], timeout: int = 5 * 60):
@@ -596,6 +629,11 @@ class Device(object):
 
     def connector_command(self, command: Union[str, list], timeout: int = 5 * 60):
         self.cmd = [Connector.name, "-s", "{}:{}".format(self.host, self.port), "-t", self.device_sn]
+        return self._exec_cmd(command, timeout=timeout)
+
+    def connector_server_command(self, command: Union[str, list], timeout: int = 5 * 60):
+        """Run a host HDC server command without binding it to one target."""
+        self.cmd = [Connector.name, "-s", "{}:{}".format(self.host, self.port)]
         return self._exec_cmd(command, timeout=timeout)
 
     def connector_shell_command(self, command: Union[str, list], timeout: int = 5 * 60):

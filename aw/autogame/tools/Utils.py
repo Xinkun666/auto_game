@@ -685,9 +685,10 @@ def prune_run_archive_artifacts(
     archive_dir: Path,
     keep_preview_video: bool = False,
 ) -> Path:
-    """Keep runtime frames, Launcher output, hilog, and optional preview video."""
+    """Keep runtime frames and the compact per-run diagnostic evidence."""
     archive_dir = Path(archive_dir)
-    allowed_logs = {"launcher_output.txt", "hilog.txt"}
+    allowed_logs = {"launcher_output.txt", "hilog.txt", "hdc_debug.log"}
+    allowed_root_files = {"hos_disconnect.json", "stream_disconnect_signal.json"}
     logs_dir = archive_dir / "logs"
 
     if logs_dir.exists():
@@ -701,6 +702,8 @@ def prune_run_archive_artifacts(
 
     for path in list(archive_dir.iterdir()):
         if path == logs_dir:
+            continue
+        if path.is_file() and path.name in allowed_root_files:
             continue
         if path.is_dir() and path.name == "process_temp_logs":
             continue

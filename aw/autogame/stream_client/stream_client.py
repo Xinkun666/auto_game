@@ -6,6 +6,7 @@ import queue
 import atexit
 import gc
 from datetime import datetime
+from pathlib import Path
 import subprocess
 import grpc
 import numpy as np
@@ -1187,6 +1188,16 @@ class HOSScrcpyStreamClient:
     HDC_RECOVERY_STATUS_ATTEMPTS = 3
     HDC_RECOVERY_STATUS_DELAY_SECONDS = 1.0
     HDC_RECOVERY_COMMAND_TIMEOUT_SECONDS = 10.0
+    HDC_TRANSPORT_WAIT_SECONDS = 15.0
+    HDC_TRANSPORT_POLL_SECONDS = 0.5
+    HDC_TRANSPORT_RECOVERY_MAX_ATTEMPTS = 2
+    HDC_USB_LOG_MARKERS = (
+        "E001003",
+        "USB communication abnormal",
+        "LIBUSB_TRANSFER_STALL",
+        "Read usb failed",
+        "SubmitUsbBio transfer failed",
+    )
 
     def __init__(
         self,
@@ -1228,6 +1239,9 @@ class HOSScrcpyStreamClient:
         self._start_monotonic = None
         self._hdc_recovery_attempted = False
         self._cleanup_hdc_recovery_attempted = False
+        self._transport_recovery_attempts = 0
+        self._last_transport_recovery_at = None
+        self._hdc_debug_scan_offsets = {}
         self._touch_replay_depth = 0
         self._touch_replay_label = ""
         self._touch_replay_started_at = None
@@ -1266,6 +1280,18 @@ class HOSScrcpyStreamClient:
             config,
             "hdc_recovery_command_timeout_seconds",
             self.HDC_RECOVERY_COMMAND_TIMEOUT_SECONDS,
+        ))
+        self.hdc_transport_wait_seconds = max(1.0, _resolve_float_option(
+            "AUTOGAME_HDC_TRANSPORT_WAIT_SECONDS",
+            config,
+            "hdc_transport_wait_seconds",
+            self.HDC_TRANSPORT_WAIT_SECONDS,
+        ))
+        self.hdc_transport_recovery_max_attempts = max(1, _resolve_int_option(
+            "AUTOGAME_HDC_TRANSPORT_RECOVERY_ATTEMPTS",
+            config,
+            "hdc_transport_recovery_attempts",
+            self.HDC_TRANSPORT_RECOVERY_MAX_ATTEMPTS,
         ))
         self.max_reconnect_attempts = max(0, _resolve_int_option(
             "AUTOGAME_HOSCRCPY_RECONNECT_RETRIES",
@@ -1360,6 +1386,9 @@ class HOSScrcpyStreamClient:
         self._excluded_video_sos = []
         self._video_so_attempt_history = []
         self._candidate_stream_error = None
+        self._transport_recovery_attempts = 0
+        self._last_transport_recovery_at = None
+        self._reset_hdc_debug_marker_scan()
         if self.save_frame:
             self._start_save_worker()
 
@@ -1368,6 +1397,7 @@ class HOSScrcpyStreamClient:
             while self.running and not self._stop_event.is_set():
                 retry_delay = None
                 cleanup_error = None
+                transport_rebuild_selected = False
                 self._pre_cleanup_disconnect_diagnostic = {}
                 self._last_error = None
                 self._candidate_stream_error = None
@@ -1422,21 +1452,93 @@ class HOSScrcpyStreamClient:
                 except Exception as exc:
                     if not self.running or self._stop_event.is_set():
                         break
-                    self._capture_pre_cleanup_disconnect_diagnostic(exc)
-                    candidate_so = self._pre_cleanup_disconnect_diagnostic.get(
+                    diagnostic = self._capture_pre_cleanup_disconnect_diagnostic(exc)
+                    candidate_so = diagnostic.get(
                         "selected_video_so",
                         "",
+                    )
+                    transport_reset = bool(
+                        diagnostic.get("hdc_transport_reset")
+                        or diagnostic.get("hdc_transport_reset_suspected")
+                    )
+                    usb_log_markers = list(diagnostic.get("hdc_debug_usb_markers") or ())
+                    explicit_usb_offline = self._is_usb_offline_error(exc)
+                    transport_failure = bool(
+                        transport_reset or explicit_usb_offline or usb_log_markers
                     )
                     use_next_auto_so = bool(
                         self._auto_video_so
                         and candidate_so
                         and candidate_so not in self._excluded_video_sos
-                        and not self._is_usb_offline_error(exc)
+                        and not diagnostic.get("capture_had_frame")
+                        and not transport_failure
                     )
-                    if use_next_auto_so:
+
+                    if transport_failure:
+                        transport_rebuild_selected = True
+                        try:
+                            short_repeat_with_usb_evidence = bool(
+                                usb_log_markers
+                                and self._last_transport_recovery_at is not None
+                                and time.monotonic() - self._last_transport_recovery_at <= 30.0
+                            )
+                            if short_repeat_with_usb_evidence:
+                                raise RuntimeError(
+                                    "USB/HDC 链路异常：整链恢复后短时间内再次断流，"
+                                    "hdc_debug.log 命中 %s"
+                                    % ", ".join(usb_log_markers)
+                                )
+                            if self._transport_recovery_attempts >= self.hdc_transport_recovery_max_attempts:
+                                raise RuntimeError(
+                                    "HDC transport/session reset 恢复次数已达上限：%s"
+                                    % self.hdc_transport_recovery_max_attempts
+                                )
+
+                            self._transport_recovery_attempts += 1
+                            if explicit_usb_offline:
+                                if self._hdc_recovery_attempted:
+                                    raise RuntimeError(
+                                        "hdc offline没有恢复：重启 hdc 后抓流仍报 USB Offline"
+                                    )
+                                self._hdc_recovery_attempted = True
+                                self._recover_hdc_from_usb_offline()
+                            else:
+                                self._recover_hdc_transport_session(
+                                    diagnostic,
+                                    restart_hdc=bool(usb_log_markers),
+                                )
+                            self._last_transport_recovery_at = time.monotonic()
+                        except Exception as recovery_exc:
+                            self._last_error = recovery_exc
+                            self._diagnostic_stage = "hdc_transport_recovery_failed"
+                            message = "[HOS] Runtime Error: %s" % recovery_exc
+                            print(message, flush=True)
+                            self._save_hos_disconnect_report(
+                                diagnostic,
+                                reason="hdc_transport_recovery_failed",
+                                message=message,
+                            )
+                            self._write_disconnect_signal(
+                                "hdc_transport_recovery_failed",
+                                message,
+                                reconnect_attempt,
+                            )
+                            raise
+
+                        reconnect_attempt = 0
+                        self._reconnect_attempt = 0
+                        retry_delay = 0.0
+                        self._diagnostic_stage = "hdc_transport_recovered_rebuilding_chain"
+                        print(
+                            "[HOS] HDC transport 已恢复；保持当前 SO，"
+                            "下一轮将重建 agent/guest/layout/video fport、"
+                            "video server 和 gRPC channel。",
+                            flush=True,
+                        )
+                    elif use_next_auto_so:
                         failed_sos = [
                             str(attempt.get("so") or "").strip()
-                            for attempt in self._pre_cleanup_disconnect_diagnostic.get(
+                            for attempt in diagnostic.get(
                                 "video_start_attempts",
                                 (),
                             )
@@ -1457,35 +1559,6 @@ class HOSScrcpyStreamClient:
                             % (candidate_so, self._excluded_video_sos),
                             flush=True,
                         )
-                    elif self._is_usb_offline_error(exc):
-                        try:
-                            if self._hdc_recovery_attempted:
-                                raise RuntimeError(
-                                    "hdc offline没有恢复：重启 hdc 后抓流仍报 USB Offline"
-                                )
-                            self._hdc_recovery_attempted = True
-                            self._recover_hdc_from_usb_offline()
-                        except Exception as hdc_exc:
-                            self._last_error = hdc_exc
-                            self._diagnostic_stage = "hdc_recovery_failed"
-                            message = "[HOS] Runtime Error: %s" % hdc_exc
-                            print(message, flush=True)
-                            self._write_disconnect_signal(
-                                "hdc_offline_recovery_failed",
-                                message,
-                                reconnect_attempt,
-                            )
-                            raise
-
-                        reconnect_attempt = 0
-                        self._reconnect_attempt = 0
-                        self._diagnostic_stage = "hdc_recovered_retrying_grpc"
-                        print(
-                            "[HOS] HDC 已恢复在线，现在开始恢复 gRPC 抓流。",
-                            flush=True,
-                        )
-                        continue
-
                     else:
                         reconnect_attempt += 1
                         self._reconnect_attempt = reconnect_attempt
@@ -1512,6 +1585,13 @@ class HOSScrcpyStreamClient:
                     self._close_decoder()
                 if retry_delay is None:
                     break
+                if cleanup_error is not None and transport_rebuild_selected:
+                    print(
+                        "[HOS] transport/session reset 后旧 fport 已失效，"
+                        "忽略旧链路清理错误并继续全链重建：%s" % cleanup_error,
+                        flush=True,
+                    )
+                    cleanup_error = None
                 if cleanup_error is not None:
                     if self._cleanup_hdc_recovery_attempted:
                         recovery_error = RuntimeError(
@@ -1635,6 +1715,7 @@ class HOSScrcpyStreamClient:
             "error": str(error),
             "captured_before_stream_cleanup": True,
             "force_video_so": self.force_video_so,
+            "capture_had_frame": self._capture_first_frame_event.is_set(),
         }
         if device is None:
             diagnostic["device_available"] = False
@@ -1642,6 +1723,7 @@ class HOSScrcpyStreamClient:
             self._pre_cleanup_disconnect_diagnostic = diagnostic
             if self._auto_video_so:
                 self._video_so_attempt_history.append(dict(diagnostic))
+            self._save_hos_disconnect_report(diagnostic)
             return diagnostic
 
         diagnostic["device_object_available"] = True
@@ -1659,14 +1741,153 @@ class HOSScrcpyStreamClient:
             diagnostic["device_available"] = bool(diagnostic["hdc_target_reachable"])
         else:
             diagnostic["device_available"] = None
+        usb_markers = self._find_hdc_usb_log_markers()
+        diagnostic["hdc_debug_usb_markers"] = usb_markers
+        diagnostic["hdc_transport_reset"] = self._diagnostic_indicates_transport_reset(
+            error,
+            diagnostic,
+        )
+        diagnostic["hdc_transport_reset_suspected"] = bool(
+            self._error_indicates_end_of_tcp_stream(error)
+            and diagnostic.get("hdc_fport_empty") is True
+            and not diagnostic["hdc_transport_reset"]
+        )
         self._pre_cleanup_disconnect_diagnostic = diagnostic
         if self._auto_video_so:
             self._video_so_attempt_history.append(dict(diagnostic))
+        self._save_hos_disconnect_report(diagnostic)
         print(
             "[HOS] Pre-cleanup disconnect diagnostic: %s" % diagnostic,
             flush=True,
         )
         return diagnostic
+
+    @staticmethod
+    def _error_indicates_end_of_tcp_stream(error) -> bool:
+        text = str(error or "").lower()
+        return "end of tcp stream" in text or "end of stream" in text
+
+    def _diagnostic_indicates_transport_reset(self, error, diagnostic) -> bool:
+        if not self._error_indicates_end_of_tcp_stream(error):
+            return False
+        if diagnostic.get("hdc_fport_empty") is not True:
+            return False
+        return bool(
+            diagnostic.get("hdc_target_visible")
+            or diagnostic.get("hdc_target_reachable")
+        )
+
+    @staticmethod
+    def _hdc_log_identity(path: Path):
+        try:
+            stat_result = path.stat()
+        except OSError:
+            return None
+        return (
+            int(getattr(stat_result, "st_dev", 0) or 0),
+            int(getattr(stat_result, "st_ino", 0) or 0),
+        )
+
+    def _reset_hdc_debug_marker_scan(self):
+        self._hdc_debug_scan_offsets = {}
+        temp_root = os.environ.get("TEMP") or os.environ.get("TMP") or os.environ.get("TMPDIR")
+        if not temp_root:
+            return
+        source_path = Path(temp_root) / "hdc.log"
+        identity = self._hdc_log_identity(source_path)
+        if identity is None:
+            return
+        try:
+            size = source_path.stat().st_size
+        except OSError:
+            return
+        self._hdc_debug_scan_offsets[str(source_path)] = (identity, int(size))
+
+    def _read_new_hdc_log_text(self, path: Path, *, scoped: bool) -> str:
+        identity = self._hdc_log_identity(path)
+        if identity is None:
+            return ""
+        key = str(path)
+        previous = self._hdc_debug_scan_offsets.get(key)
+        try:
+            size = int(path.stat().st_size)
+            if previous is None:
+                offset = 0 if scoped else max(0, size - 512 * 1024)
+            else:
+                previous_identity, previous_offset = previous
+                offset = int(previous_offset)
+                if previous_identity != identity or size < offset:
+                    offset = 0
+            # A single failure should not make diagnostics read an unbounded log.
+            offset = max(offset, size - 2 * 1024 * 1024)
+            with path.open("rb") as stream:
+                stream.seek(offset)
+                data = stream.read()
+                end_offset = stream.tell()
+            self._hdc_debug_scan_offsets[key] = (identity, int(end_offset))
+            return data.decode("utf-8", errors="ignore")
+        except OSError:
+            return ""
+
+    def _find_hdc_usb_log_markers(self):
+        paths = []
+        archive_dir = os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()
+        if archive_dir:
+            scoped_path = Path(archive_dir) / "logs" / "hdc_debug.log"
+            if scoped_path.is_file():
+                paths.append((scoped_path, True))
+        temp_root = os.environ.get("TEMP") or os.environ.get("TMP") or os.environ.get("TMPDIR")
+        if temp_root:
+            source_path = Path(temp_root) / "hdc.log"
+            if source_path.is_file() and all(path != source_path for path, _ in paths):
+                paths.append((source_path, False))
+
+        combined = "\n".join(
+            self._read_new_hdc_log_text(path, scoped=scoped)
+            for path, scoped in paths
+        )
+        combined_lower = combined.lower()
+        return [
+            marker
+            for marker in self.HDC_USB_LOG_MARKERS
+            if marker.lower() in combined_lower
+        ]
+
+    def _save_hos_disconnect_report(self, diagnostic, reason="stream_error", message=""):
+        archive_dir = os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()
+        if not archive_dir:
+            return None
+        report_path = Path(archive_dir) / "hos_disconnect.json"
+        payload = {
+            "event": "hos_disconnect",
+            "reason": str(reason),
+            "message": str(message or diagnostic.get("error") or ""),
+            "created_at": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+            "pid": os.getpid(),
+            "sn": self.sn,
+            "diagnostic": dict(diagnostic or {}),
+            "paths": {
+                "hdc_debug_log": str(Path(archive_dir) / "logs" / "hdc_debug.log"),
+                "hilog": os.environ.get("AUTOGAME_DEVICE_LOG_PATH", ""),
+                "launcher_output": str(Path(archive_dir) / "logs" / "launcher_output.txt"),
+            },
+        }
+        tmp_path = report_path.with_suffix(report_path.suffix + ".tmp")
+        try:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(tmp_path, report_path)
+            return report_path
+        except Exception as exc:
+            print("[HOS] Write hos_disconnect.json failed: %s" % exc, flush=True)
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return None
 
     def _resolve_default_device_sn(self):
         args = hdc_command_args("hdc list targets")
@@ -1825,8 +2046,8 @@ class HOSScrcpyStreamClient:
                 )
                 return
         # 先保留设备现场，再暴露 _last_error；避免 GUI 线程先行 stop 后无法诊断。
-        self._capture_pre_cleanup_disconnect_diagnostic(err)
-        if self._auto_video_so:
+        diagnostic = self._capture_pre_cleanup_disconnect_diagnostic(err)
+        if self._auto_video_so and not diagnostic.get("capture_had_frame"):
             self._candidate_stream_error = err
             self._diagnostic_stage = "video_so_candidate_error"
         else:
@@ -2151,16 +2372,110 @@ class HOSScrcpyStreamClient:
             failure_prefix="HDC cleanup recovery failed",
         )
 
+    def _wait_for_hdc_target(self, timeout_seconds=None):
+        timeout_seconds = max(
+            1.0,
+            float(timeout_seconds or self.hdc_transport_wait_seconds),
+        )
+        targets_command = hdc_command_args("hdc list targets -v")
+        if not targets_command:
+            raise RuntimeError("无法构造 hdc list targets -v 命令")
+
+        deadline = time.monotonic() + timeout_seconds
+        attempt = 0
+        last_status = ""
+        while self.running and not self._stop_event.is_set():
+            attempt += 1
+            try:
+                result = subprocess.run(
+                    targets_command,
+                    capture_output=True,
+                    timeout=self.hdc_recovery_command_timeout_seconds,
+                    text=True,
+                    encoding="utf-8",
+                    errors="ignore",
+                    **hidden_subprocess_kwargs(),
+                )
+                output = ((result.stdout or "") + (result.stderr or "")).strip()
+                last_status = "returncode=%s output=%s" % (
+                    result.returncode,
+                    output or "<empty>",
+                )
+                if result.returncode == 0 and self._hdc_target_is_online(output):
+                    print(
+                        "[HOS] HDC target 已恢复：attempt=%s %s" % (attempt, last_status),
+                        flush=True,
+                    )
+                    return output
+            except Exception as exc:
+                last_status = "hdc list targets 异常: %s" % exc
+
+            if time.monotonic() >= deadline:
+                break
+            self._stop_event.wait(self.HDC_TRANSPORT_POLL_SECONDS)
+
+        raise RuntimeError(
+            "等待 HDC target 恢复超时 %.1fs：%s"
+            % (timeout_seconds, last_status or "<no status>")
+        )
+
+    def _recover_hdc_transport_session(self, diagnostic, restart_hdc=False) -> None:
+        diagnostic["transport_recovery_attempt"] = self._transport_recovery_attempts
+        diagnostic["transport_recovery_restart_hdc"] = bool(restart_hdc)
+        print(
+            "[HOS] 判定 HDC transport/session reset：error=%s fport_empty=%s "
+            "target_visible=%s usb_markers=%s"
+            % (
+                diagnostic.get("error"),
+                diagnostic.get("hdc_fport_empty"),
+                diagnostic.get("hdc_target_visible"),
+                diagnostic.get("hdc_debug_usb_markers"),
+            ),
+            flush=True,
+        )
+
+        if restart_hdc:
+            if self._hdc_recovery_attempted:
+                raise RuntimeError(
+                    "USB/HDC 链路异常：HDC server 已重启过，"
+                    "不再重复重启"
+                )
+            self._hdc_recovery_attempted = True
+            self._restart_hdc_and_wait(
+                reason="hdc_debug.log 命中 USB/libusb 异常",
+                failure_prefix="USB/HDC 链路没有恢复",
+            )
+            target_output = "recovered_after_hdc_restart"
+        else:
+            target_output = self._wait_for_hdc_target()
+
+        diagnostic["transport_recovery_target_output"] = str(target_output)
+        diagnostic["transport_recovery_result"] = "target_online_rebuild_full_chain"
+        self._save_hos_disconnect_report(
+            diagnostic,
+            reason="hdc_transport_session_reset",
+            message=(
+                "HDC target 已恢复；将清理旧 video server，并重建 "
+                "agent/guest/layout/video fport 与 gRPC channel"
+            ),
+        )
+
     def _restart_hdc_and_wait(self, reason: str, failure_prefix: str) -> None:
         kill_command = hdc_command_args("hdc kill")
-        start_command = hdc_command_args("hdc start")
+        try:
+            debug_level = int(os.environ.get("AUTOGAME_HDC_DEBUG_LEVEL", "5"))
+        except (TypeError, ValueError):
+            debug_level = 5
+        debug_level = min(6, max(0, debug_level))
+        start_command = hdc_command_args("hdc -l %s start" % debug_level)
         targets_command = hdc_command_args("hdc list targets")
         if not kill_command or not start_command or not targets_command:
             raise RuntimeError("%s：无法构造 hdc 恢复命令" % failure_prefix)
 
         print(
-            "[HOS] %s：先执行 hdc kill / hdc start，确认设备恢复在线后再恢复 gRPC。"
-            % reason,
+            "[HOS] %s：先执行 hdc kill / hdc -l %s start，"
+            "确认设备恢复在线后再恢复 gRPC。"
+            % (reason, debug_level),
             flush=True,
         )
         command_timeout = float(getattr(
@@ -2261,12 +2576,18 @@ class HOSScrcpyStreamClient:
                 "attempt": int(attempt),
                 "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
                 "pid": os.getpid(),
+                "diagnostic": dict(self._pre_cleanup_disconnect_diagnostic),
             }
             signal_path = os.path.join(archive_dir, "stream_disconnect_signal.json")
             tmp_path = signal_path + ".tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
             os.replace(tmp_path, signal_path)
+            self._save_hos_disconnect_report(
+                self._pre_cleanup_disconnect_diagnostic,
+                reason=reason,
+                message=message,
+            )
         except Exception as exc:
             print("[HOS] Write disconnect signal failed: %s" % exc, flush=True)
 

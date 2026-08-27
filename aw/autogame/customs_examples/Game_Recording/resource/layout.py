@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
 from aw.autogame.tools.Utils import select_scene_resolution
@@ -11,7 +12,6 @@ from aw.autogame.tools.Utils import select_scene_resolution
 
 # 录制已由界面按钮控制，q/e 不再是保留键。
 RESERVED_KEYS = frozenset()
-REQUIRED_MOVEMENT_KEYS = frozenset({"w", "a", "s", "d"})
 JOYSTICK_CENTER_POINT_NAME = "center"
 JOYSTICK_BOUNDARY_POINT_NAME = "boundary"
 JOYSTICK_DIRECTION_SPECS = (
@@ -178,7 +178,7 @@ def _active_stage_name(stage_dict: Mapping[str, Any], stage_info: Mapping[str, A
         return str(next(iter(stage_info)))
     raise LayoutError(
         "info.py 里还没有场景。请先用标注工具新建阶段和场景，"
-        "再把 w、a、s、d 等键位标成控点并导出。"
+        "再添加需要操作的控点并导出。"
     )
 
 
@@ -195,6 +195,140 @@ def _iter_selected_scenes(
         selected = select_scene_resolution(scene_data, screen_width, screen_height)
         if isinstance(selected, Mapping):
             yield str(scene_name), selected
+
+
+def _selected_resolution_key(
+    scene_data: Mapping[str, Any],
+    selected: Mapping[str, Any],
+) -> str:
+    resolutions = scene_data.get("resolutions")
+    if not isinstance(resolutions, Mapping):
+        return ""
+    for resolution_key, candidate in resolutions.items():
+        if candidate is selected or candidate == selected:
+            return str(resolution_key)
+    return ""
+
+
+def load_reference_scenes(
+    info_module: Any,
+    screen_width: int,
+    screen_height: int,
+) -> list[dict[str, Any]]:
+    """收集本次录制实际选中的每个场景标定图及其键位归属。
+
+    每个场景只导出与当前设备分辨率最匹配的标定版本；
+    当一个阶段包含多个场景时，返回多条记录供回放页切换。
+    """
+    if screen_width <= 0 or screen_height <= 0:
+        raise LayoutError(f"手机分辨率无效：{screen_width}x{screen_height}")
+    stage_info = getattr(info_module, "STAGE_INFO", {})
+    stage_dict = getattr(info_module, "STAGE_DICT", {})
+    if not isinstance(stage_info, Mapping):
+        raise LayoutError("info.py 的 STAGE_INFO 格式不正确。")
+    if not isinstance(stage_dict, Mapping):
+        stage_dict = {}
+    stage_name = _active_stage_name(stage_dict, stage_info)
+    stage_data = stage_info.get(stage_name, {})
+    scenes = stage_data.get("scenes", {}) if isinstance(stage_data, Mapping) else {}
+    if not isinstance(scenes, Mapping) or not scenes:
+        raise LayoutError(f"阶段“{stage_name}”里还没有场景。")
+
+    all_bindings = getattr(info_module, "KEY_BINDINGS", {})
+    stage_bindings = (
+        all_bindings.get(stage_name, {}) if isinstance(all_bindings, Mapping) else {}
+    )
+    if not isinstance(stage_bindings, Mapping):
+        stage_bindings = {}
+    project_dir = Path(getattr(info_module, "__file__", "")).resolve().parent
+    result: list[dict[str, Any]] = []
+
+    for scene_name, scene_data in scenes.items():
+        if not isinstance(scene_data, Mapping):
+            continue
+        selected = select_scene_resolution(scene_data, screen_width, screen_height)
+        if not isinstance(selected, Mapping):
+            continue
+        points = selected.get("points", {})
+        if not isinstance(points, Mapping):
+            points = {}
+        scene_mapping = stage_bindings.get(scene_name, {})
+        if not isinstance(scene_mapping, Mapping):
+            scene_mapping = {}
+        keys: list[str] = []
+        reference_points: dict[str, dict[str, Any]] = {}
+        reference_width = max(int(selected.get("width") or screen_width), 1)
+        reference_height = max(int(selected.get("height") or screen_height), 1)
+        for raw_name, point_data in points.items():
+            if is_joystick_geometry_point(raw_name):
+                continue
+            key = normalize_key_name(scene_mapping.get(raw_name, ""))
+            if key and key not in RESERVED_KEYS and key not in keys:
+                keys.append(key)
+                try:
+                    norm_x, norm_y = _normalized_point_center(
+                        point_data, str(raw_name)
+                    )
+                except ValueError as exc:
+                    raise LayoutError(str(exc)) from exc
+                reference_points[key] = {
+                    "position": [
+                        min(
+                            max(int(round(norm_x * reference_width)), 0),
+                            reference_width - 1,
+                        ),
+                        min(
+                            max(int(round(norm_y * reference_height)), 0),
+                            reference_height - 1,
+                        ),
+                    ],
+                    "normalized_position": [norm_x, norm_y],
+                }
+        try:
+            directions = joystick_direction_points(
+                points, reference_width, reference_height
+            )
+        except ValueError as exc:
+            raise LayoutError(f"场景“{scene_name}”的{exc}") from exc
+        for direction in directions:
+            key = normalize_key_name(scene_mapping.get(direction.binding_name, ""))
+            if key and key not in RESERVED_KEYS and key not in keys:
+                keys.append(key)
+                norm_x, norm_y = direction.normalized_position
+                reference_points[key] = {
+                    "position": [
+                        min(
+                            max(int(round(norm_x * reference_width)), 0),
+                            reference_width - 1,
+                        ),
+                        min(
+                            max(int(round(norm_y * reference_height)), 0),
+                            reference_height - 1,
+                        ),
+                    ],
+                    "normalized_position": [norm_x, norm_y],
+                }
+
+        image = str(selected.get("image") or "")
+        source_image_path = (
+            str((project_dir / image).resolve()) if image else ""
+        )
+        result.append(
+            {
+                "stage": stage_name,
+                "scene": str(scene_name),
+                "resolution_key": _selected_resolution_key(scene_data, selected),
+                "screen_size": [
+                    max(int(selected.get("width") or 0), 0),
+                    max(int(selected.get("height") or 0), 0),
+                ],
+                "source_image": image,
+                "source_image_path": source_image_path,
+                "keys": keys,
+                "points": reference_points,
+            }
+        )
+    return result
 
 
 def load_key_layout(
@@ -226,8 +360,6 @@ def load_key_layout(
         stage_bindings = {}
 
     result: Dict[str, KeyPoint] = {}
-    uses_generated_joystick = False
-
     def add_key_point(
         key: str,
         norm_x: float,
@@ -276,7 +408,6 @@ def load_key_layout(
             )
         except ValueError as exc:
             raise LayoutError(f"场景“{scene_name}”的{exc}") from exc
-        uses_generated_joystick = uses_generated_joystick or bool(direction_points)
         for raw_name, point_data in points.items():
             if is_joystick_geometry_point(raw_name):
                 continue
@@ -284,7 +415,7 @@ def load_key_layout(
             bound_name = scene_bindings.get(raw_name, "")
             key = normalize_key_name(bound_name)
             if not key:
-                raise LayoutError(f"控点“{raw_name}”还没有绑定键盘按键。")
+                continue
             if key in RESERVED_KEYS:
                 raise LayoutError(f"控点“{raw_name}”占用了录制键 {key}，请改用其他键名。")
             try:
@@ -309,13 +440,4 @@ def load_key_layout(
                 joystick_center=direction.center_position,
             )
 
-    if not result and not uses_generated_joystick:
-        raise LayoutError(
-            f"阶段“{stage_name}”里还没有控点。请至少标注 w、a、s、d。"
-        )
-    missing = sorted(REQUIRED_MOVEMENT_KEYS.difference(result))
-    if missing and not uses_generated_joystick:
-        raise LayoutError(
-            "移动摇杆控点不完整，还缺少：" + "、".join(missing) + "。"
-        )
     return result

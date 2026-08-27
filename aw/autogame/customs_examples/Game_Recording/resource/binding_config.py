@@ -224,6 +224,11 @@ class BindingConfiguration:
                 mapping[other_name] = ""
         mapping[point_name] = normalized
 
+    def unbind_key(self, scene: BindingScene, point_name: str):
+        if not self.is_bindable_control(scene, point_name):
+            raise BindingConfigError(f"场景“{scene.name}”中不存在控点“{point_name}”。")
+        self._scene_bindings(scene.name)[point_name] = ""
+
     def set_point_center(self, scene: BindingScene, point_name: str, norm_x: float, norm_y: float):
         point_data = scene.points.get(point_name)
         rect = point_data.get("rect") if isinstance(point_data, MutableMapping) else None
@@ -249,27 +254,18 @@ class BindingConfiguration:
             raise BindingConfigError(
                 "当前阶段还没有场景，请先用标注工具新建场景并导出。"
             )
-        all_keys = set()
         positions_by_key: Dict[str, Dict[str, set[tuple[float, float]]]] = {}
-        uses_generated_joystick = False
         for scene in self.scenes:
             seen = set()
             geometry_error = self.joystick_geometry_error(scene)
             if geometry_error:
                 raise BindingConfigError(f"场景“{scene.display_name}”的{geometry_error}")
             controls = self.bindable_controls(scene)
-            uses_generated_joystick = uses_generated_joystick or any(
-                control.is_virtual_joystick_direction for control in controls
-            )
             for control in controls:
                 point_name = control.name
                 key = normalize_key_name(self.binding_for(scene, point_name))
                 if not key:
-                    if control.is_virtual_joystick_direction:
-                        continue
-                    raise BindingConfigError(
-                        f"场景“{scene.display_name}”的控点“{control.display_name}”还没有绑定键盘按键。"
-                    )
+                    continue
                 if key in RESERVED_KEYS:
                     raise BindingConfigError(f"控点“{point_name}”占用了录制键 {key}。")
                 if key in seen:
@@ -277,13 +273,9 @@ class BindingConfiguration:
                         f"场景“{scene.display_name}”里键位 {key} 被重复绑定。"
                     )
                 seen.add(key)
-                all_keys.add(key)
                 positions_by_key.setdefault(key, {}).setdefault(scene.name, set()).add(
                     control.normalized_position
                 )
-        missing = sorted({"w", "a", "s", "d"}.difference(all_keys))
-        if missing and not uses_generated_joystick:
-            raise BindingConfigError("移动键还缺少：" + "、".join(missing))
         for key, scene_positions in positions_by_key.items():
             if len(scene_positions) <= 1:
                 continue

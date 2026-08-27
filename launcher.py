@@ -5000,25 +5000,22 @@ class LauncherWindow(QWidget):
     def _start_selected_game_replay(self, record):
         active_window = self.game_replay_window
         if active_window is not None:
-            active_window.show()
-            active_window.raise_()
-            active_window.activateWindow()
+            self._set_status("当前记录正在回放。")
             return
         try:
             from aw.autogame.customs_examples.Game_Recording.resource.replay_app import (
                 ReplayWindow,
             )
 
-            window = ReplayWindow(record=record)
+            window = ReplayWindow(record=record, background=True)
             window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            window.replayProgress.connect(self._on_game_replay_progress)
+            window.replayFinished.connect(self._on_game_replay_finished)
             window.destroyed.connect(self._on_game_replay_window_destroyed)
             self.game_replay_window = window
             if self.game_replay_panel is not None:
                 self.game_replay_panel.set_replay_active(True)
-            window.show()
-            window.raise_()
-            window.activateWindow()
-            self._set_status(f"正在回放记录：{record.directory.name}")
+            self._set_status(f"正在后台回放记录：{record.directory.name}")
         except Exception as exc:
             LOGGER.exception("无法启动所选回放记录")
             self.game_replay_window = None
@@ -5029,8 +5026,19 @@ class LauncherWindow(QWidget):
     def _on_game_replay_window_destroyed(self, *_args):
         self.game_replay_window = None
         if self.game_replay_panel is not None:
-            self.game_replay_panel.set_replay_active(False)
+            self.game_replay_panel.set_replay_active(False, reset_status=False)
         self._sync_testcase_controls_state()
+
+    def _on_game_replay_progress(self, progress: float, action: str):
+        if self.game_replay_panel is not None:
+            self.game_replay_panel.set_replay_progress(progress, action)
+
+    def _on_game_replay_finished(self, success: bool, message: str):
+        if self.game_replay_panel is not None:
+            self.game_replay_panel.set_replay_result(success, message)
+        self._set_status(
+            f"回放{'完成' if success else '失败'}：{message}"
+        )
 
     def _close_game_replay_runtime(self):
         window, self.game_replay_window = self.game_replay_window, None
@@ -5041,14 +5049,7 @@ class LauncherWindow(QWidget):
 
     def _close_game_replay_page(self):
         if self.game_replay_window is not None:
-            self.game_replay_window.show()
-            self.game_replay_window.raise_()
-            self.game_replay_window.activateWindow()
-            QMessageBox.information(
-                self,
-                "回放正在进行",
-                "请先在回放窗口中结束或关闭当前回放，再返回启动器。",
-            )
+            self.game_replay_page_status.setText("回放正在后台执行，完成后可再返回。")
             return
         if self.game_replay_panel is not None:
             self.game_replay_panel.stop()

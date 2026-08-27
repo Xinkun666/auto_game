@@ -301,6 +301,7 @@ class ReplayThread(QThread):
         duration_seconds: float,
         controller: SingleTouchKeyboardController,
         stream_client,
+        use_stream_guard: bool = False,
         parent=None,
     ):
         super().__init__(parent)
@@ -311,6 +312,7 @@ class ReplayThread(QThread):
         )
         self.controller = controller
         self.stream_client = stream_client
+        self.use_stream_guard = bool(use_stream_guard)
 
     def _wait_until(self, deadline: float) -> bool:
         while not self.isInterruptionRequested():
@@ -325,9 +327,10 @@ class ReplayThread(QThread):
         success = False
         message = "回放已取消"
         try:
-            begin_guard = getattr(self.stream_client, "begin_touch_replay", None)
-            if callable(begin_guard):
-                guard_started = bool(begin_guard("Game Recording replay"))
+            if self.use_stream_guard:
+                begin_guard = getattr(self.stream_client, "begin_touch_replay", None)
+                if callable(begin_guard):
+                    guard_started = bool(begin_guard("Game Recording replay"))
             started_at = time.monotonic()
             self.timelineStarted.emit(started_at)
             for index, event in enumerate(self.events):
@@ -384,6 +387,9 @@ class ReplayThread(QThread):
 
 
 class ReplayWindow(QMainWindow):
+    replayProgress = pyqtSignal(float, str)
+    replayFinished = pyqtSignal(bool, str)
+
     def __init__(
         self,
         record: ReplayRecord,
@@ -392,6 +398,7 @@ class ReplayWindow(QMainWindow):
         sendevent_device: str = "",
         sendevent_max_x: int | None = None,
         sendevent_max_y: int | None = None,
+        background: bool = False,
     ):
         super().__init__()
         if shutil.which("hdc") is None:
@@ -406,6 +413,7 @@ class ReplayWindow(QMainWindow):
         self.screen_size = (int(width), int(height))
         self.key_points = load_replay_layout(record, info, *self.screen_size)
         self.touch_backend_name = str(touch_backend or "hos").strip().lower()
+        self.background = bool(background)
         self.sendevent_touch = None
         self._closed = False
         self._replay_started = False
@@ -443,6 +451,7 @@ class ReplayWindow(QMainWindow):
             duration_seconds=record.duration_seconds,
             controller=self.controller,
             stream_client=self.stream_client,
+            use_stream_guard=False,
             parent=self,
         )
         self.replay_thread.progressChanged.connect(self._update_progress)
@@ -450,13 +459,13 @@ class ReplayWindow(QMainWindow):
 
         self.setWindowTitle(f"Game Recording - 回放 {record.display_time}")
         self.resize(980, 680)
-        self.status_label = QLabel("正在连接华为手机画面，首帧到达后自动开始回放……")
+        self.status_label = QLabel("正在直接执行回放；HOS 画面仅用于可选预览。")
         self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet("font-weight: 600;")
         self.record_label = QLabel(f"回放记录：{record.directory}")
         self.record_label.setWordWrap(True)
         self.record_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.preview_label = QLabel("等待 HOScrcpy 首帧")
+        self.preview_label = QLabel("回放已开始，HOS 画面可用时在此预览")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setMinimumSize(640, 360)
         self.preview_label.setStyleSheet("background: #15191e; color: #ddd;")
@@ -491,6 +500,15 @@ class ReplayWindow(QMainWindow):
             flush=True,
         )
         self.stream_client.start_backend()
+        self._start_replay_immediately()
+
+    def _start_replay_immediately(self):
+        if self._closed or self._replay_started:
+            return
+        self._replay_started = True
+        self.status_label.setText("正在回放（不等待 HOS 视频流）……")
+        self.status_label.setStyleSheet("color: #167c36; font-weight: 600;")
+        self.replay_thread.start()
 
     def _refresh(self):
         if self._closed:
@@ -512,29 +530,22 @@ class ReplayWindow(QMainWindow):
                     Qt.TransformationMode.SmoothTransformation,
                 )
             )
-            if not self._replay_started:
-                self._replay_started = True
-                self.status_label.setText("手机画面已就绪，正在回放……")
-                self.status_label.setStyleSheet("color: #167c36; font-weight: 600;")
-                self.replay_thread.start()
         stream_error = getattr(self.stream_client, "_last_error", None)
         if stream_error is not None and not self._stream_failure_message:
             self._stream_failure_message = f"HOS 视频连接失败：{stream_error}"
-            if self.replay_thread.isRunning():
-                self.replay_thread.requestInterruption()
-            else:
-                self._replay_ended(False, self._stream_failure_message)
+            if frame is None:
+                self.preview_label.setText(
+                    "HOS 画面预览不可用，动作回放仍在执行。"
+                )
 
     def _update_progress(self, progress: float, action: str):
+        self.replayProgress.emit(progress, action)
         self.progress_bar.setValue(int(round(progress * 1000)))
         self.action_label.setText(action)
 
     def _replay_ended(self, success: bool, message: str):
         if self._closed:
             return
-        if self._stream_failure_message:
-            success = False
-            message = self._stream_failure_message
         self.refresh_timer.stop()
         if success:
             self.progress_bar.setValue(1000)
@@ -544,6 +555,10 @@ class ReplayWindow(QMainWindow):
             self.status_label.setStyleSheet("color: #b00020; font-weight: 600;")
             self.close_button.setText("关闭")
         self.status_label.setText(message)
+        self.replayFinished.emit(success, message)
+        if self.background:
+            QTimer.singleShot(0, self.close)
+            return
         self._stop_stream()
 
     def _stop_stream(self):

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import math
+import shutil
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -95,6 +97,7 @@ class RecordingSession:
         self._screen_size: Optional[Tuple[int, int]] = None
         self._layout: Dict[str, Any] = {}
         self._latest_frame: Optional[np.ndarray] = None
+        self._reference_scenes: list[dict[str, Any]] = []
         self._raw_events = []
         self._steps = []
         self._frame_count = 0
@@ -124,6 +127,7 @@ class RecordingSession:
         layout: Dict[str, Any],
         pressed_keys: Iterable[str] = (),
         session_name: str = "",
+        reference_scenes: Sequence[Mapping[str, Any]] = (),
     ) -> Path:
         with self._lock:
             if self._started_at is not None:
@@ -145,6 +149,7 @@ class RecordingSession:
             self._writer = None
             self._frame_size = None
             self._latest_frame = None
+            self._reference_scenes = self._export_reference_scenes(reference_scenes)
 
             if initial_frame is not None:
                 rgb = self._as_rgb(initial_frame)
@@ -154,6 +159,54 @@ class RecordingSession:
                     raise OSError(f"初始画面保存失败：{initial_path}")
             self._append_step(pressed_keys, timestamp=0.0)
             return self._session_dir
+
+    def _export_reference_scenes(
+        self,
+        reference_scenes: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if self._session_dir is None:
+            raise RuntimeError("录制目录尚未创建")
+        exported: list[dict[str, Any]] = []
+        target_root = self._session_dir / "reference_scenes"
+        for index, raw_scene in enumerate(reference_scenes):
+            if not isinstance(raw_scene, Mapping):
+                continue
+            scene_id = f"scene-{index + 1:03d}"
+            source_text = str(raw_scene.get("source_image_path") or "")
+            source_path = Path(source_text) if source_text else None
+            relative_image = ""
+            if source_path is not None and source_path.is_file():
+                suffix = source_path.suffix.lower()
+                if suffix not in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}:
+                    suffix = ".png"
+                target_root.mkdir(parents=True, exist_ok=True)
+                target_path = target_root / f"{scene_id}{suffix}"
+                shutil.copy2(source_path, target_path)
+                relative_image = target_path.relative_to(self._session_dir).as_posix()
+            screen_size = raw_scene.get("screen_size")
+            if not isinstance(screen_size, (list, tuple)) or len(screen_size) != 2:
+                screen_size = [0, 0]
+            keys = raw_scene.get("keys")
+            if not isinstance(keys, (list, tuple)):
+                keys = []
+            points = raw_scene.get("points")
+            if not isinstance(points, Mapping):
+                points = {}
+            exported.append(
+                {
+                    "id": scene_id,
+                    "stage": str(raw_scene.get("stage") or ""),
+                    "scene": str(raw_scene.get("scene") or f"场景 {index + 1}"),
+                    "resolution_key": str(raw_scene.get("resolution_key") or ""),
+                    "screen_size": [int(screen_size[0] or 0), int(screen_size[1] or 0)],
+                    "image": relative_image,
+                    "calibration_image": "",
+                    "source_image": str(raw_scene.get("source_image") or ""),
+                    "keys": [str(key) for key in keys if str(key)],
+                    "points": copy.deepcopy(dict(points)),
+                }
+            )
+        return exported
 
     def _ensure_writer(self, rgb: np.ndarray):
         if self._writer is not None:
@@ -281,9 +334,10 @@ class RecordingSession:
             control_points_path.write_text(
                 json.dumps(
                     {
-                        "version": 1,
+                        "version": 2,
                         "screen_size": list(self._screen_size or ()),
                         "points": self._layout,
+                        "reference_scenes": self._reference_scenes,
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -303,6 +357,8 @@ class RecordingSession:
                 "scene_view": scene_view_path.name,
                 "control_points_path": control_points_path.name,
                 "control_point_count": len(self._layout),
+                "reference_scenes": self._reference_scenes,
+                "reference_scene_count": len(self._reference_scenes),
                 "stop_reason": reason,
                 "recording_name": session_dir.name,
                 "custom_recording_name": self._custom_recording_name,
@@ -317,5 +373,6 @@ class RecordingSession:
             self._screen_size = None
             self._layout = {}
             self._latest_frame = None
+            self._reference_scenes = []
             self._custom_recording_name = False
             return session_dir

@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QGraphicsItem,
     QGraphicsScene,
     QGraphicsSimpleTextItem,
-    QGraphicsView,
+    QComboBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -32,10 +32,12 @@ from PyQt6.QtWidgets import (
 
 from aw.autogame.tools.ProcessUtils import resolve_hdc_executable
 
+from .binding_dialog import SceneView
 from .replay import (
     ReplayRecord,
     discover_replay_records,
     load_recorded_control_points,
+    load_recorded_reference_scenes,
     save_recorded_control_points,
 )
 
@@ -49,14 +51,8 @@ def format_replay_time(seconds: float) -> str:
     return f"{minutes:02d}:{remaining_seconds:02d}"
 
 
-class ReplayBindingView(QGraphicsView):
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if self.scene() is not None and not self.scene().sceneRect().isEmpty():
-            self.fitInView(
-                self.scene().sceneRect(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-            )
+class ReplayBindingView(SceneView):
+    """复用录制按键绑定画布的缩放行为，保证两个入口交互一致。"""
 
 
 class ReplayBindingPointItem(QGraphicsEllipseItem):
@@ -135,6 +131,9 @@ class LauncherReplayPanel(QWidget):
         self._binding_screen_size = (0, 0)
         self._binding_record: ReplayRecord | None = None
         self._binding_items: dict[str, ReplayBindingPointItem] = {}
+        self._reference_scenes: list[dict[str, Any]] = []
+        self._scene_binding_pixmaps: dict[str, QPixmap] = {}
+        self._reference_has_image = False
         self._binding_dirty = False
         self._syncing_binding_selection = False
         self._capture_process = QProcess(self)
@@ -209,6 +208,39 @@ class LauncherReplayPanel(QWidget):
         self.binding_empty_label.setWordWrap(True)
         self.binding_empty_label.setMinimumHeight(110)
 
+        self.binding_scene_selector = QComboBox()
+        self.binding_scene_selector.setMinimumWidth(220)
+        self.binding_scene_selector.setToolTip(
+            "切换录制时保存的场景标定参考图和该场景对应的控点"
+        )
+        self.binding_scene_selector.currentIndexChanged.connect(
+            self._binding_scene_changed
+        )
+
+        self.reference_scene = QGraphicsScene(self)
+        self.reference_view = ReplayBindingView(self.reference_scene)
+        self.reference_view.setObjectName("previewTemplate")
+        self.reference_view.setMinimumSize(260, 210)
+        self.reference_view.setBackgroundBrush(QBrush(QColor("#20242a")))
+        self.reference_view.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self.reference_zoom_in_button = QPushButton("放大")
+        self.reference_zoom_out_button = QPushButton("缩小")
+        self.reference_zoom_reset_button = QPushButton("恢复")
+        for button in (
+            self.reference_zoom_in_button,
+            self.reference_zoom_out_button,
+            self.reference_zoom_reset_button,
+        ):
+            button.setMinimumWidth(64)
+            button.setMinimumHeight(32)
+            button.setEnabled(False)
+        self.reference_zoom_in_button.clicked.connect(self.reference_view.zoom_in)
+        self.reference_zoom_out_button.clicked.connect(self.reference_view.zoom_out)
+        self.reference_zoom_reset_button.clicked.connect(self.reference_view.reset_zoom)
+
         self.binding_scene = QGraphicsScene(self)
         self.binding_view = ReplayBindingView(self.binding_scene)
         self.binding_view.setObjectName("previewTemplate")
@@ -218,27 +250,97 @@ class LauncherReplayPanel(QWidget):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
         )
+        self.binding_zoom_in_button = QPushButton("放大")
+        self.binding_zoom_out_button = QPushButton("缩小")
+        self.binding_zoom_reset_button = QPushButton("恢复")
+        binding_zoom_buttons = (
+            self.binding_zoom_in_button,
+            self.binding_zoom_out_button,
+            self.binding_zoom_reset_button,
+        )
+        for button in binding_zoom_buttons:
+            button.setMinimumWidth(72)
+            button.setMinimumHeight(32)
+            button.setEnabled(False)
+        self.binding_zoom_in_button.setToolTip(
+            "放大当前回放场景图（Ctrl + 滚轮向上）"
+        )
+        self.binding_zoom_out_button.setToolTip(
+            "缩小当前回放场景图（Ctrl + 滚轮向下）"
+        )
+        self.binding_zoom_reset_button.setToolTip("恢复为适合当前窗口的大小")
+        self.binding_zoom_in_button.clicked.connect(self.binding_view.zoom_in)
+        self.binding_zoom_out_button.clicked.connect(self.binding_view.zoom_out)
+        self.binding_zoom_reset_button.clicked.connect(self.binding_view.reset_zoom)
+        binding_zoom_hint = QLabel("Ctrl + 滚轮：以鼠标所在位置为中心缩放")
+        binding_zoom_hint.setStyleSheet("color: #777;")
+        binding_zoom_controls = QHBoxLayout()
+        binding_zoom_controls.setContentsMargins(0, 0, 0, 0)
+        binding_zoom_controls.addWidget(binding_zoom_hint)
+        binding_zoom_controls.addStretch(1)
+        binding_zoom_controls.addWidget(self.binding_zoom_in_button)
+        binding_zoom_controls.addWidget(self.binding_zoom_out_button)
+        binding_zoom_controls.addWidget(self.binding_zoom_reset_button)
+        binding_view_layout = QVBoxLayout()
+        binding_view_layout.setContentsMargins(0, 0, 0, 0)
+        binding_view_layout.setSpacing(6)
+        binding_view_layout.addWidget(self.binding_view, 1)
+        binding_view_layout.addLayout(binding_zoom_controls)
+
+        reference_zoom_hint = QLabel("只读参考·Ctrl + 滚轮缩放")
+        reference_zoom_hint.setStyleSheet("color: #777;")
+        reference_zoom_controls = QHBoxLayout()
+        reference_zoom_controls.setContentsMargins(0, 0, 0, 0)
+        reference_zoom_controls.addWidget(reference_zoom_hint)
+        reference_zoom_controls.addStretch(1)
+        reference_zoom_controls.addWidget(self.reference_zoom_in_button)
+        reference_zoom_controls.addWidget(self.reference_zoom_out_button)
+        reference_zoom_controls.addWidget(self.reference_zoom_reset_button)
+        reference_view_layout = QVBoxLayout()
+        reference_view_layout.setContentsMargins(0, 0, 0, 0)
+        reference_view_layout.setSpacing(6)
+        reference_title = QLabel("实际场景标定图（参考）")
+        reference_title.setStyleSheet("font-weight: 600;")
+        reference_view_layout.addWidget(reference_title)
+        reference_view_layout.addWidget(self.reference_view, 1)
+        reference_view_layout.addLayout(reference_zoom_controls)
+
+        binding_title = QLabel("当前抓图（拖动控点重新标定）")
+        binding_title.setStyleSheet("font-weight: 600;")
+        binding_view_layout.insertWidget(0, binding_title)
         self.binding_tree = QTreeWidget()
         self.binding_tree.setObjectName("previewInfo")
         self.binding_tree.setHeaderLabels(["按键", "场景", "当前绑定位置"])
         self.binding_tree.setRootIsDecorated(False)
         self.binding_tree.setUniformRowHeights(True)
-        self.binding_tree.setMinimumWidth(250)
+        self.binding_tree.setMaximumHeight(125)
         self.binding_tree.setColumnWidth(0, 72)
         self.binding_tree.setColumnWidth(1, 90)
         self.binding_tree.itemSelectionChanged.connect(
             self._binding_tree_selection_changed
         )
         self.binding_content = QWidget()
-        binding_content_layout = QHBoxLayout(self.binding_content)
+        binding_content_layout = QVBoxLayout(self.binding_content)
         binding_content_layout.setContentsMargins(0, 0, 0, 0)
-        binding_content_layout.setSpacing(10)
-        binding_content_layout.addWidget(self.binding_view, 3)
-        binding_content_layout.addWidget(self.binding_tree, 2)
+        binding_content_layout.setSpacing(8)
+        scene_selector_layout = QHBoxLayout()
+        scene_selector_layout.setContentsMargins(0, 0, 0, 0)
+        scene_selector_layout.addWidget(QLabel("当前场景："))
+        scene_selector_layout.addWidget(self.binding_scene_selector)
+        scene_selector_layout.addStretch(1)
+        comparison_layout = QHBoxLayout()
+        comparison_layout.setContentsMargins(0, 0, 0, 0)
+        comparison_layout.setSpacing(10)
+        comparison_layout.addLayout(reference_view_layout, 1)
+        comparison_layout.addLayout(binding_view_layout, 1)
+        binding_content_layout.addLayout(scene_selector_layout)
+        binding_content_layout.addLayout(comparison_layout, 1)
+        binding_content_layout.addWidget(self.binding_tree)
         self.binding_content.hide()
 
         self.binding_help_label = QLabel(
-            "拖动画面中的控点校准位置；这里只修改当前回放记录，不会写入全局标注工具。"
+            "拖动画面中的控点校准位置，按住图片非控点区域左键可拖动画面；"
+            "这里只修改当前回放记录，不会写入全局标注工具。"
         )
         self.binding_help_label.setWordWrap(True)
         self.capture_scene_button = QPushButton("抓取当前设备画面")
@@ -398,6 +500,13 @@ class LauncherReplayPanel(QWidget):
         self._binding_screen_size = (0, 0)
         self._binding_record = None
         self._binding_items.clear()
+        self._reference_scenes = []
+        self._scene_binding_pixmaps = {}
+        self._reference_has_image = False
+        self.binding_scene_selector.blockSignals(True)
+        self.binding_scene_selector.clear()
+        self.binding_scene_selector.blockSignals(False)
+        self.reference_scene.clear()
         self.binding_scene.clear()
         self.binding_tree.clear()
         self.binding_content.hide()
@@ -407,6 +516,7 @@ class LauncherReplayPanel(QWidget):
     def _load_binding_snapshot(self, record: ReplayRecord):
         self._clear_binding_snapshot()
         raw_points, screen_size = load_recorded_control_points(record)
+        reference_scenes = load_recorded_reference_scenes(record)
         scene_path = record.scene_view_path
         scene_pixmap = QPixmap(str(scene_path)) if scene_path is not None else QPixmap()
         self._binding_record = record
@@ -421,14 +531,43 @@ class LauncherReplayPanel(QWidget):
             )
         )
         self._binding_source_pixmap = scene_pixmap
+        self._reference_scenes = reference_scenes
+        for reference in reference_scenes:
+            scene_id = str(reference.get("id") or "")
+            calibration_path = self._record_relative_path(
+                record, str(reference.get("calibration_image") or "")
+            )
+            calibration_pixmap = (
+                QPixmap(str(calibration_path))
+                if calibration_path is not None
+                else QPixmap()
+            )
+            if scene_id and not calibration_pixmap.isNull():
+                self._scene_binding_pixmaps[scene_id] = calibration_pixmap
+        self.binding_scene_selector.blockSignals(True)
+        if reference_scenes:
+            for index, reference in enumerate(reference_scenes):
+                scene_name = str(reference.get("scene") or f"场景 {index + 1}")
+                resolution = str(reference.get("resolution_key") or "")
+                label = f"{scene_name}  ·  {resolution}" if resolution else scene_name
+                self.binding_scene_selector.addItem(label, index)
+        else:
+            self.binding_scene_selector.addItem("旧记录未保存标定参考图", -1)
+        self.binding_scene_selector.setCurrentIndex(0)
+        self.binding_scene_selector.blockSignals(False)
         point_count = self._rebuild_binding_editor()
         if scene_pixmap.isNull() and point_count == 0:
             self.status_label.setText("该记录没有可用的场景图或控点快照。")
             self.capture_scene_button.setEnabled(not self._replay_active)
             return
         if point_count:
+            reference_text = (
+                f"已加载 {len(reference_scenes)} 个标定参考场景，"
+                if reference_scenes
+                else "该旧记录未保存标定参考图；"
+            )
             self.status_label.setText(
-                f"已加载记录级场景图和 {point_count} 个控点；"
+                f"{reference_text}当前场景显示 {point_count} 个控点；"
                 "可直接拖动控点，或抓取当前设备画面后重新校准。"
             )
         else:
@@ -436,11 +575,141 @@ class LauncherReplayPanel(QWidget):
                 "已加载记录级场景图，但没有可校准的控点；抓图不会创建新控点。"
             )
 
+    def _active_reference_scene(self) -> Mapping[str, Any] | None:
+        index = self.binding_scene_selector.currentData()
+        if isinstance(index, int) and 0 <= index < len(self._reference_scenes):
+            return self._reference_scenes[index]
+        return None
+
+    @staticmethod
+    def _record_relative_path(record: ReplayRecord, relative_path: str) -> Path | None:
+        if not relative_path:
+            return None
+        record_root = record.directory.resolve()
+        candidate = (record_root / relative_path).resolve()
+        try:
+            candidate.relative_to(record_root)
+        except ValueError:
+            return None
+        return candidate if candidate.is_file() else None
+
+    def _active_binding_pixmap(self) -> QPixmap:
+        reference = self._active_reference_scene()
+        if reference is not None:
+            scene_id = str(reference.get("id") or "")
+            pixmap = self._scene_binding_pixmaps.get(scene_id)
+            if pixmap is not None and not pixmap.isNull():
+                return pixmap
+        return self._binding_source_pixmap
+
+    def _visible_binding_keys(self) -> set[str] | None:
+        reference = self._active_reference_scene()
+        if reference is None:
+            return None
+        keys = reference.get("keys")
+        if isinstance(keys, (list, tuple)) and keys:
+            return {str(key) for key in keys if str(key)}
+        scene_name = str(reference.get("scene") or "")
+        return {
+            str(key)
+            for key, point in self._binding_points.items()
+            if isinstance(point, Mapping)
+            and str(point.get("scene") or "") == scene_name
+        }
+
+    def _binding_scene_changed(self, _index: int):
+        if self._binding_record is None:
+            return
+        count = self._rebuild_binding_editor()
+        reference = self._active_reference_scene()
+        scene_name = str(reference.get("scene") or "当前场景") if reference else "当前场景"
+        dirty_hint = "已保留未保存的调整。" if self._binding_dirty else ""
+        self.status_label.setText(
+            f"已切换到“{scene_name}”，显示 {count} 个控点。{dirty_hint}"
+        )
+
+    def _reference_image_path(self, reference: Mapping[str, Any]) -> Path | None:
+        record = self._binding_record
+        relative_image = str(reference.get("image") or "")
+        return (
+            self._record_relative_path(record, relative_image)
+            if record is not None
+            else None
+        )
+
+    def _add_reference_placeholder(self, text: str):
+        width, height = self._binding_screen_size
+        width = width or 640
+        height = height or 360
+        self.reference_scene.setSceneRect(0, 0, width, height)
+        background = self.reference_scene.addRect(
+            0,
+            0,
+            width,
+            height,
+            QPen(QColor("#555")),
+            QBrush(QColor("#282d34")),
+        )
+        background.setZValue(-10)
+        label = self.reference_scene.addSimpleText(text)
+        label.setBrush(QBrush(QColor("#c6cbd2")))
+        label.setPos(max((width - label.boundingRect().width()) / 2, 12), height / 2)
+
+    def _rebuild_reference_view(self):
+        self.reference_scene.clear()
+        self._reference_has_image = False
+        reference = self._active_reference_scene()
+        if reference is None:
+            self._add_reference_placeholder("该记录当时未保存标定参考图")
+            self.reference_view.reset_zoom()
+            return
+        image_path = self._reference_image_path(reference)
+        pixmap = QPixmap(str(image_path)) if image_path is not None else QPixmap()
+        if pixmap.isNull():
+            self._add_reference_placeholder("标定参考图缺失或无法读取")
+            self.reference_view.reset_zoom()
+            return
+        self._reference_has_image = True
+        width, height = pixmap.width(), pixmap.height()
+        self.reference_scene.setSceneRect(0, 0, width, height)
+        background = self.reference_scene.addPixmap(pixmap)
+        background.setZValue(-10)
+        visible_keys = self._visible_binding_keys() or set()
+        reference_points = reference.get("points")
+        if not isinstance(reference_points, Mapping):
+            reference_points = {}
+        reference_screen_size = tuple(reference.get("screen_size") or (0, 0))
+        if len(reference_screen_size) != 2:
+            reference_screen_size = (0, 0)
+        for raw_key in visible_keys:
+            point = reference_points.get(raw_key)
+            if not isinstance(point, Mapping):
+                point = self._binding_points.get(raw_key)
+            if not isinstance(point, Mapping):
+                continue
+            normalized = self._normalized_position(point, reference_screen_size)
+            if normalized is None:
+                continue
+            marker = QGraphicsEllipseItem(-7, -7, 14, 14)
+            marker.setPos(normalized[0] * width, normalized[1] * height)
+            marker.setBrush(QBrush(QColor(49, 173, 255, 220)))
+            marker.setPen(QPen(QColor("white"), 1.5))
+            marker.setZValue(10)
+            marker.setFlag(
+                QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True
+            )
+            label = QGraphicsSimpleTextItem(str(raw_key), marker)
+            label.setBrush(QBrush(QColor("white")))
+            label.setPos(10, -7)
+            self.reference_scene.addItem(marker)
+        self.reference_view.reset_zoom()
+
     def _rebuild_binding_editor(self) -> int:
+        self._rebuild_reference_view()
         self.binding_scene.clear()
         self.binding_tree.clear()
         self._binding_items.clear()
-        pixmap = self._binding_source_pixmap
+        pixmap = self._active_binding_pixmap()
         scene_width = pixmap.width() if not pixmap.isNull() else self._binding_screen_size[0]
         scene_height = pixmap.height() if not pixmap.isNull() else self._binding_screen_size[1]
         if scene_width <= 0 or scene_height <= 0:
@@ -465,8 +734,11 @@ class LauncherReplayPanel(QWidget):
             background.setZValue(-10)
 
         valid_count = 0
+        visible_keys = self._visible_binding_keys()
         for raw_key, raw_point in self._binding_points.items():
             if not isinstance(raw_point, Mapping):
+                continue
+            if visible_keys is not None and str(raw_key) not in visible_keys:
                 continue
             normalized = self._normalized_position(
                 raw_point,
@@ -498,10 +770,7 @@ class LauncherReplayPanel(QWidget):
 
         self.binding_empty_label.hide()
         self.binding_content.show()
-        self.binding_view.fitInView(
-            self.binding_scene.sceneRect(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-        )
+        self.binding_view.reset_zoom()
         if self.binding_tree.topLevelItemCount():
             self.binding_tree.setCurrentItem(self.binding_tree.topLevelItem(0))
         self._update_binding_controls()
@@ -586,9 +855,23 @@ class LauncherReplayPanel(QWidget):
         capture_busy = self._capture_process.state() != QProcess.ProcessState.NotRunning
         has_record = self._binding_record is not None
         editable = has_record and not self._replay_active and not capture_busy
+        has_binding_scene = (
+            has_record
+            and not self.binding_scene.sceneRect().isEmpty()
+            and not self.binding_content.isHidden()
+        )
         self.capture_scene_button.setEnabled(editable)
         self.save_binding_button.setEnabled(editable and self._binding_dirty)
         self.reset_binding_button.setEnabled(editable and self._binding_dirty)
+        self.binding_zoom_in_button.setEnabled(has_binding_scene)
+        self.binding_zoom_out_button.setEnabled(has_binding_scene)
+        self.binding_zoom_reset_button.setEnabled(has_binding_scene)
+        self.reference_zoom_in_button.setEnabled(self._reference_has_image)
+        self.reference_zoom_out_button.setEnabled(self._reference_has_image)
+        self.reference_zoom_reset_button.setEnabled(self._reference_has_image)
+        self.binding_scene_selector.setEnabled(
+            has_record and bool(self._reference_scenes) and not capture_busy
+        )
         self.record_tree.setEnabled(not self._binding_dirty and not capture_busy)
         self.refresh_button.setEnabled(not self._binding_dirty and not capture_busy)
         self.start_replay_button.setEnabled(
@@ -681,7 +964,15 @@ class LauncherReplayPanel(QWidget):
                     max(next_screen_size[1] - 1, 0),
                 ),
             ]
-        self._binding_source_pixmap = pixmap
+        reference = self._active_reference_scene()
+        if reference is not None:
+            scene_id = str(reference.get("id") or "")
+            if scene_id:
+                self._scene_binding_pixmaps[scene_id] = pixmap
+            else:
+                self._binding_source_pixmap = pixmap
+        else:
+            self._binding_source_pixmap = pixmap
         self._binding_screen_size = next_screen_size
         count = self._rebuild_binding_editor()
         self._set_binding_dirty(True)
@@ -725,21 +1016,40 @@ class LauncherReplayPanel(QWidget):
         record = self._binding_record
         if record is None or not self._binding_dirty:
             return False
-        if self._binding_source_pixmap.isNull():
+        active_pixmap = self._active_binding_pixmap()
+        if active_pixmap.isNull():
             QMessageBox.warning(self, "无法保存", "请先加载或抓取一张有效场景图。")
             return False
         scene_temp_path = record.directory / ".scene_view.tmp.png"
         scene_view_path = record.directory / "scene_view.png"
+        updated_references = copy.deepcopy(self._reference_scenes)
         try:
-            if not self._binding_source_pixmap.save(
+            if not active_pixmap.save(
                 str(scene_temp_path),
                 "PNG",
             ):
                 raise OSError(f"场景图写入失败：{scene_temp_path}")
+            calibration_root = record.directory / "replay_calibrations"
+            for index, reference in enumerate(updated_references):
+                scene_id = str(reference.get("id") or "")
+                scene_pixmap = self._scene_binding_pixmaps.get(scene_id)
+                if scene_pixmap is None or scene_pixmap.isNull():
+                    continue
+                calibration_root.mkdir(parents=True, exist_ok=True)
+                filename = f"scene-{index + 1:03d}.png"
+                target_path = calibration_root / filename
+                temporary_path = calibration_root / f".{filename}.tmp.png"
+                if not scene_pixmap.save(str(temporary_path), "PNG"):
+                    raise OSError(f"场景校准图写入失败：{temporary_path}")
+                temporary_path.replace(target_path)
+                reference["calibration_image"] = target_path.relative_to(
+                    record.directory
+                ).as_posix()
             save_recorded_control_points(
                 record,
                 self._binding_points,
                 self._binding_screen_size,
+                reference_scenes=updated_references,
             )
             scene_temp_path.replace(scene_view_path)
         except (OSError, ValueError) as exc:
@@ -749,10 +1059,11 @@ class LauncherReplayPanel(QWidget):
                 pass
             QMessageBox.critical(self, "保存失败", str(exc))
             return False
+        self._reference_scenes = updated_references
         self._remove_capture_temp_file()
         self._set_binding_dirty(False)
         self.status_label.setText(
-            f"已保存 {len(self._binding_items)} 个记录级控点和当前场景图；"
+            f"已保存 {len(self._binding_points)} 个记录级控点和当前场景图；"
             "现在可以开始回放。"
         )
         return True
@@ -897,14 +1208,27 @@ class LauncherReplayPanel(QWidget):
         self._pause_video()
         self.replayRequested.emit(record)
 
-    def set_replay_active(self, active: bool):
+    def set_replay_active(self, active: bool, reset_status: bool = True):
         self._replay_active = bool(active)
         self._update_binding_controls()
-        self.status_label.setText(
-            "回放窗口已启动，请在回放结束后返回这里选择其他记录。"
-            if self._replay_active
-            else "选择一条记录，查看视频后即可开始回放。"
-        )
+        self.start_replay_button.setText("正在回放" if self._replay_active else "开始回放")
+        if reset_status:
+            self.status_label.setText(
+                "正在回放；可直接在手机上查看执行结果。"
+                if self._replay_active
+                else "选择一条记录，查看视频后即可开始回放。"
+            )
+
+    def set_replay_progress(self, progress: float, action: str):
+        if not self._replay_active:
+            return
+        percent = min(max(int(round(float(progress) * 100)), 0), 100)
+        self.status_label.setText(f"正在回放 {percent}%：{action}")
+
+    def set_replay_result(self, success: bool, message: str):
+        self.set_replay_active(False, reset_status=False)
+        prefix = "回放完成" if success else "回放失败"
+        self.status_label.setText(f"{prefix}：{message}")
 
     def stop(self):
         self._release_video()

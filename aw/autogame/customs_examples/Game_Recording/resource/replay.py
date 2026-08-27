@@ -336,10 +336,53 @@ def load_recorded_control_points(
     return layout, _screen_size(session.get("screen_size"))
 
 
+def load_recorded_reference_scenes(record: ReplayRecord) -> list[dict[str, Any]]:
+    """读取录制时导出的多场景标定参考图清单。"""
+    payload: Any = None
+    if record.control_points_path is not None:
+        snapshot = _read_json(record.control_points_path, {})
+        if isinstance(snapshot, Mapping):
+            payload = snapshot.get("reference_scenes")
+    if payload is None and record.session_path is not None:
+        session = _read_json(record.session_path, {})
+        if isinstance(session, Mapping):
+            payload = session.get("reference_scenes")
+    if not isinstance(payload, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for index, raw_scene in enumerate(payload):
+        if not isinstance(raw_scene, Mapping):
+            continue
+        keys = raw_scene.get("keys")
+        if not isinstance(keys, (list, tuple)):
+            keys = []
+        points = raw_scene.get("points")
+        if not isinstance(points, Mapping):
+            points = {}
+        result.append(
+            {
+                "id": str(raw_scene.get("id") or f"scene-{index + 1:03d}"),
+                "stage": str(raw_scene.get("stage") or ""),
+                "scene": str(raw_scene.get("scene") or f"场景 {index + 1}"),
+                "resolution_key": str(raw_scene.get("resolution_key") or ""),
+                "screen_size": list(_screen_size(raw_scene.get("screen_size"))),
+                "image": str(raw_scene.get("image") or ""),
+                "calibration_image": str(
+                    raw_scene.get("calibration_image") or ""
+                ),
+                "source_image": str(raw_scene.get("source_image") or ""),
+                "keys": [str(key) for key in keys if str(key)],
+                "points": deepcopy(dict(points)),
+            }
+        )
+    return result
+
+
 def save_recorded_control_points(
     record: ReplayRecord,
     points: Mapping[str, Any],
     screen_size: tuple[int, int],
+    reference_scenes: list[Mapping[str, Any]] | None = None,
 ) -> Path:
     """保存记录级控点，并同步 session.json 供旧版读取路径兼容。"""
     width, height = _screen_size(screen_size)
@@ -349,14 +392,20 @@ def save_recorded_control_points(
         raise ReplayError("控点快照格式无效。")
 
     saved_points = deepcopy(dict(points))
+    saved_reference_scenes = (
+        deepcopy(reference_scenes)
+        if reference_scenes is not None
+        else load_recorded_reference_scenes(record)
+    )
     snapshot_path = record.directory / "control_points.json"
     snapshot_temp_path = record.directory / ".control_points.json.tmp"
     snapshot_temp_path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "screen_size": [width, height],
                 "points": saved_points,
+                "reference_scenes": saved_reference_scenes,
             },
             ensure_ascii=False,
             indent=2,
@@ -377,6 +426,8 @@ def save_recorded_control_points(
             "scene_view": "scene_view.png",
             "control_points_path": snapshot_path.name,
             "control_point_count": len(saved_points),
+            "reference_scenes": saved_reference_scenes,
+            "reference_scene_count": len(saved_reference_scenes),
         }
     )
     session_temp_path = record.directory / ".session.json.tmp"

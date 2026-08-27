@@ -29,7 +29,12 @@ from aw.autogame.tools.Utils import get_resolution
 
 from .binding_config import BindingConfigError
 from .binding_dialog import BindingDialog
-from .layout import LayoutError, RESERVED_KEYS, load_key_layout
+from .layout import (
+    LayoutError,
+    RESERVED_KEYS,
+    load_key_layout,
+    load_reference_scenes,
+)
 from .recording import RecordingSession
 from .runtime_log import save_disconnect_report
 from .touch_controller import DRAG_DIRECTIONS, SingleTouchKeyboardController
@@ -187,7 +192,8 @@ class RecorderWindow(QMainWindow):
 
         self.status_label = QLabel("正在连接华为手机画面……")
         self.status_label.setWordWrap(True)
-        self.keys_label = QLabel("已加载键位：" + "、".join(sorted(self.key_points)))
+        loaded_keys = "、".join(sorted(self.key_points)) or "无（当前仅录制视频）"
+        self.keys_label = QLabel("已加载键位：" + loaded_keys)
         self.keys_label.setWordWrap(True)
         self.record_name_edit = QLineEdit()
         self.record_name_edit.setPlaceholderText("留空则使用默认时间名称")
@@ -433,7 +439,8 @@ class RecorderWindow(QMainWindow):
             self.key_points,
             screen_size=self.screen_size,
         )
-        self.keys_label.setText("已加载键位：" + "、".join(sorted(self.key_points)))
+        loaded_keys = "、".join(sorted(self.key_points)) or "无（当前仅录制视频）"
+        self.keys_label.setText("已加载键位：" + loaded_keys)
         self._set_status("控点和键位绑定已重新加载；可开始新的录制。")
 
     def _toggle_recording(self):
@@ -460,6 +467,10 @@ class RecorderWindow(QMainWindow):
                 self._layout_for_metadata(),
                 pressed_keys=self.pressed_keys,
                 session_name=self.record_name_edit.text(),
+                reference_scenes=load_reference_scenes(
+                    info,
+                    *self.screen_size,
+                ),
             )
         except (ValueError, FileExistsError, OSError, RuntimeError) as exc:
             self._set_status(f"无法开启录制：{exc}", error=True)

@@ -7,6 +7,32 @@ tests/
 .vscode/
 
 aw/autogame/temp/
+
+# 本地设备调试、录制与回放产物不纳入版本控制。
+# 保留 Game_Recording 源码目录，避免录制/回放功能代码被误忽略。
+aw/autogame/records/
+aw/autogame/customs_examples/Game_Recording/scenes/
+*.log
+
+# 本地下载的 HDC/HOS 工具包和模型，不随源码仓库分发。
+hoscrcpy_sdk.zip
+hoscrcpy_sdk/
+sam3_tiny/
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.pt
+*.pth
+*.onnx
+*.ckpt
+
+# 本地分析导出、项目说明与个人笔记。
+outputs/
+项目信息/
+docs/和平精英自动化Wiki.md
+docs/local/
+
 aw/autogame/customs_examples/Auto_PUBG_ALL/resource/navigation/adaptive_motion_table.json
 aw/autogame/customs_examples/Auto_PUBG_ALL/resource/navigation/adaptive_motion_table.json.tmp
 aw/autogame/customs_examples/Auto_PUBG_ALL/resource/control/driving_turn_calibration.json

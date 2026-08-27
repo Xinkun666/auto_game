@@ -688,7 +688,11 @@ def prune_run_archive_artifacts(
     """Keep runtime frames and the compact per-run diagnostic evidence."""
     archive_dir = Path(archive_dir)
     allowed_logs = {"launcher_output.txt", "hilog.txt", "hdc_debug.log"}
-    allowed_root_files = {"hos_disconnect.json", "stream_disconnect_signal.json"}
+    allowed_root_files = {
+        "hos_disconnect.json",
+        "stream_disconnect_signal.json",
+        "manual_stop_preserve.json",
+    }
     logs_dir = archive_dir / "logs"
 
     if logs_dir.exists():

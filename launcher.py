@@ -145,6 +145,7 @@ REBOOT_RELAUNCH_DELAY_SECONDS = 80
 STREAM_DISCONNECT_GRACEFUL_STOP_TIMEOUT_MS = 60000
 STREAM_DISCONNECT_FORCE_KILL_TIMEOUT_MS = 5000
 RUN_STOP_FORCE_KILL_TIMEOUT_MS = 15000
+MANUAL_STOP_SP_SAVE_SETTLE_SECONDS = 2.0
 STREAM_DISCONNECT_PATTERNS = (
     "[Stream] Channel ready timeout.",
     "[Stream] Receive loop ended unexpectedly.",
@@ -1381,6 +1382,56 @@ while ($true) {{
 """
 
 
+def terminate_popen_process_tree(proc: subprocess.Popen, force: bool) -> None:
+    """Terminate a subprocess and its descendants without depending on Qt."""
+    if proc is None or proc.poll() is not None:
+        return
+
+    if os.name == "nt":
+        if not force:
+            ctrl_break_event = getattr(signal, "CTRL_BREAK_EVENT", None)
+            if ctrl_break_event is not None:
+                try:
+                    proc.send_signal(ctrl_break_event)
+                    return
+                except Exception:
+                    LOGGER.debug(
+                        "graceful CTRL_BREAK_EVENT failed, fallback to taskkill: pid=%s",
+                        proc.pid,
+                        exc_info=True,
+                    )
+        command = ["taskkill", "/PID", str(int(proc.pid)), "/T"]
+        if force:
+            command.append("/F")
+        try:
+            subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                **hidden_subprocess_kwargs(),
+            )
+            return
+        except Exception:
+            pass
+    elif getattr(proc, "pid", None):
+        try:
+            pgid = os.getpgid(int(proc.pid))
+            os.killpg(pgid, signal.SIGKILL if force else signal.SIGTERM)
+            return
+        except Exception:
+            pass
+
+    try:
+        if force:
+            proc.kill()
+        else:
+            proc.terminate()
+    except Exception:
+        pass
+
+
 class HiddenSubprocess(QObject):
     readyReadStandardOutput = pyqtSignal()
     finished = pyqtSignal(int, object)
@@ -1492,51 +1543,7 @@ class HiddenSubprocess(QObject):
         proc = self._proc
         if proc is None:
             return
-
-        if os.name == "nt":
-            if not force:
-                ctrl_break_event = getattr(signal, "CTRL_BREAK_EVENT", None)
-                if ctrl_break_event is not None:
-                    try:
-                        proc.send_signal(ctrl_break_event)
-                        return
-                    except Exception:
-                        LOGGER.debug(
-                            "graceful CTRL_BREAK_EVENT failed, fallback to taskkill: pid=%s",
-                            proc.pid,
-                            exc_info=True,
-                        )
-            command = ["taskkill", "/PID", str(int(proc.pid)), "/T"]
-            if force:
-                command.append("/F")
-            try:
-                subprocess.run(
-                    command,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                    **hidden_subprocess_kwargs(),
-                )
-                return
-            except Exception:
-                pass
-
-        elif getattr(proc, "pid", None):
-            try:
-                pgid = os.getpgid(int(proc.pid))
-                os.killpg(pgid, signal.SIGKILL if force else signal.SIGTERM)
-                return
-            except Exception:
-                pass
-
-        try:
-            if force:
-                proc.kill()
-            else:
-                proc.terminate()
-        except Exception:
-            pass
+        terminate_popen_process_tree(proc, force=force)
 
     def _close_stdout_pipe(self):
         proc = self._proc
@@ -2793,6 +2800,8 @@ class LauncherWindow(QWidget):
 
         self.batch_active = False
         self.stop_requested = False
+        self.manual_stop_requested = False
+        self.recovery_processes: list[subprocess.Popen] = []
         self._close_after_stop = False
         self.current_run_index = 0
         self.total_runs = 1
@@ -6250,6 +6259,7 @@ class LauncherWindow(QWidget):
         self.current_run_start_timestamp = None
         self.batch_active = True
         self.stop_requested = False
+        self.manual_stop_requested = False
         self.current_run_index = 0
         self.current_run_timed_out = False
         self.output_log_entries.clear()
@@ -6314,6 +6324,7 @@ class LauncherWindow(QWidget):
 
     def _finish_batch(self, message: str):
         LOGGER.info("finish_batch: %s", message)
+        self._stop_recovery_processes()
         self._stop_current_hdc_debug_capture()
         restore_hiz = bool(
             self.stop_requested
@@ -6361,11 +6372,11 @@ class LauncherWindow(QWidget):
             self._close_after_stop = False
             QTimer.singleShot(0, self.close)
 
-    def _cleanup_apps_between_runs(self, reason: str):
+    def _cleanup_apps_between_runs(self, reason: str, force: bool = False):
         if self.current_plan is None:
             return
 
-        if should_preserve_game_process_for_plan(self.current_plan):
+        if should_preserve_game_process_for_plan(self.current_plan) and not force:
             self._log_message(
                 f"[Launcher] {reason}：当前测试处于保留进程模式，跳过应用进程清理。\n"
             )
@@ -7026,6 +7037,49 @@ class LauncherWindow(QWidget):
             except Exception:
                 log_exception(f"write inactivity timeout preserve result failed: archive_dir={archive_dir}")
 
+    def _preserve_manual_stop_run_state(self):
+        """Best-effort SP save before manual-stop cleanup, while keeping the stop bounded."""
+        self._refresh_current_run_sp_state()
+        archive_dir = self._resolve_current_run_archive_dir()
+        preserve_result = {
+            "event": "manual_stop_preserve",
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "run_index": self.current_run_index + 1,
+            "sp_recording_enabled": self._current_plan_uses_sp_recording(),
+            "sp_started": self.current_run_sp_started,
+            "sp_state": self.current_run_sp_state,
+            "sp_save_attempted": False,
+            "sp_save_ok": False,
+            "sp_save_skipped_reason": "",
+        }
+
+        if not self._current_plan_uses_sp_recording():
+            preserve_result["sp_save_skipped_reason"] = "sp_recording_disabled"
+        elif self.current_run_sp_state.get("sp_saved"):
+            preserve_result["sp_save_skipped_reason"] = "sp_already_saved"
+        elif not self.current_run_sp_started:
+            preserve_result["sp_save_skipped_reason"] = "sp_not_started"
+        else:
+            preserve_result["sp_save_attempted"] = True
+            preserve_result["sp_save_ok"] = self._save_sp_for_preserve("手动停止保全")
+            if preserve_result["sp_save_ok"]:
+                self.current_run_sp_state["sp_saved"] = True
+                deadline = time.monotonic() + MANUAL_STOP_SP_SAVE_SETTLE_SECONDS
+                while time.monotonic() < deadline:
+                    QApplication.processEvents()
+                    time.sleep(0.1)
+
+        if archive_dir is not None:
+            try:
+                (archive_dir / "manual_stop_preserve.json").write_text(
+                    json.dumps(preserve_result, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception:
+                log_exception(
+                    f"write manual stop preserve result failed: archive_dir={archive_dir}"
+                )
+
     def _mark_stream_disconnected(self, message: str, source: str):
         if self.current_run_stream_disconnected:
             return
@@ -7128,6 +7182,8 @@ class LauncherWindow(QWidget):
         )
 
     def _terminate_stream_disconnect_process_if_running(self):
+        if self.manual_stop_requested:
+            return
         if (
             self.process is not None
             and self.current_run_stream_disconnected
@@ -7144,6 +7200,8 @@ class LauncherWindow(QWidget):
             )
 
     def _force_kill_stream_disconnect_process_if_running(self):
+        if self.manual_stop_requested:
+            return
         if (
             self.process is not None
             and self.current_run_stream_disconnected
@@ -7156,6 +7214,8 @@ class LauncherWindow(QWidget):
             self.process.kill()
 
     def _poll_stream_disconnect_signal(self):
+        if self.manual_stop_requested:
+            return
         if self.process is None or self.current_run_stream_disconnected:
             return
         if not self._stream_disconnect_recovery_enabled():
@@ -7759,6 +7819,8 @@ class LauncherWindow(QWidget):
         )
 
     def _reinitialize_stream_service(self) -> bool:
+        if self.manual_stop_requested:
+            return False
         self._log_message("[Launcher] 仅执行流服务初始化...\n")
 
         hdc = resolve_hdc_executable()
@@ -7789,16 +7851,9 @@ class LauncherWindow(QWidget):
             try:
                 self._log_message(f"[Launcher][init] 执行：{desc}，command={command}\n")
 
-                result = subprocess.run(
-                    command,
-                    cwd=str(APP_DIR),
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="ignore",
-                    timeout=30,
-                    **hidden_subprocess_kwargs(),
-                )
+                result = self._run_interruptible_recovery_command(command, timeout=30)
+                if result is None:
+                    return False
 
                 output = (result.stdout or "") + (result.stderr or "")
                 if output.strip():
@@ -7841,7 +7896,76 @@ class LauncherWindow(QWidget):
         self._log_message("[Launcher] 流服务初始化完成。\n")
         return True
 
+    def _track_recovery_process(self, proc: subprocess.Popen):
+        self.recovery_processes = [
+            item for item in self.recovery_processes if item.poll() is None
+        ]
+        self.recovery_processes.append(proc)
+
+    def _untrack_recovery_process(self, proc: subprocess.Popen):
+        self.recovery_processes = [
+            item for item in self.recovery_processes if item is not proc and item.poll() is None
+        ]
+
+    def _stop_recovery_processes(self):
+        processes, self.recovery_processes = self.recovery_processes, []
+        for proc in processes:
+            if proc.poll() is not None:
+                continue
+            terminate_popen_process_tree(proc, force=True)
+
+    def _run_interruptible_recovery_command(
+        self,
+        command: list[str],
+        timeout: float,
+    ) -> Optional[subprocess.CompletedProcess]:
+        popen_kwargs = hidden_subprocess_kwargs()
+        if os.name != "nt":
+            popen_kwargs["start_new_session"] = True
+        proc = subprocess.Popen(
+            command,
+            cwd=str(APP_DIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            **popen_kwargs,
+        )
+        self._track_recovery_process(proc)
+        deadline = time.monotonic() + float(timeout)
+        output = ""
+        try:
+            while True:
+                if self.manual_stop_requested:
+                    terminate_popen_process_tree(proc, force=True)
+                    try:
+                        output, _ = proc.communicate(timeout=1)
+                    except Exception:
+                        output = output or ""
+                    return None
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    terminate_popen_process_tree(proc, force=True)
+                    raise subprocess.TimeoutExpired(command, timeout, output=output)
+                try:
+                    output, _ = proc.communicate(timeout=min(0.1, remaining))
+                    return subprocess.CompletedProcess(
+                        command,
+                        int(proc.returncode or 0),
+                        stdout=output,
+                        stderr="",
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    if exc.output:
+                        output = str(exc.output)
+                    QApplication.processEvents()
+        finally:
+            self._untrack_recovery_process(proc)
+
     def _recover_stream_only_for_stream_disconnect(self) -> bool:
+        if self.manual_stop_requested:
+            return False
         if "hdc offline没有恢复" in self.current_run_stream_disconnect_message.lower():
             self._log_message(
                 "[Launcher] hdc offline没有恢复，停止恢复；不再尝试 gRPC 重连或重跑用例。\n",
@@ -7857,7 +7981,7 @@ class LauncherWindow(QWidget):
         )
         self._set_runtime("运行信息：检测到 HOScrcpy 断流，正在只恢复流服务。")
         QApplication.processEvents()
-        return True
+        return not self.manual_stop_requested
 
     def _stream_recovery_failure_message(self) -> str:
         if "hdc offline没有恢复" in self.current_run_stream_disconnect_message.lower():
@@ -7865,6 +7989,8 @@ class LauncherWindow(QWidget):
         return "HOScrcpy 流恢复失败，批量任务已终止。"
 
     def _restart_device_for_stream_disconnect(self) -> bool:
+        if self.manual_stop_requested:
+            return False
         self._log_message("[Launcher] 开始执行断流恢复命令。\n")
         self._set_runtime("运行信息：检测到断流，正在重启手机并等待开机。")
         QApplication.processEvents()
@@ -7876,7 +8002,8 @@ class LauncherWindow(QWidget):
 
         self._log_message(f"[Launcher] 弹出 cmd 窗口执行断流恢复脚本：{script_path}\n")
         try:
-            launch_restart_bat_with_system_shell(script_path)
+            restart_proc = launch_restart_bat_cmd_window(script_path)
+            self._track_recovery_process(restart_proc)
         except Exception:
             log_exception("restart device after stream disconnect failed")
             self._log_message(
@@ -7890,12 +8017,24 @@ class LauncherWindow(QWidget):
         )
         for _ in range(REBOOT_RELAUNCH_DELAY_SECONDS):
             QApplication.processEvents()
+            if self.manual_stop_requested:
+                self._stop_recovery_processes()
+                self._log_message("[Launcher] 手动停止已取消断流恢复等待。\n")
+                return False
             time.sleep(1)
 
+        if self.manual_stop_requested:
+            self._stop_recovery_processes()
+            return False
         if not self._reinitialize_stream_service():
             return False
 
+        if self.manual_stop_requested:
+            self._stop_recovery_processes()
+            return False
+
         self._log_message("[Launcher] 手机重启与端口恢复完成。\n")
+        self._stop_recovery_processes()
         self.dismiss_reboot_prompt_on_next_case_start = True
         return True
 
@@ -7920,6 +8059,8 @@ class LauncherWindow(QWidget):
         self._poll_preview_frame()
         self._refresh_current_run_sp_state()
         self._refresh_current_run_failure_signal()
+        if self.manual_stop_requested:
+            self._preserve_manual_stop_run_state()
         if self._current_run_failed_by_inactivity_timeout():
             self._log_message(
                 "[Launcher] 本次用例因长时间无操控主动结束，正在执行无操作保全。\n"
@@ -7932,7 +8073,7 @@ class LauncherWindow(QWidget):
             and self.current_run_stream_disconnect_startup
         )
         self._archive_run_outputs(run_no, exit_code)
-        if not startup_stream_disconnect:
+        if self.manual_stop_requested or not startup_stream_disconnect:
             self._pull_current_run_sp_artifacts(run_no)
         self.preview_timer.stop()
         if self.process is not None:
@@ -7943,8 +8084,8 @@ class LauncherWindow(QWidget):
             self._finish_batch(f"任务已结束，退出码：{exit_code}")
             return
 
-        if self.stop_requested:
-            self._cleanup_apps_between_runs("停止后清理")
+        if self.manual_stop_requested:
+            self._cleanup_apps_between_runs("手动停止后清理", force=True)
             self._finish_batch("任务已停止。")
             return
 
@@ -7966,6 +8107,8 @@ class LauncherWindow(QWidget):
             if self.current_run_stream_disconnect_startup:
                 if self._current_plan_recovers_stream_only_on_disconnect():
                     if not self._recover_stream_only_for_stream_disconnect():
+                        if self.manual_stop_requested:
+                            return
                         self._cleanup_apps_between_runs("断流恢复失败后清理")
                         self._finish_batch(self._stream_recovery_failure_message())
                         return
@@ -7996,6 +8139,8 @@ class LauncherWindow(QWidget):
                     "本轮不保存产物；重启手机后将重新运行当前用例。\n"
                 )
                 if not self._restart_device_for_stream_disconnect():
+                    if self.manual_stop_requested:
+                        return
                     self._cleanup_apps_between_runs("断流恢复失败后清理")
                     self._finish_batch("断流恢复失败，批量任务已终止。")
                     return
@@ -8032,6 +8177,8 @@ class LauncherWindow(QWidget):
 
             if self._current_plan_recovers_stream_only_on_disconnect():
                 if not self._recover_stream_only_for_stream_disconnect():
+                    if self.manual_stop_requested:
+                        return
                     self._cleanup_apps_between_runs("断流恢复失败后清理")
                     self._finish_batch(self._stream_recovery_failure_message())
                     return
@@ -8050,6 +8197,8 @@ class LauncherWindow(QWidget):
                 return
 
             if not self._restart_device_for_stream_disconnect():
+                if self.manual_stop_requested:
+                    return
                 self._cleanup_apps_between_runs("断流恢复失败后清理")
                 self._finish_batch("断流恢复失败，批量任务已终止。")
                 return
@@ -8102,18 +8251,26 @@ class LauncherWindow(QWidget):
             return
 
         self.stop_requested = True
+        self.manual_stop_requested = True
+        self.stop_button.setEnabled(False)
         self.safety_timer.stop()
         self.run_timeout_timer.stop()
+        self.stream_disconnect_signal_timer.stop()
+        self.preview_timer.stop()
+        self._stop_recovery_processes()
 
         if self.process is None:
-            self._log_message("\n[Launcher] 已取消后续运行。\n")
-            self._cleanup_apps_between_runs("停止后清理")
+            self._log_message("\n[Launcher] 手动停止已取消断流恢复和后续运行。\n")
+            self._cleanup_apps_between_runs("手动停止后清理", force=True)
             self._finish_batch("任务已停止。")
             return
 
-        self._log_message("\n[Launcher] 正在停止当前子进程，并取消后续运行...\n")
-        self.preview_timer.stop()
-        self._request_current_process_shutdown("手动停止")
+        self._log_message(
+            "\n[Launcher] 手动停止优先：立即强制结束当前子进程，"
+            "取消断流恢复和后续运行；子进程结束后保全日志与记录。\n"
+        )
+        self._set_status("手动停止中：正在结束进程并保全日志。")
+        self.process.kill()
 
 
 def _run_helper_command(args: argparse.Namespace) -> int:

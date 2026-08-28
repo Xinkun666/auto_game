@@ -99,6 +99,8 @@ STAGE_PRIORITY_JUMP_FORWARD_DURA = 100
 STAGE_PRIORITY_JUMP_FORWARD_WAIT = 300
 STAGE_PRIORITY_JUMP_SETTLE_SECONDS = 0.2
 RANK_FINISH_SPECTATE_WAIT_SECONDS = 2.0
+RANK_FINISH_CONTINUE_WAIT_SECONDS = 3.0
+RANK_FINISH_CONTINUE_1_WAIT_SECONDS = 2.0
 SP_RECORDING_ENABLED = False
 START_GAME_VERIFY_DELAY = 5.0
 CLOSE_POPUP_SETTLE_DELAY = 1.0
@@ -120,6 +122,7 @@ start_game = False
 start_game_click_time = None
 final_shutdown_pending = False
 rank_finish_pending = False
+rank_finish_lobby_flow_state = None
 searching_view_synced = False
 searching_phase_finishing = False
 searching_to_running_notified = False
@@ -259,7 +262,7 @@ def pause_sp_after_death(w: "FrameWorker"):
 
 
 def prepare_round(w: "FrameWorker" = None):
-    global searching_view_synced, rank_finish_pending
+    global searching_view_synced, rank_finish_pending, rank_finish_lobby_flow_state
     global searching_phase_finishing, searching_to_running_notified, searching_exit_retry_count
 
     _require_runtime()
@@ -270,6 +273,7 @@ def prepare_round(w: "FrameWorker" = None):
     searching_to_running_notified = False
     searching_exit_retry_count = 0
     rank_finish_pending = False
+    rank_finish_lobby_flow_state = None
 
     need_drive = phase_timer.need_drive()
     need_searching = not phase_timer.is_completed(PHASE_SEARCHING)
@@ -738,8 +742,55 @@ def confirm_lobby_after_popups(w: "FrameWorker") -> bool:
     return lobby_house_confirm_count >= LOBBY_CONFIRM_REQUIRED
 
 
+def _advance_rank_finish_continue_lobby_flow(w: "FrameWorker") -> bool:
+    """Finish the post-spectator continue flow without falling back to Settings."""
+    global rank_finish_lobby_flow_state
+
+    if rank_finish_lobby_flow_state == "waiting_continue_1":
+        if not w.refresh_frame():
+            return False
+        continue_1 = w.get_info("继续1")
+        if not continue_1:
+            w.frame_log(
+                "已点击继续，等待继续1区域出现",
+                log_type=FrameLogType.LOGIC,
+            )
+            return False
+        w.frame_log(
+            f"通过区域动态点击继续1: position={continue_1}",
+            log_type=FrameLogType.UI_CONTROL,
+        )
+        w.click(continue_1)
+        rank_finish_lobby_flow_state = "waiting_return_lobby_1"
+        return False
+
+    if rank_finish_lobby_flow_state == "waiting_return_lobby_1":
+        if not w.refresh_frame():
+            return False
+        return_lobby = w.get_info("返回大厅1")
+        if not return_lobby:
+            w.frame_log(
+                "已点击继续1，等待返回大厅1区域出现",
+                log_type=FrameLogType.LOGIC,
+            )
+            return False
+        w.frame_log(
+            f"通过区域动态点击返回大厅1: position={return_lobby}",
+            log_type=FrameLogType.UI_CONTROL,
+        )
+        w.click(return_lobby)
+        rank_finish_lobby_flow_state = None
+        w.change_stage("开始游戏阶段")
+        return False
+
+    return True
+
+
 def prepare_rank_finish_for_lobby(w: "FrameWorker") -> bool:
-    global rank_finish_pending
+    global rank_finish_pending, rank_finish_lobby_flow_state
+
+    if rank_finish_lobby_flow_state:
+        return _advance_rank_finish_continue_lobby_flow(w)
 
     if not rank_finish_pending and not _has_rank_finish_info(w):
         return True
@@ -766,10 +817,50 @@ def prepare_rank_finish_for_lobby(w: "FrameWorker") -> bool:
         log_type=FrameLogType.UI_CONTROL,
     )
     w.click(spectate_opponent)
+    w.frame_log(
+        "已点击观战对手，等待3s观察继续区域",
+        log_type=FrameLogType.LOGIC,
+    )
+    time.sleep(RANK_FINISH_CONTINUE_WAIT_SECONDS)
     if not w.refresh_frame():
         return False
+
+    continue_region = w.get_info("继续")
+    if not continue_region:
+        w.frame_log(
+            "未识别到继续区域，回退到原有设置返回大厅流程",
+            log_type=FrameLogType.LOGIC,
+        )
+        rank_finish_pending = False
+        return True
+
+    w.frame_log(
+        f"通过区域动态点击继续: position={continue_region}",
+        log_type=FrameLogType.UI_CONTROL,
+    )
+    w.click(continue_region)
+    time.sleep(RANK_FINISH_CONTINUE_1_WAIT_SECONDS)
+    if not w.refresh_frame():
+        return False
+
+    continue_1 = w.get_info("继续1")
+    if not continue_1:
+        w.frame_log(
+            "继续1区域尚未出现，保留在结束阶段继续观察",
+            log_type=FrameLogType.LOGIC,
+        )
+        rank_finish_lobby_flow_state = "waiting_continue_1"
+        rank_finish_pending = False
+        return False
+
+    w.frame_log(
+        f"通过区域动态点击继续1: position={continue_1}",
+        log_type=FrameLogType.UI_CONTROL,
+    )
+    w.click(continue_1)
+    rank_finish_lobby_flow_state = "waiting_return_lobby_1"
     rank_finish_pending = False
-    return True
+    return False
 
 
 def maybe_report_phase_remaining():

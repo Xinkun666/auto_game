@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QTreeWidget, QTreeWidgetItem, QPushButton,
                              QMenu, QFileDialog, QInputDialog, QLabel, QSplitter,
                              QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-                             QGraphicsRectItem, QGraphicsLineItem, QToolBar, QMessageBox, QFrame,
+                             QGraphicsRectItem, QGraphicsLineItem, QToolBar, QMessageBox,
                              QPinchGesture, QHeaderView, QProgressDialog, QComboBox, QDialog,
                              QLineEdit, QCheckBox, QScrollArea, QDialogButtonBox, QTabWidget)
 from PyQt6.QtCore import Qt, QRectF, QPointF, QEvent, QTimer
@@ -660,13 +660,6 @@ class AutoStudioWindow(QMainWindow):
         # 4. 右侧：项目树
         right_container = QWidget()
         right_layout = QVBoxLayout(right_container)
-        # 控制按钮栏
-        self.btn_layout = QHBoxLayout()
-        self.btn_add_stage = QPushButton("新建阶段")
-        self.btn_add_stage.clicked.connect(self.add_stage)
-        self.btn_add_stage.setEnabled(False)
-        self.btn_layout.addWidget(self.btn_add_stage)
-        right_layout.addLayout(self.btn_layout)
         tree_toolbar = QHBoxLayout()
         tree_toolbar.addWidget(QLabel("资源管理"))
         tree_toolbar.addStretch()
@@ -682,11 +675,7 @@ class AutoStudioWindow(QMainWindow):
         self.scene_pool_tree = self._create_tree_widget(["场景池", "属性"])
         self.tree_tabs.addTab(self.tree, "项目层级")
         self.tree_tabs.addTab(self.scene_pool_tree, "场景池")
-        right_layout.addWidget(self.tree_tabs)
-        # 操作面板 (动态显示)
-        self.action_panel = QFrame()
-        self.action_layout = QVBoxLayout(self.action_panel)
-        right_layout.addWidget(self.action_panel)
+        right_layout.addWidget(self.tree_tabs, 1)
         splitter.addWidget(left_container)
         splitter.addWidget(right_container)
         splitter.setStretchFactor(0, 85)
@@ -723,7 +712,6 @@ class AutoStudioWindow(QMainWindow):
             self.set_current_work_stage(None)
             self.current_scene = None
             self.update_tree_view()
-            self.btn_add_stage.setEnabled(True)
             self.status_label.setText(f"工程 {name} 已创建。请添加阶段。")
     def set_current_work_stage(self, stage: Optional[StageData]):
         self.current_work_stage = stage
@@ -3598,92 +3586,21 @@ class AutoStudioWindow(QMainWindow):
             return
         self.tree.collapseAll()
         self.scene_pool_tree.collapseAll()
-    # --- 树交互与动态按钮 ---
-    def on_tree_click(self, item, column):
-        self._active_tree_widget = item.treeWidget()
-        data = item.data(0, Qt.ItemDataRole.UserRole)
-        self.clear_action_panel()
+
+    def _select_tree_data(self, item, data):
+        """Update the selected model and canvas without changing the window layout."""
         if isinstance(data, StageData):
             self.current_stage = data
             self.set_current_work_stage(data)
             self.current_scene = None
             self.clear_scene_display()
-            btn = QPushButton("新建场景")
-            btn.clicked.connect(lambda: self.add_scene(data))
-            self.action_layout.addWidget(btn)
-            btn_manage_scene = QPushButton("场景管理")
-            btn_manage_scene.clicked.connect(lambda: self.manage_stage_scenes(data))
-            btn_manage_scene.setEnabled(bool(self.project and any(group.scenes for group in self.project.scene_groups)))
-            self.action_layout.addWidget(btn_manage_scene)
-            btn_paste_scene = QPushButton("📋 粘贴场景")
-            btn_paste_scene.clicked.connect(lambda: self.paste_scene_to_stage(data))
-            btn_paste_scene.setEnabled(self.scene_clipboard is not None)
-            self.action_layout.addWidget(btn_paste_scene)
-            if self.project and len(self.project.stages) > 1:
-                btn_move_up = QPushButton("⬆ 上移阶段")
-                btn_move_up.clicked.connect(lambda: self.move_stage(data, -1))
-                btn_move_up.setEnabled(self.project.stages.index(data) > 0)
-                self.action_layout.addWidget(btn_move_up)
-                btn_move_down = QPushButton("⬇ 下移阶段")
-                btn_move_down.clicked.connect(lambda: self.move_stage(data, 1))
-                btn_move_down.setEnabled(self.project.stages.index(data) < len(self.project.stages) - 1)
-                self.action_layout.addWidget(btn_move_down)
-            btn_rename = QPushButton("✏️ 修改阶段名称")
-            btn_rename.clicked.connect(lambda: self.rename_stage(data))
-            self.action_layout.addWidget(btn_rename)
-            btn_delete = QPushButton("🗑 删除阶段")
-            btn_delete.clicked.connect(lambda: self.delete_stage(data))
-            self.action_layout.addWidget(btn_delete)
-        elif isinstance(data, dict) and data.get("kind") == "scene_pool_root":
+        elif isinstance(data, dict) and data.get("kind") in {"scene_pool_root", "scene_pool_group"}:
             self.current_scene = None
             self.clear_scene_display()
-            lbl = QLabel("当前: 场景池")
-            self.action_layout.addWidget(lbl)
-            btn_add_group = QPushButton("新建场景分组")
-            btn_add_group.clicked.connect(self.add_scene_pool_group)
-            self.action_layout.addWidget(btn_add_group)
-        elif isinstance(data, dict) and data.get("kind") == "scene_pool_group":
-            self.current_scene = None
-            self.clear_scene_display()
-            scene_group = data.get("scene_group")
-            is_virtual_group = bool(data.get("virtual")) or self._is_virtual_all_scene_group(scene_group)
-            lbl = QLabel(f"当前分组: {scene_group.name if scene_group else ''}")
-            self.action_layout.addWidget(lbl)
-            btn_add_scene = QPushButton("新建池内场景")
-            btn_add_scene.clicked.connect(lambda: self.add_pool_scene(scene_group))
-            btn_add_scene.setEnabled(bool(scene_group))
-            self.action_layout.addWidget(btn_add_scene)
-            is_system_group = bool(
-                scene_group
-                and scene_group.name in SYSTEM_SCENE_GROUP_NAMES
-            )
-            btn_duplicate_items = QPushButton("重复标注检查")
-            btn_duplicate_items.clicked.connect(lambda: self.show_scene_pool_group_duplicate_items(scene_group))
-            btn_duplicate_items.setEnabled(bool(scene_group and scene_group.scenes))
-            self.action_layout.addWidget(btn_duplicate_items)
-            btn_batch_manage = QPushButton("批量管理")
-            btn_batch_manage.clicked.connect(lambda: self.manage_scene_pool_group_batch(scene_group))
-            can_batch_manage = bool(
-                scene_group
-                and not is_virtual_group
-                and self._scene_pool_group_batch_entries(self.project, scene_group)
-            )
-            btn_batch_manage.setEnabled(can_batch_manage)
-            self.action_layout.addWidget(btn_batch_manage)
-            btn_rename = QPushButton("✏️ 修改分组名称")
-            btn_rename.clicked.connect(lambda: self.rename_scene_pool_group(scene_group))
-            btn_rename.setEnabled(not is_system_group)
-            self.action_layout.addWidget(btn_rename)
-            btn_delete = QPushButton("🗑 删除空分组")
-            btn_delete.clicked.connect(lambda: self.delete_scene_pool_group(scene_group))
-            btn_delete.setEnabled(not is_system_group)
-            self.action_layout.addWidget(btn_delete)
         elif isinstance(data, dict) and data.get("kind") == "scene_pool_scene_group":
             scene_group = data.get("scene_group")
             scene_name = data.get("scene_name", "")
-            is_virtual_group = bool(data.get("virtual")) or self._is_virtual_all_scene_group(scene_group)
             first_scene = self._first_pool_scene_resolution(scene_group, scene_name)
-            action_scene_group = self._find_scene_pool_group_for_scene(first_scene) if first_scene else None
             self.current_stage = self._find_stage_for_scene(first_scene) if first_scene else None
             self.set_current_work_stage(self.current_stage)
             self.current_scene = first_scene
@@ -3691,109 +3608,19 @@ class AutoStudioWindow(QMainWindow):
                 self.show_scene_image(first_scene)
             else:
                 self.clear_scene_display()
-            lbl = QLabel(f"池内场景: {scene_name}")
-            self.action_layout.addWidget(lbl)
-            btn_cap = QPushButton("📷 抓图")
-            btn_cap.clicked.connect(
-                lambda: self.capture_image(first_scene, scene_group=action_scene_group)
-            )
-            btn_cap.setEnabled(bool(first_scene and action_scene_group))
-            self.action_layout.addWidget(btn_cap)
-            btn_import = QPushButton("🖼 导入图片")
-            btn_import.clicked.connect(
-                lambda: self.import_image(first_scene, scene_group=action_scene_group)
-            )
-            btn_import.setEnabled(bool(first_scene and action_scene_group))
-            self.action_layout.addWidget(btn_import)
-            btn_manage_stages = QPushButton("管理阶段")
-            btn_manage_stages.clicked.connect(lambda: self.manage_pool_scene_stages(scene_group, scene_name))
-            btn_manage_stages.setEnabled(bool(self.project and self.project.stages and first_scene))
-            self.action_layout.addWidget(btn_manage_stages)
-            btn_rename = QPushButton("✏️ 修改场景名称")
-            btn_rename.clicked.connect(lambda: self.rename_pool_scene_group(scene_group, scene_name))
-            btn_rename.setEnabled(bool(first_scene))
-            self.action_layout.addWidget(btn_rename)
-            btn_move = QPushButton("移动到其他分组")
-            btn_move.clicked.connect(lambda: self.move_pool_scene_group(scene_group, scene_name))
-            btn_move.setEnabled(not is_virtual_group)
-            self.action_layout.addWidget(btn_move)
-            btn_delete = QPushButton("🗑 删除池内场景")
-            btn_delete.clicked.connect(lambda: self.delete_pool_scene_group(scene_group, scene_name))
-            btn_delete.setEnabled(bool(first_scene))
-            self.action_layout.addWidget(btn_delete)
         elif isinstance(data, dict) and data.get("kind") == "scene_group":
             self.current_stage = data.get("stage")
             self.set_current_work_stage(self.current_stage)
-            scene_name = data.get("scene_name", "")
-            first_scene = self._first_stage_scene_resolution(self.current_stage, scene_name)
-            action_scene_group = self._find_scene_pool_group_for_scene(first_scene) if first_scene else None
+            first_scene = self._first_stage_scene_resolution(
+                self.current_stage,
+                data.get("scene_name", ""),
+            )
             self.current_scene = first_scene
             if first_scene:
                 self.show_scene_image(first_scene)
             else:
                 self.clear_scene_display()
-            lbl = QLabel(f"当前场景: {self._stage_scene_display_name(self.current_stage, scene_name)}")
-            self.action_layout.addWidget(lbl)
-            btn_cap = QPushButton("📷 抓图")
-            btn_cap.clicked.connect(
-                lambda: self.capture_image(
-                    first_scene,
-                    scene_group=action_scene_group,
-                    stage_context=self.current_stage,
-                )
-            )
-            btn_cap.setEnabled(bool(first_scene))
-            self.action_layout.addWidget(btn_cap)
-            btn_import = QPushButton("🖼 导入图片")
-            btn_import.clicked.connect(
-                lambda: self.import_image(
-                    first_scene,
-                    scene_group=action_scene_group,
-                    stage_context=self.current_stage,
-                )
-            )
-            btn_import.setEnabled(bool(first_scene))
-            self.action_layout.addWidget(btn_import)
-            btn_manage_stages = QPushButton("管理场景所在阶段")
-            btn_manage_stages.clicked.connect(
-                lambda: self.manage_pool_scene_stages(action_scene_group, scene_name)
-            )
-            btn_manage_stages.setEnabled(bool(action_scene_group and self.project and self.project.stages))
-            self.action_layout.addWidget(btn_manage_stages)
-            btn_rename = QPushButton("✏️ 修改场景名称（同步所有阶段）")
-            btn_rename.clicked.connect(
-                lambda: self.rename_pool_scene_group(action_scene_group, scene_name)
-            )
-            btn_rename.setEnabled(bool(action_scene_group))
-            self.action_layout.addWidget(btn_rename)
-            btn_move = QPushButton("移动到其他场景分组")
-            btn_move.clicked.connect(
-                lambda: self.move_pool_scene_group(action_scene_group, scene_name)
-            )
-            btn_move.setEnabled(bool(action_scene_group))
-            self.action_layout.addWidget(btn_move)
-            btn_delete_pool = QPushButton("🗑 从场景池删除（同步所有阶段）")
-            btn_delete_pool.clicked.connect(
-                lambda: self.delete_pool_scene_group(action_scene_group, scene_name)
-            )
-            btn_delete_pool.setEnabled(bool(action_scene_group))
-            self.action_layout.addWidget(btn_delete_pool)
-            btn_copy_resolution = QPushButton("复制控件到不同分辨率")
-            btn_copy_resolution.clicked.connect(
-                lambda: self.copy_scene_to_different_resolution(
-                    self.current_stage,
-                    scene_name,
-                    first_scene,
-                    scene_group=action_scene_group,
-                )
-            )
-            btn_copy_resolution.setEnabled(bool(action_scene_group))
-            self.action_layout.addWidget(btn_copy_resolution)
-            btn_delete = QPushButton("从当前阶段移除")
-            btn_delete.clicked.connect(lambda: self.delete_scene_group(self.current_stage, scene_name))
-            self.action_layout.addWidget(btn_delete)
         elif isinstance(data, SceneData):
-            is_pool_scene = item.treeWidget() is getattr(self, "scene_pool_tree", None)
             parent_data = item.parent().data(0, Qt.ItemDataRole.UserRole) if item.parent() else None
             self.current_stage = (
                 parent_data.get("stage")
@@ -3803,176 +3630,22 @@ class AutoStudioWindow(QMainWindow):
             self.set_current_work_stage(self.current_stage)
             self.current_scene = data
             self.refresh_scene_display(data)
-            if is_pool_scene:
-                action_scene_group = self._find_scene_pool_group_for_scene(data)
-                btn_cap = QPushButton("📷 抓图")
-                btn_cap.clicked.connect(
-                    lambda: self.capture_image(data, scene_group=action_scene_group)
-                )
-                btn_import = QPushButton("🖼 导入图片")
-                btn_import.clicked.connect(
-                    lambda: self.import_image(data, scene_group=action_scene_group)
-                )
-                btn_area = QPushButton("🟦 添加区域 (Area)")
-                btn_area.clicked.connect(lambda: self.prepare_draw('area'))
-                btn_ctrl = QPushButton("🟥 添加控点 (Control)")
-                btn_ctrl.clicked.connect(lambda: self.prepare_draw('control'))
-                btn_sp_area = QPushButton("🟧 添加特殊区域 (Special)")
-                btn_sp_area.clicked.connect(lambda: self.prepare_draw('special_area'))
-                self.action_layout.addWidget(btn_cap)
-                self.action_layout.addWidget(btn_import)
-                self.action_layout.addWidget(btn_area)
-                self.action_layout.addWidget(btn_ctrl)
-                self.action_layout.addWidget(btn_sp_area)
-                btn_copy_resolution = QPushButton("复制控件到不同分辨率")
-                btn_copy_resolution.clicked.connect(
-                    lambda: self.copy_scene_to_different_resolution(
-                        None,
-                        data.name,
-                        data,
-                        scene_group=self._find_scene_pool_group_for_scene(data),
-                    )
-                )
-                self.action_layout.addWidget(btn_copy_resolution)
-                btn_copy_scene = QPushButton("📋 复制场景")
-                btn_copy_scene.clicked.connect(lambda: self.copy_scene(data))
-                self.action_layout.addWidget(btn_copy_scene)
-            else:
-                action_scene_group = self._find_scene_pool_group_for_scene(data)
-                lbl = QLabel("当前为阶段引用；下面对场景本体的修改会同步到所有引用该场景的阶段。")
-                self.action_layout.addWidget(lbl)
-                btn_cap = QPushButton("📷 抓图")
-                btn_cap.clicked.connect(
-                    lambda: self.capture_image(
-                        data,
-                        scene_group=action_scene_group,
-                        stage_context=self.current_stage,
-                    )
-                )
-                btn_cap.setEnabled(bool(action_scene_group))
-                self.action_layout.addWidget(btn_cap)
-                btn_import = QPushButton("🖼 导入图片")
-                btn_import.clicked.connect(
-                    lambda: self.import_image(
-                        data,
-                        scene_group=action_scene_group,
-                        stage_context=self.current_stage,
-                    )
-                )
-                btn_import.setEnabled(bool(action_scene_group))
-                self.action_layout.addWidget(btn_import)
-                btn_area = QPushButton("🟦 添加区域 (Area)")
-                btn_area.clicked.connect(lambda: self.prepare_draw('area'))
-                self.action_layout.addWidget(btn_area)
-                btn_ctrl = QPushButton("🟥 添加控点 (Control)")
-                btn_ctrl.clicked.connect(lambda: self.prepare_draw('control'))
-                self.action_layout.addWidget(btn_ctrl)
-                btn_sp_area = QPushButton("🟧 添加特殊区域 (Special)")
-                btn_sp_area.clicked.connect(lambda: self.prepare_draw('special_area'))
-                self.action_layout.addWidget(btn_sp_area)
-                btn_manage_stages = QPushButton("管理场景所在阶段")
-                btn_manage_stages.clicked.connect(
-                    lambda: self.manage_pool_scene_stages(action_scene_group, data.name)
-                )
-                btn_manage_stages.setEnabled(bool(action_scene_group and self.project and self.project.stages))
-                self.action_layout.addWidget(btn_manage_stages)
-                btn_rename = QPushButton("✏️ 修改场景名称（同步所有阶段）")
-                btn_rename.clicked.connect(
-                    lambda: self.rename_pool_scene_group(action_scene_group, data.name)
-                )
-                btn_rename.setEnabled(bool(action_scene_group))
-                self.action_layout.addWidget(btn_rename)
-                btn_move = QPushButton("移动到其他场景分组")
-                btn_move.clicked.connect(
-                    lambda: self.move_pool_scene_group(action_scene_group, data.name)
-                )
-                btn_move.setEnabled(bool(action_scene_group))
-                self.action_layout.addWidget(btn_move)
-                btn_delete_pool = QPushButton("🗑 从场景池删除（同步所有阶段）")
-                btn_delete_pool.clicked.connect(
-                    lambda: self.delete_pool_scene_group(action_scene_group, data.name)
-                )
-                btn_delete_pool.setEnabled(bool(action_scene_group))
-                self.action_layout.addWidget(btn_delete_pool)
-                btn_copy_scene = QPushButton("📋 复制场景")
-                btn_copy_scene.clicked.connect(lambda: self.copy_scene(data))
-                self.action_layout.addWidget(btn_copy_scene)
-                btn_copy_resolution = QPushButton("复制控件到不同分辨率")
-                btn_copy_resolution.clicked.connect(
-                    lambda: self.copy_scene_to_different_resolution(
-                        self.current_stage,
-                        data.name,
-                        data,
-                        scene_group=action_scene_group,
-                    )
-                )
-                btn_copy_resolution.setEnabled(bool(action_scene_group))
-                self.action_layout.addWidget(btn_copy_resolution)
-                btn_remove_reference = QPushButton("从当前阶段移除")
-                btn_remove_reference.clicked.connect(
-                    lambda: self.delete_scene_group(self.current_stage, data.name)
-                )
-                self.action_layout.addWidget(btn_remove_reference)
         elif isinstance(data, ItemData):
             scene_node = item.parent()
             self.current_scene = scene_node.data(0, Qt.ItemDataRole.UserRole) if scene_node else None
             self.current_stage = self._find_stage_for_scene(self.current_scene)
             self.set_current_work_stage(self.current_stage)
-            # 同一场景下只重绘标注，避免点击时触发自动适配
             if self.canvas.active_scene_data is self.current_scene and self.canvas.current_pixmap:
                 self.canvas.redraw_overlays(self.current_scene)
             else:
                 self.show_scene_image(self.current_scene)
-            # 区域/控点操作
-            lbl = QLabel(f"当前选中: {data.name}")
-            self.action_layout.addWidget(lbl)
-            if data.item_type == 'area':
-                btn_scope = QPushButton("🔍 设置搜索范围 (Search Scope)")
-                btn_scope.clicked.connect(lambda: self.prepare_draw('search_scope', data))
-                self.action_layout.addWidget(btn_scope)
-                btn_edit_area = QPushButton("✏️ 修改区域位置")
-                btn_edit_area.clicked.connect(lambda: self.prepare_draw('edit_area', data))
-                self.action_layout.addWidget(btn_edit_area)
-                btn_rename = QPushButton("✏️ 修改区域名称")
-                btn_rename.clicked.connect(lambda: self.rename_item(data))
-                self.action_layout.addWidget(btn_rename)
-            elif data.item_type == 'special_area':
-                btn_set_range = QPushButton("📐 设置区域范围 (Normalized)")
-                btn_set_range.clicked.connect(lambda: self.set_special_area_range(data))
-                self.action_layout.addWidget(btn_set_range)
-                btn_edit_area = QPushButton("✏️ 修改区域位置")
-                btn_edit_area.clicked.connect(lambda: self.prepare_draw('edit_special_area', data))
-                self.action_layout.addWidget(btn_edit_area)
-                btn_copy_pos = QPushButton("📋 复制区域坐标")
-                btn_copy_pos.clicked.connect(lambda: self.copy_special_area_coords(data))
-                self.action_layout.addWidget(btn_copy_pos)
-                btn_rename = QPushButton("✏️ 修改区域名称")
-                btn_rename.clicked.connect(lambda: self.rename_item(data))
-                self.action_layout.addWidget(btn_rename)
-            else:
-                positioning_text = "绝对定位"
-                if data.positioning == "relative" and data.relative_to:
-                    positioning_text = f"相对定位（区域：{data.relative_to}）"
-                lbl_positioning = QLabel(f"定位方式: {positioning_text}")
-                self.action_layout.addWidget(lbl_positioning)
-                btn_positioning = QPushButton("📍 设置定位方式")
-                btn_positioning.clicked.connect(lambda: self.set_control_positioning(data))
-                self.action_layout.addWidget(btn_positioning)
-                btn_edit_ctrl = QPushButton("✏️ 修改控点位置")
-                btn_edit_ctrl.clicked.connect(lambda: self.prepare_draw('edit_control', data))
-                self.action_layout.addWidget(btn_edit_ctrl)
-                btn_rename = QPushButton("✏️ 修改控点名称")
-                btn_rename.clicked.connect(lambda: self.rename_item(data))
-                self.action_layout.addWidget(btn_rename)
-            btn_vis = QPushButton("切换显示/隐藏")
-            btn_vis.clicked.connect(lambda: self.toggle_visibility(data))
-            self.action_layout.addWidget(btn_vis)
-            btn_delete = QPushButton("🗑 删除")
-            btn_delete.clicked.connect(lambda: self.delete_selected_item(data))
-            self.action_layout.addWidget(btn_delete)
-    def clear_action_panel(self):
-        for i in reversed(range(self.action_layout.count())):
-            self.action_layout.itemAt(i).widget().setParent(None)
+
+    # --- 树交互：单击只选中和预览；所有修改操作收进右键菜单。 ---
+    def on_tree_click(self, item, column):
+        self._active_tree_widget = item.treeWidget()
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        self._select_tree_data(item, data)
+
     def clear_scene_display(self):
         self.canvas.scene.clear()
         self.canvas.current_pixmap = None
@@ -4036,18 +3709,97 @@ class AutoStudioWindow(QMainWindow):
                 self.tree_tabs.setCurrentWidget(self.tree)
             target_tree.setCurrentItem(target_item)
             self.on_tree_click(target_item, 0)
+    def _copy_item_name(self, data: ItemData):
+        if data.item_type in ('area', 'special_area', 'control'):
+            QGuiApplication.clipboard().setText(data.name)
+
+    def _add_item_context_actions(self, menu, item_data: ItemData, delete_callback):
+        if item_data.item_type == 'area':
+            action_scope = QAction("🔍 设置搜索范围", self)
+            action_scope.triggered.connect(lambda: self.prepare_draw('search_scope', item_data))
+            menu.addAction(action_scope)
+            action_edit = QAction("✏️ 修改区域位置", self)
+            action_edit.triggered.connect(lambda: self.prepare_draw('edit_area', item_data))
+            menu.addAction(action_edit)
+            action_rename = QAction("✏️ 修改区域名称", self)
+            action_rename.triggered.connect(lambda: self.rename_item(item_data))
+            menu.addAction(action_rename)
+        elif item_data.item_type == 'special_area':
+            action_set_range = QAction("📐 设置区域范围 (Normalized)", self)
+            action_set_range.triggered.connect(lambda: self.set_special_area_range(item_data))
+            menu.addAction(action_set_range)
+            action_edit = QAction("✏️ 修改区域位置", self)
+            action_edit.triggered.connect(lambda: self.prepare_draw('edit_special_area', item_data))
+            menu.addAction(action_edit)
+            action_copy = QAction("📋 复制区域坐标", self)
+            action_copy.triggered.connect(lambda: self.copy_special_area_coords(item_data))
+            menu.addAction(action_copy)
+            action_rename = QAction("✏️ 修改区域名称", self)
+            action_rename.triggered.connect(lambda: self.rename_item(item_data))
+            menu.addAction(action_rename)
+        elif item_data.item_type == 'control':
+            action_positioning = QAction("📍 设置定位方式", self)
+            action_positioning.triggered.connect(lambda: self.set_control_positioning(item_data))
+            menu.addAction(action_positioning)
+            action_edit = QAction("✏️ 修改控点位置", self)
+            action_edit.triggered.connect(lambda: self.prepare_draw('edit_control', item_data))
+            menu.addAction(action_edit)
+            action_rename = QAction("✏️ 修改控点名称", self)
+            action_rename.triggered.connect(lambda: self.rename_item(item_data))
+            menu.addAction(action_rename)
+        action_vis = QAction("切换显示/隐藏", self)
+        action_vis.triggered.connect(lambda: self.toggle_visibility(item_data))
+        menu.addAction(action_vis)
+        copy_name_action = QAction("复制名称", self)
+        copy_name_action.triggered.connect(lambda: self._copy_item_name(item_data))
+        menu.addAction(copy_name_action)
+        action_delete = QAction("🗑 删除", self)
+        action_delete.triggered.connect(delete_callback)
+        menu.addAction(action_delete)
+
     def open_context_menu(self, position, tree=None):
         tree = tree or self.tree
         item = tree.itemAt(position)
         if not item: return
         self._active_tree_widget = tree
         data = item.data(0, Qt.ItemDataRole.UserRole)
+        tree.setCurrentItem(item)
+        self._select_tree_data(item, data)
         menu = QMenu()
-        if isinstance(data, StageData):
+        if isinstance(data, ProjectData):
+            add_stage_action = QAction("新建阶段", self)
+            add_stage_action.triggered.connect(self.add_stage)
+            menu.addAction(add_stage_action)
+            menu.addSeparator()
+        elif isinstance(data, StageData):
+            add_scene_action = QAction("新建场景", self)
+            add_scene_action.triggered.connect(lambda: self.add_scene(data))
+            menu.addAction(add_scene_action)
+            manage_scene_action = QAction("场景管理", self)
+            manage_scene_action.setEnabled(bool(self.project and any(group.scenes for group in self.project.scene_groups)))
+            manage_scene_action.triggered.connect(lambda: self.manage_stage_scenes(data))
+            menu.addAction(manage_scene_action)
             paste_action = QAction("📋 粘贴场景", self)
             paste_action.setEnabled(self.scene_clipboard is not None)
             paste_action.triggered.connect(lambda: self.paste_scene_to_stage(data))
             menu.addAction(paste_action)
+            if self.project and len(self.project.stages) > 1:
+                move_up_action = QAction("⬆ 上移阶段", self)
+                move_up_action.setEnabled(self.project.stages.index(data) > 0)
+                move_up_action.triggered.connect(lambda: self.move_stage(data, -1))
+                menu.addAction(move_up_action)
+                move_down_action = QAction("⬇ 下移阶段", self)
+                move_down_action.setEnabled(self.project.stages.index(data) < len(self.project.stages) - 1)
+                move_down_action.triggered.connect(lambda: self.move_stage(data, 1))
+                menu.addAction(move_down_action)
+            rename_action = QAction("✏️ 修改阶段名称", self)
+            rename_action.triggered.connect(lambda: self.rename_stage(data))
+            menu.addAction(rename_action)
+            menu.addSeparator()
+        elif isinstance(data, dict) and data.get("kind") == "scene_pool_root":
+            add_group_action = QAction("新建场景分组", self)
+            add_group_action.triggered.connect(self.add_scene_pool_group)
+            menu.addAction(add_group_action)
             menu.addSeparator()
         elif isinstance(data, dict) and data.get("kind") == "scene_pool_scene_group":
             scene_group = data.get("scene_group")
@@ -4092,6 +3844,11 @@ class AutoStudioWindow(QMainWindow):
         elif isinstance(data, dict) and data.get("kind") == "scene_pool_group":
             scene_group = data.get("scene_group")
             is_virtual_group = bool(data.get("virtual")) or self._is_virtual_all_scene_group(scene_group)
+            is_system_group = bool(scene_group and scene_group.name in SYSTEM_SCENE_GROUP_NAMES)
+            add_scene_action = QAction("新建池内场景", self)
+            add_scene_action.setEnabled(bool(scene_group))
+            add_scene_action.triggered.connect(lambda: self.add_pool_scene(scene_group))
+            menu.addAction(add_scene_action)
             duplicate_items_action = QAction("重复标注检查", self)
             duplicate_items_action.setEnabled(bool(scene_group and scene_group.scenes))
             duplicate_items_action.triggered.connect(lambda: self.show_scene_pool_group_duplicate_items(scene_group))
@@ -4104,6 +3861,14 @@ class AutoStudioWindow(QMainWindow):
             ))
             batch_action.triggered.connect(lambda: self.manage_scene_pool_group_batch(scene_group))
             menu.addAction(batch_action)
+            rename_action = QAction("✏️ 修改分组名称", self)
+            rename_action.setEnabled(not is_system_group)
+            rename_action.triggered.connect(lambda: self.rename_scene_pool_group(scene_group))
+            menu.addAction(rename_action)
+            delete_action = QAction("🗑 删除空分组", self)
+            delete_action.setEnabled(not is_system_group)
+            delete_action.triggered.connect(lambda: self.delete_scene_pool_group(scene_group))
+            menu.addAction(delete_action)
             menu.addSeparator()
         elif isinstance(data, dict) and data.get("kind") == "scene_group":
             stage = data.get("stage")
@@ -4179,6 +3944,15 @@ class AutoStudioWindow(QMainWindow):
                     lambda: self.import_image(data, scene_group=action_scene_group)
                 )
                 menu.addAction(import_image_action)
+                add_area_action = QAction("🟦 添加区域 (Area)", self)
+                add_area_action.triggered.connect(lambda: self.prepare_draw('area'))
+                menu.addAction(add_area_action)
+                add_control_action = QAction("🟥 添加控点 (Control)", self)
+                add_control_action.triggered.connect(lambda: self.prepare_draw('control'))
+                menu.addAction(add_control_action)
+                add_special_area_action = QAction("🟧 添加特殊区域 (Special)", self)
+                add_special_area_action.triggered.connect(lambda: self.prepare_draw('special_area'))
+                menu.addAction(add_special_area_action)
                 menu.addSeparator()
                 copy_action = QAction("复制场景", self)
                 copy_action.triggered.connect(lambda: self.copy_scene(data))
@@ -4220,6 +3994,15 @@ class AutoStudioWindow(QMainWindow):
                     )
                 )
                 menu.addAction(import_image_action)
+                add_area_action = QAction("🟦 添加区域 (Area)", self)
+                add_area_action.triggered.connect(lambda: self.prepare_draw('area'))
+                menu.addAction(add_area_action)
+                add_control_action = QAction("🟥 添加控点 (Control)", self)
+                add_control_action.triggered.connect(lambda: self.prepare_draw('control'))
+                menu.addAction(add_control_action)
+                add_special_area_action = QAction("🟧 添加特殊区域 (Special)", self)
+                add_special_area_action.triggered.connect(lambda: self.prepare_draw('special_area'))
+                menu.addAction(add_special_area_action)
                 copy_action = QAction("复制场景", self)
                 copy_action.triggered.connect(lambda: self.copy_scene(data))
                 menu.addAction(copy_action)
@@ -4252,13 +4035,25 @@ class AutoStudioWindow(QMainWindow):
                     lambda: self.delete_pool_scene_group(action_scene_group, data.name)
                 )
                 menu.addAction(delete_pool_action)
+                manage_stages_action = QAction("管理场景所在阶段", self)
+                manage_stages_action.setEnabled(bool(action_scene_group and self.project and self.project.stages))
+                manage_stages_action.triggered.connect(
+                    lambda: self.manage_pool_scene_stages(action_scene_group, data.name)
+                )
+                menu.addAction(manage_stages_action)
+                remove_reference_action = QAction("从当前阶段移除", self)
+                remove_reference_action.triggered.connect(
+                    lambda: self.delete_scene_group(stage_context, data.name)
+                )
+                menu.addAction(remove_reference_action)
                 menu.addSeparator()
-        if isinstance(data, ItemData):  # 添加节点复制名称按钮
-            if data.item_type in ('area', 'special_area', 'control'):
-                copy_name_action = QAction("复制名称", self)
-                copy_name_action.triggered.connect(lambda: QGuiApplication.clipboard().setText(data.name))
-                menu.addAction(copy_name_action)
-        if isinstance(data, (StageData, ItemData)):
+        if isinstance(data, ItemData):
+            self._add_item_context_actions(
+                menu,
+                data,
+                lambda: self.delete_item(item, data),
+            )
+        elif isinstance(data, StageData):
             del_action = QAction("删除", self)
             del_action.triggered.connect(lambda: self.delete_item(item, data))
             menu.addAction(del_action)
@@ -4267,45 +4062,11 @@ class AutoStudioWindow(QMainWindow):
         if not isinstance(item_data, ItemData):
             return
         menu = QMenu(self)
-        if item_data.item_type == 'area':
-            action_scope = QAction("🔍 设置搜索范围", self)
-            action_scope.triggered.connect(lambda: self.prepare_draw('search_scope', item_data))
-            menu.addAction(action_scope)
-            action_edit = QAction("✏️ 修改区域位置", self)
-            action_edit.triggered.connect(lambda: self.prepare_draw('edit_area', item_data))
-            menu.addAction(action_edit)
-            action_rename = QAction("✏️ 修改区域名称", self)
-            action_rename.triggered.connect(lambda: self.rename_item(item_data))
-            menu.addAction(action_rename)
-        elif item_data.item_type == 'special_area':
-            action_set_range = QAction("📐 设置区域范围 (Normalized)", self)
-            action_set_range.triggered.connect(lambda: self.set_special_area_range(item_data))
-            menu.addAction(action_set_range)
-            action_edit = QAction("✏️ 修改区域位置", self)
-            action_edit.triggered.connect(lambda: self.prepare_draw('edit_special_area', item_data))
-            menu.addAction(action_edit)
-            action_copy = QAction("📋 复制区域坐标", self)
-            action_copy.triggered.connect(lambda: self.copy_special_area_coords(item_data))
-            menu.addAction(action_copy)
-            action_rename = QAction("✏️ 修改区域名称", self)
-            action_rename.triggered.connect(lambda: self.rename_item(item_data))
-            menu.addAction(action_rename)
-        elif item_data.item_type == 'control':
-            action_positioning = QAction("📍 设置定位方式", self)
-            action_positioning.triggered.connect(lambda: self.set_control_positioning(item_data))
-            menu.addAction(action_positioning)
-            action_edit = QAction("✏️ 修改控点位置", self)
-            action_edit.triggered.connect(lambda: self.prepare_draw('edit_control', item_data))
-            menu.addAction(action_edit)
-            action_rename = QAction("✏️ 修改控点名称", self)
-            action_rename.triggered.connect(lambda: self.rename_item(item_data))
-            menu.addAction(action_rename)
-        action_vis = QAction("切换显示/隐藏", self)
-        action_vis.triggered.connect(lambda: self.toggle_visibility(item_data))
-        menu.addAction(action_vis)
-        action_delete = QAction("🗑 删除", self)
-        action_delete.triggered.connect(lambda: self.delete_selected_item(item_data))
-        menu.addAction(action_delete)
+        self._add_item_context_actions(
+            menu,
+            item_data,
+            lambda: self.delete_selected_item(item_data),
+        )
         menu.exec(global_pos)
     def show_canvas_context_menu(self, global_pos):
         menu = QMenu(self)
@@ -6249,7 +6010,6 @@ class AutoStudioWindow(QMainWindow):
                 self.select_data_in_tree(first_scene)
             else:
                 self.select_data_in_tree(first_stage)
-        self.btn_add_stage.setEnabled(True)
         self.status_label.setText(f"工程 {project_name} 已导入。")
         return project_name
 

@@ -3429,8 +3429,8 @@ class LauncherWindow(QWidget):
                 QPushButton#outputLogFilterButton {
                     padding: 2px 3px;
                     min-height: 0px;
-                    max-height: 26px;
-                    font-size: 12px;
+                    max-height: 32px;
+                    font-size: 14px;
                 }
                 QPushButton[primaryButton="true"] {
                     background: #2563eb;
@@ -3712,8 +3712,8 @@ class LauncherWindow(QWidget):
             QPushButton#outputLogFilterButton {
                 padding: 2px 3px;
                 min-height: 0px;
-                max-height: 26px;
-                font-size: 12px;
+                max-height: 32px;
+                font-size: 14px;
             }
             QPushButton[primaryButton="true"] {
                 background: #2f80ed;

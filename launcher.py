@@ -1133,6 +1133,34 @@ def format_preview_info_item_value(value, max_length: int = PREVIEW_INFO_VALUE_M
     return str(compact_value)
 
 
+def format_preview_info_detail(value) -> str:
+    """Format one selected item's full frame value without truncating it."""
+    candidate = value
+    if isinstance(candidate, str):
+        candidate_text = candidate.strip()
+        if not candidate_text:
+            return "(空字符串)"
+        if candidate_text.startswith(("[", "{", "(")):
+            try:
+                candidate = json.loads(candidate_text)
+            except (json.JSONDecodeError, TypeError):
+                try:
+                    candidate = ast.literal_eval(candidate_text)
+                except (SyntaxError, ValueError):
+                    return candidate
+        else:
+            return candidate
+
+    if isinstance(candidate, (list, tuple, dict)):
+        return json.dumps(
+            candidate,
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+    return str(candidate)
+
+
 def resolve_preview_group_filter(stage_entry, group_name: str):
     """Match the runtime stage-group selection used by StageLogicController."""
     group_name = str(group_name or "").strip()
@@ -2787,7 +2815,7 @@ def resolve_preview_stage_info_entries(
                 entries.append(
                     {
                         "key": row_key,
-                        "info_key": info_key if item_type != "points" else "",
+                        "info_key": info_key,
                         "item_type": item_type,
                         "type": type_label,
                         "name": f"{scene_name}/{item_name}",
@@ -3199,9 +3227,23 @@ class LauncherWindow(QWidget):
             QSizePolicy.Policy.Preferred,
         )
         preview_template_layout.addWidget(self.preview_info_template_label)
+        preview_detail_group = QGroupBox("详细信息")
+        preview_detail_layout = QVBoxLayout(preview_detail_group)
+        preview_detail_layout.setContentsMargins(8, 8, 8, 8)
+        self.preview_info_detail_edit = QPlainTextEdit()
+        self.preview_info_detail_edit.setObjectName("previewInfoDetail")
+        self.preview_info_detail_edit.setReadOnly(True)
+        self.preview_info_detail_edit.setLineWrapMode(
+            QPlainTextEdit.LineWrapMode.NoWrap
+        )
+        self.preview_info_detail_edit.setMinimumHeight(90)
+        self.preview_info_detail_edit.setMaximumHeight(150)
+        self.preview_info_detail_edit.setPlainText("选中区域、特殊区域或控点后查看当前帧完整信息")
+        preview_detail_layout.addWidget(self.preview_info_detail_edit)
         preview_info_layout.addWidget(preview_info_header, 0)
         preview_info_layout.addWidget(self.preview_info_tree, 1)
         preview_info_layout.addWidget(preview_template_group, 0)
+        preview_info_layout.addWidget(preview_detail_group, 0)
 
         self._build_ui()
         self._bind_signals()
@@ -3440,6 +3482,7 @@ class LauncherWindow(QWidget):
                     color: #64748b;
                 }
                 QPlainTextEdit#outputConsole,
+                QPlainTextEdit#previewInfoDetail,
                 QTreeWidget#previewInfo {
                     background: #fbfdff;
                     border: 1px solid #d3dfec;
@@ -3716,6 +3759,7 @@ class LauncherWindow(QWidget):
                 color: #94a3b8;
             }
             QPlainTextEdit#outputConsole,
+            QPlainTextEdit#previewInfoDetail,
             QTreeWidget#previewInfo {
                 background: #060912;
                 border: 1px solid #273142;
@@ -4577,6 +4621,38 @@ class LauncherWindow(QWidget):
         self.preview_info_template_label.setText(message)
         self.preview_info_template_label.setToolTip("")
 
+    def _reset_preview_info_detail(self, message: str):
+        self.preview_info_detail_edit.setPlainText(message)
+
+    def _refresh_preview_info_detail(self, payload=None):
+        selected_items = self.preview_info_tree.selectedItems()
+        if not selected_items:
+            self._reset_preview_info_detail(
+                "选中区域、特殊区域或控点后查看当前帧完整信息"
+            )
+            return
+
+        item = selected_items[0]
+        row_key = str(item.data(0, Qt.ItemDataRole.UserRole) or "")
+        info_key = self.preview_info_result_keys.get(row_key, "")
+        item_type = item.text(0).strip() or "条目"
+        item_name = item.text(1).strip() or row_key or "未命名"
+        payload = payload if isinstance(payload, dict) else self.latest_preview_payload
+        info_payload = (
+            payload.get("info")
+            if isinstance(payload, dict) and isinstance(payload.get("info"), dict)
+            else {}
+        )
+        if not info_key or info_key not in info_payload:
+            detail_text = f"{item_type}：{item_name}\n\n当前帧无该项信息"
+        else:
+            full_value = format_preview_info_detail(info_payload[info_key])
+            detail_text = f"{item_type}：{item_name}\n帧信息：\n{full_value}"
+
+        if self.preview_info_detail_edit.toPlainText() != detail_text:
+            self.preview_info_detail_edit.setPlainText(detail_text)
+            self.preview_info_detail_edit.moveCursor(QTextCursor.MoveOperation.Start)
+
     def _render_preview_info_template(self):
         label = getattr(self, "preview_info_template_label", None)
         pixmap = getattr(self, "preview_info_template_pixmap", None)
@@ -4594,6 +4670,7 @@ class LauncherWindow(QWidget):
         label.setPixmap(scaled)
 
     def _on_preview_info_selection_changed(self):
+        self._refresh_preview_info_detail()
         selected_items = self.preview_info_tree.selectedItems()
         if not selected_items:
             self._reset_preview_info_template("点击特殊区域或区域查看模板图片")
@@ -5690,6 +5767,9 @@ class LauncherWindow(QWidget):
         self.preview_info_stage_label.setText("当前阶段：等待运行")
         self.preview_info_tree.clear()
         self._reset_preview_info_template("点击特殊区域或区域查看模板图片")
+        self._reset_preview_info_detail(
+            "选中区域、特殊区域或控点后查看当前帧完整信息"
+        )
 
         preview_dir.mkdir(parents=True, exist_ok=True)
         for path in preview_dir.iterdir():
@@ -5878,6 +5958,9 @@ class LauncherWindow(QWidget):
         self.preview_info_result_keys.clear()
         self.preview_info_template_paths.clear()
         self._reset_preview_info_template("点击特殊区域或区域查看模板图片")
+        self._reset_preview_info_detail(
+            "选中区域、特殊区域或控点后查看当前帧完整信息"
+        )
         self.preview_info_stage_name = stage_name
 
         project_info = self._load_preview_project_info(self._get_preview_project_case())
@@ -5974,6 +6057,7 @@ class LauncherWindow(QWidget):
         if not stage_changed:
             vertical_scroll.setValue(vertical_value)
             horizontal_scroll.setValue(horizontal_value)
+        self._refresh_preview_info_detail(payload)
 
     def _is_preview_info_item_checked(
         self,

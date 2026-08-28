@@ -189,7 +189,7 @@ class DrawingOverlay(QGraphicsRectItem):
         painter.drawText(text_pos, self.label)
 class ImageCanvas(QGraphicsView):
     DRAW_AUTO_PAN_MARGIN = 32
-    DRAW_AUTO_PAN_MAX_STEP = 8
+    DRAW_AUTO_PAN_MAX_STEP = 4
 
     def __init__(self, main_window):
         super().__init__()

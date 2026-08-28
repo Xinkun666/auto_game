@@ -27,7 +27,6 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -3172,6 +3171,7 @@ class LauncherWindow(QWidget):
         self.output_filter_buttons: dict[str, QPushButton] = {}
         for filter_name in LOG_FILTERS:
             button = QPushButton(filter_name)
+            button.setObjectName("outputLogFilterButton")
             button.setCheckable(True)
             button.setProperty("toggleButton", True)
             button.setChecked(filter_name == self.output_log_filter)
@@ -3425,6 +3425,12 @@ class LauncherWindow(QWidget):
                     background: #eaf4ff;
                     border-color: #7bb5f4;
                     color: #1d4ed8;
+                }
+                QPushButton#outputLogFilterButton {
+                    padding: 2px 3px;
+                    min-height: 0px;
+                    max-height: 26px;
+                    font-size: 10px;
                 }
                 QPushButton[primaryButton="true"] {
                     background: #2563eb;
@@ -3702,6 +3708,12 @@ class LauncherWindow(QWidget):
                 background: #162334;
                 border-color: #2f80ed;
                 color: #d9ecff;
+            }
+            QPushButton#outputLogFilterButton {
+                padding: 2px 3px;
+                min-height: 0px;
+                max-height: 26px;
+                font-size: 10px;
             }
             QPushButton[primaryButton="true"] {
                 background: #2f80ed;
@@ -4065,17 +4077,8 @@ class LauncherWindow(QWidget):
         log_filter_layout.setContentsMargins(0, 0, 0, 0)
         log_filter_layout.setSpacing(6)
         log_filter_layout.addWidget(QLabel("显示"))
-        log_filter_grid = QGridLayout()
-        log_filter_grid.setContentsMargins(0, 0, 0, 0)
-        log_filter_grid.setHorizontalSpacing(6)
-        log_filter_grid.setVerticalSpacing(4)
-        for index, filter_name in enumerate(LOG_FILTERS):
-            log_filter_grid.addWidget(
-                self.output_filter_buttons[filter_name],
-                index // 3,
-                index % 3,
-            )
-        log_filter_layout.addLayout(log_filter_grid)
+        for filter_name in LOG_FILTERS:
+            log_filter_layout.addWidget(self.output_filter_buttons[filter_name])
         log_filter_layout.addStretch(1)
         log_layout.addLayout(log_filter_layout)
         log_layout.addWidget(self.output_edit)

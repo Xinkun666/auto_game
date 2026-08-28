@@ -3430,7 +3430,7 @@ class LauncherWindow(QWidget):
                     padding: 2px 3px;
                     min-height: 0px;
                     max-height: 26px;
-                    font-size: 10px;
+                    font-size: 12px;
                 }
                 QPushButton[primaryButton="true"] {
                     background: #2563eb;
@@ -3713,7 +3713,7 @@ class LauncherWindow(QWidget):
                 padding: 2px 3px;
                 min-height: 0px;
                 max-height: 26px;
-                font-size: 10px;
+                font-size: 12px;
             }
             QPushButton[primaryButton="true"] {
                 background: #2f80ed;
@@ -4076,7 +4076,6 @@ class LauncherWindow(QWidget):
         log_filter_layout = QHBoxLayout()
         log_filter_layout.setContentsMargins(0, 0, 0, 0)
         log_filter_layout.setSpacing(6)
-        log_filter_layout.addWidget(QLabel("显示"))
         for filter_name in LOG_FILTERS:
             log_filter_layout.addWidget(self.output_filter_buttons[filter_name])
         log_filter_layout.addStretch(1)

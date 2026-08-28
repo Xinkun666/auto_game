@@ -2363,7 +2363,7 @@ class HouseSearchManager:
             try:
                 reset_strategy()
             except Exception as exc:
-                w.frame_log(f"[NandaFallback] 南大运行态重置异常，继续回退原搜房逻辑: {exc}")
+                w.frame_log(f"[NandaFallback] 南大运行态重置异常，继续执行安全降级: {exc}")
 
         # 真实的死亡、手动停止或已切走搜房阶段由上层生命周期处理，
         # 这里不反向恢复。南大自身异常不再 mark_failed，也不改 worker
@@ -2375,7 +2375,7 @@ class HouseSearchManager:
         if failure_phase == "preflight":
             w.frame_log(
                 f"[NandaFallback] {reason}；尚未进入搜房操作，"
-                "本轮禁用南大管线并继续原搜房逻辑"
+                "本轮禁用南大管线，交回上层跳过当前入门点"
             )
             return "fallback"
 
@@ -2383,25 +2383,25 @@ class HouseSearchManager:
         if scene == self.HOUSE_INDOOR:
             w.frame_log(
                 f"[NandaFallback] {reason}；人物已在室内，"
-                "立即交回原室内搜房/出房逻辑"
+                "交回上层按意外进房直接出房"
             )
             return "indoor"
 
         if failure_phase in {"replay", "exit", "verify"}:
             # 回放可能已经改变人物位姿，不继续使用进入南大前的旧门框。
-            # 下一帧回到原 PRECISE_NAV 近门流程，重新从当前画面
-            # YOLO -> SAM3 定位门，然后执行原对门进房，不使用旧门框。
+            # 通用基类保留 adjusting 结果；生产 R 城上层会将它收紧为
+            # 室外跳过当前入门点，室内则直接出房。
             self.status = "PRECISE_NAV"
             self.history_locations = []
             w.frame_log(
                 f"[NandaFallback] {reason}；house_scene={self._house_scene_label(scene)}，"
-                "下一帧回到原近门流程重新定位门，用例继续"
+                "交回上层执行安全降级"
             )
             return "adjusting"
 
         w.frame_log(
             f"[NandaFallback] {reason}；尚未开始回放，"
-            "当前帧直接交回原对门进房逻辑"
+            "交回上层跳过当前入门点"
         )
         return "fallback"
 
@@ -4792,10 +4792,10 @@ class HouseSearchManager:
 
 
 class HouseSceneSearchManager(HouseSearchManager):
-    """基于 house_scene 五分类的新搜房入口逻辑。
+    """基于 house_scene 五分类的 R 城南大排他搜房逻辑。
 
-    这套逻辑替换“到达进门点后如何进门”和“进房后如何旋转搜房”的流程，
-    选点、导航和出房兜底仍复用旧 HouseSearchManager 的成熟能力，便于新旧逻辑并存和回滚。
+    选点、导航和出房兜底仍复用基类能力；入户搜房只允许南大管线接管。
+    未接管时室外跳过入门点，已在室内时直接出房，不回退旋转搜房。
     """
 
     HOUSE_INDOOR = 0
@@ -5038,6 +5038,40 @@ class HouseSceneSearchManager(HouseSearchManager):
         super().reset()
         self._reset_r_city_runtime()
 
+    def _try_nanda_search_before_entry(
+        self,
+        w: "FrameWorker",
+        door,
+        target_loc,
+        dist,
+        phase_label,
+    ) -> str:
+        """R 城生产搜房只允许南大管线接管。"""
+        result = super()._try_nanda_search_before_entry(
+            w,
+            door,
+            target_loc,
+            dist,
+            phase_label,
+        )
+        disabled_reason = str(
+            getattr(self, "_nanda_runtime_disabled_reason", "") or ""
+        ).strip()
+        must_skip = result == "fallback" or (
+            result == "adjusting" and bool(disabled_reason)
+        )
+        if not must_skip:
+            return result
+
+        reason = disabled_reason or "南大搜房未启用或未接管"
+        w.frame_log(
+            f"[NandaOnly] {reason}；禁止回退原旋转搜房，"
+            "跳过当前入门点"
+        )
+        self._mark_current_entry_failed(f"南大搜房未接管：{reason}")
+        self.status = "IDLE"
+        return "skipped"
+
     def _handle_nav_near_entry_scene_if_needed(
         self,
         w: "FrameWorker",
@@ -5093,11 +5127,27 @@ class HouseSceneSearchManager(HouseSearchManager):
             door = self.find_largest_door(w)
 
         if door is not None:
-            w.frame_log('[Action] 视觉对准门并前推')
-            result = self._push_aligned_entry_door_and_check_indoor(w, phase_label, door)
-            if result != "failed":
-                return result
-            failure_reason = "贴门墙后已确认门但视觉对门前推仍未进入室内"
+            resolved_target_loc = self._location_tuple(target_loc)
+            if resolved_target_loc is None and self.active_entry:
+                resolved_target_loc = self._location_tuple(
+                    self.active_entry.get("location")
+                )
+            resolved_current_loc = self._location_tuple(current_loc)
+            if resolved_current_loc is None:
+                resolved_current_loc = self._get_current_location(w)
+            resolved_dist = (
+                get_distance(resolved_current_loc, resolved_target_loc)
+                if resolved_current_loc is not None and resolved_target_loc is not None
+                else None
+            )
+            w.frame_log('[Action] 已确认门框，只允许南大搜房接管')
+            return self._try_nanda_search_before_entry(
+                w,
+                door,
+                resolved_target_loc,
+                resolved_dist,
+                phase_label,
+            )
         else:
             failure_reason = "贴门墙后正前方、左转30度和回正后均未看到门"
 
@@ -6546,11 +6596,11 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         self.stop_auto_forward(w)
         self.indoor_stuck_frames = 0
-        w.frame_log(f"[SceneSearch] {reason}")
-
-        if not self.start_searching(w):
-            return False
-        return self._finalize_completed_house_search(w, reason)
+        w.frame_log(
+            f"[NandaOnly] {reason}，但未由南大回放完成搜房；"
+            "按意外进房处理，直接出房"
+        )
+        return self._exit_unexpected_indoor(w)
 
     def _finalize_completed_house_search(self, w: "FrameWorker", reason: str) -> bool:
         if w.current_stage != "搜房阶段":
@@ -6595,14 +6645,18 @@ class HouseSceneSearchManager(HouseSearchManager):
         if self._exit_house(w):
             self.indoor_stuck_frames = 0
             self.current_house_id = None
+            self.current_r_city_target = None
+            self.active_entry = None
             self.status = "IDLE"
+            self.history_locations = []
+            self._reset_route_stuck_bypass()
             self._continue_searching_until_timer(w, "意外进房后已出房")
             return True
         return False
 
     def _recover_r_city_navigation_stuck(self, w: "FrameWorker", current_loc) -> bool:
         if self._is_indoor(w):
-            w.frame_log("[RCitySearch] 推进中卡住但已在室内，转入室内搜房/出房链路")
+            w.frame_log("[RCitySearch] 推进中卡住且已意外进房，直接转出房链路")
             return self._handle_indoor_during_entry_route(
                 w,
                 current_loc,
@@ -6880,42 +6934,11 @@ class HouseSceneSearchManager(HouseSearchManager):
     def start_searching(self, w: "FrameWorker"):
         if self._should_abort(w):
             return False
-
-        self._clear_house_search_timer()
-        self.room_yaw = 0.0
-        self.global_yaw = 0.0
-        self.sub_rooms_entered = 0
-        self.visited_sub_doors.clear()
-
-        w.frame_log("[SceneRotate] 进入房屋，启动 house_scene 旋转搜房")
-        rotate_result = self._rotate_search_inside_house(w)
-
-        if self._should_abort(w):
-            return False
-
-        self._refresh_frame_and_handle_jump(w)
-        if rotate_result == self.ROTATE_RESULT_EXITED or self._is_out_of_house(w):
-            w.frame_log("[SceneRotate] 旋转搜房过程中已出房，房屋搜索完成")
-            return True
-
-        if rotate_result == self.ROTATE_RESULT_FALLBACK_EXIT:
-            w.frame_log("[SceneRotate] 两轮撞墙循环仍未自然出房，开始执行出房策略")
-        else:
-            w.frame_log("[SceneRotate] 旋转搜房结束，开始出房")
-
-        if self._exit_house(w):
-            w.frame_log("[SceneRotate] 出房策略成功，房屋搜索完成")
-            return True
-        if self._should_abort(w):
-            return False
-
-        self._refresh_frame_and_handle_jump(w)
-        if self._is_out_of_house(w):
-            w.frame_log("[SceneRotate] 出房策略成功，房屋搜索完成")
-            return True
-
-        w.frame_log(f"[SceneRotate] 出房策略后仍未确认出房 house_scene={self._get_house_scene(w)}")
-        return False
+        w.frame_log(
+            "[NandaOnly] 旧 start_searching 旋转搜房入口已禁用；"
+            "当前已在室内，按意外进房直接出房"
+        )
+        return self._exit_unexpected_indoor(w)
 
     def _house_search_timed_out(self):
         return False

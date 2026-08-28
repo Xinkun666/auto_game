@@ -199,14 +199,14 @@ def initialize_runtime():
             else:
                 LOGGER.error(
                     "[NandaPreload] 南大房型匹配启动预检失败：%s；"
-                    "本轮禁用南大管线，继续原搜房逻辑。",
+                    "本轮禁用南大管线，后续跳过无法由南大接管的入门点。",
                     preload_error.message,
                 )
                 nanda_search_strategy = NandaHouseSearchStrategy()
     except Exception as exc:
         LOGGER.exception(
             "[NandaPreload] 南大策略构建/预检异常: %s；"
-            "本轮禁用南大管线，继续原搜房逻辑。",
+            "本轮禁用南大管线，后续跳过无法由南大接管的入门点。",
             exc,
         )
         nanda_search_strategy = NandaHouseSearchStrategy()

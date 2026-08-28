@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -2894,7 +2895,7 @@ class LauncherWindow(QWidget):
         # 真正启动任务时再校验环境变量，避免无效配置让 Launcher 初始化阶段崩溃。
         self.hdc_debug_level = 5
         self.preview_target_info_height = 64
-        self.preview_target_info_width = 300
+        self.preview_target_info_width = 460
         self._adjusting_preview_splitter = False
         self.preview_render_screen_size: Optional[tuple[int, int]] = None
         self.stream_verify_active = False
@@ -3220,14 +3221,16 @@ class LauncherWindow(QWidget):
         self.preview_info_template_label = QLabel("点击特殊区域或区域查看模板图片")
         self.preview_info_template_label.setObjectName("previewTemplate")
         self.preview_info_template_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_info_template_label.setMinimumHeight(60)
-        self.preview_info_template_label.setMaximumHeight(90)
+        self.preview_info_template_label.setWordWrap(True)
+        self.preview_info_template_label.setMinimumHeight(48)
+        self.preview_info_template_label.setMaximumHeight(72)
         self.preview_info_template_label.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Preferred,
         )
         preview_template_layout.addWidget(self.preview_info_template_label)
         preview_detail_group = QGroupBox("详细信息")
+        preview_template_group.setMaximumWidth(220)
         preview_detail_layout = QVBoxLayout(preview_detail_group)
         preview_detail_layout.setContentsMargins(8, 8, 8, 8)
         self.preview_info_detail_edit = QPlainTextEdit()
@@ -3236,8 +3239,8 @@ class LauncherWindow(QWidget):
         self.preview_info_detail_edit.setLineWrapMode(
             QPlainTextEdit.LineWrapMode.NoWrap
         )
-        self.preview_info_detail_edit.setMinimumHeight(90)
-        self.preview_info_detail_edit.setMaximumHeight(150)
+        self.preview_info_detail_edit.setMinimumHeight(64)
+        self.preview_info_detail_edit.setMaximumHeight(100)
         self.preview_info_detail_edit.setPlainText("选中区域、特殊区域或控点后查看当前帧完整信息")
         preview_detail_layout.addWidget(self.preview_info_detail_edit)
         preview_info_layout.addWidget(preview_info_header, 0)
@@ -3245,7 +3248,7 @@ class LauncherWindow(QWidget):
         preview_auxiliary_layout = QHBoxLayout()
         preview_auxiliary_layout.setContentsMargins(0, 0, 0, 0)
         preview_auxiliary_layout.setSpacing(6)
-        preview_auxiliary_layout.addWidget(preview_detail_group, 1)
+        preview_auxiliary_layout.addWidget(preview_detail_group, 2)
         preview_auxiliary_layout.addWidget(preview_template_group, 1)
         preview_info_layout.addLayout(preview_auxiliary_layout, 0)
 
@@ -4062,15 +4065,26 @@ class LauncherWindow(QWidget):
         log_filter_layout.setContentsMargins(0, 0, 0, 0)
         log_filter_layout.setSpacing(6)
         log_filter_layout.addWidget(QLabel("显示"))
-        for filter_name in LOG_FILTERS:
-            log_filter_layout.addWidget(self.output_filter_buttons[filter_name])
+        log_filter_grid = QGridLayout()
+        log_filter_grid.setContentsMargins(0, 0, 0, 0)
+        log_filter_grid.setHorizontalSpacing(6)
+        log_filter_grid.setVerticalSpacing(4)
+        for index, filter_name in enumerate(LOG_FILTERS):
+            log_filter_grid.addWidget(
+                self.output_filter_buttons[filter_name],
+                index // 3,
+                index % 3,
+            )
+        log_filter_layout.addLayout(log_filter_grid)
         log_filter_layout.addStretch(1)
         log_layout.addLayout(log_filter_layout)
         log_layout.addWidget(self.output_edit)
         content_splitter.addWidget(preview_group)
         content_splitter.addWidget(log_group)
         content_splitter.setStretchFactor(0, 3)
-        content_splitter.setStretchFactor(1, 2)
+        content_splitter.setStretchFactor(1, 1)
+        content_splitter.setSizes([860, 340])
+        QTimer.singleShot(0, lambda: content_splitter.setSizes([860, 340]))
 
         main_layout.addWidget(content_splitter, 1)
         self.page_stack.addWidget(self.launcher_page)

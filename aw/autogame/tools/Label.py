@@ -692,9 +692,31 @@ class AutoStudioWindow(QMainWindow):
         tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         tree.itemClicked.connect(self.on_tree_click)
-        tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        tree.customContextMenuRequested.connect(lambda position, tree=tree: self.open_context_menu(position, tree))
+        # QTreeWidget 实际由 viewport 接收鼠标事件；菜单也绑定在这里，避免右键
+        # 只落在外层控件而在部分平台上不触发。
+        viewport = tree.viewport()
+        viewport.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        viewport.customContextMenuRequested.connect(
+            lambda position, tree=tree: self.open_context_menu(position, tree)
+        )
+        viewport.installEventFilter(self)
         return tree
+
+    def eventFilter(self, watched, event):
+        """让项目树的鼠标右键直接由其 viewport 打开菜单。"""
+        tree = None
+        for candidate in (getattr(self, "tree", None), getattr(self, "scene_pool_tree", None)):
+            if candidate is not None and watched is candidate.viewport():
+                tree = candidate
+                break
+        if (
+            tree is not None
+            and event.type() == QEvent.Type.MouseButtonRelease
+            and event.button() == Qt.MouseButton.RightButton
+        ):
+            self.open_context_menu(event.position().toPoint(), tree)
+            return True
+        return super().eventFilter(watched, event)
     def trigger_add_shortcut(self, mode):
         if not self.current_scene:
             QMessageBox.warning(self, "提示", "请先在项目树中选择一个场景。")

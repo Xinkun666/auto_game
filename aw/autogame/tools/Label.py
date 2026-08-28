@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QGraphicsRectItem, QGraphicsLineItem, QToolBar, QMessageBox, QFrame,
                              QPinchGesture, QHeaderView, QProgressDialog, QComboBox, QDialog,
                              QLineEdit, QCheckBox, QScrollArea, QDialogButtonBox, QTabWidget)
-from PyQt6.QtCore import Qt, QRectF, QPointF, QEvent
+from PyQt6.QtCore import Qt, QRectF, QPointF, QEvent, QTimer
 from PyQt6.QtGui import QAction, QPixmap, QColor, QPen, QBrush, QImage, QPainter, QGuiApplication, QFontMetricsF
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
@@ -188,6 +188,9 @@ class DrawingOverlay(QGraphicsRectItem):
         painter.setPen(Qt.GlobalColor.white)
         painter.drawText(text_pos, self.label)
 class ImageCanvas(QGraphicsView):
+    DRAW_AUTO_PAN_MARGIN = 32
+    DRAW_AUTO_PAN_MAX_STEP = 18
+
     def __init__(self, main_window):
         super().__init__()
         self.main_window = main_window
@@ -214,6 +217,10 @@ class ImageCanvas(QGraphicsView):
         self.drag_start_point = None
         self.drag_start_rect = None
         self.drag_start_scope = None
+        self._draw_cursor_pos = None
+        self._draw_auto_pan_timer = QTimer(self)
+        self._draw_auto_pan_timer.setInterval(16)
+        self._draw_auto_pan_timer.timeout.connect(self._continue_draw_auto_pan)
     def is_point_on_image(self, pt: QPointF):
         if not self.current_pixmap:
             return False
@@ -222,6 +229,7 @@ class ImageCanvas(QGraphicsView):
             return False
         return 0 <= pt.x() <= pixmap.width() and 0 <= pt.y() <= pixmap.height()
     def set_image(self, pixmap):
+        self._stop_draw_auto_pan()
         self.scene.clear()
         self.current_pixmap = self.scene.addPixmap(pixmap)
         self.setSceneRect(QRectF(pixmap.rect()))
@@ -346,7 +354,71 @@ class ImageCanvas(QGraphicsView):
                     self._search_scope_label(item),
                 )
                 scope.setData(0, item)
-                self.scene.addItem(scope)
+            self.scene.addItem(scope)
+
+    def _draw_auto_pan_delta(self, viewport_pos):
+        """Return the scroll delta when a drawing cursor reaches a viewport edge."""
+        if not viewport_pos:
+            return 0, 0
+        viewport = self.viewport().rect()
+        margin = self.DRAW_AUTO_PAN_MARGIN
+
+        def edge_speed(distance):
+            return max(
+                1,
+                round(self.DRAW_AUTO_PAN_MAX_STEP * (margin - distance + 1) / margin),
+            )
+
+        dx = 0
+        dy = 0
+        if viewport_pos.x() <= viewport.left() + margin:
+            dx = -edge_speed(viewport_pos.x() - viewport.left())
+        elif viewport_pos.x() >= viewport.right() - margin:
+            dx = edge_speed(viewport.right() - viewport_pos.x())
+        if viewport_pos.y() <= viewport.top() + margin:
+            dy = -edge_speed(viewport_pos.y() - viewport.top())
+        elif viewport_pos.y() >= viewport.bottom() - margin:
+            dy = edge_speed(viewport.bottom() - viewport_pos.y())
+        return dx, dy
+
+    def _apply_draw_auto_pan(self):
+        dx, dy = self._draw_auto_pan_delta(self._draw_cursor_pos)
+        if not dx and not dy:
+            return False
+        horizontal = self.horizontalScrollBar()
+        vertical = self.verticalScrollBar()
+        old_horizontal = horizontal.value()
+        old_vertical = vertical.value()
+        horizontal.setValue(old_horizontal + dx)
+        vertical.setValue(old_vertical + dy)
+        return horizontal.value() != old_horizontal or vertical.value() != old_vertical
+
+    def _update_draw_auto_pan(self):
+        if self.mode == "IDLE" or not self.start_point or not self._draw_cursor_pos:
+            self._stop_draw_auto_pan()
+            return
+        self._apply_draw_auto_pan()
+        if any(self._draw_auto_pan_delta(self._draw_cursor_pos)):
+            self._draw_auto_pan_timer.start()
+        else:
+            self._stop_draw_auto_pan()
+
+    def _continue_draw_auto_pan(self):
+        if self.mode == "IDLE" or not self.start_point or not self._draw_cursor_pos:
+            self._stop_draw_auto_pan()
+            return
+        if not self._apply_draw_auto_pan():
+            self._stop_draw_auto_pan()
+            return
+        current_pt = self.mapToScene(self._draw_cursor_pos)
+        self.update_crosshair(current_pt)
+        if self.temp_rect_item:
+            self.temp_rect_item.setRect(QRectF(self.start_point, current_pt).normalized())
+
+    def _stop_draw_auto_pan(self):
+        self._draw_auto_pan_timer.stop()
+        self._draw_cursor_pos = None
+
     def mousePressEvent(self, event):
         if self.mode == "IDLE" and self.current_pixmap and event.button() == Qt.MouseButton.RightButton:
             pt = self.mapToScene(event.pos())
@@ -392,6 +464,9 @@ class ImageCanvas(QGraphicsView):
         else:
             super().mousePressEvent(event)
     def mouseMoveEvent(self, event):
+        if self.mode != "IDLE" and self.start_point:
+            self._draw_cursor_pos = event.pos()
+            self._update_draw_auto_pan()
         current_pt = self.mapToScene(event.pos())
         self.update_crosshair(current_pt)
         if self.mode == "IDLE" and self.drag_item_data and self.drag_start_point and self.drag_start_rect:
@@ -445,6 +520,7 @@ class ImageCanvas(QGraphicsView):
             event.accept()
             return
         if self.mode != "IDLE" and self.start_point:
+            self._stop_draw_auto_pan()
             end_point = self.mapToScene(event.pos())
             rect = QRectF(self.start_point, end_point).normalized()
             self.scene.removeItem(self.temp_rect_item)
@@ -2619,6 +2695,15 @@ class AutoStudioWindow(QMainWindow):
             将内存中的数据同步渲染到 UI。
         """
         expanded_ids = self.collect_expanded_ids()
+        # ``clear()`` rebuilds the viewport and resets both scroll bars to zero.
+        # Keep the user's place in either tree while refreshing labels or nodes.
+        tree_scroll_positions = {
+            tree: (
+                tree.verticalScrollBar().value(),
+                tree.horizontalScrollBar().value(),
+            )
+            for tree in (self.tree, self.scene_pool_tree)
+        }
         self.tree.clear()
         self.scene_pool_tree.clear()
         if not self.project:
@@ -2632,6 +2717,7 @@ class AutoStudioWindow(QMainWindow):
         root.setExpanded(True)
         stage_items = {}
         scene_items = {}
+        project_scene_group_items = {}
 
         def add_scene_version_nodes(parent_node, scenes, stage=None):
             for scene in scenes:
@@ -2714,12 +2800,18 @@ class AutoStudioWindow(QMainWindow):
                     "stage": stage,
                     "scene_name": scene_name,
                 })
+                project_scene_group_items[(stage.id, scene_name)] = group_node
                 add_scene_version_nodes(group_node, scenes, stage)
         self.tree.resizeColumnToContents(0)
         self.tree.resizeColumnToContents(1)
         self.scene_pool_tree.resizeColumnToContents(0)
         self.scene_pool_tree.resizeColumnToContents(1)
-        self.restore_expanded_ids(expanded_ids, stage_items, scene_items)
+        self.restore_expanded_ids(
+            expanded_ids,
+            stage_items,
+            scene_items,
+            project_scene_group_items,
+        )
         if self.last_expand_stage_id:
             item = stage_items.get(self.last_expand_stage_id)
             if item:
@@ -2731,6 +2823,9 @@ class AutoStudioWindow(QMainWindow):
         self.last_expand_stage_id = None
         self.last_expand_scene_id = None
         self.update_group_controls()
+        for tree, (vertical_value, horizontal_value) in tree_scroll_positions.items():
+            tree.verticalScrollBar().setValue(vertical_value)
+            tree.horizontalScrollBar().setValue(horizontal_value)
     def add_stage(self):
         if not self.project: return
         name = self.prompt_unique_name("新建阶段", "阶段名称:",
@@ -5305,6 +5400,7 @@ class AutoStudioWindow(QMainWindow):
         expanded_stage_ids = set()
         expanded_scene_ids = set()
         expanded_scene_group_ids = set()
+        expanded_project_scene_group_keys = set()
         def walk(node):
             for i in range(node.childCount()):
                 child = node.child(i)
@@ -5317,23 +5413,52 @@ class AutoStudioWindow(QMainWindow):
                     scene_group = data.get("scene_group")
                     if scene_group:
                         expanded_scene_group_ids.add(scene_group.id)
+                if isinstance(data, dict) and data.get("kind") == "scene_group" and child.isExpanded():
+                    stage = data.get("stage")
+                    scene_name = data.get("scene_name")
+                    if stage and scene_name:
+                        expanded_project_scene_group_keys.add((stage.id, scene_name))
                 walk(child)
         walk(self.tree.invisibleRootItem())
         if hasattr(self, "scene_pool_tree"):
             walk(self.scene_pool_tree.invisibleRootItem())
-        return expanded_stage_ids, expanded_scene_ids, expanded_scene_group_ids
-    def restore_expanded_ids(self, expanded_ids, stage_items, scene_items):
+        return (
+            expanded_stage_ids,
+            expanded_scene_ids,
+            expanded_scene_group_ids,
+            expanded_project_scene_group_keys,
+        )
+    def restore_expanded_ids(
+        self,
+        expanded_ids,
+        stage_items,
+        scene_items,
+        project_scene_group_items=None,
+    ):
         if len(expanded_ids) == 2:
             expanded_stage_ids, expanded_scene_ids = expanded_ids
             expanded_scene_group_ids = set()
-        else:
+            expanded_project_scene_group_keys = set()
+        elif len(expanded_ids) == 3:
             expanded_stage_ids, expanded_scene_ids, expanded_scene_group_ids = expanded_ids
+            expanded_project_scene_group_keys = set()
+        else:
+            (
+                expanded_stage_ids,
+                expanded_scene_ids,
+                expanded_scene_group_ids,
+                expanded_project_scene_group_keys,
+            ) = expanded_ids
         for stage_id in expanded_stage_ids:
             item = stage_items.get(stage_id)
             if item:
                 item.setExpanded(True)
         for scene_id in expanded_scene_ids:
             item = scene_items.get(scene_id)
+            if item:
+                item.setExpanded(True)
+        for scene_group_key in expanded_project_scene_group_keys:
+            item = (project_scene_group_items or {}).get(scene_group_key)
             if item:
                 item.setExpanded(True)
         if hasattr(self, "scene_pool_tree"):

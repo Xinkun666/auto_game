@@ -2,6 +2,8 @@ import os
 import importlib
 import concurrent.futures
 import copy
+import gc
+import sys
 import threading
 import time
 from datetime import datetime
@@ -66,6 +68,11 @@ class GameSceneMemoryMonitor:
         self._call_index = 0
         self._error_reported = False
         self._lock = threading.Lock()
+        self._snapshot_lock = threading.Lock()
+        self._last_detail_profile_at = 0.0
+        self._last_detail_signature = None
+        self._handler_totals = {}
+        self._baseline_python_allocated_blocks = None
 
     @property
     def enabled(self):
@@ -75,10 +82,26 @@ class GameSceneMemoryMonitor:
         if not self.enabled:
             return None
         try:
-            return self.snapshot_func()
+            with self._snapshot_lock:
+                return self.snapshot_func()
         except Exception as exc:
             self._report_error(exc)
             return None
+
+    def should_profile_task_details(self, tasks_config):
+        """Reserve one detailed task-level sample about every five seconds."""
+        if not self.enabled:
+            return False
+        now = time.monotonic()
+        signature = self._task_signature(tasks_config)
+        with self._lock:
+            changed = signature != self._last_detail_signature
+            due = now - self._last_detail_profile_at >= self.interval_seconds
+            if not changed and not due:
+                return False
+            self._last_detail_signature = signature
+            self._last_detail_profile_at = now
+            return True
 
     @staticmethod
     def _compact_snapshot(snapshot):
@@ -127,18 +150,129 @@ class GameSceneMemoryMonitor:
         return tuple(values)
 
     @staticmethod
-    def _task_summary(task_metrics):
+    def _runtime_snapshot():
+        result = {"gc_generation_counts": list(gc.get_count())}
+        getallocatedblocks = getattr(sys, "getallocatedblocks", None)
+        if callable(getallocatedblocks):
+            try:
+                result["python_allocated_blocks"] = int(getallocatedblocks())
+            except Exception:
+                pass
+
+        torch_module = sys.modules.get("torch")
+        cuda = getattr(torch_module, "cuda", None) if torch_module is not None else None
+        try:
+            if cuda is not None and cuda.is_available():
+                result.update(
+                    {
+                        "torch_cuda_device": int(cuda.current_device()),
+                        "torch_cuda_allocated_mb": _mb(cuda.memory_allocated()),
+                        "torch_cuda_reserved_mb": _mb(cuda.memory_reserved()),
+                        "torch_cuda_max_allocated_mb": _mb(cuda.max_memory_allocated()),
+                        "torch_cuda_max_reserved_mb": _mb(cuda.max_memory_reserved()),
+                    }
+                )
+        except Exception as exc:
+            result["torch_cuda_probe_error"] = repr(exc)
+        return result
+
+    @classmethod
+    def _task_summary(cls, task_metrics):
+        summaries = []
+        optional_fields = (
+            "thread_name",
+            "python_thread_id",
+            "native_thread_id",
+            "input_copy_kind",
+            "input_shape",
+            "input_owns_data",
+            "input_shares_frame_memory",
+            "copy_duration_ms",
+            "handler_duration_ms",
+            "task_start_offset_ms",
+            "copy_end_offset_ms",
+            "handler_end_offset_ms",
+            "task_end_offset_ms",
+            "copy_process_delta_mb",
+            "handler_process_delta_mb",
+            "task_process_delta_mb",
+            "result_type",
+            "result_size",
+            "detailed_memory_sample",
+            "process_before_copy",
+            "process_after_copy",
+            "process_after_handler",
+            "process_after_task",
+        )
+        for item in task_metrics:
+            summary = {
+                "task_id": item["task_id"],
+                "task_type": item["task_type"],
+                "handler": item["handler"],
+                "duration_ms": item["duration_ms"],
+            }
+            copy_bytes = int(item.get("input_copy_bytes") or 0)
+            if copy_bytes:
+                summary["input_copy_mb"] = _mb(copy_bytes)
+            for field in optional_fields:
+                if field in item:
+                    summary[field] = item[field]
+            summaries.append(summary)
         return sorted(
-            (
-                {
-                    "task_id": item["task_id"],
-                    "task_type": item["task_type"],
-                    "handler": item["handler"],
-                    "duration_ms": item["duration_ms"],
-                }
-                for item in task_metrics
-            ),
+            summaries,
             key=lambda item: item["duration_ms"],
+            reverse=True,
+        )
+
+    def _update_handler_totals(self, task_metrics):
+        for item in task_metrics:
+            handler = str(item.get("handler") or item.get("task_id") or "unknown")
+            task_type = str(item.get("task_type") or "unknown")
+            key = (task_type, handler)
+            total = self._handler_totals.setdefault(
+                key,
+                {
+                    "task_type": task_type,
+                    "handler": handler,
+                    "calls": 0,
+                    "duration_ms": 0.0,
+                    "max_duration_ms": 0.0,
+                    "input_copy_bytes": 0,
+                    "max_input_copy_bytes": 0,
+                },
+            )
+            duration_ms = float(item.get("duration_ms") or 0.0)
+            copy_bytes = int(item.get("input_copy_bytes") or 0)
+            total["calls"] += 1
+            total["duration_ms"] += duration_ms
+            total["max_duration_ms"] = max(total["max_duration_ms"], duration_ms)
+            total["input_copy_bytes"] += copy_bytes
+            total["max_input_copy_bytes"] = max(
+                total["max_input_copy_bytes"],
+                copy_bytes,
+            )
+
+    def _handler_totals_summary(self):
+        summaries = []
+        for total in self._handler_totals.values():
+            calls = int(total["calls"])
+            summaries.append(
+                {
+                    "task_type": total["task_type"],
+                    "handler": total["handler"],
+                    "calls": calls,
+                    "total_input_copy_mb": _mb(total["input_copy_bytes"]),
+                    "max_input_copy_mb": _mb(total["max_input_copy_bytes"]),
+                    "average_duration_ms": round(
+                        total["duration_ms"] / calls if calls else 0.0,
+                        3,
+                    ),
+                    "max_duration_ms": round(total["max_duration_ms"], 3),
+                }
+            )
+        return sorted(
+            summaries,
+            key=lambda item: item["total_input_copy_mb"],
             reverse=True,
         )
 
@@ -173,6 +307,7 @@ class GameSceneMemoryMonitor:
                 "growth_since_gamescene_start_mb": self._delta_mb(
                     self._baseline_snapshot, after,
                 ),
+                "runtime": self._runtime_snapshot(),
                 "notes": "Memory is process-scoped; this phase is correlation evidence.",
             }
             self._write_event(record)
@@ -186,6 +321,7 @@ class GameSceneMemoryMonitor:
         delta_mb = self._delta_mb(before, after)
         with self._lock:
             self._call_index += 1
+            self._update_handler_totals(task_metrics)
             reasons = []
             if self._last_signature is None:
                 reasons.append("first_frame")
@@ -200,6 +336,17 @@ class GameSceneMemoryMonitor:
                 return
             if self._baseline_snapshot is None:
                 self._baseline_snapshot = before or after
+            runtime = self._runtime_snapshot()
+            allocated_blocks = runtime.get("python_allocated_blocks")
+            if self._baseline_python_allocated_blocks is None:
+                self._baseline_python_allocated_blocks = allocated_blocks
+            if allocated_blocks is not None and self._baseline_python_allocated_blocks is not None:
+                runtime["python_allocated_blocks_growth"] = (
+                    allocated_blocks - self._baseline_python_allocated_blocks
+                )
+            frame_copy_bytes = sum(
+                int(item.get("input_copy_bytes") or 0) for item in task_metrics
+            )
             record = {
                 "event": "gamescene_memory",
                 "timestamp": _iso_now(),
@@ -209,7 +356,15 @@ class GameSceneMemoryMonitor:
                 "duration_ms": round(float(duration_ms), 3),
                 "task_count": len(tasks_config),
                 "exclusive_task": len(tasks_config) == 1,
+                "detailed_task_memory": any(
+                    bool(item.get("detailed_memory_sample")) for item in task_metrics
+                ),
+                "special_input_copy_count": sum(
+                    1 for item in task_metrics if item.get("input_copy_bytes")
+                ),
+                "frame_input_copy_mb": _mb(frame_copy_bytes),
                 "tasks": self._task_summary(task_metrics),
+                "handler_totals": self._handler_totals_summary(),
                 "process_before": self._compact_snapshot(before),
                 "process_after": self._compact_snapshot(after),
                 "delta_memory_mb": delta_mb,
@@ -218,8 +373,10 @@ class GameSceneMemoryMonitor:
                 ),
                 "notes": (
                     "Per-task memory ownership is not measurable. A single-task frame "
-                    "is stronger attribution evidence; concurrent task deltas are correlation only."
+                    "is stronger attribution evidence; concurrent task deltas are correlation only. "
+                    "Copy bytes are exact NumPy buffer sizes; process deltas may overlap between tasks."
                 ),
+                "runtime": runtime,
             }
             self._write_event(record)
             self._last_emit_at = now
@@ -410,6 +567,12 @@ class GameImageProcessor:
 
     def process(self, raw_frame, tasks_config, buffer_ratio=0.3):
         memory_monitor = self._get_memory_monitor()
+        should_profile_details = getattr(
+            memory_monitor,
+            "should_profile_task_details",
+            lambda _tasks: False,
+        )
+        profile_task_details = bool(should_profile_details(tasks_config))
         frame_started = time.perf_counter()
         memory_before = memory_monitor.snapshot()
         self.task_config = tasks_config
@@ -418,7 +581,7 @@ class GameImageProcessor:
         task_metrics = []
         task_metrics_lock = threading.Lock()
 
-        def _execute_task(task_id, config):
+        def _execute_task(task_id, config, metric):
             try:
                 task_type = config.get('type')
                 origin_w = config.get('origin_width')
@@ -432,6 +595,8 @@ class GameImageProcessor:
                 # Case 1: 特殊区域
                 if task_type == 'special':
                     area_config = config.get('area_config') or config
+                    copy_before = memory_monitor.snapshot() if profile_task_details else None
+                    copy_started = time.perf_counter()
                     if 'anchor' in area_config or 'rect' in area_config:
                         x1, y1, x2, y2 = resolve_area_rect_for_frame(
                             curr_w,
@@ -447,9 +612,52 @@ class GameImageProcessor:
                         x2 = max(0, min(curr_w, x2))
                         y2 = max(0, min(curr_h, y2))
                         target_img = np.ascontiguousarray(raw_frame[y1:y2, x1:x2]).copy()
+                        copy_kind = (
+                            "full_frame_copy"
+                            if (x1, y1, x2, y2) == (0, 0, curr_w, curr_h)
+                            else "roi_copy"
+                        )
                     else:
                         x1, y1, x2, y2 = 0, 0, curr_w, curr_h
                         target_img = np.ascontiguousarray(raw_frame).copy()
+                        copy_kind = "full_frame_copy"
+
+                    metric.update(
+                        {
+                            "input_copy_bytes": int(target_img.nbytes),
+                            "input_copy_kind": copy_kind,
+                            "input_shape": [int(value) for value in target_img.shape],
+                            "copy_duration_ms": round(
+                                (time.perf_counter() - copy_started) * 1000.0,
+                                3,
+                            ),
+                            "copy_end_offset_ms": round(
+                                (time.perf_counter() - frame_started) * 1000.0,
+                                3,
+                            ),
+                        }
+                    )
+                    copy_after = None
+                    if profile_task_details:
+                        copy_after = memory_monitor.snapshot()
+                        metric.update(
+                            {
+                                "input_owns_data": bool(target_img.flags["OWNDATA"]),
+                                "input_shares_frame_memory": bool(
+                                    np.shares_memory(target_img, raw_frame)
+                                ),
+                                "process_before_copy": memory_monitor._compact_snapshot(
+                                    copy_before
+                                ),
+                                "process_after_copy": memory_monitor._compact_snapshot(
+                                    copy_after
+                                ),
+                                "copy_process_delta_mb": memory_monitor._delta_mb(
+                                    copy_before,
+                                    copy_after,
+                                ),
+                            }
+                        )
 
                     handler_name = config.get('handler_name', task_id)
                     method = getattr(self.special_handler, handler_name, None)
@@ -470,7 +678,25 @@ class GameImageProcessor:
                         ):
                             return task_id, "Error: sam3 version must be integer 0 or 1"
                         handler_kwargs['version'] = version
+                    handler_started = time.perf_counter()
                     raw_special_result = method(target_img, **handler_kwargs)
+                    metric["handler_duration_ms"] = round(
+                        (time.perf_counter() - handler_started) * 1000.0,
+                        3,
+                    )
+                    metric["handler_end_offset_ms"] = round(
+                        (time.perf_counter() - frame_started) * 1000.0,
+                        3,
+                    )
+                    if profile_task_details:
+                        handler_after = memory_monitor.snapshot()
+                        metric["process_after_handler"] = memory_monitor._compact_snapshot(
+                            handler_after
+                        )
+                        metric["handler_process_delta_mb"] = memory_monitor._delta_mb(
+                            copy_after,
+                            handler_after,
+                        )
                     special_result, timing_ms = self._split_special_timing_result(method, raw_special_result)
                     mapped_result = self._map_special_visualizations(
                         special_result,
@@ -554,18 +780,48 @@ class GameImageProcessor:
 
         def _execute_task_profiled(task_id, config):
             task_started = time.perf_counter()
+            task_before = memory_monitor.snapshot() if profile_task_details else None
+            metric = {
+                "task_id": str(task_id),
+                "task_type": str(config.get("type") or "unknown"),
+                "handler": str(config.get("handler_name") or task_id),
+                "thread_name": threading.current_thread().name,
+                "python_thread_id": int(threading.get_ident()),
+                "task_start_offset_ms": round(
+                    (task_started - frame_started) * 1000.0,
+                    3,
+                ),
+            }
+            get_native_id = getattr(threading, "get_native_id", None)
+            if callable(get_native_id):
+                metric["native_thread_id"] = int(get_native_id())
+            if profile_task_details:
+                metric["detailed_memory_sample"] = True
             try:
-                return _execute_task(task_id, config)
+                outcome = _execute_task(task_id, config, metric)
+                result_value = outcome[1]
+                metric["result_type"] = type(result_value).__name__
+                if isinstance(result_value, (list, tuple, dict, set, str, bytes)):
+                    metric["result_size"] = len(result_value)
+                return outcome
             finally:
-                metric = {
-                    "task_id": str(task_id),
-                    "task_type": str(config.get("type") or "unknown"),
-                    "handler": str(config.get("handler_name") or task_id),
-                    "duration_ms": round(
-                        (time.perf_counter() - task_started) * 1000.0,
-                        3,
-                    ),
-                }
+                metric["duration_ms"] = round(
+                    (time.perf_counter() - task_started) * 1000.0,
+                    3,
+                )
+                metric["task_end_offset_ms"] = round(
+                    (time.perf_counter() - frame_started) * 1000.0,
+                    3,
+                )
+                if profile_task_details:
+                    task_after = memory_monitor.snapshot()
+                    metric["process_after_task"] = memory_monitor._compact_snapshot(
+                        task_after
+                    )
+                    metric["task_process_delta_mb"] = memory_monitor._delta_mb(
+                        task_before,
+                        task_after,
+                    )
                 with task_metrics_lock:
                     task_metrics.append(metric)
 

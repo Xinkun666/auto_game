@@ -20,7 +20,7 @@ from typing import Dict, NamedTuple, Optional
 from xml.etree import ElementTree
 
 from PyQt6.QtCore import QByteArray, QObject, QProcess, QProcessEnvironment, Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QDesktopServices, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextCursor
+from PyQt6.QtGui import QColor, QDesktopServices, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextCursor, QTextOption
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -3289,7 +3289,16 @@ class LauncherWindow(QWidget):
         self.preview_info_detail_edit.setFrameShape(QFrame.Shape.NoFrame)
         self.preview_info_detail_edit.setReadOnly(True)
         self.preview_info_detail_edit.setLineWrapMode(
-            QPlainTextEdit.LineWrapMode.NoWrap
+            QPlainTextEdit.LineWrapMode.WidgetWidth
+        )
+        self.preview_info_detail_edit.setWordWrapMode(
+            QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere
+        )
+        self.preview_info_detail_edit.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.preview_info_detail_edit.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
         self.preview_info_detail_edit.setMinimumHeight(64)
         self.preview_info_detail_edit.setMaximumHeight(100)

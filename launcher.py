@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -3263,10 +3264,12 @@ class LauncherWindow(QWidget):
         self.preview_info_tree.setColumnWidth(1, 150)
         self.preview_info_tree.header().setStretchLastSection(True)
         preview_template_group = QGroupBox("模板预览")
+        preview_template_group.setObjectName("previewTemplateGroup")
         preview_template_layout = QVBoxLayout(preview_template_group)
-        preview_template_layout.setContentsMargins(8, 8, 8, 8)
+        preview_template_layout.setContentsMargins(0, 0, 0, 0)
         self.preview_info_template_label = QLabel("点击特殊区域或区域查看模板图片")
         self.preview_info_template_label.setObjectName("previewTemplate")
+        self.preview_info_template_label.setFrameShape(QFrame.Shape.NoFrame)
         self.preview_info_template_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_info_template_label.setWordWrap(True)
         self.preview_info_template_label.setMinimumHeight(48)
@@ -3277,11 +3280,13 @@ class LauncherWindow(QWidget):
         )
         preview_template_layout.addWidget(self.preview_info_template_label)
         preview_detail_group = QGroupBox("详细信息")
+        preview_detail_group.setObjectName("previewDetailGroup")
         preview_template_group.setMaximumWidth(220)
         preview_detail_layout = QVBoxLayout(preview_detail_group)
-        preview_detail_layout.setContentsMargins(8, 8, 8, 8)
+        preview_detail_layout.setContentsMargins(0, 0, 0, 0)
         self.preview_info_detail_edit = QPlainTextEdit()
         self.preview_info_detail_edit.setObjectName("previewInfoDetail")
+        self.preview_info_detail_edit.setFrameShape(QFrame.Shape.NoFrame)
         self.preview_info_detail_edit.setReadOnly(True)
         self.preview_info_detail_edit.setLineWrapMode(
             QPlainTextEdit.LineWrapMode.NoWrap
@@ -3536,13 +3541,24 @@ class LauncherWindow(QWidget):
                     font-size: 14px;
                 }
                 QLabel#previewTemplate {
-                    background: #f8fbff;
-                    border: 1px dashed #b9c9da;
-                    border-radius: 6px;
+                    background: transparent;
+                    border: none;
                     color: #64748b;
                 }
+                QGroupBox#previewDetailGroup,
+                QGroupBox#previewTemplateGroup {
+                    padding: 4px;
+                }
+                QPlainTextEdit#previewInfoDetail {
+                    background: transparent;
+                    border: none;
+                    border-radius: 0;
+                    padding: 0;
+                    color: #1f2937;
+                    font-family: "JetBrains Mono", "SF Mono", "Consolas", monospace;
+                    font-size: 12px;
+                }
                 QPlainTextEdit#outputConsole,
-                QPlainTextEdit#previewInfoDetail,
                 QTreeWidget#previewInfo {
                     background: #fbfdff;
                     border: 1px solid #d3dfec;
@@ -3819,13 +3835,24 @@ class LauncherWindow(QWidget):
                 font-size: 14px;
             }
             QLabel#previewTemplate {
-                background: #080d16;
-                border: 1px dashed #3a4658;
-                border-radius: 6px;
+                background: transparent;
+                border: none;
                 color: #94a3b8;
             }
+            QGroupBox#previewDetailGroup,
+            QGroupBox#previewTemplateGroup {
+                padding: 4px;
+            }
+            QPlainTextEdit#previewInfoDetail {
+                background: transparent;
+                border: none;
+                border-radius: 0;
+                padding: 0;
+                color: #d6dde8;
+                font-family: "JetBrains Mono", "SF Mono", "Consolas", monospace;
+                font-size: 12px;
+            }
             QPlainTextEdit#outputConsole,
-            QPlainTextEdit#previewInfoDetail,
             QTreeWidget#previewInfo {
                 background: #060912;
                 border: 1px solid #273142;

@@ -4,6 +4,7 @@ import base64
 import importlib
 import json
 import logging
+import math
 import multiprocessing
 import os
 import re
@@ -63,7 +64,12 @@ from aw.autogame.tools.HilogCapture import HilogRunCapture
 from aw.autogame.tools.MemoryCapture import MemoryRunCapture
 from aw.autogame.tools.Utils import LATEST_PREVIEW_POINTER_FILENAME, archive_run_artifacts, get_display_rotation, get_resolution, get_screen_mode, prune_run_archive_artifacts, resolve_run_archive_dir, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
-from aw.autogame.common.SPController.SPArea import build_sp_save_shell_command
+from aw.autogame.common.SPController.SPArea import (
+    SP_CONTROLLER_STATE_FILE,
+    SP_SAVE_PROTECTION_LOG_MARKER,
+    build_sp_save_shell_command,
+    calculate_sp_save_settle_seconds,
+)
 
 class AppPaths(NamedTuple):
     app_dir: Path
@@ -143,7 +149,6 @@ REBOOT_RELAUNCH_DELAY_SECONDS = 80
 STREAM_DISCONNECT_GRACEFUL_STOP_TIMEOUT_MS = 60000
 STREAM_DISCONNECT_FORCE_KILL_TIMEOUT_MS = 5000
 RUN_STOP_FORCE_KILL_TIMEOUT_MS = 15000
-MANUAL_STOP_SP_SAVE_SETTLE_SECONDS = 2.0
 STREAM_DISCONNECT_PATTERNS = (
     "[Stream] Channel ready timeout.",
     "[Stream] Receive loop ended unexpectedly.",
@@ -2927,7 +2932,11 @@ class LauncherWindow(QWidget):
         self.current_run_stream_disconnect_message = ""
         self.current_run_stream_preserved = False
         self.current_run_sp_started = False
+        self.current_run_sp_started_monotonic: Optional[float] = None
+        self.current_run_sp_save_confirmed = False
         self.current_run_sp_state: dict = {}
+        self.sp_save_settle_in_progress = False
+        self.pending_process_finished: Optional[tuple[int, object]] = None
         self.current_run_failure_code = ""
         self.current_run_failure_reason = ""
         self.current_run_failure_details: dict = {}
@@ -6583,7 +6592,11 @@ class LauncherWindow(QWidget):
         self.current_run_stream_disconnect_message = ""
         self.current_run_stream_preserved = False
         self.current_run_sp_started = False
+        self.current_run_sp_started_monotonic = None
+        self.current_run_sp_save_confirmed = False
         self.current_run_sp_state = {}
+        self.sp_save_settle_in_progress = False
+        self.pending_process_finished = None
         self.current_run_failure_code = ""
         self.current_run_failure_reason = ""
         self.current_run_failure_details = {}
@@ -6732,7 +6745,11 @@ class LauncherWindow(QWidget):
         self.current_run_stream_disconnect_message = ""
         self.current_run_stream_preserved = False
         self.current_run_sp_started = False
+        self.current_run_sp_started_monotonic = None
+        self.current_run_sp_save_confirmed = False
         self.current_run_sp_state = {}
+        self.sp_save_settle_in_progress = False
+        self.pending_process_finished = None
         self.current_run_failure_code = ""
         self.current_run_failure_reason = ""
         self.current_run_failure_details = {}
@@ -7029,6 +7046,7 @@ class LauncherWindow(QWidget):
         if self.current_run_sp_started:
             return
         self.current_run_sp_started = True
+        self.current_run_sp_started_monotonic = time.monotonic()
         LOGGER.info("sp recording started detected: source=%s state=%s", source, state)
 
     def _refresh_current_run_sp_state(self):
@@ -7063,6 +7081,9 @@ class LauncherWindow(QWidget):
         if not state:
             return
 
+        if self.current_run_sp_save_confirmed:
+            state["sp_saved"] = True
+
         self.current_run_sp_state = state
         if (
             state.get("sp_started_ever")
@@ -7070,6 +7091,108 @@ class LauncherWindow(QWidget):
             or state.get("sp_saved")
         ):
             self._mark_current_run_sp_started("state_file", state)
+
+    def _current_sp_actual_runtime_seconds(self) -> float:
+        self._refresh_current_run_sp_state()
+        state = self.current_run_sp_state
+        controller_state = state.get("controller") if isinstance(state, dict) else None
+        if not isinstance(controller_state, dict):
+            controller_state = state if isinstance(state, dict) else {}
+
+        try:
+            effective_seconds = max(
+                0.0,
+                float(controller_state.get("effective_time_seconds", 0.0) or 0.0),
+            )
+        except (TypeError, ValueError):
+            effective_seconds = 0.0
+
+        if controller_state.get("sp_recording") and not controller_state.get("sp_saved"):
+            try:
+                state_written_at = float(
+                    controller_state.get("state_written_at_epoch", 0.0) or 0.0
+                )
+            except (TypeError, ValueError):
+                state_written_at = 0.0
+            if state_written_at <= 0 and self.current_run_archive_dir is not None:
+                controller_state_path = (
+                    self.current_run_archive_dir / SP_CONTROLLER_STATE_FILE
+                )
+                try:
+                    state_written_at = controller_state_path.stat().st_mtime
+                except OSError:
+                    state_written_at = 0.0
+            if state_written_at > 0:
+                effective_seconds += max(0.0, time.time() - state_written_at)
+        if effective_seconds <= 0 and self.current_run_sp_started_monotonic is not None:
+            effective_seconds = max(
+                0.0,
+                time.monotonic() - self.current_run_sp_started_monotonic,
+            )
+
+        return effective_seconds
+
+    def _wait_for_sp_save_settle(
+        self,
+        reason_label: str,
+        actual_runtime_seconds: float,
+    ) -> int:
+        wait_seconds = calculate_sp_save_settle_seconds(actual_runtime_seconds)
+        label = str(reason_label or "SP保全").strip() or "SP保全"
+        actual_minutes = max(0.0, float(actual_runtime_seconds)) / 60.0
+        self._log_message(
+            f"[Launcher] {label}：SP 实际运行 {actual_minutes:.2f} 分钟，"
+            f"按 max(60秒, 实际运行分钟×2) 需要等待 {wait_seconds} 秒；"
+            "等待完成前不会清理游戏/SP 进程。\n"
+        )
+        self._set_status(f"{label}：SP 后台保存中，剩余 {wait_seconds} 秒。")
+
+        previous_wait_state = self.sp_save_settle_in_progress
+        self.sp_save_settle_in_progress = True
+        deadline = time.monotonic() + wait_seconds
+        last_reported = wait_seconds
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                QApplication.processEvents()
+                time.sleep(min(0.1, remaining))
+                remaining_seconds = max(0, int(math.ceil(deadline - time.monotonic())))
+                if (
+                    0 < remaining_seconds < last_reported
+                    and (
+                        last_reported - remaining_seconds >= 10
+                        or remaining_seconds <= 5
+                    )
+                ):
+                    self._log_message(
+                        f"[Launcher] {label}：SP 后台保存中，"
+                        f"剩余 {remaining_seconds} 秒。\n"
+                    )
+                    self._set_status(
+                        f"{label}：SP 后台保存中，剩余 {remaining_seconds} 秒。"
+                    )
+                    last_reported = remaining_seconds
+        finally:
+            self.sp_save_settle_in_progress = previous_wait_state
+
+        self._log_message(
+            f"[Launcher] {label}：SP 后台保存等待 {wait_seconds} 秒已完成，"
+            "现在可以继续归档和清理进程。\n"
+        )
+
+        if not previous_wait_state and self.pending_process_finished is not None:
+            exit_code, exit_status = self.pending_process_finished
+            self.pending_process_finished = None
+            QTimer.singleShot(
+                0,
+                lambda code=exit_code, status=exit_status: self._on_process_finished(
+                    code,
+                    status,
+                ),
+            )
+        return wait_seconds
 
     def _refresh_current_run_failure_signal(self):
         archive_dir = self.current_run_archive_dir
@@ -7193,7 +7316,8 @@ class LauncherWindow(QWidget):
                 except Exception:
                     pass
 
-    def _save_sp_for_preserve(self, reason_label: str) -> bool:
+    def _save_sp_for_preserve(self, reason_label: str) -> dict:
+        self.run_timeout_timer.stop()
         try:
             resolution = get_resolution()
         except Exception:
@@ -7217,9 +7341,26 @@ class LauncherWindow(QWidget):
                 f"[Launcher] {label}：SP 保存指令执行失败，请检查 hdc/uinput 状态。\n",
                 level=logging.WARNING,
             )
-        return ok
+            return {
+                "ok": False,
+                "actual_runtime_seconds": self._current_sp_actual_runtime_seconds(),
+                "settle_seconds": 0,
+            }
 
-    def _save_sp_on_stream_disconnect(self) -> bool:
+        actual_runtime_seconds = self._current_sp_actual_runtime_seconds()
+        self.current_run_sp_save_confirmed = True
+        self.current_run_sp_state["sp_saved"] = True
+        settle_seconds = self._wait_for_sp_save_settle(
+            label,
+            actual_runtime_seconds,
+        )
+        return {
+            "ok": True,
+            "actual_runtime_seconds": actual_runtime_seconds,
+            "settle_seconds": settle_seconds,
+        }
+
+    def _save_sp_on_stream_disconnect(self) -> dict:
         return self._save_sp_for_preserve("断流保全")
 
     def _preserve_stream_disconnect_run_state(self):
@@ -7240,6 +7381,8 @@ class LauncherWindow(QWidget):
             "screenshot_path": None,
             "sp_save_attempted": False,
             "sp_save_ok": False,
+            "sp_actual_runtime_seconds": 0.0,
+            "sp_save_settle_seconds": 0,
             "sp_save_skipped_reason": "",
         }
 
@@ -7247,15 +7390,14 @@ class LauncherWindow(QWidget):
             screenshot_path = self._capture_stream_disconnect_screenshot(archive_dir)
             preserve_result["screenshot_path"] = str(screenshot_path) if screenshot_path else None
 
-        if is_marathon_plan(self.current_plan):
-            preserve_result["sp_save_skipped_reason"] = "marathon_waits_for_duration_or_battery"
-            self._log_message(
-                "[Launcher] 马拉松断流保全：本轮未达到 SP 有效时长且未触发结束电量，"
-                "跳过长按保存。\n"
-            )
-        elif not self.current_run_stream_disconnect_startup and self._current_plan_uses_sp_recording():
+        if not self.current_run_stream_disconnect_startup and self._current_plan_uses_sp_recording():
             preserve_result["sp_save_attempted"] = True
-            preserve_result["sp_save_ok"] = self._save_sp_on_stream_disconnect()
+            save_result = self._save_sp_on_stream_disconnect()
+            preserve_result["sp_save_ok"] = save_result["ok"]
+            preserve_result["sp_actual_runtime_seconds"] = save_result[
+                "actual_runtime_seconds"
+            ]
+            preserve_result["sp_save_settle_seconds"] = save_result["settle_seconds"]
 
         if archive_dir is not None:
             try:
@@ -7288,23 +7430,24 @@ class LauncherWindow(QWidget):
             "screenshot_path": details.get("screenshot_path"),
             "sp_save_attempted": False,
             "sp_save_ok": False,
+            "sp_actual_runtime_seconds": 0.0,
+            "sp_save_settle_seconds": 0,
             "sp_save_skipped_reason": "",
         }
 
-        if is_marathon_plan(self.current_plan):
-            preserve_result["sp_save_skipped_reason"] = "marathon_waits_for_duration_or_battery"
-            self._log_message(
-                "[Launcher] 马拉松无操作保全：仅允许在 SP 时长达标或结束电量触发时保存，"
-                "跳过额外长按。\n"
-            )
-        elif not self._current_plan_uses_sp_recording():
+        if not self._current_plan_uses_sp_recording():
             preserve_result["sp_save_skipped_reason"] = "sp_recording_disabled"
         elif self.current_run_sp_state.get("sp_saved"):
             preserve_result["sp_save_skipped_reason"] = "sp_already_saved"
             self._log_message("[Launcher] 无操作保全：SP 状态显示已经保存，跳过重复长按。\n")
         else:
             preserve_result["sp_save_attempted"] = True
-            preserve_result["sp_save_ok"] = self._save_sp_for_preserve("无操作保全")
+            save_result = self._save_sp_for_preserve("无操作保全")
+            preserve_result["sp_save_ok"] = save_result["ok"]
+            preserve_result["sp_actual_runtime_seconds"] = save_result[
+                "actual_runtime_seconds"
+            ]
+            preserve_result["sp_save_settle_seconds"] = save_result["settle_seconds"]
 
         if archive_dir is not None:
             try:
@@ -7328,6 +7471,8 @@ class LauncherWindow(QWidget):
             "sp_state": self.current_run_sp_state,
             "sp_save_attempted": False,
             "sp_save_ok": False,
+            "sp_actual_runtime_seconds": 0.0,
+            "sp_save_settle_seconds": 0,
             "sp_save_skipped_reason": "",
         }
 
@@ -7339,13 +7484,12 @@ class LauncherWindow(QWidget):
             preserve_result["sp_save_skipped_reason"] = "sp_not_started"
         else:
             preserve_result["sp_save_attempted"] = True
-            preserve_result["sp_save_ok"] = self._save_sp_for_preserve("手动停止保全")
-            if preserve_result["sp_save_ok"]:
-                self.current_run_sp_state["sp_saved"] = True
-                deadline = time.monotonic() + MANUAL_STOP_SP_SAVE_SETTLE_SECONDS
-                while time.monotonic() < deadline:
-                    QApplication.processEvents()
-                    time.sleep(0.1)
+            save_result = self._save_sp_for_preserve("手动停止保全")
+            preserve_result["sp_save_ok"] = save_result["ok"]
+            preserve_result["sp_actual_runtime_seconds"] = save_result[
+                "actual_runtime_seconds"
+            ]
+            preserve_result["sp_save_settle_seconds"] = save_result["settle_seconds"]
 
         if archive_dir is not None:
             try:
@@ -8101,6 +8245,12 @@ class LauncherWindow(QWidget):
 
     def _handle_sp_output(self, text: str):
         decoded_text = "".join(line for _, line in decode_output_text(text))
+        if SP_SAVE_PROTECTION_LOG_MARKER in decoded_text:
+            self.run_timeout_timer.stop()
+            self._log_message(
+                "[Launcher] 检测到 SP 长按保存开始，"
+                "已停止本轮安全超时计时，等待后台数据落盘。\n"
+            )
         if any(marker in decoded_text for marker in SP_RECORD_EVER_STARTED_MARKERS):
             self._mark_current_run_sp_started("stdout")
 
@@ -8347,6 +8497,13 @@ class LauncherWindow(QWidget):
         return True
 
     def _on_process_finished(self, exit_code: int, _exit_status):
+        if self.sp_save_settle_in_progress:
+            self.pending_process_finished = (int(exit_code), _exit_status)
+            LOGGER.info(
+                "process finished while SP save settle wait is active; defer cleanup: exit_code=%s",
+                exit_code,
+            )
+            return
         LOGGER.info(
             "process finished: exit_code=%s exit_status=%s current_run_index=%s timed_out=%s",
             exit_code,
@@ -8478,8 +8635,8 @@ class LauncherWindow(QWidget):
 
             if is_marathon_plan(self.current_plan):
                 self._log_message(
-                    "[Launcher] 马拉松本轮在 SP 时长达标前发生断流，按规则不长按保存；"
-                    "中断状态已归档，清理进程后继续下一轮。\n"
+                    "[Launcher] 马拉松本轮发生断流，已长按 SP 并按实际运行时长"
+                    "完成后台落盘等待；中断状态已归档，清理进程后继续下一轮。\n"
                 )
             else:
                 self._log_message(

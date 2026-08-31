@@ -20,6 +20,7 @@ import numpy as np
 from aw.autogame.common.SPController.SPArea import (
     MARATHON_DURATION_ENV,
     SPControllerBase,
+    calculate_sp_save_settle_seconds,
     parse_marathon_duration_minutes,
 )
 from aw.autogame.tools.Utils import *
@@ -2268,7 +2269,6 @@ class FrameWorker(threading.Thread):
     STREAM_RECOVERY_WAIT_LOG_INTERVAL_SECONDS = 15.0
     STREAM_RECOVERY_MAX_WAIT_SECONDS = 120.0
     LOGIC_THREAD_STOP_TIMEOUT_SECONDS = 6.0
-    BATTERY_CUTOFF_SHUTDOWN_DELAY_SECONDS = 60.0
     VISUALIZER_QUEUE_SIZE = 5
 
     def __init__(
@@ -2377,6 +2377,7 @@ class FrameWorker(threading.Thread):
         self.current_frame_flushed = False
         self._frame_log_state_cache = {}
         self._frame_log_state_lock = threading.Lock()
+        self._logic_iteration_lock = threading.Lock()
         self.last_gc_time = time.time()
 
         self.click = self._wrap_control_action("click", self.controller.click)
@@ -3204,39 +3205,63 @@ class FrameWorker(threading.Thread):
 
     def _handle_launcher_inactivity_timeout(self):
         idle_seconds = max(0.0, time.monotonic() - self.last_control_action_time)
-        screenshot_path = self._capture_launcher_unknown_screenshot()
         idle_seconds_text = f"{idle_seconds:.1f}".rstrip("0").rstrip(".")
-        timeout_message = (
-            f"连续 {idle_seconds_text} 秒没有操控，已结束游戏进程。"
-        )
-        self.frame_log(timeout_message, log_type=FrameLogType.SYSTEM)
-        if screenshot_path:
-            self.frame_log(
-                f"无操作超时截图已保存至：{screenshot_path}",
-                log_type=FrameLogType.SYSTEM,
-            )
-        else:
-            self.frame_log(
-                "无操作超时截图抓取失败，异常画面目录中未生成截图。",
-                log_type=FrameLogType.SYSTEM,
-            )
-        self._flush_current_frame_log()
+        self.paused = True
+        pause_wait_event = getattr(self, "_pause_wait_event", None)
+        if pause_wait_event is not None:
+            pause_wait_event.clear()
+        logic_lock = getattr(self, "_logic_iteration_lock", None)
+        if logic_lock is None:
+            logic_lock = threading.Lock()
+            self._logic_iteration_lock = logic_lock
 
-        reason = (
-            f"launcher 模式下连续 {idle_seconds_text} 秒未执行操控，"
-            f"已判定当前用例卡在未知界面并主动结束游戏进程。"
-        )
-        if screenshot_path:
-            reason = f"{reason} 截图: {screenshot_path}"
+        with logic_lock:
+            screenshot_path = self._capture_launcher_unknown_screenshot()
+            timeout_message = (
+                f"连续 {idle_seconds_text} 秒没有操控，"
+                "已停止后续业务操作，开始保全 SP 记录。"
+            )
+            self.frame_log(timeout_message, log_type=FrameLogType.SYSTEM)
+            if screenshot_path:
+                self.frame_log(
+                    f"无操作超时截图已保存至：{screenshot_path}",
+                    log_type=FrameLogType.SYSTEM,
+                )
+            else:
+                self.frame_log(
+                    "无操作超时截图抓取失败，异常画面目录中未生成截图。",
+                    log_type=FrameLogType.SYSTEM,
+                )
+            self._flush_current_frame_log()
 
-        if self.mark_failed(
-            "launcher_inactivity_timeout",
-            reason,
-            idle_seconds=idle_seconds,
-            screenshot_path=screenshot_path,
-        ):
-            self.running = False
-            self.finished = True
+            sp_controller = getattr(self, "sp_controller", None)
+            if (
+                sp_controller is not None
+                and getattr(sp_controller, "has_started", False)
+                and not getattr(sp_controller, "is_saved", False)
+            ):
+                self.frame_log(
+                    "无操作超时：正在长按 SP 保存，完成后将按实际运行时长等待落盘。",
+                    log_type=FrameLogType.SYSTEM,
+                )
+                if sp_controller.stop():
+                    self.wait_for_sp_save_settle("无操作超时")
+
+            reason = (
+                f"launcher 模式下连续 {idle_seconds_text} 秒未执行操控，"
+                f"已判定当前用例卡在未知界面并主动结束游戏进程。"
+            )
+            if screenshot_path:
+                reason = f"{reason} 截图: {screenshot_path}"
+
+            if self.mark_failed(
+                "launcher_inactivity_timeout",
+                reason,
+                idle_seconds=idle_seconds,
+                screenshot_path=screenshot_path,
+            ):
+                self.running = False
+                self.finished = True
 
     def _watch_launcher_inactivity(self):
         while not self._watchdog_stop_event.wait(self.WATCHDOG_CHECK_INTERVAL_SECONDS):
@@ -3328,10 +3353,52 @@ class FrameWorker(threading.Thread):
 
     def get_sp_save_settle_seconds(self):
         """长按 SP 保存后预留给手机端的落盘时间。"""
-        return max(
-            self.BATTERY_CUTOFF_SHUTDOWN_DELAY_SECONDS,
-            self.marathon_time * 2,
+        return calculate_sp_save_settle_seconds(
+            getattr(self.sp_controller, "effective_time", 0.0)
         )
+
+    def wait_for_sp_save_settle(self, reason_label: str) -> int:
+        actual_runtime_seconds = max(
+            0.0,
+            float(getattr(self.sp_controller, "effective_time", 0.0) or 0.0),
+        )
+        wait_seconds = calculate_sp_save_settle_seconds(actual_runtime_seconds)
+        label = str(reason_label or "SP保存").strip() or "SP保存"
+        actual_minutes = actual_runtime_seconds / 60.0
+        self.frame_log(
+            f"{label}：SP 实际运行 {actual_minutes:.2f} 分钟，"
+            f"按 max(60秒, 实际运行分钟×2) 需要等待 {wait_seconds} 秒，"
+            "等待完成后才允许清理游戏/SP 进程。"
+        )
+        self._flush_current_frame_log()
+
+        deadline = time.monotonic() + wait_seconds
+        last_reported = wait_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(1.0, remaining))
+            remaining_seconds = max(0, int(math.ceil(deadline - time.monotonic())))
+            if (
+                0 < remaining_seconds < last_reported
+                and (
+                    last_reported - remaining_seconds >= 10
+                    or remaining_seconds <= 5
+                )
+            ):
+                self.frame_log(
+                    f"{label}：SP 后台保存中，剩余 {remaining_seconds} 秒。"
+                )
+                self._flush_current_frame_log()
+                last_reported = remaining_seconds
+
+        self.frame_log(
+            f"{label}：SP 后台保存等待 {wait_seconds} 秒已完成，"
+            "可继续结束用例并清理进程。"
+        )
+        self._flush_current_frame_log()
+        return wait_seconds
 
     def _handle_marathon_battery_stop(self):
         percent = self.sp_controller.last_battery_percent
@@ -3341,19 +3408,16 @@ class FrameWorker(threading.Thread):
             "正在长按 SP 保存。"
         )
         saved = self.sp_controller.stop()
-        sp_save_wait_time = self.get_sp_save_settle_seconds()
         if saved:
             self.frame_log(
-                f"SP 已保存，等待 {sp_save_wait_time:g} 秒后"
-                "结束自动化工程。"
+                "SP 长按保存指令已执行，开始等待后台数据落盘。"
             )
         else:
             self.frame_log(
-                f"SP 长按保存未确认执行，仍将等待 "
-                f"{sp_save_wait_time:g} 秒后结束自动化工程。"
+                "SP 长按保存未确认执行，仍按实际运行时长"
+                "预留后台落盘时间。"
             )
-        self._flush_current_frame_log()
-        time.sleep(sp_save_wait_time)
+        self.wait_for_sp_save_settle("马拉松低电量结束")
         self.stop()
 
     def loop(self):
@@ -3396,7 +3460,10 @@ class FrameWorker(threading.Thread):
                 )
 
                 self._begin_frame_log_context()
-                self.on_stage_logic(self)
+                with self._logic_iteration_lock:
+                    if self.paused or not self.running:
+                        continue
+                    self.on_stage_logic(self)
                 self._flush_current_frame_log()
                 time.sleep(0.05)
             except Exception as exc:

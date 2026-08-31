@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import threading
 import time
@@ -12,6 +13,8 @@ if TYPE_CHECKING:
 
 
 SP_SAVE_LONG_PRESS_MS = 3000
+SP_SAVE_MIN_SETTLE_SECONDS = 60
+SP_SAVE_PROTECTION_LOG_MARKER = "SP 保存保护开始"
 SP_DEFAULT_NORM_POSITION = (0.048, 0.295)
 MARATHON_DURATION_ENV = "AUTOGAME_MARATHON_DURATION_MINUTES"
 MARATHON_END_BATTERY_ENV = "AUTOGAME_MARATHON_END_BATTERY_PERCENT"
@@ -41,6 +44,18 @@ def parse_battery_percent(value: Any) -> Optional[int]:
 def parse_marathon_end_battery_percent(value: Any) -> int:
     percent = parse_battery_percent(value)
     return percent if percent is not None and percent > 0 else 0
+
+
+def calculate_sp_save_settle_seconds(actual_runtime_seconds: Any) -> int:
+    """Return a conservative post-save wait from the SP effective runtime."""
+    try:
+        runtime_seconds = max(0.0, float(actual_runtime_seconds))
+    except (TypeError, ValueError):
+        runtime_seconds = 0.0
+    return max(
+        SP_SAVE_MIN_SETTLE_SECONDS,
+        int(math.ceil(runtime_seconds / 30.0)),
+    )
 
 
 def build_sp_save_shell_command(
@@ -82,6 +97,7 @@ class SPControllerBase:
             float(battery_poll_interval_seconds),
         )
         self._start_time: Optional[float] = None
+        self._start_wall_time: Optional[float] = None
         self._paused_time = 0.0
         self._pause_start: Optional[float] = None
         self._is_paused = False
@@ -186,6 +202,7 @@ class SPControllerBase:
     def snapshot(self, event_name: str = "snapshot"):
         stopped = self._effective_time_at_stop is not None
         started = self._start_time is not None
+        state_written_at_epoch = time.time()
         return {
             "event": event_name,
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -193,6 +210,8 @@ class SPControllerBase:
             "sp_recording": self.is_recording,
             "sp_paused": started and not stopped and self._is_paused,
             "sp_saved": self.is_saved,
+            "state_written_at_epoch": state_written_at_epoch,
+            "sp_started_at_epoch": self._start_wall_time,
             "marathon_enabled": self.marathon_enabled,
             "target_duration_seconds": self.target_duration_seconds,
             "effective_time_seconds": self.effective_time,
@@ -341,6 +360,7 @@ class SPControllerBase:
             return False
 
         self._start_time = time.monotonic()
+        self._start_wall_time = time.time()
         self._paused_time = 0.0
         self._pause_start = None
         self._is_paused = False
@@ -401,6 +421,7 @@ class SPControllerBase:
             self._log_missing()
             return False
 
+        self._frame_log(f"{SP_SAVE_PROTECTION_LOG_MARKER}：正在长按 SP 保存。")
         result = self.w.click_down(self._area, dura=SP_SAVE_LONG_PRESS_MS)
         if not self._control_executed(result):
             self._log_missing()

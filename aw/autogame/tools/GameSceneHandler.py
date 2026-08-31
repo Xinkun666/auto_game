@@ -432,6 +432,9 @@ def load_special_handler(project_case):
 class GameImageProcessor:
     def __init__(self, project_name, special_handler=None, screen_resolution=None):
         self._memory_monitor = GameSceneMemoryMonitor()
+        self._executor_lock = threading.Lock()
+        self._executor = None
+        self._executor_closed = False
         self.project_root = os.path.join(r"aw/autogame/customs_examples", project_name)
 
         phase_started = time.perf_counter()
@@ -462,6 +465,41 @@ class GameImageProcessor:
             monitor = GameSceneMemoryMonitor()
             self._memory_monitor = monitor
         return monitor
+
+    def _get_executor(self):
+        executor_lock = getattr(self, "_executor_lock", None)
+        if executor_lock is None:
+            executor_lock = threading.Lock()
+            self._executor_lock = executor_lock
+        with executor_lock:
+            if getattr(self, "_executor_closed", False):
+                raise RuntimeError("GameImageProcessor 已关闭，不能继续处理画面")
+            executor = getattr(self, "_executor", None)
+            if executor is None:
+                executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=8,
+                    thread_name_prefix="GameSceneWorker",
+                )
+                self._executor = executor
+            return executor
+
+    def close(self, wait=True):
+        """Stop the persistent scene worker pool exactly once."""
+        executor_lock = getattr(self, "_executor_lock", None)
+        if executor_lock is None:
+            executor_lock = threading.Lock()
+            self._executor_lock = executor_lock
+        with executor_lock:
+            if getattr(self, "_executor_closed", False):
+                return
+            self._executor_closed = True
+            executor = getattr(self, "_executor", None)
+            self._executor = None
+        if executor is not None:
+            executor.shutdown(
+                wait=bool(wait),
+                cancel_futures=not bool(wait),
+            )
 
     def _resolve_screen_resolution(self, screen_resolution=None):
         if isinstance(screen_resolution, (tuple, list)) and len(screen_resolution) == 2:
@@ -825,14 +863,14 @@ class GameImageProcessor:
                 with task_metrics_lock:
                     task_metrics.append(metric)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            futures = [
-                executor.submit(_execute_task_profiled, k, v)
-                for k, v in tasks_config.items()
-            ]
-            for future in concurrent.futures.as_completed(futures):
-                tid, res = future.result()
-                results[tid] = res
+        executor = self._get_executor()
+        futures = [
+            executor.submit(_execute_task_profiled, k, v)
+            for k, v in tasks_config.items()
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            tid, res = future.result()
+            results[tid] = res
         memory_monitor.record_frame(
             tasks_config,
             task_metrics,
@@ -872,6 +910,12 @@ class StageLogicController:
         )
         print(f"[{self.project_name}] 场景分辨率已锁定: {self.processor.screen_w}x{self.processor.screen_h}")
         print(f"[{self.project_name}] 逻辑控制器已就绪。")
+
+    def close(self, wait=True):
+        processor = getattr(self, "processor", None)
+        close = getattr(processor, "close", None)
+        if callable(close):
+            close(wait=wait)
 
     def refresh_resolution(self, screen_width, screen_height):
         """同步屏幕分辨率，并重新选择当前分辨率对应的场景配置。"""

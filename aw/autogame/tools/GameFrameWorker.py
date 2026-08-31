@@ -3461,6 +3461,16 @@ class FrameWorker(threading.Thread):
                     "[FrameWorker] 逻辑线程未在 "
                     f"{self.LOGIC_THREAD_STOP_TIMEOUT_SECONDS:.1f}s 内退出，继续执行底层资源清理。"
                 )
+        logic_thread_still_running = bool(
+            logic_thread is not None and logic_thread.is_alive()
+        )
+        stage_resolver = getattr(self, "stage_resolver", None)
+        close_stage_resolver = getattr(stage_resolver, "close", None)
+        if callable(close_stage_resolver):
+            try:
+                close_stage_resolver(wait=not logic_thread_still_running)
+            except Exception as exc:
+                print(f"[FrameWorker] 关闭场景识别线程池失败: {exc}")
         self._flush_current_frame_log()
 
         if self._watchdog_thread and threading.current_thread() is not self._watchdog_thread:

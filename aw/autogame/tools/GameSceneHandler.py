@@ -2,12 +2,227 @@ import os
 import importlib
 import concurrent.futures
 import copy
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+
 from aw.autogame.tools.Utils import *
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
+from aw.autogame.tools.MemoryCapture import (
+    append_memory_log_record,
+    current_process_memory_snapshot,
+)
 import numpy as np
 
 DEFAULT_GROUP_NAME = "默认"
 GROUPABLE_ITEM_TYPES = ("area", "special_area")
+GAME_SCENE_MEMORY_INTERVAL_SECONDS = 5.0
+GAME_SCENE_MEMORY_LARGE_DELTA_MB = 64.0
+
+
+def _iso_now():
+    return datetime.now().astimezone().isoformat(timespec="milliseconds")
+
+
+def _mb(value):
+    if value is None:
+        return None
+    return round(float(value) / (1024 * 1024), 3)
+
+
+class GameSceneMemoryMonitor:
+    """Correlate GameSceneHandler phases with process-level memory changes."""
+
+    def __init__(
+        self,
+        output_path=None,
+        *,
+        interval_seconds=None,
+        snapshot_func=current_process_memory_snapshot,
+        writer=append_memory_log_record,
+    ):
+        configured_path = (
+            str(output_path)
+            if output_path is not None
+            else os.environ.get("AUTOGAME_MEMORY_LOG_PATH", "")
+        ).strip()
+        self.path = Path(configured_path) if configured_path else None
+        configured_interval = interval_seconds
+        if configured_interval is None:
+            configured_interval = os.environ.get(
+                "AUTOGAME_GAMESCENE_MEMORY_INTERVAL_SECONDS",
+                str(GAME_SCENE_MEMORY_INTERVAL_SECONDS),
+            )
+        try:
+            self.interval_seconds = max(0.5, float(configured_interval))
+        except (TypeError, ValueError):
+            self.interval_seconds = GAME_SCENE_MEMORY_INTERVAL_SECONDS
+        self.snapshot_func = snapshot_func
+        self.writer = writer
+        self._last_emit_at = 0.0
+        self._last_signature = None
+        self._baseline_snapshot = None
+        self._call_index = 0
+        self._error_reported = False
+        self._lock = threading.Lock()
+
+    @property
+    def enabled(self):
+        return self.path is not None
+
+    def snapshot(self):
+        if not self.enabled:
+            return None
+        try:
+            return self.snapshot_func()
+        except Exception as exc:
+            self._report_error(exc)
+            return None
+
+    @staticmethod
+    def _compact_snapshot(snapshot):
+        if not snapshot:
+            return None
+        result = {
+            "pid": snapshot.get("pid"),
+            "thread_count": snapshot.get("thread_count"),
+            "python_thread_count": snapshot.get("python_thread_count"),
+            "handle_count": snapshot.get("handle_count"),
+            "cpu_seconds": snapshot.get("cpu_seconds"),
+        }
+        for key in (
+            "private_bytes",
+            "working_set_bytes",
+            "peak_working_set_bytes",
+            "virtual_bytes",
+        ):
+            result[key[:-6] + "_mb"] = _mb(snapshot.get(key))
+        return {key: value for key, value in result.items() if value is not None}
+
+    @staticmethod
+    def _preferred_memory_bytes(snapshot):
+        if not snapshot:
+            return None
+        value = snapshot.get("private_bytes")
+        if value is None:
+            value = snapshot.get("working_set_bytes")
+        return None if value is None else int(value)
+
+    @classmethod
+    def _delta_mb(cls, before, after):
+        before_value = cls._preferred_memory_bytes(before)
+        after_value = cls._preferred_memory_bytes(after)
+        if before_value is None or after_value is None:
+            return None
+        return _mb(after_value - before_value)
+
+    @staticmethod
+    def _task_signature(tasks_config):
+        values = []
+        for task_id, config in sorted(tasks_config.items()):
+            task_type = str(config.get("type") or "unknown")
+            handler = str(config.get("handler_name") or task_id)
+            values.append((task_type, handler))
+        return tuple(values)
+
+    @staticmethod
+    def _task_summary(task_metrics):
+        return sorted(
+            (
+                {
+                    "task_id": item["task_id"],
+                    "task_type": item["task_type"],
+                    "handler": item["handler"],
+                    "duration_ms": item["duration_ms"],
+                }
+                for item in task_metrics
+            ),
+            key=lambda item: item["duration_ms"],
+            reverse=True,
+        )
+
+    def _report_error(self, exc):
+        if self._error_reported:
+            return
+        self._error_reported = True
+        print(f"[GameSceneMemory] 监控失败，自动化继续运行: {exc}", flush=True)
+
+    def _write_event(self, record):
+        try:
+            self.writer(self.path, record)
+        except Exception as exc:
+            self._report_error(exc)
+
+    def record_phase(self, phase, before, after, duration_ms):
+        if not self.enabled or (before is None and after is None):
+            return
+        with self._lock:
+            if self._baseline_snapshot is None:
+                self._baseline_snapshot = before or after
+            record = {
+                "event": "gamescene_memory",
+                "timestamp": _iso_now(),
+                "source": "aw/autogame/tools/GameSceneHandler.py",
+                "reason": ["initialization_phase"],
+                "phase": str(phase),
+                "duration_ms": round(float(duration_ms), 3),
+                "process_before": self._compact_snapshot(before),
+                "process_after": self._compact_snapshot(after),
+                "delta_memory_mb": self._delta_mb(before, after),
+                "growth_since_gamescene_start_mb": self._delta_mb(
+                    self._baseline_snapshot, after,
+                ),
+                "notes": "Memory is process-scoped; this phase is correlation evidence.",
+            }
+            self._write_event(record)
+            self._last_emit_at = time.monotonic()
+
+    def record_frame(self, tasks_config, task_metrics, before, after, duration_ms):
+        if not self.enabled or (before is None and after is None):
+            return
+        now = time.monotonic()
+        signature = self._task_signature(tasks_config)
+        delta_mb = self._delta_mb(before, after)
+        with self._lock:
+            self._call_index += 1
+            reasons = []
+            if self._last_signature is None:
+                reasons.append("first_frame")
+            elif signature != self._last_signature:
+                reasons.append("task_set_changed")
+            if now - self._last_emit_at >= self.interval_seconds:
+                reasons.append("interval")
+            if delta_mb is not None and delta_mb >= GAME_SCENE_MEMORY_LARGE_DELTA_MB:
+                reasons.append("large_frame_delta")
+            self._last_signature = signature
+            if not reasons:
+                return
+            if self._baseline_snapshot is None:
+                self._baseline_snapshot = before or after
+            record = {
+                "event": "gamescene_memory",
+                "timestamp": _iso_now(),
+                "source": "aw/autogame/tools/GameSceneHandler.py",
+                "reason": reasons,
+                "call_index": self._call_index,
+                "duration_ms": round(float(duration_ms), 3),
+                "task_count": len(tasks_config),
+                "exclusive_task": len(tasks_config) == 1,
+                "tasks": self._task_summary(task_metrics),
+                "process_before": self._compact_snapshot(before),
+                "process_after": self._compact_snapshot(after),
+                "delta_memory_mb": delta_mb,
+                "growth_since_gamescene_start_mb": self._delta_mb(
+                    self._baseline_snapshot, after,
+                ),
+                "notes": (
+                    "Per-task memory ownership is not measurable. A single-task frame "
+                    "is stronger attribution evidence; concurrent task deltas are correlation only."
+                ),
+            }
+            self._write_event(record)
+            self._last_emit_at = now
 
 
 def load_stage_info(project_case, info_mod):
@@ -59,11 +274,37 @@ def load_special_handler(project_case):
 
 class GameImageProcessor:
     def __init__(self, project_name, special_handler=None, screen_resolution=None):
+        self._memory_monitor = GameSceneMemoryMonitor()
         self.project_root = os.path.join(r"aw/autogame/customs_examples", project_name)
+
+        phase_started = time.perf_counter()
+        phase_before = self._memory_monitor.snapshot()
         self.template_cache = self._load_templates()
+        self._memory_monitor.record_phase(
+            "load_templates",
+            phase_before,
+            self._memory_monitor.snapshot(),
+            (time.perf_counter() - phase_started) * 1000.0,
+        )
+
+        phase_started = time.perf_counter()
+        phase_before = self._memory_monitor.snapshot()
         self.special_handler = special_handler or load_special_handler(project_name)
+        self._memory_monitor.record_phase(
+            "load_special_handler",
+            phase_before,
+            self._memory_monitor.snapshot(),
+            (time.perf_counter() - phase_started) * 1000.0,
+        )
         self.task_config = None
         self.screen_w, self.screen_h = self._resolve_screen_resolution(screen_resolution)
+
+    def _get_memory_monitor(self):
+        monitor = getattr(self, "_memory_monitor", None)
+        if monitor is None:
+            monitor = GameSceneMemoryMonitor()
+            self._memory_monitor = monitor
+        return monitor
 
     def _resolve_screen_resolution(self, screen_resolution=None):
         if isinstance(screen_resolution, (tuple, list)) and len(screen_resolution) == 2:
@@ -168,9 +409,14 @@ class GameImageProcessor:
         return [result, [timing_ms]]
 
     def process(self, raw_frame, tasks_config, buffer_ratio=0.3):
+        memory_monitor = self._get_memory_monitor()
+        frame_started = time.perf_counter()
+        memory_before = memory_monitor.snapshot()
         self.task_config = tasks_config
         curr_h, curr_w = raw_frame.shape[:2]
         results = {}
+        task_metrics = []
+        task_metrics_lock = threading.Lock()
 
         def _execute_task(task_id, config):
             try:
@@ -306,11 +552,38 @@ class GameImageProcessor:
             except Exception as e:
                 return task_id, f"Err: {e}"
 
+        def _execute_task_profiled(task_id, config):
+            task_started = time.perf_counter()
+            try:
+                return _execute_task(task_id, config)
+            finally:
+                metric = {
+                    "task_id": str(task_id),
+                    "task_type": str(config.get("type") or "unknown"),
+                    "handler": str(config.get("handler_name") or task_id),
+                    "duration_ms": round(
+                        (time.perf_counter() - task_started) * 1000.0,
+                        3,
+                    ),
+                }
+                with task_metrics_lock:
+                    task_metrics.append(metric)
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            futures = [executor.submit(_execute_task, k, v) for k, v in tasks_config.items()]
+            futures = [
+                executor.submit(_execute_task_profiled, k, v)
+                for k, v in tasks_config.items()
+            ]
             for future in concurrent.futures.as_completed(futures):
                 tid, res = future.result()
                 results[tid] = res
+        memory_monitor.record_frame(
+            tasks_config,
+            task_metrics,
+            memory_before,
+            memory_monitor.snapshot(),
+            (time.perf_counter() - frame_started) * 1000.0,
+        )
         return results
 
 class StageLogicController:

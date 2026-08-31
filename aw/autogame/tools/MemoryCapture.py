@@ -427,8 +427,63 @@ def _default_provider():
     return _WindowsSnapshotProvider() if os.name == "nt" else _PosixSnapshotProvider()
 
 
+_CURRENT_PROCESS_PROVIDER = None
+_CURRENT_PROCESS_PROVIDER_LOCK = threading.Lock()
+
+
+def current_process_memory_snapshot(provider=None) -> Dict[str, Any]:
+    """Return a lightweight memory snapshot for the calling process.
+
+    This is intentionally separate from :class:`MemoryRunCapture`: callers can
+    correlate a code phase with process memory without starting another sampler
+    thread or claiming that memory belongs to a specific Python file/thread.
+    """
+    global _CURRENT_PROCESS_PROVIDER
+    active_provider = provider
+    if active_provider is None:
+        with _CURRENT_PROCESS_PROVIDER_LOCK:
+            if _CURRENT_PROCESS_PROVIDER is None:
+                _CURRENT_PROCESS_PROVIDER = _default_provider()
+            active_provider = _CURRENT_PROCESS_PROVIDER
+
+    pid = os.getpid()
+    item: Dict[str, Any] = {"pid": pid}
+    if isinstance(active_provider, _WindowsSnapshotProvider):
+        # Keep per-frame probes cheap: the Launcher's 5-second sampler already
+        # captures native thread counts. Avoid scanning every process here.
+        item.update(active_provider._read_process_metrics(pid))
+    elif isinstance(active_provider, _PosixSnapshotProvider):
+        item.update(active_provider._entries().get(pid, {}))
+    else:
+        snapshot = active_provider.sample(pid)
+        for process in snapshot.get("processes") or []:
+            if int(process.get("pid", 0)) == pid:
+                item.update(process)
+                break
+
+    item["python_thread_count"] = threading.active_count()
+    return item
+
+
+def append_memory_log_record(output_path: Path, record: Dict[str, Any]) -> None:
+    """Append one complete JSONL record with one OS-level append write."""
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = (
+        json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    descriptor = os.open(str(path), flags, 0o644)
+    try:
+        os.write(descriptor, payload)
+    finally:
+        os.close(descriptor)
+
+
 class MemoryRunCapture:
-    """Write one JSON record per sample to a run's ``logs/memory.log``."""
+    """Write one JSON record per sample to a run's ``memory.log``."""
 
     def __init__(
         self,

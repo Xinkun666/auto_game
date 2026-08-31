@@ -59,6 +59,7 @@ from aw.autogame.tools.HdcDebugLog import (
     resolve_hdc_debug_level,
 )
 from aw.autogame.tools.HilogCapture import HilogRunCapture
+from aw.autogame.tools.MemoryCapture import MemoryRunCapture
 from aw.autogame.tools.Utils import LATEST_PREVIEW_POINTER_FILENAME, archive_run_artifacts, get_display_rotation, get_resolution, get_screen_mode, prune_run_archive_artifacts, resolve_run_archive_dir, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 from aw.autogame.common.SPController.SPArea import build_sp_save_shell_command
@@ -109,7 +110,7 @@ def resolve_runtime_temp_dir(app_dir: Optional[Path] = None) -> Path:
 
 
 def resolve_preview_frame_dir(app_dir: Optional[Path] = None) -> Path:
-    return resolve_runtime_temp_dir(app_dir) / "logs" / "process_temp_logs"
+    return resolve_runtime_temp_dir(app_dir) / "process_temp_logs"
 
 
 def resolve_history_temp_dir() -> Path:
@@ -129,10 +130,9 @@ CUSTOMS_GAME_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_game_example
 GAME_RECORDING_PROJECT_DIR = CUSTOMS_EXAMPLES_DIR / "Game_Recording"
 TEMP_DIR = resolve_runtime_temp_dir(APP_DIR)
 PREVIEW_DIR = resolve_preview_frame_dir(APP_DIR)
-LOG_DIR = TEMP_DIR / "logs"
-LAUNCHER_LOG_FILE = LOG_DIR / "launcher_debug.log"
 PACKAGE_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+){2,}")
 LOGGER = logging.getLogger("launcher")
+LAUNCHER_FILE_HANDLER_MARKER = "_autogame_run_file_handler"
 PREVIEW_FRAME_SUFFIXES = {".jpg", ".jpeg", ".png"}
 PYINSTALLER_SUPPRESS_SPLASH_ENV = "PYINSTALLER_SUPPRESS_SPLASH_SCREEN"
 PYINSTALLER_SPLASH_IPC_ENV = "_PYI_SPLASH_IPC"
@@ -379,28 +379,56 @@ class CaptureStreamCheckResult(NamedTuple):
     message: str
 
 
-def setup_logging():
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    if LOGGER.handlers:
-        return
+def _run_log_path_from_environment() -> Optional[Path]:
+    archive_dir = str(os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR") or "").strip()
+    if not archive_dir:
+        return None
+    return Path(archive_dir).expanduser().resolve() / "launcher_debug.log"
 
+
+def set_launcher_log_file(log_file: Optional[Path]) -> Optional[Path]:
+    for handler in list(LOGGER.handlers):
+        if not getattr(handler, LAUNCHER_FILE_HANDLER_MARKER, False):
+            continue
+        LOGGER.removeHandler(handler)
+        handler.close()
+
+    if log_file is None:
+        return None
+
+    log_file = Path(log_file)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] [pid=%(process)d] %(message)s"
+    )
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    setattr(file_handler, LAUNCHER_FILE_HANDLER_MARKER, True)
+    LOGGER.addHandler(file_handler)
+    LOGGER.info("launcher run logging attached, log_file=%s", log_file)
+    return log_file
+
+
+def setup_logging():
     LOGGER.setLevel(logging.DEBUG)
     formatter = logging.Formatter(
         "%(asctime)s [%(levelname)s] [pid=%(process)d] %(message)s"
     )
 
-    file_handler = logging.FileHandler(LAUNCHER_LOG_FILE, encoding="utf-8")
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(formatter)
-    LOGGER.addHandler(file_handler)
-
-    stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setLevel(logging.INFO)
-    stream_handler.setFormatter(formatter)
-    LOGGER.addHandler(stream_handler)
+    if not any(
+        isinstance(handler, logging.StreamHandler)
+        and not isinstance(handler, logging.FileHandler)
+        for handler in LOGGER.handlers
+    ):
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setLevel(logging.INFO)
+        stream_handler.setFormatter(formatter)
+        LOGGER.addHandler(stream_handler)
 
     LOGGER.propagate = False
-    LOGGER.info("launcher logging initialized, log_file=%s", LAUNCHER_LOG_FILE)
+    LOGGER.info("launcher logging initialized; run logs are stored per run")
+    set_launcher_log_file(_run_log_path_from_environment())
 
 
 def log_exception(context: str, exc_info=None):
@@ -668,8 +696,6 @@ def build_launcher_plan_env_values(plan: Optional[dict]) -> dict[str, str]:
         "AUTOGAME_PRESERVE_GAME_PROCESS": (
             "1" if should_preserve_game_process_for_plan(plan) else "0"
         ),
-        "AUTOGAME_LOG_DIR": str(LOG_DIR),
-        "AUTOGAME_PREVIEW_DIR": str(PREVIEW_DIR),
         "AUTOGAME_DISABLE_SAVE_FRAMES": "1",
         "AUTOGAME_TMP_FRAMES_DIR": str(TEMP_DIR / "tmp_frames"),
     }
@@ -1247,11 +1273,11 @@ def is_process_trace_enabled(os_name: Optional[str] = None) -> bool:
 class WindowsProcessLaunchTracer:
     def __init__(
         self,
-        log_dir: Path = LOG_DIR,
+        log_dir: Optional[Path] = None,
         os_name: Optional[str] = None,
         root_pid: Optional[int] = None,
     ):
-        self.log_dir = Path(log_dir)
+        self.log_dir = Path(log_dir) if log_dir is not None else None
         self.os_name = os_name
         self.root_pid = int(root_pid or os.getpid())
         self.log_path: Optional[Path] = None
@@ -1266,6 +1292,10 @@ class WindowsProcessLaunchTracer:
                 self.os_name or os.name,
                 os.environ.get(PROCESS_TRACE_ENV),
             )
+            return None
+
+        if self.log_dir is None:
+            LOGGER.warning("process launch trace skipped: no run archive directory")
             return None
 
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -1702,6 +1732,11 @@ def _looks_like_history_archive_dir(path: Path) -> bool:
         return True
     if (path / "logs").is_dir():
         return True
+    if any(
+        (path / name).is_file()
+        for name in ("launcher_output.txt", "hilog.txt", "hdc_debug.log", "memory.log")
+    ):
+        return True
     if (path / "process_temp_logs").is_dir():
         return True
     if (path / "process_save_frames").is_dir():
@@ -1776,13 +1811,18 @@ def discover_history_outputs(temp_dir: Path = TEMP_DIR) -> list[dict]:
         if not info_path.exists():
             info_path = None
         metadata = _read_archive_metadata(info_path)
-        logs_dir = archive_dir / "logs"
-        launcher_output = _read_history_text(logs_dir / "launcher_output.txt")
+        legacy_logs_dir = archive_dir / "logs"
+
+        def history_log_path(name: str) -> Path:
+            direct_path = archive_dir / name
+            return direct_path if direct_path.is_file() else legacy_logs_dir / name
+
+        launcher_output = _read_history_text(history_log_path("launcher_output.txt"))
         if not launcher_output:
-            launcher_output = _read_history_text(logs_dir / "launcher_output_partial.txt")
+            launcher_output = _read_history_text(history_log_path("launcher_output_partial.txt"))
 
         preview_video = archive_dir / "preview_10fps.mp4"
-        hilog_path = logs_dir / "hilog.txt"
+        hilog_path = history_log_path("hilog.txt")
         battery_log_path = archive_dir.parent / "battery.log"
         mtime_path = info_path or archive_dir
         record = {
@@ -1808,7 +1848,18 @@ def discover_history_outputs(temp_dir: Path = TEMP_DIR) -> list[dict]:
             "hilog_exists": hilog_path.exists() and hilog_path.is_file(),
             "battery_log_path": battery_log_path,
             "battery_log_exists": battery_log_path.exists() and battery_log_path.is_file(),
-            "log_file_count": _count_files(logs_dir),
+            "log_file_count": sum(
+                1
+                for name in (
+                    "launcher_output.txt",
+                    "launcher_output_partial.txt",
+                    "launcher_debug.log",
+                    "hilog.txt",
+                    "hdc_debug.log",
+                    "memory.log",
+                )
+                if history_log_path(name).is_file()
+            ),
             "process_temp_file_count": _count_files(archive_dir / "process_temp_logs"),
             "process_save_frame_count": _count_files(archive_dir / "process_save_frames"),
             "frame_log_count": _count_frame_json_files(archive_dir / "process_temp_logs"),
@@ -2891,6 +2942,7 @@ class LauncherWindow(QWidget):
         self.current_run_archive_dir: Optional[Path] = None
         self.current_hdc_debug_capture: Optional[HdcDebugRunCapture] = None
         self.current_hilog_capture: Optional[HilogRunCapture] = None
+        self.current_memory_capture: Optional[MemoryRunCapture] = None
         # 真正启动任务时再校验环境变量，避免无效配置让 Launcher 初始化阶段崩溃。
         self.hdc_debug_level = 5
         self.preview_target_info_height = 64
@@ -2923,7 +2975,7 @@ class LauncherWindow(QWidget):
         self.selected_history_batch_dir: Optional[Path] = None
         self.history_frame_records: list[dict] = []
         self.history_frame_index = -1
-        self.process_launch_tracer = WindowsProcessLaunchTracer(LOG_DIR)
+        self.process_launch_tracer = WindowsProcessLaunchTracer()
 
         self.setWindowTitle("Auto Game 启动器")
         self.resize(1260, 860)
@@ -3259,7 +3311,7 @@ class LauncherWindow(QWidget):
         self._sync_test_profile_ui()
         self._sync_game_process_policy_ui()
         self._log_message(
-            f"[Launcher] 启动器已初始化，日志文件：{LAUNCHER_LOG_FILE}\n",
+            "[Launcher] 启动器已初始化，日志将保存到每次运行目录。\n",
             level=logging.INFO,
         )
         LOGGER.info("LauncherWindow init finished")
@@ -4434,13 +4486,13 @@ class LauncherWindow(QWidget):
         else:
             scrollbar.setValue(old_scroll_value)
 
-    def _start_output_log_spool(self):
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        timestamp = self.current_batch_start_timestamp or time.strftime("%Y%m%d%H%M%S")
-        self.output_log_spool_path = (
-            LOG_DIR / f"launcher_output_live_{timestamp}_{os.getpid()}.txt"
-        )
-        self.output_log_spool_path.write_text("", encoding="utf-8")
+    def _start_output_log_spool(self, archive_dir: Path):
+        initial_text = ""
+        if self.output_log_spool_path is None:
+            initial_text = "".join(line for _, line in self.output_log_entries)
+        self.output_log_spool_path = Path(archive_dir) / "launcher_output.txt"
+        self.output_log_spool_path.parent.mkdir(parents=True, exist_ok=True)
+        self.output_log_spool_path.write_text(initial_text, encoding="utf-8")
 
     def _append_output_log_spool(self, entries):
         path = self.output_log_spool_path
@@ -5660,12 +5712,17 @@ class LauncherWindow(QWidget):
             self.current_run_archive_dir = run_archive_dir
             run_preview_dir = run_archive_dir / "process_temp_logs"
             run_preview_dir.mkdir(parents=True, exist_ok=True)
+            env.insert("AUTOGAME_LOG_DIR", str(run_archive_dir))
             env.insert("AUTOGAME_PREVIEW_DIR", str(run_preview_dir))
             env.insert("AUTOGAME_RUN_ARCHIVE_DIR", str(run_archive_dir))
             env.insert("AUTOGAME_BATCH_ARCHIVE_DIR", str(run_archive_dir.parent))
             env.insert(
                 "AUTOGAME_DEVICE_LOG_PATH",
-                str(run_archive_dir / "logs" / "hilog.txt"),
+                str(run_archive_dir / "hilog.txt"),
+            )
+            env.insert(
+                "AUTOGAME_MEMORY_LOG_PATH",
+                str(run_archive_dir / "memory.log"),
             )
             if (
                 self.current_hilog_capture is not None
@@ -5674,7 +5731,6 @@ class LauncherWindow(QWidget):
                 env.insert("AUTOGAME_DEVICE_LOG_OWNER", "launcher")
         except Exception:
             log_exception(f"resolve run archive dir failed: run_no={run_no}")
-            env.insert("AUTOGAME_DEVICE_LOG_PATH", str(LOG_DIR / f"{target_case}.txt"))
         if self.current_plan is not None:
             env.insert(
                 "AUTOGAME_LAUNCHER_INACTIVITY_TIMEOUT_MINUTES",
@@ -6405,7 +6461,7 @@ class LauncherWindow(QWidget):
         self.current_plan = plan
         screen_width, screen_height = self._lock_preview_render_screen_size_for_plan(plan)
         self.current_batch_start_timestamp = time.strftime("%Y%m%d%H%M%S")
-        self._start_output_log_spool()
+        self.output_log_spool_path = None
         self.current_run_start_timestamp = None
         self.batch_active = True
         self.stop_requested = False
@@ -6429,8 +6485,6 @@ class LauncherWindow(QWidget):
         else:
             self._set_status("已开始批量执行，准备进行安全检查。")
             self._set_runtime(f"运行信息：共 {plan['run_count']} 次，等待第 1 次启动。")
-        trace_label = f"{plan['mode']}:{plan['project_case']}:{plan['target_case']}"
-        trace_path = self.process_launch_tracer.start(trace_label)
         run_limit_text = "continuous_until_battery_cutoff" if marathon_minutes > 0 else plan["run_count"]
         self._log_message(
             f"[Launcher] 批量运行开始，mode={plan['mode']}, runs={run_limit_text}, "
@@ -6465,16 +6519,13 @@ class LauncherWindow(QWidget):
             )
         if plan.get("capture_preflight_message"):
             self._log_message(f"[Launcher] 截图流预检：{plan['capture_preflight_message']}\n")
-        if trace_path is not None:
-            self._log_message(f"[Launcher] 进程创建追踪日志：{trace_path}\n")
-        else:
-            self._log_message("[Launcher] 当前环境未启用 Windows 进程创建追踪。\n")
         self._cleanup_apps_between_runs("批次启动前预清理")
         self._check_and_start_if_safe()
 
     def _finish_batch(self, message: str):
         LOGGER.info("finish_batch: %s", message)
         self._stop_recovery_processes()
+        self._stop_current_memory_capture()
         self._stop_current_hilog_capture()
         self._stop_current_hdc_debug_capture()
         restore_hiz = bool(
@@ -6519,6 +6570,8 @@ class LauncherWindow(QWidget):
         if restore_hiz:
             self._log_message("[Launcher] 异常/手动停止后由 Launcher 兜底关闭 HIZ 并恢复充电。\n")
             set_hiz_mode(False)
+        set_launcher_log_file(None)
+        self.output_log_spool_path = None
         if getattr(self, "_close_after_stop", False):
             self._close_after_stop = False
             QTimer.singleShot(0, self.close)
@@ -6637,13 +6690,6 @@ class LauncherWindow(QWidget):
         if self.current_plan is None:
             return
 
-        LOGGER.info(
-            "launch_iteration start: run_no=%s temperature=%s battery=%s plan=%s",
-            run_no,
-            temperature,
-            battery,
-            self.current_plan,
-        )
         self.current_run_timed_out = False
         self.current_run_stream_started = False
         self.current_run_stream_disconnected = False
@@ -6660,11 +6706,51 @@ class LauncherWindow(QWidget):
         self.current_run_archive_dir = None
         self.process_output_buffer = ""
         archive_dir = self._resolve_current_run_archive_dir()
+        if archive_dir is not None:
+            set_launcher_log_file(archive_dir / "launcher_debug.log")
+            self._start_output_log_spool(archive_dir)
+            self.current_run_output_start = 0
+        LOGGER.info(
+            "launch_iteration start: run_no=%s temperature=%s battery=%s plan=%s archive_dir=%s",
+            run_no,
+            temperature,
+            battery,
+            self.current_plan,
+            archive_dir,
+        )
+        self._stop_current_memory_capture()
         self._stop_current_hilog_capture()
         self._stop_current_hdc_debug_capture()
         if archive_dir is not None:
+            self.process_launch_tracer.stop()
+            self.process_launch_tracer = WindowsProcessLaunchTracer(archive_dir)
+            trace_label = (
+                f"{self.current_plan['mode']}:"
+                f"{self.current_plan['project_case']}:"
+                f"{self.current_plan['target_case']}"
+            )
+            trace_path = self.process_launch_tracer.start(trace_label)
+            if trace_path is not None:
+                self._log_message(f"[Launcher] 进程创建追踪日志：{trace_path}\n")
+            else:
+                self._log_message("[Launcher] 当前环境未启用 Windows 进程创建追踪。\n")
+            self.current_memory_capture = MemoryRunCapture(
+                archive_dir / "memory.log",
+                root_pid=os.getpid(),
+            ).start()
+            if self.current_memory_capture.start_error:
+                self._log_message(
+                    "[Launcher] 内存监控启动失败：%s\n"
+                    % self.current_memory_capture.start_error,
+                    level=logging.ERROR,
+                )
+            else:
+                self._log_message(
+                    "[Launcher] 内存监控日志：%s（每5秒采样，每60秒批量写盘）\n"
+                    % self.current_memory_capture.path
+                )
             self.current_hdc_debug_capture = HdcDebugRunCapture(
-                archive_dir / "logs" / "hdc_debug.log"
+                archive_dir / "hdc_debug.log"
             ).start()
             if self.current_hdc_debug_capture.start_error:
                 self._log_message(
@@ -6678,7 +6764,7 @@ class LauncherWindow(QWidget):
                     % self.current_hdc_debug_capture.path
                 )
             self.current_hilog_capture = HilogRunCapture(
-                archive_dir / "logs" / "hilog.txt"
+                archive_dir / "hilog.txt"
             ).start()
             if self.current_hilog_capture.start_error:
                 self._log_message(
@@ -6692,7 +6778,8 @@ class LauncherWindow(QWidget):
                     % self.current_hilog_capture.path
                 )
         self._clear_preview_files()
-        self.current_run_output_start = self._current_output_offset()
+        if archive_dir is None:
+            self.current_run_output_start = self._current_output_offset()
 
         project_case = self.current_plan["project_case"]
         target_case = self.current_plan["target_case"]
@@ -6795,13 +6882,8 @@ class LauncherWindow(QWidget):
 
     def _resolve_current_device_log_path(self) -> Optional[Path]:
         if self.current_run_archive_dir is not None:
-            return self.current_run_archive_dir / "logs" / "hilog.txt"
-        if self.current_plan is None:
-            return None
-        target_case = str(self.current_plan.get("target_case") or "").strip()
-        if not target_case:
-            return None
-        return LOG_DIR / f"{target_case}.txt"
+            return self.current_run_archive_dir / "hilog.txt"
+        return None
 
     def _wait_for_device_log_stable(self, log_path: Path) -> bool:
         deadline = time.time() + DEVICE_LOG_SETTLE_TIMEOUT_SECONDS
@@ -6882,10 +6964,8 @@ class LauncherWindow(QWidget):
             return
 
         try:
-            logs_dir = archive_dir / "logs"
-            logs_dir.mkdir(parents=True, exist_ok=True)
             run_output_text = self._output_text_since(self.current_run_output_start)
-            (logs_dir / "launcher_output_partial.txt").write_text(
+            (archive_dir / "launcher_output_partial.txt").write_text(
                 run_output_text,
                 encoding="utf-8",
             )
@@ -7422,6 +7502,19 @@ class LauncherWindow(QWidget):
         except Exception:
             log_exception("stop current HDC DEBUG capture failed")
 
+    def _stop_current_memory_capture(self):
+        capture, self.current_memory_capture = self.current_memory_capture, None
+        if capture is None:
+            return
+        try:
+            capture.stop()
+            self._log_message(
+                "[Launcher] 内存监控已收尾：samples=%s path=%s\n"
+                % (capture.sample_count, capture.path)
+            )
+        except Exception:
+            log_exception("stop current memory capture failed")
+
     def _stop_current_hilog_capture(self):
         capture, self.current_hilog_capture = self.current_hilog_capture, None
         if capture is None:
@@ -7450,7 +7543,7 @@ class LauncherWindow(QWidget):
             self._wait_for_device_log_stable(device_log_path)
             if device_log_path.exists() and device_log_path.is_file():
                 direct_hilog_path = (
-                    self.current_run_archive_dir / "logs" / "hilog.txt"
+                    self.current_run_archive_dir / "hilog.txt"
                     if self.current_run_archive_dir is not None
                     else None
                 )
@@ -7480,9 +7573,7 @@ class LauncherWindow(QWidget):
                 process_temp_logs_source_dir=self._current_preview_dir(),
             )
             self._log_message(f"[Launcher] 本次运行产物已归档到：{archive_dir}\n")
-            logs_dir = archive_dir / "logs"
-            logs_dir.mkdir(parents=True, exist_ok=True)
-            (logs_dir / "launcher_output.txt").write_text(
+            (archive_dir / "launcher_output.txt").write_text(
                 self._output_text_since(self.current_run_output_start),
                 encoding="utf-8",
             )
@@ -8231,8 +8322,12 @@ class LauncherWindow(QWidget):
         self._flush_process_output_buffer()
         self.run_timeout_timer.stop()
         self.stream_disconnect_signal_timer.stop()
+        self._stop_current_memory_capture()
         self._stop_current_hilog_capture()
         self._stop_current_hdc_debug_capture()
+        trace_path = self.process_launch_tracer.stop()
+        if trace_path is not None:
+            self._log_message(f"[Launcher] 进程创建追踪已停止：{trace_path}\n")
         if not self.current_run_stream_disconnected:
             self._poll_stream_disconnect_signal()
         finish_prefix = "进程结束"
@@ -8513,7 +8608,7 @@ def main():
     hidden_patch_installed = install_hidden_subprocess_patch()
     hidden_window_suppressor_started = start_hidden_subprocess_window_suppressor()
     LOGGER.info(
-        "path context: frozen=%s sys_executable=%s __file__=%s APP_DIR=%s INTERNAL_DIR=%s ROOT_DIR=%s TEMP_DIR=%s LOG_DIR=%s PREVIEW_DIR=%s old_cwd=%s new_cwd=%s chdir_error=%s hidden_subprocess_patch=%s hidden_window_suppressor=%s",
+        "path context: frozen=%s sys_executable=%s __file__=%s APP_DIR=%s INTERNAL_DIR=%s ROOT_DIR=%s TEMP_DIR=%s PREVIEW_DIR=%s old_cwd=%s new_cwd=%s chdir_error=%s hidden_subprocess_patch=%s hidden_window_suppressor=%s",
         bool(getattr(sys, "frozen", False)),
         sys.executable,
         __file__,
@@ -8521,7 +8616,6 @@ def main():
         INTERNAL_DIR,
         ROOT_DIR,
         TEMP_DIR,
-        LOG_DIR,
         PREVIEW_DIR,
         old_cwd,
         Path.cwd(),

@@ -33,6 +33,7 @@ from aw.autogame.tools.Utils import (
     analyze_txt,
     get_display_rotation,
     normalize_rotation,
+    resolve_log_dir,
     resolve_process_save_frames_dir,
 )
 
@@ -55,7 +56,9 @@ class StandardAutoGameCase(TestCase):
         self.device_logger = DeviceLogger(self.driver)
         self.device_log_started = False
         self.device_log_available = False
-        self.log_path = os.environ.get("AUTOGAME_DEVICE_LOG_PATH") or f"aw/autogame/temp/logs/{self.task_name}.txt"
+        self.log_path = os.environ.get("AUTOGAME_DEVICE_LOG_PATH") or str(
+            resolve_log_dir() / f"{self.task_name}.txt"
+        )
         self.frame_path = str(resolve_process_save_frames_dir())
         self.game_display_name = GAME_DISPLAY_NAME
         self.game_package = GAME_PACKAGE_NAME

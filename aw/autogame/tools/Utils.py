@@ -28,10 +28,7 @@ def _resolve_env_path(env_name: str, default_path: Path) -> Path:
 
 
 def resolve_log_dir() -> Path:
-    return _resolve_env_path("AUTOGAME_LOG_DIR", TEMP_DIR / "logs")
-
-
-LOG_DIR = resolve_log_dir()
+    return _resolve_env_path("AUTOGAME_LOG_DIR", TEMP_DIR)
 
 
 def resolve_process_temp_logs_dir() -> Path:
@@ -647,7 +644,6 @@ def archive_run_artifacts(
         extra_metadata=extra_metadata,
         reuse_existing=reuse_existing,
     )
-    log_archive_dir = archive_dir / "logs"
     process_archive_dir = archive_dir / "process_temp_logs"
     _copy_process_temp_logs(
         process_archive_dir,
@@ -665,10 +661,10 @@ def archive_run_artifacts(
         for name, content in extra_text_files.items():
             if not name:
                 continue
-            _safe_write_text(log_archive_dir / name, content)
+            _safe_write_text(archive_dir / name, content)
 
     if extra_log_files:
-        log_archive_dir.mkdir(parents=True, exist_ok=True)
+        archive_dir.mkdir(parents=True, exist_ok=True)
         for archive_name, source_path in extra_log_files.items():
             if not archive_name or not source_path:
                 continue
@@ -676,7 +672,7 @@ def archive_run_artifacts(
             if not src.exists() or not src.is_file():
                 continue
             safe_name = _sanitize_archive_name_part(archive_name) + src.suffix
-            target = log_archive_dir / safe_name
+            target = archive_dir / safe_name
             shutil.copy2(src, target)
     return archive_dir
 
@@ -687,27 +683,30 @@ def prune_run_archive_artifacts(
 ) -> Path:
     """Keep runtime frames and the compact per-run diagnostic evidence."""
     archive_dir = Path(archive_dir)
-    allowed_logs = {"launcher_output.txt", "hilog.txt", "hdc_debug.log"}
     allowed_root_files = {
+        "launcher_output.txt",
+        "launcher_output_partial.txt",
+        "launcher_debug.log",
+        "hilog.txt",
+        "hdc_debug.log",
+        "memory.log",
         "hos_disconnect.json",
         "stream_disconnect_signal.json",
         "manual_stop_preserve.json",
     }
-    logs_dir = archive_dir / "logs"
+    legacy_logs_dir = archive_dir / "logs"
 
-    if logs_dir.exists():
-        for path in list(logs_dir.iterdir()):
-            if path.is_file() and path.name in allowed_logs:
-                continue
-            if path.is_dir():
-                shutil.rmtree(path)
-            else:
-                path.unlink(missing_ok=True)
+    if legacy_logs_dir.exists():
+        for path in list(legacy_logs_dir.iterdir()):
+            target = archive_dir / path.name
+            if path.is_file() and path.name in allowed_root_files and not target.exists():
+                shutil.move(str(path), str(target))
+        shutil.rmtree(legacy_logs_dir)
 
     for path in list(archive_dir.iterdir()):
-        if path == logs_dir:
-            continue
         if path.is_file() and path.name in allowed_root_files:
+            continue
+        if path.is_file() and path.name.startswith("process_launch_trace_") and path.suffix == ".log":
             continue
         if path.is_dir() and path.name == "process_temp_logs":
             continue

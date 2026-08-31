@@ -251,8 +251,6 @@ def copy_runtime_assets() -> None:
         else:
             shutil.copy2(asset.source, target)
 
-    (DIST_DIR / "aw" / "autogame" / "temp" / "logs" / "process_temp_logs").mkdir(parents=True, exist_ok=True)
-
 
 def run_pyinstaller(command: list[str]) -> None:
     if not _module_exists("PyInstaller"):

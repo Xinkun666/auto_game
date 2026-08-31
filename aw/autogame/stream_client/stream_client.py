@@ -1833,7 +1833,7 @@ class HOSScrcpyStreamClient:
         paths = []
         archive_dir = os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()
         if archive_dir:
-            scoped_path = Path(archive_dir) / "logs" / "hdc_debug.log"
+            scoped_path = Path(archive_dir) / "hdc_debug.log"
             if scoped_path.is_file():
                 paths.append((scoped_path, True))
         temp_root = os.environ.get("TEMP") or os.environ.get("TMP") or os.environ.get("TMPDIR")
@@ -1867,9 +1867,10 @@ class HOSScrcpyStreamClient:
             "sn": self.sn,
             "diagnostic": dict(diagnostic or {}),
             "paths": {
-                "hdc_debug_log": str(Path(archive_dir) / "logs" / "hdc_debug.log"),
+                "hdc_debug_log": str(Path(archive_dir) / "hdc_debug.log"),
                 "hilog": os.environ.get("AUTOGAME_DEVICE_LOG_PATH", ""),
-                "launcher_output": str(Path(archive_dir) / "logs" / "launcher_output.txt"),
+                "launcher_output": str(Path(archive_dir) / "launcher_output.txt"),
+                "memory_log": os.environ.get("AUTOGAME_MEMORY_LOG_PATH", ""),
             },
         }
         tmp_path = report_path.with_suffix(report_path.suffix + ".tmp")

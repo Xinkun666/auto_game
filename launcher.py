@@ -109,10 +109,6 @@ def resolve_runtime_temp_dir(app_dir: Optional[Path] = None) -> Path:
     return Path(app_dir or APP_DIR).resolve() / "aw" / "autogame" / "temp"
 
 
-def resolve_preview_frame_dir(app_dir: Optional[Path] = None) -> Path:
-    return resolve_runtime_temp_dir(app_dir) / "process_temp_logs"
-
-
 def resolve_history_temp_dir() -> Path:
     return Path("aw") / "autogame" / "temp"
 
@@ -129,7 +125,6 @@ CUSTOMS_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_examples"
 CUSTOMS_GAME_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_game_examples"
 GAME_RECORDING_PROJECT_DIR = CUSTOMS_EXAMPLES_DIR / "Game_Recording"
 TEMP_DIR = resolve_runtime_temp_dir(APP_DIR)
-PREVIEW_DIR = resolve_preview_frame_dir(APP_DIR)
 PACKAGE_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+){2,}")
 LOGGER = logging.getLogger("launcher")
 LAUNCHER_FILE_HANDLER_MARKER = "_autogame_run_file_handler"
@@ -5821,10 +5816,10 @@ class LauncherWindow(QWidget):
             button.setEnabled(enabled)
         self._sync_testcase_controls_state()
 
-    def _current_preview_dir(self) -> Path:
+    def _current_preview_dir(self) -> Optional[Path]:
         if self.current_run_archive_dir is not None:
             return self.current_run_archive_dir / "process_temp_logs"
-        return PREVIEW_DIR
+        return None
 
     def _clear_preview_files(self):
         preview_dir = self._current_preview_dir()
@@ -5846,6 +5841,10 @@ class LauncherWindow(QWidget):
         self._reset_preview_info_detail(
             "选中区域、特殊区域或控点后查看当前帧完整信息"
         )
+
+        if preview_dir is None:
+            LOGGER.debug("skip preview directory cleanup: run archive is not ready")
+            return
 
         preview_dir.mkdir(parents=True, exist_ok=True)
         for path in preview_dir.iterdir():
@@ -6296,7 +6295,7 @@ class LauncherWindow(QWidget):
 
     def _poll_preview_frame(self):
         preview_dir = self._current_preview_dir()
-        if not preview_dir.exists():
+        if preview_dir is None or not preview_dir.exists():
             return
 
         latest_image = find_latest_preview_frame(preview_dir)
@@ -8608,7 +8607,7 @@ def main():
     hidden_patch_installed = install_hidden_subprocess_patch()
     hidden_window_suppressor_started = start_hidden_subprocess_window_suppressor()
     LOGGER.info(
-        "path context: frozen=%s sys_executable=%s __file__=%s APP_DIR=%s INTERNAL_DIR=%s ROOT_DIR=%s TEMP_DIR=%s PREVIEW_DIR=%s old_cwd=%s new_cwd=%s chdir_error=%s hidden_subprocess_patch=%s hidden_window_suppressor=%s",
+        "path context: frozen=%s sys_executable=%s __file__=%s APP_DIR=%s INTERNAL_DIR=%s ROOT_DIR=%s TEMP_DIR=%s old_cwd=%s new_cwd=%s chdir_error=%s hidden_subprocess_patch=%s hidden_window_suppressor=%s",
         bool(getattr(sys, "frozen", False)),
         sys.executable,
         __file__,
@@ -8616,7 +8615,6 @@ def main():
         INTERNAL_DIR,
         ROOT_DIR,
         TEMP_DIR,
-        PREVIEW_DIR,
         old_cwd,
         Path.cwd(),
         chdir_error,

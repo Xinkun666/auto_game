@@ -396,7 +396,8 @@ class DirLocApp:
                 direction_detail = direction_tool.get_direction_detail(direction_crop)
                 direction = int(direction_detail.get("angle", -1))
                 confidence = float(direction_detail.get("confidence", 0.0))
-                location, location_mode = location_tool.get_location(
+                # 离线截图不是连续视频帧，不能使用带卡尔曼历史状态的 get_location。
+                location, location_mode = location_tool.get_global_location(
                     cv2.cvtColor(location_crop, cv2.COLOR_RGB2BGR)
                 )
                 location_x, location_y = location

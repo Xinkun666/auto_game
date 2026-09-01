@@ -96,6 +96,22 @@ class LocatePoints:
                 return (int(dst_center[0][0][0]), int(dst_center[0][0][1]))
         return None
 
+    def get_global_location(self, img) -> tuple:
+        """对单张、非连续画面直接做全局配准，不使用卡尔曼历史状态。
+
+        ``get_location`` 面向连续视频流：稳定后会根据上一帧预测拒绝跳变较大的
+        测量值。离线截图、抽帧数据或跨场景图片之间的位置通常不连续，应调用
+        本方法，让每一张图片独立用 SIFT/单应性匹配到大地图。
+        """
+        if img is None or img.size == 0:
+            return (None, None), "global"
+
+        gray_curr = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        measured_point = self._get_global_measured_point(gray_curr)
+        if measured_point is None:
+            return (None, None), "global"
+        return measured_point, "global"
+
     def get_location(self, img) -> tuple:
         if img is None or img.size == 0:
             return (None, None), self.mode

@@ -92,7 +92,8 @@ def display_value(value: Optional[object]) -> str:
 class DirLocApp:
     """人工复核工具：自动提取候选值，人工修改后统一确认保存。"""
 
-    PREVIEW_MAX_SIZE = (900, 650)
+    PREVIEW_FALLBACK_SIZE = (480, 480)
+    PREVIEW_PADDING = 20
     POLL_QUEUE_INTERVAL_MS = 80
 
     def __init__(self) -> None:
@@ -110,6 +111,7 @@ class DirLocApp:
         self.Image = Image
         self.ImageDraw = ImageDraw
         self.ImageTk = ImageTk
+        self.resample_filter = getattr(Image, "Resampling", Image).LANCZOS
 
         self.root = tk.Tk()
         self.root.title("方向与位置批量提取（人工确认）")
@@ -133,6 +135,9 @@ class DirLocApp:
         self.cancel_event = threading.Event()
         self.result_queue: queue.Queue = queue.Queue()
         self._preview_photo = None
+        self._preview_image_path: Optional[Path] = None
+        self._preview_resize_after_id = None
+        self._last_preview_bounds: Optional[Tuple[int, int]] = None
         self._config_widgets = []
         self._build_ui()
 
@@ -205,6 +210,7 @@ class DirLocApp:
 
         list_frame = self.ttk.LabelFrame(pane, text="识别结果（选中一行后可修改）", padding=8)
         preview_frame = self.ttk.LabelFrame(pane, text="当前图片与 ROI", padding=8)
+        self.preview_frame = preview_frame
         pane.add(list_frame, weight=3)
         pane.add(preview_frame, weight=4)
 
@@ -237,6 +243,7 @@ class DirLocApp:
             anchor="center",
         )
         self.preview_label.grid(row=0, column=0, sticky="nsew")
+        self.preview_frame.bind("<Configure>", self._schedule_preview_resize)
 
         editor = self.ttk.LabelFrame(container, text="人工修正与确认", padding=10)
         editor.grid(row=2, column=0, sticky="ew", pady=(12, 0))
@@ -476,6 +483,32 @@ class DirLocApp:
         self.show_image(self.image_paths[index])
 
     def show_image(self, image_path: Path) -> None:
+        self._preview_image_path = image_path
+        self._last_preview_bounds = None
+        self._render_preview_image()
+
+    def _schedule_preview_resize(self, _event=None) -> None:
+        if self._preview_image_path is None:
+            return
+        if self._preview_resize_after_id is not None:
+            self.root.after_cancel(self._preview_resize_after_id)
+        self._preview_resize_after_id = self.root.after(80, self._render_preview_image)
+
+    def _preview_bounds(self) -> Tuple[int, int]:
+        width = self.preview_frame.winfo_width() - self.PREVIEW_PADDING
+        height = self.preview_frame.winfo_height() - self.PREVIEW_PADDING
+        if width <= 80 or height <= 80:
+            return self.PREVIEW_FALLBACK_SIZE
+        return max(80, width), max(80, height)
+
+    def _render_preview_image(self) -> None:
+        self._preview_resize_after_id = None
+        image_path = self._preview_image_path
+        if image_path is None:
+            return
+        bounds = self._preview_bounds()
+        if bounds == self._last_preview_bounds:
+            return
         try:
             direction_roi, location_roi = self._read_rois()
             with self.Image.open(image_path) as image:
@@ -493,9 +526,10 @@ class DirLocApp:
                 outline=color,
                 width=max(2, min(width, height) // 500),
             )
-        preview.thumbnail(self.PREVIEW_MAX_SIZE, self.Image.Resampling.LANCZOS)
+        preview.thumbnail(bounds, self.resample_filter)
         self._preview_photo = self.ImageTk.PhotoImage(preview)
         self.preview_label.configure(image=self._preview_photo, text="")
+        self._last_preview_bounds = bounds
 
     def apply_current_edit(self) -> None:
         if self.selected_index is None or self.selected_index >= len(self.results):

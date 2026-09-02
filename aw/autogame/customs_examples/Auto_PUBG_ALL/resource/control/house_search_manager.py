@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import time
 from typing import TYPE_CHECKING, Optional
@@ -144,10 +145,9 @@ class HouseSearchManager:
     HOUSE_SEARCH_TIMEOUT_SECONDS = 60
     ENTRY_NEAR_MICRO_ADJUST_DISTANCE = 2.5
     ENTRY_NEAR_MICRO_DONE_DISTANCE = 0.0
-    ENTRY_NEAR_MICRO_X_BIAS = 120
-    ENTRY_NEAR_MICRO_Y_BIAS = 120
-    ENTRY_NEAR_MICRO_DURA = 160
-    ENTRY_NEAR_MICRO_WAIT = 320
+    ENTRY_NEAR_MICRO_RADIUS = 200
+    ENTRY_NEAR_MICRO_DURA = 200
+    ENTRY_NEAR_MICRO_WAIT = 300
     ENTRY_DOOR_FINAL_ALIGN_MAX_STEPS = 4
     ENTRY_DOOR_FINAL_VIEW_TOLERANCE_PX = 55
     ENTRY_DOOR_VIEW_ADJUST_REFRESH_SETTLE_SECONDS = 0.2
@@ -1393,23 +1393,13 @@ class HouseSearchManager:
             return None
 
         relative = (target_angle - current_dir + 540) % 360 - 180
-        if abs(relative) <= 45:
-            return "forward", 0, -self.ENTRY_NEAR_MICRO_Y_BIAS, relative
-        if abs(relative) >= 135:
-            return "back", 0, self.ENTRY_NEAR_MICRO_Y_BIAS, relative
-        if relative < 0:
-            return "left", -self.ENTRY_NEAR_MICRO_X_BIAS, 0, relative
-        return "right", self.ENTRY_NEAR_MICRO_X_BIAS, 0, relative
-
-    @staticmethod
-    def _entry_micro_direction_label(direction: str) -> str:
-        labels = {
-            "forward": "上方",
-            "back": "后方",
-            "left": "左边",
-            "right": "右边",
-        }
-        return labels.get(direction, direction)
+        radians = math.radians(relative)
+        radius = self.ENTRY_NEAR_MICRO_RADIUS
+        return (
+            int(round(radius * math.sin(radians))),
+            int(round(-radius * math.cos(radians))),
+            relative,
+        )
 
     @staticmethod
     def _side_label(side: str) -> str:
@@ -2925,75 +2915,24 @@ class HouseSearchManager:
             )
             return "failed"
 
-        direction, x_bias, y_bias, relative = move_params
+        x_bias, y_bias, relative = move_params
         self.entry_near_micro_adjust_attempts += 1
-        before_dist = get_distance(refreshed_loc, target_loc) if refreshed_loc is not None else dist_val
-        desired_dist = max(0.2, float(before_dist))
-        used_x_bias = x_bias
-        used_y_bias = y_bias
-        used_dura = self.ENTRY_NEAR_MICRO_DURA
-        used_wait = self.ENTRY_NEAR_MICRO_WAIT
-        distance_key = None
-        if direction in ("left", "right"):
-            used_x_bias, used_dura, used_wait, distance_key = get_adaptive_side_motion(
-                direction,
-                desired_dist,
-                x_bias,
-                self.ENTRY_NEAR_MICRO_DURA,
-                self.ENTRY_NEAR_MICRO_WAIT,
-            )
-            used_y_bias = 0
-        else:
-            mode = "entry_back" if direction == "back" else "slow"
-            used_y_bias, used_dura, used_wait, distance_key = get_adaptive_forward_motion(
-                mode,
-                desired_dist,
-                y_bias,
-                self.ENTRY_NEAR_MICRO_DURA,
-                self.ENTRY_NEAR_MICRO_WAIT,
-            )
-            used_x_bias = 0
-            if direction == "back":
-                used_y_bias = abs(int(used_y_bias))
 
         w.frame_log(
-                    f"[{phase_label}] 入门点微调 "
-                    f"第{self.entry_near_micro_adjust_attempts}次："
-                    f"距离={dist_val:.2f}，方向={self._entry_micro_direction_label(direction)}，"
-                    f"相对角={relative:.1f}°，摇杆=({used_x_bias},{used_y_bias})，"
-                    f"dura={used_dura}，wait={used_wait}"
-                )
+            f"[{phase_label}] 入门点微调 "
+            f"第{self.entry_near_micro_adjust_attempts}次："
+            f"距离={dist_val:.2f}，相对方位={relative:.1f}°，"
+            f"摇杆=({x_bias},{y_bias})，半径={self.ENTRY_NEAR_MICRO_RADIUS}，"
+            f"dura={self.ENTRY_NEAR_MICRO_DURA}，wait={self.ENTRY_NEAR_MICRO_WAIT}"
+        )
         w.tap_single(
             '摇杆',
-            x_bias=used_x_bias,
-            y_bias=used_y_bias,
-            dura=used_dura,
-            wait=used_wait,
+            x_bias=x_bias,
+            y_bias=y_bias,
+            dura=self.ENTRY_NEAR_MICRO_DURA,
+            wait=self.ENTRY_NEAR_MICRO_WAIT,
         )
         self._refresh_frame_and_handle_jump(w, handle_jump=False)
-        after_loc = self._get_current_location(w) or refreshed_loc
-        after_dist = get_distance(after_loc, target_loc) if after_loc is not None else None
-        if direction in ("left", "right"):
-            update_adaptive_side_motion(
-                direction,
-                desired_dist,
-                before_dist,
-                after_dist,
-                used_x_bias,
-                used_dura,
-                used_wait,
-            )
-        else:
-            mode = "entry_back" if direction == "back" else "slow"
-            update_adaptive_forward_motion(
-                mode,
-                desired_dist,
-                before_dist,
-                after_dist,
-                used_y_bias,
-                used_dura,
-                used_wait,
-            )
         self.history_locations = []
         return "adjusting"
 

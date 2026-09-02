@@ -357,7 +357,10 @@ class HouseSearchManager:
     def _mark_current_entry_failed(self, reason: str):
         entry_loc = self._entry_location_tuple(self.active_entry) if self.active_entry else None
         if getattr(self, "_frame_worker", None) is not None:
-            self._frame_worker.frame_log(f'[EntryPoint] {reason}，临时舍弃当前入门点 house={self.current_house_id}, entry={entry_loc}；同一房子的其他入门点继续保留')
+            self._frame_worker.frame_log(
+                f'[EntryPoint] {reason}，临时舍弃当前房屋唯一入门点 '
+                f'house={self.current_house_id}, entry={entry_loc}；本轮跳过该房'
+            )
         if entry_loc is not None:
             self.temp_skip_entries.add(entry_loc)
         self.current_house_id = None
@@ -6523,7 +6526,11 @@ class HouseSceneSearchManager(HouseSearchManager):
             if approach_loc is not None:
                 self.temp_skip_entries.add(tuple(approach_loc))
             if getattr(self, "_frame_worker", None) is not None:
-                self._frame_worker.frame_log(f'[RCitySearch] {reason}: 跳过当前入门点 {target_id} entry={entry_loc}, approach={approach_loc} fail={self.r_city_failed_counts[target_id]}/{self.R_CITY_FAILED_TARGET_LIMIT}；同房其他入门点继续保留')
+                self._frame_worker.frame_log(
+                    f'[RCitySearch] {reason}: 跳过当前房屋唯一入门点 {target_id} '
+                    f'entry={entry_loc}, approach={approach_loc} '
+                    f'fail={self.r_city_failed_counts[target_id]}/{self.R_CITY_FAILED_TARGET_LIMIT}'
+                )
         elif self.current_house_id:
             if getattr(self, "_frame_worker", None) is not None:
                 self._frame_worker.frame_log(f'[RCitySearch] {reason}: {self.current_house_id}')

@@ -61,17 +61,25 @@ PHASE_STAGE_MAP = {
 
 DROP_TARGET_R_CITY = (990, 757)
 DROP_TARGET_R_CITY_SEARCH_START = (986, 759)
-DROP_TARGET_R_CITY_HOUSE = (1042, 748)
-DROP_TARGET_M_CITY_HOUSE = (1526, 1218)
-DROP_TARGET_L_CITY_HOUSE = (1813, 822)
-DROP_TARGET_G_TOWN_HOUSE = (563, 1003)
-DROP_TARGETS_BY_CITY = {
-    "R城": DROP_TARGET_R_CITY_HOUSE,
-    "M城": DROP_TARGET_M_CITY_HOUSE,
-    "L城": DROP_TARGET_L_CITY_HOUSE,
-    "G镇": DROP_TARGET_G_TOWN_HOUSE,
+DROP_HOUSE_TARGETS_BY_REGION = {
+    "片区01": (1051, 751),
+    "片区02": (1243, 881),
+    "片区03": (1293, 969),
+    "片区04": (1522, 1202),
+    "片区05": (617, 1089),
+    "片区06": (550, 989),
+    "片区07": (700, 1005),
+    "片区08": (748, 1129),
+    "片区09": (923, 1300),
+    "片区10": (947, 917),
+    "片区11": (1019, 1033),
+    # 片区12靠近悬崖，房点中心 (1111, 1140) 会增加落水风险。
+    "片区12": (893, 1257),
 }
-# L城落点暂时有问题；保留所有坐标和后续逻辑，只从本轮跳伞候选中排除。
+# 保留旧名称，避免外部脚本读取该常量时立即失效。
+DROP_TARGETS_BY_CITY = DROP_HOUSE_TARGETS_BY_REGION
+
+# 旧L城车辆落点暂时有问题；只影响下面的寻车候选，不影响新房区。
 DISABLED_DROP_CITIES = {"L城"}
 DROP_TARGET_R_CITY_CAR_SEARCH = (1104, 790)
 DROP_TARGET_L_CITY_CAR_SEARCH = (1731, 910)
@@ -280,7 +288,7 @@ def prepare_round(w: "FrameWorker" = None):
     landing_stage = "搜房阶段" if need_searching else "跑图阶段"
     if need_searching:
         drop_target = None
-        drop_target_candidates = _enabled_drop_target_candidates(DROP_TARGETS_BY_CITY)
+        drop_target_candidates = _enabled_drop_target_candidates(DROP_HOUSE_TARGETS_BY_REGION)
     else:
         drop_target = None
         drop_target_candidates = _enabled_drop_target_candidates(DROP_CAR_SEARCH_TARGETS_BY_CITY)

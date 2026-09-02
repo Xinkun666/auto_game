@@ -715,6 +715,20 @@ def should_preserve_game_process_for_plan(plan: Optional[dict]) -> bool:
     return bool(plan.get("preserve_game_process"))
 
 
+def skips_safety_gate_for_plan(plan: Optional[dict]) -> bool:
+    """Return whether a test profile starts without temperature/battery gating."""
+    plan = plan or {}
+    profile = str(plan.get("test_profile") or "").strip().lower()
+    return profile == "function" or is_marathon_plan(plan)
+
+
+def should_preserve_game_process_on_manual_stop(plan: Optional[dict]) -> bool:
+    """Keep app processes for a manually stopped function test by default."""
+    plan = plan or {}
+    profile = str(plan.get("test_profile") or "").strip().lower()
+    return profile == "function" or should_preserve_game_process_for_plan(plan)
+
+
 def is_marathon_plan(plan: Optional[dict]) -> bool:
     plan = plan or {}
     if str(plan.get("test_profile") or "").strip().lower() == TEST_PROFILE_MARATHON:
@@ -4895,7 +4909,7 @@ class LauncherWindow(QWidget):
             if marathon_selected
             else "当前为保留进程：功耗测试和功能测试在启动、手动停止、自动结束时都不关闭相关应用"
             if preserve_process
-            else "当前为关闭进程：功耗测试和功能测试在启动、手动停止、自动结束时都会关闭相关应用"
+            else "当前为关闭进程：功耗测试会在启动、手动停止、自动结束时清理相关应用；功能测试手动停止时默认保留应用进程"
         )
 
     def _toggle_generate_preview_video(self, checked: bool):
@@ -6667,6 +6681,18 @@ class LauncherWindow(QWidget):
         else:
             self._log_message("[Launcher] 未成功执行 force-stop，请检查 hdc 环境或设备连接状态。\n", level=logging.WARNING)
 
+    def _cleanup_apps_after_manual_stop(self):
+        if should_preserve_game_process_on_manual_stop(self.current_plan):
+            profile = str(self.current_plan.get("test_profile") or "").strip().lower()
+            message = (
+                "[Launcher] 手动停止：功能测试默认保留应用进程，跳过设备清理。\n"
+                if profile == "function"
+                else "[Launcher] 手动停止：当前测试处于保留进程模式，跳过设备清理。\n"
+            )
+            self._log_message(message)
+            return
+        self._cleanup_apps_between_runs("手动停止后清理", force=True)
+
     def _check_and_start_if_safe(self):
         LOGGER.info(
             "check_and_start_if_safe: batch_active=%s process_exists=%s stop_requested=%s current_run_index=%s current_plan=%s",
@@ -6688,12 +6714,17 @@ class LauncherWindow(QWidget):
             return
 
         run_no = self.current_run_index + 1
-        if is_marathon_plan(self.current_plan):
+        if skips_safety_gate_for_plan(self.current_plan):
             self.safety_timer.stop()
-            self._log_message(
-                f"[Launcher] 马拉松第 {run_no} 轮跳过启动前温度和电量检查。\n"
+            profile_text = (
+                "功能测试"
+                if str(self.current_plan.get("test_profile") or "").strip().lower() == "function"
+                else "马拉松"
             )
-            self._cleanup_apps_between_runs("马拉松启动前清理")
+            self._log_message(
+                f"[Launcher] {profile_text}第 {run_no} 轮跳过启动前温度和电量检查。\n"
+            )
+            self._cleanup_apps_between_runs(f"{profile_text}启动前清理")
             self._launch_iteration(run_no, None, None)
             return
 
@@ -8584,7 +8615,7 @@ class LauncherWindow(QWidget):
             return
 
         if self.manual_stop_requested:
-            self._cleanup_apps_between_runs("手动停止后清理", force=True)
+            self._cleanup_apps_after_manual_stop()
             self._finish_batch("任务已停止。")
             return
 
@@ -8760,7 +8791,7 @@ class LauncherWindow(QWidget):
 
         if self.process is None:
             self._log_message("\n[Launcher] 手动停止已取消断流恢复和后续运行。\n")
-            self._cleanup_apps_between_runs("手动停止后清理", force=True)
+            self._cleanup_apps_after_manual_stop()
             self._finish_batch("任务已停止。")
             return
 

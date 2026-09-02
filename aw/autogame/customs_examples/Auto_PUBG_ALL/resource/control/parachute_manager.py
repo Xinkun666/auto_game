@@ -853,6 +853,30 @@ class ParachuteManager:
         w.change_stage("结束阶段")
         return {"missing_jump_icon_restart": True}
 
+    @staticmethod
+    def _reset_location_tracking_after_landing(w: 'FrameWorker') -> bool:
+        """落地切阶段前强制 SIFT 回到 unstable，避免沿用跳伞期的预测状态。"""
+        stage_resolver = getattr(w, "stage_resolver", None)
+        processor = getattr(stage_resolver, "processor", None)
+        special_handler = getattr(processor, "special_handler", None)
+        reset_tracking = getattr(special_handler, "reset_location_tracking", None)
+        if not callable(reset_tracking):
+            w.frame_log("[Parachute] 落地时未找到定位重置接口，无法确认 SIFT 已切换为 unstable")
+            return False
+
+        try:
+            mode = reset_tracking()
+        except Exception as exc:
+            w.frame_log(f"[Parachute] 落地重置 SIFT 定位状态失败: {exc}")
+            return False
+
+        if mode != "unstable":
+            w.frame_log(f"[Parachute] 落地重置 SIFT 后模式异常: mode={mode}")
+            return False
+
+        w.frame_log("[Parachute] 人物已落地，SIFT 定位已强制重置为 unstable")
+        return True
+
 
     def _perform_jump_sequence(self, w: 'FrameWorker'):
         """
@@ -870,5 +894,6 @@ class ParachuteManager:
         w.tap_single('视角', wait=100, dura=400, x_bias=0, y_bias=-500)
         w.tap_single('摇杆', wait=self.DIVE_DURATION_MS, dura=400, x_bias=0, y_bias=-500)
         w.tap_single('视角', wait=100, dura=400, x_bias=0, y_bias=200)
+        self._reset_location_tracking_after_landing(w)
         self.reset()
         w.change_stage(self.landing_stage)

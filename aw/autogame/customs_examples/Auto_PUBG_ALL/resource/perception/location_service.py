@@ -70,6 +70,16 @@ class LocatePoints:
         self.correction_thresh = correction_thresh
         self.max_corrections = max_corrections
 
+    def reset_tracking(self) -> str:
+        """清除跨场景的定位历史，强制下一帧从全局 SIFT 匹配重新收敛。"""
+        self.mode = "unstable"
+        self.history_points = []
+        self.consecutive_corrections = 0
+        zero_state = np.zeros((4, 1), dtype=np.float32)
+        self.kf.statePre = zero_state.copy()
+        self.kf.statePost = zero_state.copy()
+        return self.mode
+
     def _get_global_measured_point(self, gray_curr):
         mask = None
         if self.is_circle:

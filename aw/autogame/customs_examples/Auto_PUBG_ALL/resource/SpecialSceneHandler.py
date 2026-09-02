@@ -46,6 +46,11 @@ def location(img):
     return loc_tool.get_location(img)
 
 
+def reset_location_tracking():
+    """人物落地后丢弃跳伞阶段的 SIFT/卡尔曼状态。"""
+    return loc_tool.reset_tracking()
+
+
 def forward_scene(img):
     """
     这是之前 forward_scene 的原始逻辑，已单独迁移到这个函数中保留。

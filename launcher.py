@@ -3197,6 +3197,14 @@ class LauncherWindow(QWidget):
             "关闭时仍保留运行帧图片/JSON、Launcher 日志和 hilog，"
             "但不生成预览视频"
         )
+        self.memory_log_button = QPushButton("Memory日志：关")
+        self.memory_log_button.setObjectName("memoryLogButton")
+        self.memory_log_button.setCheckable(True)
+        self.memory_log_button.setChecked(False)
+        self.memory_log_button.setProperty("toggleButton", True)
+        self.memory_log_button.setToolTip(
+            "默认关闭；开启后每5秒采样内存，每60秒写入本次运行目录的 memory.log"
+        )
         self.preview_overlay_button = QPushButton("隐藏标注")
         self.preview_overlay_button.setCheckable(True)
         self.preview_overlay_button.setChecked(True)
@@ -4105,6 +4113,7 @@ class LauncherWindow(QWidget):
                     ("SP运行时长", self.marathon_duration_field, 150),
                     ("结束电量", self.marathon_end_battery_field, 150),
                     ("视频归档", self.generate_preview_video_button, 150),
+                    ("内存诊断", self.memory_log_button, 150),
                     ("回放录像时长", self.power_collection_duration_field, 150),
                 ),
             ),
@@ -4491,6 +4500,7 @@ class LauncherWindow(QWidget):
         self.history_next_frame_button.clicked.connect(self._show_next_history_frame)
         self.game_process_policy_button.toggled.connect(self._toggle_game_process_policy)
         self.generate_preview_video_button.toggled.connect(self._toggle_generate_preview_video)
+        self.memory_log_button.toggled.connect(self._toggle_memory_log)
         self.preview_overlay_button.toggled.connect(self._toggle_preview_overlay)
         self.preview_points_button.toggled.connect(self._toggle_preview_points)
         self.preview_info_select_all_button.clicked.connect(self._select_all_preview_info)
@@ -4891,6 +4901,10 @@ class LauncherWindow(QWidget):
     def _toggle_generate_preview_video(self, checked: bool):
         self.generate_preview_video_button.setText("生成视频：开" if checked else "生成视频：关")
         LOGGER.info("generate preview video toggled: %s", checked)
+
+    def _toggle_memory_log(self, checked: bool):
+        self.memory_log_button.setText("Memory日志：开" if checked else "Memory日志：关")
+        LOGGER.info("memory log toggled: %s", checked)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -5718,6 +5732,8 @@ class LauncherWindow(QWidget):
     def _build_process_environment(self, project_case: str, target_case: str, run_no: int) -> QProcessEnvironment:
         env = QProcessEnvironment.systemEnvironment()
         apply_pyinstaller_splash_suppression(env)
+        # 默认彻底关闭业务进程内的内存打点，避免继承到外部残留配置。
+        env.remove("AUTOGAME_MEMORY_LOG_PATH")
         env.insert("TARGET_PROJECT_CASE", project_case)
         env.insert("TARGET_GAME_CASE", target_case)
         env.insert("AUTOGAME_VIS_MODE", "launcher")
@@ -5760,10 +5776,11 @@ class LauncherWindow(QWidget):
                 "AUTOGAME_DEVICE_LOG_PATH",
                 str(run_archive_dir / "hilog.txt"),
             )
-            env.insert(
-                "AUTOGAME_MEMORY_LOG_PATH",
-                str(run_archive_dir / "memory.log"),
-            )
+            if bool(self.current_plan and self.current_plan.get("memory_log_enabled")):
+                env.insert(
+                    "AUTOGAME_MEMORY_LOG_PATH",
+                    str(run_archive_dir / "memory.log"),
+                )
             if (
                 self.current_hilog_capture is not None
                 and not self.current_hilog_capture.start_error
@@ -5856,6 +5873,7 @@ class LauncherWindow(QWidget):
         self.marathon_duration_spin.setEnabled(enabled)
         self.marathon_end_battery_spin.setEnabled(enabled)
         self.generate_preview_video_button.setEnabled(enabled)
+        self.memory_log_button.setEnabled(enabled)
         self._sync_test_profile_ui()
         for button in self.preset_buttons:
             button.setEnabled(enabled)
@@ -6472,6 +6490,7 @@ class LauncherWindow(QWidget):
             "marathon_duration_minutes": marathon_duration_minutes,
             "marathon_end_battery_percent": marathon_end_battery_percent,
             "generate_preview_video": bool(self.generate_preview_video_button.isChecked()),
+            "memory_log_enabled": bool(self.memory_log_button.isChecked()),
             "preserve_game_process": (
                 False
                 if marathon_selected
@@ -6536,6 +6555,7 @@ class LauncherWindow(QWidget):
             f"screen_size={screen_width}x{screen_height}, "
             f"case_loops={plan['case_loop_count']}, "
             f"generate_preview_video={plan['generate_preview_video']}, "
+            f"memory_log_enabled={plan['memory_log_enabled']}, "
             f"preserve_game_process={plan['preserve_game_process']}, "
             f"safe_temp={plan['safe_temp']}°C, safe_battery={plan['safe_battery']}%, "
             f"safe_time={plan['safe_minutes']}分钟, inactivity_timeout={plan['inactivity_timeout_minutes']}分钟, "
@@ -6786,21 +6806,22 @@ class LauncherWindow(QWidget):
                 self._log_message(f"[Launcher] 进程创建追踪日志：{trace_path}\n")
             else:
                 self._log_message("[Launcher] 当前环境未启用 Windows 进程创建追踪。\n")
-            self.current_memory_capture = MemoryRunCapture(
-                archive_dir / "memory.log",
-                root_pid=os.getpid(),
-            ).start()
-            if self.current_memory_capture.start_error:
-                self._log_message(
-                    "[Launcher] 内存监控启动失败：%s\n"
-                    % self.current_memory_capture.start_error,
-                    level=logging.ERROR,
-                )
-            else:
-                self._log_message(
-                    "[Launcher] 内存监控日志：%s（每5秒采样，每60秒批量写盘）\n"
-                    % self.current_memory_capture.path
-                )
+            if bool(self.current_plan and self.current_plan.get("memory_log_enabled")):
+                self.current_memory_capture = MemoryRunCapture(
+                    archive_dir / "memory.log",
+                    root_pid=os.getpid(),
+                ).start()
+                if self.current_memory_capture.start_error:
+                    self._log_message(
+                        "[Launcher] 内存监控启动失败：%s\n"
+                        % self.current_memory_capture.start_error,
+                        level=logging.ERROR,
+                    )
+                else:
+                    self._log_message(
+                        "[Launcher] 内存监控日志：%s（每5秒采样，每60秒批量写盘）\n"
+                        % self.current_memory_capture.path
+                    )
             self.current_hdc_debug_capture = HdcDebugRunCapture(
                 archive_dir / "hdc_debug.log"
             ).start()

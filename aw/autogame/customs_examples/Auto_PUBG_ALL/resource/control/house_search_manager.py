@@ -2845,7 +2845,7 @@ class HouseSearchManager:
             self._reset_entry_near_micro_adjust()
             return visible_door_result
 
-        if dist > self.ENTRY_NEAR_MICRO_DONE_DISTANCE:
+        if dist != self.ENTRY_NEAR_MICRO_DONE_DISTANCE:
             w.frame_log(
                 f"[{phase_label}] YOLO与SAM3暂未定位到门，"
                 "保持入门方向不变，只用摇杆向入门点微调；下一轮重新定位门"
@@ -2896,10 +2896,10 @@ class HouseSearchManager:
         if dist_val > self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
             self._reset_entry_near_micro_adjust()
             return "outside"
-        if dist_val <= self.ENTRY_NEAR_MICRO_DONE_DISTANCE:
+        if dist_val == self.ENTRY_NEAR_MICRO_DONE_DISTANCE:
             w.frame_log(
                 f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist_val:.2f} "
-                f"<= {self.ENTRY_NEAR_MICRO_DONE_DISTANCE:g}，按 0 处理，停止微调并开始看门"
+                f"== {self.ENTRY_NEAR_MICRO_DONE_DISTANCE:g}，停止微调并开始看门"
             )
             return "ready"
         ideal_angle = self.active_entry.get('direction') if self.active_entry else None

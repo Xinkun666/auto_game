@@ -2243,6 +2243,13 @@ class HouseSearchManager:
             if current_loc is not None and target_loc is not None
             else None
         )
+        door_align_result = self._align_visible_entry_door_before_nanda(
+            w,
+            door,
+            phase_label,
+        )
+        if door_align_result != "aligned":
+            return door_align_result
         nanda_result = self._try_nanda_search_before_entry(
             w,
             door,
@@ -2703,6 +2710,31 @@ class HouseSearchManager:
             result=result,
         )
 
+    def _align_visible_entry_door_before_nanda(self, w, door, phase_label='Nav') -> str:
+        """Keep the near-entry sequence as: find door -> align door -> match/replay."""
+        door_state = self._align_to_door_detection(
+            w,
+            door,
+            tolerance_px=self.ENTRY_DOOR_FINAL_VIEW_TOLERANCE_PX,
+            phase_label=f"{phase_label} 门对齐",
+            return_state=True,
+        )
+        if door_state == "aligned":
+            w.frame_log(
+                f"[{phase_label}] 门已视觉对齐，进入房型匹配；匹配成功后立即执行回放"
+            )
+            return "aligned"
+
+        if door_state == "lost":
+            w.frame_log(
+                f"[{phase_label}] 门对齐过程中目标丢失，下一轮重新从YOLO优先定位门"
+            )
+        else:
+            w.frame_log(
+                f"[{phase_label}] 门尚未对齐，本轮不进入房型匹配/回放"
+            )
+        return "adjusting"
+
     def _try_entry_door_yolo_then_sam3(
         self,
         w: 'FrameWorker',
@@ -2738,9 +2770,16 @@ class HouseSearchManager:
 
         w.frame_log(
             f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
-            f"方向已对齐且已定位门，先尝试南大门前方案: door={door}"
+            f"方向已对齐且已定位门，先完成门对齐再进入房型匹配: door={door}"
         )
         self.stop_auto_forward(w)
+        door_align_result = self._align_visible_entry_door_before_nanda(
+            w,
+            door,
+            phase_label,
+        )
+        if door_align_result != "aligned":
+            return door_align_result
         nanda_result = self._try_nanda_search_before_entry(
             w,
             door,

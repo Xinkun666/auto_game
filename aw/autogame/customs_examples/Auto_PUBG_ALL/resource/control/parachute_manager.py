@@ -35,8 +35,14 @@ class ParachuteManager:
     PLANNED_JUMP_POINT_TOLERANCE: float = 15.0  # 靠近计划航线交点时的允许误差
     PLANNED_JUMP_TARGET_DIST_TOLERANCE: float = 5.0  # 圆线交点取整后的距离误差
     ROUTE_MAX_DISTANCE: float = 1450.0  # 根据实测航线长度收紧后的有效上限
+    TARGET_IMPORTANCE_CENTER: Tuple[int, int] = (1024, 1024)  # 2048×2048地图中心
+    TARGET_IMPORTANCE_MAX_DISTANCE: float = math.hypot(1024, 1024)
 
-    def __init__(self, route_max_distance: Optional[float] = None):
+    def __init__(
+        self,
+        route_max_distance: Optional[float] = None,
+        importance_center: Optional[Tuple[int, int]] = None,
+    ):
         self._frame_worker = None
         self.is_active = False  # 是否处于监控跳伞距离的激活状态
         self.prior_dist = 0  # 历史最近距离（用于判断是否飞过了）
@@ -61,6 +67,13 @@ class ParachuteManager:
         except (TypeError, ValueError):
             configured_route_distance = self.ROUTE_MAX_DISTANCE
         self.route_max_distance = max(0.0, configured_route_distance)
+        try:
+            self.importance_center = (
+                int(importance_center[0]),
+                int(importance_center[1]),
+            )
+        except (TypeError, ValueError, IndexError):
+            self.importance_center = self.TARGET_IMPORTANCE_CENTER
         self.selected_target_name: Optional[str] = None
         self.planned_jump_position: Optional[Tuple[int, int]] = None
         self.planned_jump_direction: Optional[int] = None
@@ -69,6 +82,16 @@ class ParachuteManager:
         self.last_route_progress: Optional[float] = None
         self.direction_prepared = False
         self.target_selected_callback = None
+
+    def _target_importance(self, target_pos: Tuple[int, int]):
+        center_distance = get_distance(self.importance_center, target_pos)
+        importance_score = max(
+            0.0,
+            100.0 * (
+                1.0 - center_distance / self.TARGET_IMPORTANCE_MAX_DISTANCE
+            ),
+        )
+        return importance_score, center_distance
 
 
     def reset(self):
@@ -319,9 +342,16 @@ class ParachuteManager:
             plan["travel_distance"] = (
                 plan["entry_distance"] - current_progress
             )
+            importance_score, center_distance = self._target_importance(
+                target_pos
+            )
+            plan["importance_score"] = importance_score
+            plan["center_distance"] = center_distance
             plans.append(plan)
             w.frame_log(
                 f"[Parachute] 航线目标可达: {target_name}={target_pos}, "
+                f"重要性={importance_score:.2f}, "
+                f"距地图中心={center_distance:.2f}, "
                 f"沿航线还需={plan['travel_distance']:.2f}, "
                 f"垂直距离={plan['cross_distance']:.2f}, "
                 f"入口={plan['entry_distance']:.2f}, "
@@ -338,8 +368,9 @@ class ParachuteManager:
         selected = max(
             plans,
             key=lambda item: (
-                item["travel_distance"],
+                item["importance_score"],
                 -item["cross_distance"],
+                -item["travel_distance"],
                 item["name"],
             ),
         )
@@ -352,8 +383,10 @@ class ParachuteManager:
         self.last_route_progress = current_progress
         self.direction_prepared = False
         w.frame_log(
-            f"[Parachute] 选择航线上最远可跳目标: {self.selected_target_name}, "
+            f"[Parachute] 选择可跳片区中重要性最高目标: {self.selected_target_name}, "
             f"target={self.target_pos}, jump_at={self.planned_jump_position}, "
+            f"importance={selected['importance_score']:.2f}, "
+            f"center_distance={selected['center_distance']:.2f}, "
             f"direction={self.planned_jump_direction}°, "
             f"remaining={selected['travel_distance']:.2f}, "
             f"entry={self.planned_jump_progress:.2f}, "
@@ -366,7 +399,7 @@ class ParachuteManager:
                 callback(self.selected_target_name, self.target_pos)
             except Exception as exc:
                 w.frame_log(
-                    f"[Parachute] 通知所选城区失败: {exc}"
+                    f"[Parachute] 通知所选片区失败: {exc}"
                 )
 
         self._prepare_planned_direction(w)

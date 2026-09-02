@@ -101,7 +101,7 @@ def _enabled_drop_target_candidates(candidates):
         if city not in DISABLED_DROP_CITIES
     }
 DROP_TARGET_GARAGE = DROP_TARGET_R_CITY
-DROP_TARGET_CENTER = DROP_TARGET_R_CITY
+DROP_TARGET_CENTER = (1024, 1024)
 STAGE_PRIORITY_JUMP_FORWARD_Y_BIAS = -400
 STAGE_PRIORITY_JUMP_FORWARD_DURA = 100
 STAGE_PRIORITY_JUMP_FORWARD_WAIT = 300
@@ -190,7 +190,8 @@ def initialize_runtime():
     if not isinstance(parachute_config, dict):
         parachute_config = {}
     parachute_manager = ParachuteManager(
-        route_max_distance=parachute_config.get("route_max_distance")
+        route_max_distance=parachute_config.get("route_max_distance"),
+        importance_center=DROP_TARGET_CENTER,
     )
     running_manager = RunningManager()
     driving_manager = DrivingManager()

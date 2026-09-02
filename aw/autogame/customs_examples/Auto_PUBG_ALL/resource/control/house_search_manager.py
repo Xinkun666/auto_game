@@ -141,8 +141,7 @@ class HouseSearchManager:
     ROUTE_STUCK_HOUSE_BYPASS_FORWARD_WAIT = 1000
     HOUSE_SEARCH_TIMEOUT_SECONDS = 60
     ENTRY_NEAR_MICRO_ADJUST_DISTANCE = 2.5
-    ENTRY_NEAR_MICRO_DONE_DISTANCE = 0.25
-    ENTRY_NEAR_MICRO_MAX_ATTEMPTS = 8
+    ENTRY_NEAR_MICRO_DONE_DISTANCE = 0.0
     ENTRY_NEAR_MICRO_X_BIAS = 120
     ENTRY_NEAR_MICRO_Y_BIAS = 120
     ENTRY_NEAR_MICRO_DURA = 160
@@ -174,13 +173,7 @@ class HouseSearchManager:
     ENTRY_DOOR_DIRECT_BACKOFF_WAIT = 3000
     ENTRY_DOOR_MISSING_BACKOFF_Y_BIAS = 320
     ENTRY_DOOR_MISSING_BACKOFF_DURA = 300
-    ENTRY_DOOR_MISSING_BACKOFF_WAIT = 520
-    ENTRY_DOOR_MISSING_STRICT_FORWARD_Y_BIAS = -420
-    ENTRY_DOOR_MISSING_STRICT_FORWARD_DURA = 650
-    ENTRY_DOOR_MISSING_STRICT_FORWARD_WAIT = 850
-    ENTRY_DOOR_MISSING_WALL_BACKOFF_Y_BIAS = 200
-    ENTRY_DOOR_MISSING_WALL_BACKOFF_DURA = 200
-    ENTRY_DOOR_MISSING_WALL_BACKOFF_WAIT = 520
+    ENTRY_DOOR_MISSING_BACKOFF_WAIT = 1000
     ENTRY_DOOR_SAM3_GROUP = "sam3"
     ENTRY_DOOR_SAM3_INFO_NAME = "sam3"
     ENTRY_DOOR_SAM3_PROMPT = "door frame"
@@ -652,7 +645,12 @@ class HouseSearchManager:
         except (TypeError, ValueError):
             return None
 
-    def _refresh_frame_and_handle_jump(self, w: 'FrameWorker', reason: str = ""):
+    def _refresh_frame_and_handle_jump(
+        self,
+        w: 'FrameWorker',
+        reason: str = "",
+        handle_jump: bool = True,
+    ):
         refreshed = w.refresh_frame()
         raw_location = w.get_info("location")
         current_loc = self._remember_valid_location(raw_location)
@@ -674,8 +672,9 @@ class HouseSearchManager:
                 f"当前场景={self._house_scene_label(house_scene)}"
             )
 
-        jump_reason = reason or f"{getattr(self, 'status', 'UNKNOWN')} 刷新后检查"
-        self._handle_global_jump_forward_if_visible(w, jump_reason)
+        if handle_jump:
+            jump_reason = reason or f"{getattr(self, 'status', 'UNKNOWN')} 刷新后检查"
+            self._handle_global_jump_forward_if_visible(w, jump_reason)
         return refreshed
 
     def _handle_global_jump_forward_if_visible(self, w: 'FrameWorker', reason: str) -> bool:
@@ -2071,10 +2070,12 @@ class HouseSearchManager:
         return "failed"
 
     def _scan_entry_door_after_micro_adjust(self, w: 'FrameWorker', phase_label='Nav'):
-        w.frame_log(f"[{phase_label}] 入门点距离已微调到 0/近似0，开始看正前方有没有门")
+        w.frame_log(f"[{phase_label}] 入门点距离已微调到0，开始用YOLO+SAM3定位门")
         door = self.find_largest_door(w)
+        if door is None:
+            door = self._find_entry_door_with_sam3(w, phase_label)
         if door is not None:
-            w.frame_log(f"[{phase_label}] 正前方看到了门，进入对准门流程: door={door}")
+            w.frame_log(f"[{phase_label}] YOLO+SAM3已定位门，进入对准门流程: door={door}")
             return door
 
         w.frame_log(
@@ -2088,64 +2089,16 @@ class HouseSearchManager:
             dura=self.ENTRY_DOOR_MISSING_BACKOFF_DURA,
             wait=self.ENTRY_DOOR_MISSING_BACKOFF_WAIT,
         )
-        self._refresh_frame_and_handle_jump(w)
-        if self._is_indoor(w):
-            w.frame_log(f"[{phase_label}] 后拉扩视野后 house_scene=indoor，直接启动搜房")
-            return "indoor"
+        self._refresh_frame_and_handle_jump(w, handle_jump=False)
         door = self.find_largest_door(w)
+        if door is None:
+            door = self._find_entry_door_with_sam3(w, phase_label)
         if door is not None:
-            w.frame_log(f"[{phase_label}] 后拉扩视野后看到门，进入对准门流程: door={door}")
+            w.frame_log(f"[{phase_label}] 后拉后YOLO+SAM3已定位门，进入对准门流程: door={door}")
             self._mark_entry_door_strict_align_after_backoff()
             return door
 
-        return self._push_missing_entry_door_after_strict_align(w, phase_label)
-
-    def _push_missing_entry_door_after_strict_align(self, w: 'FrameWorker', phase_label='Nav'):
-        ideal_angle = self.active_entry.get('direction') if self.active_entry else None
-        if ideal_angle is None:
-            w.frame_log(f"[{phase_label}] 后拉扩视野后仍没看到门，但缺少入门方向，舍弃当前入门点")
-            return None
-
-        w.frame_log(f"[{phase_label}] 后拉扩视野后仍没看到门，严格回正入门方向 ideal_angle={ideal_angle}")
-        if not self._align_near_entry_direction(w, ideal_angle):
-            w.frame_log(f"[{phase_label}] 入门方向仍未严格对齐，等待下一帧继续校准")
-            return "adjusting"
-
-        w.frame_log(
-            f"[{phase_label}] 入门方向已严格回正但仍没门，执行大前推确认进门 "
-            f"y={self.ENTRY_DOOR_MISSING_STRICT_FORWARD_Y_BIAS}，"
-            f"dura={self.ENTRY_DOOR_MISSING_STRICT_FORWARD_DURA}"
-        )
-        w.tap_single(
-            '摇杆',
-            y_bias=self.ENTRY_DOOR_MISSING_STRICT_FORWARD_Y_BIAS,
-            dura=self.ENTRY_DOOR_MISSING_STRICT_FORWARD_DURA,
-            wait=self.ENTRY_DOOR_MISSING_STRICT_FORWARD_WAIT,
-        )
-        self._refresh_frame_and_handle_jump(w)
-        if self._is_indoor(w):
-            w.frame_log(f"[{phase_label}] 大前推后 house_scene=indoor，确认已经进门")
-            return "indoor"
-
-        scene = self._get_house_scene(w)
-        if scene == self.HOUSE_NEAR_WALL:
-            w.frame_log(
-                f"[{phase_label}] 大前推后撞墙，稍微后拉复核是否已进门 "
-                f"y={self.ENTRY_DOOR_MISSING_WALL_BACKOFF_Y_BIAS}，"
-                f"dura={self.ENTRY_DOOR_MISSING_WALL_BACKOFF_DURA}"
-            )
-            w.tap_single(
-                '摇杆',
-                y_bias=self.ENTRY_DOOR_MISSING_WALL_BACKOFF_Y_BIAS,
-                dura=self.ENTRY_DOOR_MISSING_WALL_BACKOFF_DURA,
-                wait=self.ENTRY_DOOR_MISSING_WALL_BACKOFF_WAIT,
-            )
-            self._refresh_frame_and_handle_jump(w)
-            if self._is_indoor(w):
-                w.frame_log(f"[{phase_label}] 撞墙后拉复核 house_scene=indoor，确认已经进门")
-                return "indoor"
-
-        w.frame_log(f"[{phase_label}] 大前推/撞墙后拉后仍未进房，舍弃当前入门点")
+        w.frame_log(f"[{phase_label}] 短后拉后YOLO与SAM3仍未定位到门，舍弃当前入门点")
         return None
 
     def _push_aligned_entry_door_and_check_indoor(self, w: 'FrameWorker', phase_label='Nav', initial_door=None) -> str:
@@ -2155,7 +2108,7 @@ class HouseSearchManager:
                 return "aborted"
 
             if door is None:
-                w.frame_log(f"[{phase_label}] 前推前门目标丢失，重新正前方看门；没门就回正入门方向大前推确认")
+                w.frame_log(f"[{phase_label}] 前推前门目标丢失，重新用YOLO+SAM3定位；仍无门则短后拉复查")
                 door = self._scan_entry_door_after_micro_adjust(w, phase_label)
                 if door == "indoor":
                     return "indoor"
@@ -2301,7 +2254,7 @@ class HouseSearchManager:
                 f"{tolerance}°容差并锁定，"
                 "后续只做门中心对齐"
             )
-            self._refresh_frame_and_handle_jump(w)
+            self._refresh_frame_and_handle_jump(w, handle_jump=False)
         return aligned
 
     def _align_near_entry_direction(self, w: 'FrameWorker', ideal_angle) -> bool:
@@ -2716,18 +2669,20 @@ class HouseSearchManager:
         target_loc,
         dist: float,
         phase_label='Nav',
+        fail_if_missing: bool = True,
     ) -> str:
         door = self.find_largest_door(w)
         if door is None:
             w.frame_log(
                 f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
-                "方向已对齐但YOLO没看到门，取消按入门点坐标左右横移，"
-                "改用SAM3分割门"
+                "方向已锁定但YOLO没看到门，继续使用SAM3分割门"
             )
             door = self._find_entry_door_with_sam3(w, phase_label)
             if door is None:
-                self._mark_current_entry_failed("YOLO与SAM3均未定位到门")
-                return "failed"
+                if fail_if_missing:
+                    self._mark_current_entry_failed("YOLO与SAM3均未定位到门")
+                    return "failed"
+                return "missing"
 
             sam3_state, adjusted_door = self._adjust_to_sam3_door_once(
                 w,
@@ -2844,9 +2799,52 @@ class HouseSearchManager:
             target_loc,
             dist,
             phase_label,
+            fail_if_missing=False,
+        )
+        if visible_door_result != "missing":
+            self._reset_entry_near_micro_adjust()
+            return visible_door_result
+
+        if dist > self.ENTRY_NEAR_MICRO_DONE_DISTANCE:
+            w.frame_log(
+                f"[{phase_label}] YOLO与SAM3暂未定位到门，"
+                "保持入门方向不变，只用摇杆向入门点微调；下一轮重新定位门"
+            )
+            return self._micro_adjust_near_entry_point(
+                w,
+                current_loc,
+                target_loc,
+                dist,
+                phase_label,
+            )
+
+        w.frame_log(
+            f"[{phase_label}] 已到入门点坐标0但YOLO与SAM3仍未定位到门，"
+            f"短后拉后做最后一次门定位：dura={self.ENTRY_DOOR_MISSING_BACKOFF_DURA}，"
+            f"wait={self.ENTRY_DOOR_MISSING_BACKOFF_WAIT}"
+        )
+        w.tap_single(
+            '摇杆',
+            y_bias=self.ENTRY_DOOR_MISSING_BACKOFF_Y_BIAS,
+            dura=self.ENTRY_DOOR_MISSING_BACKOFF_DURA,
+            wait=self.ENTRY_DOOR_MISSING_BACKOFF_WAIT,
+        )
+        self._refresh_frame_and_handle_jump(w, handle_jump=False)
+        refreshed_loc = self._get_current_location(w)
+        refreshed_dist = (
+            get_distance(refreshed_loc, target_loc)
+            if refreshed_loc is not None
+            else 0.0
+        )
+        final_result = self._try_entry_door_yolo_then_sam3(
+            w,
+            target_loc,
+            refreshed_dist,
+            phase_label,
+            fail_if_missing=True,
         )
         self._reset_entry_near_micro_adjust()
-        return visible_door_result
+        return final_result
 
     def _micro_adjust_near_entry_point(self, w: 'FrameWorker', current_loc, target_loc, dist: float, phase_label='Nav') -> str:
         try:
@@ -2864,14 +2862,6 @@ class HouseSearchManager:
                 f"<= {self.ENTRY_NEAR_MICRO_DONE_DISTANCE:g}，按 0 处理，停止微调并开始看门"
             )
             return "ready"
-        if self.entry_near_micro_adjust_attempts >= self.ENTRY_NEAR_MICRO_MAX_ATTEMPTS:
-            w.frame_log(
-                f"[{phase_label}] 入门点近距离很慢微调已达上限 "
-                f"{self.entry_near_micro_adjust_attempts}/{self.ENTRY_NEAR_MICRO_MAX_ATTEMPTS}，"
-                f"当前距离入门点 {target_loc} 仍为 {dist_val:.2f}，不能提前找门，舍弃当前入门点"
-            )
-            return "failed"
-
         ideal_angle = self.active_entry.get('direction') if self.active_entry else None
         refreshed_loc = self._get_current_location(w) or current_loc
         current_dir = ideal_angle if ideal_angle is not None else w.get_info('direction')
@@ -2918,7 +2908,7 @@ class HouseSearchManager:
 
         w.frame_log(
                     f"[{phase_label}] 入门点微调 "
-                    f"{self.entry_near_micro_adjust_attempts}/{self.ENTRY_NEAR_MICRO_MAX_ATTEMPTS}："
+                    f"第{self.entry_near_micro_adjust_attempts}次："
                     f"距离={dist_val:.2f}，方向={self._entry_micro_direction_label(direction)}，"
                     f"相对角={relative:.1f}°，摇杆=({used_x_bias},{used_y_bias})，"
                     f"dura={used_dura}，wait={used_wait}"
@@ -2930,7 +2920,7 @@ class HouseSearchManager:
             dura=used_dura,
             wait=used_wait,
         )
-        self._refresh_frame_and_handle_jump(w)
+        self._refresh_frame_and_handle_jump(w, handle_jump=False)
         after_loc = self._get_current_location(w) or refreshed_loc
         after_dist = get_distance(after_loc, target_loc) if after_loc is not None else None
         if direction in ("left", "right"):

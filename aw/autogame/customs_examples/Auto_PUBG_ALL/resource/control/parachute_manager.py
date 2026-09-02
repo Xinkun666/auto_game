@@ -35,14 +35,8 @@ class ParachuteManager:
     PLANNED_JUMP_POINT_TOLERANCE: float = 15.0  # 靠近计划航线交点时的允许误差
     PLANNED_JUMP_TARGET_DIST_TOLERANCE: float = 5.0  # 圆线交点取整后的距离误差
     ROUTE_MAX_DISTANCE: float = 1450.0  # 根据实测航线长度收紧后的有效上限
-    TARGET_IMPORTANCE_CENTER: Tuple[int, int] = (1024, 1024)  # 2048×2048地图中心
-    TARGET_IMPORTANCE_MAX_DISTANCE: float = math.hypot(1024, 1024)
 
-    def __init__(
-        self,
-        route_max_distance: Optional[float] = None,
-        importance_center: Optional[Tuple[int, int]] = None,
-    ):
+    def __init__(self, route_max_distance: Optional[float] = None):
         self._frame_worker = None
         self.is_active = False  # 是否处于监控跳伞距离的激活状态
         self.prior_dist = 0  # 历史最近距离（用于判断是否飞过了）
@@ -57,6 +51,7 @@ class ParachuteManager:
         self.route_confirm_locations: List[Tuple[int, int]] = []
         self.jump_button_clicked = False
         self.target_candidates: Dict[str, Tuple[int, int]] = {}
+        self.target_importance: Dict[str, float] = {}
         self.dynamic_target_selection = False
         self.route_samples: List[Tuple[int, int]] = []
         self.route_start_location: Optional[Tuple[int, int]] = None
@@ -67,13 +62,6 @@ class ParachuteManager:
         except (TypeError, ValueError):
             configured_route_distance = self.ROUTE_MAX_DISTANCE
         self.route_max_distance = max(0.0, configured_route_distance)
-        try:
-            self.importance_center = (
-                int(importance_center[0]),
-                int(importance_center[1]),
-            )
-        except (TypeError, ValueError, IndexError):
-            self.importance_center = self.TARGET_IMPORTANCE_CENTER
         self.selected_target_name: Optional[str] = None
         self.planned_jump_position: Optional[Tuple[int, int]] = None
         self.planned_jump_direction: Optional[int] = None
@@ -82,17 +70,6 @@ class ParachuteManager:
         self.last_route_progress: Optional[float] = None
         self.direction_prepared = False
         self.target_selected_callback = None
-
-    def _target_importance(self, target_pos: Tuple[int, int]):
-        center_distance = get_distance(self.importance_center, target_pos)
-        importance_score = max(
-            0.0,
-            100.0 * (
-                1.0 - center_distance / self.TARGET_IMPORTANCE_MAX_DISTANCE
-            ),
-        )
-        return importance_score, center_distance
-
 
     def reset(self):
         """重置跳伞管理器的内部状态"""
@@ -107,6 +84,7 @@ class ParachuteManager:
         self.route_confirm_locations = []
         self.jump_button_clicked = False
         self.target_candidates = {}
+        self.target_importance = {}
         self.dynamic_target_selection = False
         self.route_samples = []
         self.route_start_location = None
@@ -128,6 +106,7 @@ class ParachuteManager:
         landing_stage: str = "跑图阶段",
         dive_duration_ms: Optional[int] = None,
         target_candidates: Optional[Dict[str, Tuple[int, int]]] = None,
+        target_importance: Optional[Dict[str, float]] = None,
     ):
         normalized_candidates = {}
         for name, candidate in (target_candidates or {}).items():
@@ -140,6 +119,15 @@ class ParachuteManager:
                 continue
 
         self.target_candidates = normalized_candidates
+        self.target_importance = {}
+        for name, score in (target_importance or {}).items():
+            normalized_name = str(name)
+            if normalized_name not in normalized_candidates:
+                continue
+            try:
+                self.target_importance[normalized_name] = float(score)
+            except (TypeError, ValueError):
+                continue
         self.dynamic_target_selection = bool(normalized_candidates)
         self.route_samples = []
         self.route_start_location = None
@@ -161,7 +149,8 @@ class ParachuteManager:
             self.DIVE_DURATION_MS = dive_duration_ms
         if getattr(self, "_frame_worker", None) is not None:
             target_text = (
-                f"candidates={self.target_candidates}"
+                f"candidates={self.target_candidates}, "
+                f"importance={self.target_importance or '未配置'}"
                 if self.dynamic_target_selection
                 else f"target={self.target_pos}"
             )
@@ -342,16 +331,17 @@ class ParachuteManager:
             plan["travel_distance"] = (
                 plan["entry_distance"] - current_progress
             )
-            importance_score, center_distance = self._target_importance(
-                target_pos
-            )
+            importance_score = self.target_importance.get(target_name)
             plan["importance_score"] = importance_score
-            plan["center_distance"] = center_distance
             plans.append(plan)
+            importance_text = (
+                f"{importance_score:.2f}"
+                if importance_score is not None
+                else "未配置"
+            )
             w.frame_log(
                 f"[Parachute] 航线目标可达: {target_name}={target_pos}, "
-                f"重要性={importance_score:.2f}, "
-                f"距地图中心={center_distance:.2f}, "
+                f"预生成重要性={importance_text}, "
                 f"沿航线还需={plan['travel_distance']:.2f}, "
                 f"垂直距离={plan['cross_distance']:.2f}, "
                 f"入口={plan['entry_distance']:.2f}, "
@@ -365,15 +355,29 @@ class ParachuteManager:
         if not plans:
             return self._restart_match_for_unreachable_targets(w)
 
-        selected = max(
-            plans,
-            key=lambda item: (
-                item["importance_score"],
-                -item["cross_distance"],
-                -item["travel_distance"],
-                item["name"],
-            ),
-        )
+        if self.target_importance:
+            selected = max(
+                plans,
+                key=lambda item: (
+                    item["importance_score"]
+                    if item["importance_score"] is not None
+                    else float("-inf"),
+                    -item["cross_distance"],
+                    -item["travel_distance"],
+                    item["name"],
+                ),
+            )
+            selection_reason = "可跳片区中预生成重要性最高"
+        else:
+            selected = max(
+                plans,
+                key=lambda item: (
+                    item["travel_distance"],
+                    -item["cross_distance"],
+                    item["name"],
+                ),
+            )
+            selection_reason = "航线上最远可跳"
         self.selected_target_name = selected["name"]
         self.target_pos = selected["target"]
         self.planned_jump_position = selected["jump_position"]
@@ -382,11 +386,15 @@ class ParachuteManager:
         self.planned_exit_progress = selected["exit_distance"]
         self.last_route_progress = current_progress
         self.direction_prepared = False
+        importance_text = (
+            f"{selected['importance_score']:.2f}"
+            if selected["importance_score"] is not None
+            else "未配置"
+        )
         w.frame_log(
-            f"[Parachute] 选择可跳片区中重要性最高目标: {self.selected_target_name}, "
+            f"[Parachute] 选择{selection_reason}目标: {self.selected_target_name}, "
             f"target={self.target_pos}, jump_at={self.planned_jump_position}, "
-            f"importance={selected['importance_score']:.2f}, "
-            f"center_distance={selected['center_distance']:.2f}, "
+            f"importance={importance_text}, "
             f"direction={self.planned_jump_direction}°, "
             f"remaining={selected['travel_distance']:.2f}, "
             f"entry={self.planned_jump_progress:.2f}, "

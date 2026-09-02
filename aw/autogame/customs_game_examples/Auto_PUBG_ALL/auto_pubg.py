@@ -61,20 +61,27 @@ PHASE_STAGE_MAP = {
 
 DROP_TARGET_R_CITY = (990, 757)
 DROP_TARGET_R_CITY_SEARCH_START = (986, 759)
-DROP_HOUSE_TARGETS_BY_REGION = {
-    "片区01": (1051, 751),
-    "片区02": (1243, 881),
-    "片区03": (1293, 969),
-    "片区04": (1522, 1202),
-    "片区05": (617, 1089),
-    "片区06": (550, 989),
-    "片区07": (700, 1005),
-    "片区08": (748, 1129),
-    "片区09": (923, 1300),
-    "片区10": (947, 917),
-    "片区11": (1019, 1033),
+DROP_HOUSE_REGIONS = {
+    # importance已按地图中心(1024, 1024)的距离预先生成，越靠近中心分数越高。
+    "片区01": {"target": (1051, 751), "importance": 81.06},
+    "片区02": {"target": (1243, 881), "importance": 81.94},
+    "片区03": {"target": (1293, 969), "importance": 81.04},
+    "片区04": {"target": (1522, 1202), "importance": 63.48},
+    "片区05": {"target": (617, 1089), "importance": 71.54},
+    "片区06": {"target": (550, 989), "importance": 67.18},
+    "片区07": {"target": (700, 1005), "importance": 77.59},
+    "片区08": {"target": (748, 1129), "importance": 79.61},
+    "片区09": {"target": (923, 1300), "importance": 79.71},
+    "片区10": {"target": (947, 917), "importance": 90.90},
+    "片区11": {"target": (1019, 1033), "importance": 99.29},
     # 片区12靠近悬崖，房点中心 (1111, 1140) 会增加落水风险。
-    "片区12": (893, 1257),
+    "片区12": {"target": (893, 1257), "importance": 81.54},
+}
+DROP_HOUSE_TARGETS_BY_REGION = {
+    region: config["target"] for region, config in DROP_HOUSE_REGIONS.items()
+}
+DROP_HOUSE_IMPORTANCE_BY_REGION = {
+    region: config["importance"] for region, config in DROP_HOUSE_REGIONS.items()
 }
 # 保留旧名称，避免外部脚本读取该常量时立即失效。
 DROP_TARGETS_BY_CITY = DROP_HOUSE_TARGETS_BY_REGION
@@ -190,8 +197,7 @@ def initialize_runtime():
     if not isinstance(parachute_config, dict):
         parachute_config = {}
     parachute_manager = ParachuteManager(
-        route_max_distance=parachute_config.get("route_max_distance"),
-        importance_center=DROP_TARGET_CENTER,
+        route_max_distance=parachute_config.get("route_max_distance")
     )
     running_manager = RunningManager()
     driving_manager = DrivingManager()
@@ -295,11 +301,14 @@ def prepare_round(w: "FrameWorker" = None):
         drop_target_candidates = _enabled_drop_target_candidates(DROP_CAR_SEARCH_TARGETS_BY_CITY)
 
     parachute_manager.reset()
-    parachute_manager.configure(
+    configure_kwargs = dict(
         target_pos=drop_target,
         target_candidates=drop_target_candidates,
         landing_stage=landing_stage,
     )
+    if need_searching:
+        configure_kwargs["target_importance"] = DROP_HOUSE_IMPORTANCE_BY_REGION
+    parachute_manager.configure(**configure_kwargs)
 
     running_manager.reset(finding_car=need_drive)
 

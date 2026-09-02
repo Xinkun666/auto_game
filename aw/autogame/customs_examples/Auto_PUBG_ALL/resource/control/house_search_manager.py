@@ -4823,6 +4823,8 @@ class HouseSceneSearchManager(HouseSearchManager):
     R_CITY_ROUTE_REPLAN_STUCK_CYCLES = 2
     R_CITY_FAILED_TARGET_LIMIT = 2
     R_CITY_NEAR_ENTRY_LOOK_DEGREES = 30
+    HOUSE_REGION_ACCESS_SEARCH_RADIUS = 65
+    HOUSE_REGION_LANDING_SAFE_SEARCH_RADIUS = 120
     ENTRY_AUTO_FORWARD_DISTANCE = 15.0
     ENTRY_COARSE_MOVE_DISTANCE = 10.0
     R_CITY_FORWARD_HOUSE_BYPASS_DISTANCE = 10.0
@@ -5010,6 +5012,8 @@ class HouseSceneSearchManager(HouseSearchManager):
         super().__init__(nanda_search_strategy=nanda_search_strategy)
         self.r_city_config = {}
         self.house_region = None
+        self.house_regions = {}
+        self.house_region_selection_pending = False
         self.r_city_center = self._load_r_city_center()
         self.r_city_landing_target = self._load_r_city_landing_target()
         self.r_city_near_distance = max(
@@ -5039,6 +5043,11 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def reset(self):
         super().reset()
+        self.house_region = None
+        self.house_region_selection_pending = bool(self.house_regions)
+        self.r_city_targets = (
+            [] if self.house_region_selection_pending else self._build_r_city_targets()
+        )
         self._reset_r_city_runtime()
 
     def _try_nanda_search_before_entry(
@@ -5193,6 +5202,14 @@ class HouseSceneSearchManager(HouseSearchManager):
                 return
             current_loc = stable_loc
             self.initial_target_pending = False
+
+        if getattr(self, "house_region_selection_pending", False):
+            if not self._select_house_region_after_landing(w, current_loc):
+                self._finish_r_city_searching(
+                    w,
+                    "落地后没有找到可通行且路径可达的搜房片区",
+                )
+                return
 
         nearest_entry_loc = self._maintain_nearest_r_city_entry_reference(current_loc)
         if nearest_entry_loc is None:
@@ -5446,9 +5463,26 @@ class HouseSceneSearchManager(HouseSearchManager):
         if loc is not None:
             self.r_city_landing_target = loc
 
+    def configure_house_regions(self, regions):
+        normalized_regions = {}
+        for name, center in (regions or {}).items():
+            loc = self._location_tuple(center)
+            normalized_name = str(name or "").strip()
+            if normalized_name and loc is not None:
+                normalized_regions[normalized_name] = loc
+
+        self.house_regions = normalized_regions
+        self.house_region = None
+        self.house_region_selection_pending = bool(normalized_regions)
+        self.r_city_targets = (
+            [] if self.house_region_selection_pending else self._build_r_city_targets()
+        )
+        self._reset_r_city_runtime()
+
     def configure_house_region(self, region_name, region_center=None):
         normalized = str(region_name or "").strip()
         self.house_region = normalized or None
+        self.house_region_selection_pending = False
         center = self._location_tuple(region_center)
         if center is not None:
             self.r_city_center = center
@@ -5460,6 +5494,117 @@ class HouseSceneSearchManager(HouseSearchManager):
                 f"region={self.house_region or '全部'}, "
                 f"targets={len(self.r_city_targets)}"
             )
+
+    def _resolve_house_region_access_point(self, center):
+        loc = self._location_tuple(center)
+        if loc is None:
+            return None, float("inf")
+        if self._is_walkable(loc):
+            return loc, 0.0
+
+        finder = getattr(self.map_tool, "nearest_walkable_within_radius", None)
+        if not callable(finder):
+            return None, float("inf")
+        try:
+            safe_point, offset = finder(
+                loc,
+                self.HOUSE_REGION_ACCESS_SEARCH_RADIUS,
+            )
+        except Exception as exc:
+            if getattr(self, "_frame_worker", None) is not None:
+                self._frame_worker.frame_log(
+                    f"[Searching] 片区点可通行接入点查找失败: center={loc}, err={exc}"
+                )
+            return None, float("inf")
+        try:
+            normalized_offset = float(offset)
+        except (TypeError, ValueError):
+            normalized_offset = float("inf")
+        return self._location_tuple(safe_point), normalized_offset
+
+    def _select_house_region_after_landing(self, w: "FrameWorker", current_loc) -> bool:
+        loc = self._location_tuple(current_loc)
+        if loc is None or not self.house_regions:
+            return False
+
+        route_start = loc
+        landing_escape_distance = 0.0
+        if not self._is_walkable(route_start):
+            finder = getattr(self.map_tool, "nearest_walkable_within_radius", None)
+            if not callable(finder):
+                return False
+            try:
+                safe_point, landing_escape_distance = finder(
+                    route_start,
+                    self.HOUSE_REGION_LANDING_SAFE_SEARCH_RADIUS,
+                )
+            except Exception as exc:
+                w.frame_log(
+                    f"[Searching] 落地安全接入点查找失败: location={loc}, err={exc}"
+                )
+                return False
+            route_start = self._location_tuple(safe_point)
+            if route_start is None:
+                w.frame_log(
+                    f"[Searching] 落地位置 {loc} 不可通行，附近未找到安全接入点"
+                )
+                return False
+            w.frame_log(
+                f"[Searching] 落地位置 {loc} 不可通行，"
+                f"使用最近安全点 {route_start} 参与片区可达性判断"
+            )
+            try:
+                landing_escape_distance = float(landing_escape_distance)
+            except (TypeError, ValueError):
+                landing_escape_distance = get_distance(loc, route_start)
+
+        candidates = sorted(
+            self.house_regions.items(),
+            key=lambda item: (get_distance(loc, item[1]), item[0]),
+        )
+        for region_name, region_center in candidates:
+            access_point, access_offset = self._resolve_house_region_access_point(
+                region_center
+            )
+            if access_point is None:
+                w.frame_log(
+                    f"[Searching] 跳过片区: region={region_name}, "
+                    f"center={region_center}, reason=片区点附近无可通行接入点"
+                )
+                continue
+
+            path = self._plan_path_safe(route_start, access_point)
+            if not path:
+                w.frame_log(
+                    f"[Searching] 跳过片区: region={region_name}, "
+                    f"center={region_center}, access={access_point}, reason=路径不可达"
+                )
+                continue
+
+            self.house_region = region_name
+            self.house_region_selection_pending = False
+            self.r_city_center = region_center
+            self.r_city_targets = self._build_r_city_targets()
+            if not self.r_city_targets:
+                w.frame_log(
+                    f"[Searching] 跳过片区: region={region_name}, reason=没有可用房点"
+                )
+                self.house_region = None
+                continue
+
+            route_distance = landing_escape_distance + self._path_length(path)
+            w.frame_log(
+                f"[Searching] 落地后锁定最近可达搜房片区: "
+                f"region={region_name}, center={region_center}, access={access_point}, "
+                f"直线距离={get_distance(loc, region_center):.2f}, "
+                f"接入偏移={access_offset:.2f}, 路径距离={route_distance:.2f}, "
+                f"targets={len(self.r_city_targets)}"
+            )
+            return True
+
+        self.house_region = None
+        self.r_city_targets = []
+        return False
 
     def configure_r_city_pre_search_target(
         self,

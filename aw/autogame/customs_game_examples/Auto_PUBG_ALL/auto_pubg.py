@@ -175,7 +175,7 @@ def handle_parachute_target_selected(region_name, target):
 
     if searching_house_manager is None:
         return
-    searching_house_manager.configure_house_region(region_name, target)
+    # 跳伞片区只决定落点；真正的搜房片区在落地坐标稳定后重新选择。
     searching_house_manager.configure_r_city_landing_target(target)
 
 
@@ -232,6 +232,7 @@ def initialize_runtime():
         nanda_search_strategy=nanda_search_strategy
     )
     parachute_manager.target_selected_callback = handle_parachute_target_selected
+    searching_house_manager.configure_house_regions(DROP_HOUSE_TARGETS_BY_REGION)
     searching_house_manager.configure_r_city_landing_target(DROP_TARGET_R_CITY)
     searching_house_manager.configure_r_city_pre_search_target(
         DROP_TARGET_R_CITY_SEARCH_START,

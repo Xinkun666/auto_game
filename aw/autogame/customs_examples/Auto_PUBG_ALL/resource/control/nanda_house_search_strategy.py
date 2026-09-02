@@ -76,6 +76,9 @@ class NandaSearchContext:
     refresh_context: Optional[
         Callable[[str], Optional["NandaSearchContext"]]
     ] = None
+    # 上游已完成门中心视觉对齐时，直接复用与 run_room_match_once 相同的
+    # 原始匹配/回放链路，不能再由位姿准备器做第二次移动或转视角。
+    door_aligned: bool = False
 
 
 @dataclass(frozen=True)
@@ -393,32 +396,43 @@ class NandaHouseSearchStrategy:
         if ready_error is not None:
             return ready_error
 
-        try:
-            pose_result = self.pose_preparer.prepare(context)
-        except Exception as exc:
-            aborted = self._abort_result_after_exception(
-                context,
-                f"门前位姿标准化时搜房阶段已中止: {exc}",
-                metadata={"phase": "pose", "exception": type(exc).__name__},
-            )
-            if aborted is not None:
-                return aborted
-            return NandaSearchResult(
-                NandaSearchStatus.FAILED,
-                f"门前位姿标准化异常: {exc}",
-                metadata={"phase": "pose", "exception": type(exc).__name__},
-            )
-        if pose_result is not None:
-            if not isinstance(pose_result, NandaSearchResult):
+        if context.door_aligned:
+            frame_log = getattr(context.worker, "frame_log", None)
+            if callable(frame_log):
+                frame_log(
+                    "[NandaSearch] 上游已完成门视觉对齐，直接执行南大原始匹配链与回放"
+                )
+        else:
+            try:
+                pose_result = self.pose_preparer.prepare(context)
+            except Exception as exc:
+                aborted = self._abort_result_after_exception(
+                    context,
+                    f"门前位姿标准化时搜房阶段已中止: {exc}",
+                    metadata={"phase": "pose", "exception": type(exc).__name__},
+                )
+                if aborted is not None:
+                    return aborted
                 return NandaSearchResult(
                     NandaSearchStatus.FAILED,
-                    f"位姿准备器返回了无效类型: {type(pose_result).__name__}",
-                    metadata={"phase": "pose"},
+                    f"门前位姿标准化异常: {exc}",
+                    metadata={"phase": "pose", "exception": type(exc).__name__},
                 )
-            return pose_result
+            if pose_result is not None:
+                if not isinstance(pose_result, NandaSearchResult):
+                    return NandaSearchResult(
+                        NandaSearchStatus.FAILED,
+                        f"位姿准备器返回了无效类型: {type(pose_result).__name__}",
+                        metadata={"phase": "pose"},
+                    )
+                return pose_result
 
         try:
-            match = self.matcher.match(context)
+            match_aligned_entry = getattr(self.matcher, "match_aligned_entry", None)
+            if context.door_aligned and callable(match_aligned_entry):
+                match = match_aligned_entry(context)
+            else:
+                match = self.matcher.match(context)
         except NandaViewPreparationError as exc:
             aborted = self._abort_result_after_exception(
                 context,

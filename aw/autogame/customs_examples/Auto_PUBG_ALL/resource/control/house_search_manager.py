@@ -2506,6 +2506,7 @@ class HouseSearchManager:
                 phase_label,
                 reason,
             ),
+            door_aligned=True,
         )
 
     def _refresh_nanda_search_context(

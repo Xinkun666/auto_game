@@ -2257,6 +2257,37 @@ class NandaLocalRoomMatcher(_NandaSpecialAreaRoomMatcher):
 
         raise RuntimeError("南大原流程未生成匹配结果")
 
+    def match_aligned_entry(
+        self,
+        context: NandaSearchContext,
+    ) -> Optional[NandaRoomMatch]:
+        """供主流程复用 run_room_match_once 的完整原始匹配链。
+
+        该入口只应在上游已完成门视觉对齐后调用：原始链路自行处理
+        building 分割失败的后拉/恢复，成功后直接交给回放，不再额外做门前位姿校准。
+        """
+        result = self.match_original_nanda_flow(context)
+        if not result.matched:
+            return None
+        if not result.room_id or not result.replay_path:
+            raise RuntimeError("南大原始匹配成功但缺少房型或回放路径")
+
+        return NandaRoomMatch(
+            room_id=str(result.room_id),
+            replay_path=str(result.replay_path),
+            score=result.score,
+            metadata={
+                "decision": dict(result.decision),
+                "selection_reason": result.selection_reason,
+                "matching_attempts": result.matching_attempts,
+                "view_preparation": result.view_preparation,
+                "timing_breakdown": result.timing_breakdown,
+                "execution_mode": "nanda_original_aligned_entry",
+                # 原始链路已经在成功后按后拉次数前推恢复，不能重复位姿校准。
+                "requires_pose_realign": False,
+            },
+        )
+
     def match(self, context: NandaSearchContext) -> Optional[NandaRoomMatch]:
         if context.should_abort():
             return None

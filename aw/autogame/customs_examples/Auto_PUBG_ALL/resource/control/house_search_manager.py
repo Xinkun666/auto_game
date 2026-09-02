@@ -47,8 +47,10 @@ class HouseSearchManager:
     INITIAL_LOCATION_JUMP_RESET_DISTANCE = 8.0
     LANDING_LOCATION_PROBE_Y_BIAS = -120
     LANDING_LOCATION_PROBE_DURA = 180
-    LANDING_LOCATION_PROBE_WAIT = 360
-    LANDING_LOCATION_STABLE_MAX_JUMP_DISTANCE = 100.0
+    LANDING_LOCATION_PROBE_WAIT = 1000
+    LANDING_LOCATION_STABLE_REQUIRED_CHANGES = 3
+    LANDING_LOCATION_STABLE_MIN_CHANGE_DISTANCE = 0.0
+    LANDING_LOCATION_STABLE_MAX_CHANGE_DISTANCE = 2.0
     VALID_FRAME_LOCATION_RECOVERY_Y_BIAS = -120
     VALID_FRAME_LOCATION_RECOVERY_WAIT = 300
     VALID_FRAME_DIRECTION_RECOVERY_X_BIAS = 180
@@ -298,6 +300,7 @@ class HouseSearchManager:
         self.last_valid_location = None
         self.initial_location_samples = []
         self.landing_location_confirmed = False
+        self.landing_stable_change_count = 0
         self.route_stuck_reference_loc = None
         self.route_stuck_bypass_attempts = 0
         self.house_bypass_unstuck_pause_until = 0.0
@@ -404,6 +407,7 @@ class HouseSearchManager:
         self.last_valid_location = None
         self.initial_location_samples = []
         self.landing_location_confirmed = False
+        self.landing_stable_change_count = 0
         self.route_stuck_reference_loc = None
         self.route_stuck_bypass_attempts = 0
         self.house_bypass_unstuck_pause_until = 0.0
@@ -440,7 +444,7 @@ class HouseSearchManager:
 
         confirmed_landing_location = None
 
-        # 0. 基础设置：落地后先用当前位置做一次前探刷新，确认坐标稳定后再切第一人称。
+        # 0. 基础设置：落地后每次向前探1秒采样位移，连续3次 0 < change <= 2 才确认稳定。
         if not self.first_view:
             confirmed_landing_location = self._confirm_landing_location_before_first_view(w)
             if confirmed_landing_location is None:
@@ -513,6 +517,8 @@ class HouseSearchManager:
         first_loc = self._remember_valid_location(w.get_info('location'))
         if first_loc is None:
             self.location_missing_frames += 1
+            self.landing_stable_change_count = 0
+            self.initial_location_samples = []
             w.frame_log('落地首帧位置值无效，先刷新等待位置稳定...')
             w.frame_log("搜房观察：落地首帧当前位置为空，所以先刷新画面；连续缺失时轻推摇杆刷新小地图坐标")
             self._reset_stuck_history_for_frame_wait("落地首帧坐标缺失")
@@ -522,33 +528,77 @@ class HouseSearchManager:
             return None
 
         self.location_missing_frames = 0
-        w.frame_log("[Searching] 落地坐标首次有效，轻推摇杆后刷新第二帧确认稳定性")
+        samples = list(getattr(self, "initial_location_samples", []) or [])
+        stable_count = int(getattr(self, "landing_stable_change_count", 0) or 0)
+        if not samples or samples[-1] != first_loc:
+            if stable_count > 0:
+                w.frame_log(
+                    f"[Searching] 落地稳定采样链不连续："
+                    f"prev={samples[-1] if samples else None}, current={first_loc}，重新计数"
+                )
+            samples = [first_loc]
+            stable_count = 0
+
+        w.frame_log(
+            f"[Searching] 落地坐标采样起点={first_loc}，"
+            f"向前推1秒后获取下一坐标 "
+            f"({stable_count}/{self.LANDING_LOCATION_STABLE_REQUIRED_CHANGES})"
+        )
         w.tap_single(
             '摇杆',
             y_bias=self.LANDING_LOCATION_PROBE_Y_BIAS,
             dura=self.LANDING_LOCATION_PROBE_DURA,
             wait=self.LANDING_LOCATION_PROBE_WAIT,
         )
-        self._refresh_frame_and_handle_jump(w, "落地首帧前推后确认坐标")
+        self._refresh_frame_and_handle_jump(
+            w,
+            "落地向前推1秒后采样坐标",
+            handle_jump=False,
+        )
 
         second_loc = self._remember_valid_location(w.get_info('location'))
         if second_loc is None:
-            w.frame_log("[Searching] 落地前推后第二帧位置仍无效，等待下一帧重新确认")
-            self._reset_stuck_history_for_frame_wait("落地前推后第二帧位置无效")
+            self.landing_stable_change_count = 0
+            self.initial_location_samples = []
+            w.frame_log("[Searching] 落地前推1秒后坐标无效，清空连续计数并重新采样")
+            self._reset_stuck_history_for_frame_wait("落地前推后坐标无效")
             return None
 
         location_delta = get_distance(first_loc, second_loc)
-        if location_delta > self.LANDING_LOCATION_STABLE_MAX_JUMP_DISTANCE:
-            w.frame_log(
-                f"[Searching] 落地前推后坐标跳变 {location_delta:.2f} > "
-                f"{self.LANDING_LOCATION_STABLE_MAX_JUMP_DISTANCE:.1f}，暂不切人称或选入门点"
-            )
+        if not (
+            self.LANDING_LOCATION_STABLE_MIN_CHANGE_DISTANCE
+            < location_delta
+            <= self.LANDING_LOCATION_STABLE_MAX_CHANGE_DISTANCE
+        ):
+            self.landing_stable_change_count = 0
             self.initial_location_samples = [second_loc]
-            self._reset_stuck_history_for_frame_wait("落地前推后坐标跳变过大")
+            w.frame_log(
+                f"[Searching] 落地坐标变化 change={location_delta:.2f} 不满足 "
+                f"0 < change <= {self.LANDING_LOCATION_STABLE_MAX_CHANGE_DISTANCE:g}，"
+                "连续稳定计数清零，暂不选片区"
+            )
+            self._reset_stuck_history_for_frame_wait("落地坐标变化不在稳定范围")
             return None
 
-        self.initial_location_samples = [second_loc]
+        stable_count += 1
+        samples.append(second_loc)
+        self.landing_stable_change_count = stable_count
+        self.initial_location_samples = samples
+        if stable_count < self.LANDING_LOCATION_STABLE_REQUIRED_CHANGES:
+            w.frame_log(
+                f"[Searching] 落地坐标变化 change={location_delta:.2f} 有效，"
+                f"连续稳定 {stable_count}/{self.LANDING_LOCATION_STABLE_REQUIRED_CHANGES}，"
+                "继续前推采样，暂不选片区"
+            )
+            self._reset_stuck_history_for_frame_wait("等待落地坐标连续稳定")
+            return None
+
         self.landing_location_confirmed = True
+        w.frame_log(
+            f"[Searching] 落地坐标已连续稳定 "
+            f"{stable_count}/{self.LANDING_LOCATION_STABLE_REQUIRED_CHANGES}，"
+            f"取最后坐标 {second_loc} 选择搜房片区"
+        )
         w.frame_log('[Action] 点击人称并进入搜房判断')
         w.click('人称')
         self.first_view = True
@@ -3303,9 +3353,12 @@ class HouseSearchManager:
         loc = tuple(current_loc)
         if getattr(self, "landing_location_confirmed", False):
             self.landing_location_confirmed = False
+            self.landing_stable_change_count = 0
             self.initial_location_samples = [loc]
             if getattr(self, "_frame_worker", None) is not None:
-                self._frame_worker.frame_log(f'[Searching] 落地位置已通过前推两帧确认: {loc}')
+                self._frame_worker.frame_log(
+                    f'[Searching] 落地位置已通过连续3次前推位移确认: {loc}'
+                )
             return loc
 
         if self.initial_location_samples:

@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from typing import Optional
 
 
 def get_distance(p1, p2):
@@ -19,7 +20,10 @@ class LocatePoints:
                  min_inlier_ratio: float = 0.5,
                  max_median_reprojection_error: float = 5.0,
                  min_inlier_coverage_ratio: float = 0.01,
-                 unstable_output_min_samples: int = 3):
+                 unstable_output_min_samples: int = 3,
+                 max_local_interference_ratio: float = 0.30,
+                 local_residual_grid_size: int = 8,
+                 min_clean_region_similarity: float = 0.55):
 
         self.big_map = cv2.imread(big_map_path)
         if self.big_map is None:
@@ -32,6 +36,7 @@ class LocatePoints:
         # clipLimit 越大对比度越强，tileGridSize 决定局部增强的网格大小
         self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         self.big_map_gray = self.clahe.apply(self.big_map_gray)
+        self.big_map_support = np.full(self.big_map_gray.shape, 255, dtype=np.uint8)
 
         self.is_circle = is_circle
 
@@ -87,7 +92,19 @@ class LocatePoints:
             max(0.0, float(min_inlier_coverage_ratio)),
         )
         self.unstable_output_min_samples = max(1, int(unstable_output_min_samples))
+        # 动态小地图提示（枪声、脚步等）只应占据局部区域。这里不按颜色判断，
+        # 而是在候选单应矩阵成立后，检查大地图回投影与当前画面的局部结构一致性。
+        self.max_local_interference_ratio = min(
+            1.0,
+            max(0.0, float(max_local_interference_ratio)),
+        )
+        self.local_residual_grid_size = max(2, int(local_residual_grid_size))
+        self.min_clean_region_similarity = min(
+            1.0,
+            max(-1.0, float(min_clean_region_similarity)),
+        )
         self.last_match_quality = {}
+        self.last_local_interference_mask = None
 
     def reset_tracking(self) -> str:
         """清除跨场景的定位历史，强制下一帧从全局 SIFT 匹配重新收敛。"""
@@ -98,6 +115,7 @@ class LocatePoints:
         self.kf.statePre = zero_state.copy()
         self.kf.statePost = zero_state.copy()
         self.last_match_quality = {}
+        self.last_local_interference_mask = None
         return self.mode
 
     def _reject_global_match(self, reason: str, **metrics):
@@ -121,13 +139,179 @@ class LocatePoints:
         clahe = getattr(self, "clahe", None)
         return clahe.apply(gray_curr) if clahe is not None else gray_curr
 
+    @staticmethod
+    def _local_gradient(image: np.ndarray) -> np.ndarray:
+        """返回对整体色偏不敏感的局部地图结构。"""
+        blurred = cv2.GaussianBlur(image, (3, 3), 0)
+        grad_x = cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(blurred, cv2.CV_32F, 0, 1, ksize=3)
+        return cv2.magnitude(grad_x, grad_y)
+
+    def _local_valid_mask(self, image_shape: tuple[int, int]) -> np.ndarray:
+        """生成真正参与小地图一致性计算的区域，圆外永远不参与。"""
+        height, width = image_shape
+        mask = np.full((height, width), 255, dtype=np.uint8)
+        if getattr(self, "is_circle", False):
+            mask.fill(0)
+            cv2.circle(mask, (width // 2, height // 2), min(height, width) // 2 - 2, 255, -1)
+        return mask
+
+    @staticmethod
+    def _masked_correlation(
+        left: np.ndarray, right: np.ndarray, valid: np.ndarray,
+    ) -> Optional[float]:
+        left_values = left[valid]
+        right_values = right[valid]
+        if len(left_values) < 16:
+            return None
+        left_centered = left_values - float(np.mean(left_values))
+        right_centered = right_values - float(np.mean(right_values))
+        denominator = float(np.linalg.norm(left_centered) * np.linalg.norm(right_centered))
+        if denominator <= 1e-6:
+            return None
+        return float(np.dot(left_centered, right_centered) / denominator)
+
+    def _validate_local_map_agreement(
+        self, gray_curr: np.ndarray, homography: np.ndarray,
+    ) -> dict:
+        """验证候选地图变换是否仅有不超过阈值的局部结构残差。
+
+        红区会改变整张小地图的色调，因此这里比较 CLAHE 后的梯度结构，而不是
+        RGB/HSV 颜色。返回的 mask 仅用于诊断和内点分布检查，绝不参与导航。
+        """
+        height, width = gray_curr.shape[:2]
+        valid_mask = self._local_valid_mask((height, width))
+        try:
+            inverse_homography = np.linalg.inv(homography)
+            reference = cv2.warpPerspective(
+                self.big_map_gray,
+                inverse_homography,
+                (width, height),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+            )
+            source_support = getattr(self, "big_map_support", None)
+            if source_support is None or source_support.shape != self.big_map_gray.shape:
+                source_support = np.full(self.big_map_gray.shape, 255, dtype=np.uint8)
+                self.big_map_support = source_support
+            reference_support = cv2.warpPerspective(
+                source_support,
+                inverse_homography,
+                (width, height),
+                flags=cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_CONSTANT,
+            )
+        except (cv2.error, np.linalg.LinAlgError):
+            return {"evaluated": False, "reason": "local_reference_warp_failed"}
+
+        valid = (valid_mask > 0) & (reference_support > 0)
+        valid_area = int(np.count_nonzero(valid))
+        if valid_area < 64:
+            return {"evaluated": False, "reason": "local_valid_area_too_small"}
+
+        query_gradient = self._local_gradient(gray_curr)
+        reference_gradient = self._local_gradient(reference)
+        grid_size = max(2, int(getattr(self, "local_residual_grid_size", 8)))
+        y_edges = np.linspace(0, height, grid_size + 1, dtype=int)
+        x_edges = np.linspace(0, width, grid_size + 1, dtype=int)
+        low_similarity_cells = np.zeros((grid_size, grid_size), dtype=np.uint8)
+        cell_areas = np.zeros((grid_size, grid_size), dtype=np.int32)
+        similarities = []
+
+        for row in range(grid_size):
+            for column in range(grid_size):
+                y1, y2 = y_edges[row], y_edges[row + 1]
+                x1, x2 = x_edges[column], x_edges[column + 1]
+                cell_valid = valid[y1:y2, x1:x2]
+                area = int(np.count_nonzero(cell_valid))
+                cell_areas[row, column] = area
+                if area < 16:
+                    continue
+                similarity = self._masked_correlation(
+                    query_gradient[y1:y2, x1:x2],
+                    reference_gradient[y1:y2, x1:x2],
+                    cell_valid,
+                )
+                if similarity is None:
+                    continue
+                similarities.append(similarity)
+                if similarity < float(getattr(self, "min_clean_region_similarity", 0.55)):
+                    low_similarity_cells[row, column] = 1
+
+        # 纯色/无纹理小地图无法进行这种验证；保留原有的 SIFT 质量门槛处理它，
+        # 而不是因辅助检查不可评估而拒绝一个正常定位。
+        if len(similarities) < 4:
+            return {
+                "evaluated": False,
+                "reason": "local_structure_not_evaluable",
+                "valid_area": valid_area,
+                "evaluated_cells": len(similarities),
+            }
+
+        interference_mask = np.zeros((height, width), dtype=np.uint8)
+        for row, column in zip(*np.nonzero(low_similarity_cells)):
+            interference_mask[
+                y_edges[row]:y_edges[row + 1], x_edges[column]:x_edges[column + 1]
+            ] = valid_mask[
+                y_edges[row]:y_edges[row + 1], x_edges[column]:x_edges[column + 1]
+            ]
+        interference_mask[reference_support == 0] = 0
+        interference_area = int(np.count_nonzero(interference_mask))
+        interference_ratio = interference_area / float(valid_area)
+
+        component_count, labels, _, _ = cv2.connectedComponentsWithStats(
+            low_similarity_cells, connectivity=8,
+        )
+        largest_component_area = 0
+        for label in range(1, component_count):
+            largest_component_area = max(
+                largest_component_area,
+                int(np.sum(cell_areas[labels == label])),
+            )
+        largest_component_ratio = largest_component_area / float(valid_area)
+
+        clean_similarities = []
+        for row in range(grid_size):
+            for column in range(grid_size):
+                if cell_areas[row, column] < 16 or low_similarity_cells[row, column]:
+                    continue
+                y1, y2 = y_edges[row], y_edges[row + 1]
+                x1, x2 = x_edges[column], x_edges[column + 1]
+                similarity = self._masked_correlation(
+                    query_gradient[y1:y2, x1:x2],
+                    reference_gradient[y1:y2, x1:x2],
+                    valid[y1:y2, x1:x2],
+                )
+                if similarity is not None:
+                    clean_similarities.append(similarity)
+
+        clean_similarity = float(np.median(clean_similarities)) if clean_similarities else -1.0
+        max_ratio = float(getattr(self, "max_local_interference_ratio", 0.30))
+        accepted = (
+            interference_ratio <= max_ratio
+            and largest_component_ratio <= max_ratio
+            and bool(clean_similarities)
+            and clean_similarity >= float(getattr(self, "min_clean_region_similarity", 0.55))
+        )
+        reason = "accepted" if accepted else "local_interference_exceeds_limit"
+        return {
+            "evaluated": True,
+            "accepted": accepted,
+            "reason": reason,
+            "valid_area": valid_area,
+            "evaluated_cells": len(similarities),
+            "low_similarity_cells": int(np.count_nonzero(low_similarity_cells)),
+            "interference_ratio": interference_ratio,
+            "largest_interference_ratio": largest_component_ratio,
+            "clean_similarity": clean_similarity,
+            "interference_mask": interference_mask,
+        }
+
     def _get_global_measured_point(self, gray_curr):
         gray_curr = self._preprocess_query(gray_curr)
         mask = None
         if self.is_circle:
-            mask = np.zeros(gray_curr.shape, dtype=np.uint8)
-            h, w = gray_curr.shape
-            cv2.circle(mask, (w // 2, h // 2), min(h, w) // 2 - 2, 255, -1)
+            mask = self._local_valid_mask(gray_curr.shape[:2])
 
         kp_small, des_small = self.sift.detectAndCompute(gray_curr, mask)
         if des_small is None or len(kp_small) < 4:
@@ -217,6 +401,39 @@ class LocatePoints:
                 median_reprojection_error=median_reprojection_error,
             )
 
+        local_validation = self._validate_local_map_agreement(gray_curr, M)
+        interference_mask = local_validation.pop("interference_mask", None)
+        self.last_local_interference_mask = interference_mask
+        if local_validation.get("evaluated") and not local_validation.get("accepted"):
+            return self._reject_global_match(
+                local_validation.get("reason", "local_map_agreement_failed"),
+                good_matches=good_count,
+                inliers=inlier_count,
+                inlier_ratio=inlier_ratio,
+                coverage_ratio=coverage_ratio,
+                median_reprojection_error=median_reprojection_error,
+                local_validation=local_validation,
+            )
+
+        if interference_mask is not None and int(np.count_nonzero(interference_mask)):
+            inlier_coordinates = np.rint(inlier_src.reshape(-1, 2)).astype(int)
+            height, width = interference_mask.shape
+            inside_interference = [
+                bool(interference_mask[y, x])
+                for x, y in inlier_coordinates
+                if 0 <= x < width and 0 <= y < height
+            ]
+            outside_inliers = inlier_count - int(np.count_nonzero(inside_interference))
+            if outside_inliers < self.min_inliers:
+                return self._reject_global_match(
+                    "inliers_concentrated_in_local_interference",
+                    good_matches=good_count,
+                    inliers=inlier_count,
+                    inliers_outside_interference=outside_inliers,
+                    local_validation=local_validation,
+                )
+            local_validation["inliers_outside_interference"] = outside_inliers
+
         center_pts = np.float32([[w / 2, h / 2]]).reshape(-1, 1, 2)
         try:
             dst_center = cv2.perspectiveTransform(center_pts, M).reshape(-1, 2)[0]
@@ -243,6 +460,7 @@ class LocatePoints:
             "inlier_ratio": inlier_ratio,
             "coverage_ratio": coverage_ratio,
             "median_reprojection_error": median_reprojection_error,
+            "local_validation": local_validation,
             "point": measured_point,
         }
         return measured_point

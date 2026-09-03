@@ -23,7 +23,8 @@ class LocatePoints:
                  unstable_output_min_samples: int = 3,
                  max_local_interference_ratio: float = 0.30,
                  local_residual_grid_size: int = 8,
-                 min_clean_region_similarity: float = 0.55):
+                 min_clean_region_similarity: float = 0.55,
+                 enable_local_map_validation: bool = True):
 
         self.big_map = cv2.imread(big_map_path)
         if self.big_map is None:
@@ -103,6 +104,7 @@ class LocatePoints:
             1.0,
             max(-1.0, float(min_clean_region_similarity)),
         )
+        self.enable_local_map_validation = bool(enable_local_map_validation)
         self.last_match_quality = {}
         self.last_local_interference_mask = None
 
@@ -432,8 +434,12 @@ class LocatePoints:
                 candidate_point=candidate_point,
             )
 
-        local_validation = self._validate_local_map_agreement(gray_curr, M)
-        interference_mask = local_validation.pop("interference_mask", None)
+        if getattr(self, "enable_local_map_validation", True):
+            local_validation = self._validate_local_map_agreement(gray_curr, M)
+            interference_mask = local_validation.pop("interference_mask", None)
+        else:
+            local_validation = {"evaluated": False, "reason": "disabled_for_this_locator"}
+            interference_mask = None
         self.last_local_interference_mask = interference_mask
         if local_validation.get("evaluated") and not local_validation.get("accepted"):
             return self._reject_global_match(

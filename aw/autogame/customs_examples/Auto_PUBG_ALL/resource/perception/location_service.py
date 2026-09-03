@@ -141,7 +141,7 @@ class LocatePoints:
         """给特征不足的离线帧提供仅供审计显示的单点候选。
 
         单一特征无法估计单应矩阵，故调用方不得将此结果作为正式定位。这里选择
-        Lowe 比率最低的匹配，并假定它与小地图中心只有平移差，用于在地图上标红。
+        Lowe 比率最低的匹配，直接使用其在大地图上的特征坐标，用于在地图上标红。
         """
         best = None
         for pair in matches:
@@ -157,17 +157,13 @@ class LocatePoints:
             return None
 
         _, match = best
-        query_x, query_y = keypoints[match.queryIdx].pt
         map_x, map_y = self.kp_big[match.trainIdx].pt
-        height, width = image_shape[:2]
-        candidate_x = float(map_x) + (width / 2.0 - float(query_x))
-        candidate_y = float(map_y) + (height / 2.0 - float(query_y))
         map_height, map_width = self.big_map_gray.shape[:2]
-        if not (0 <= candidate_x < map_width and 0 <= candidate_y < map_height):
+        if not (0 <= map_x < map_width and 0 <= map_y < map_height):
             return None
         ratio, distance = best[0]
         return {
-            "point": (int(round(candidate_x)), int(round(candidate_y))),
+            "point": (int(round(map_x)), int(round(map_y))),
             "lowe_ratio": ratio,
             "distance": distance,
             "confidence": max(0.0, min(1.0, 1.0 - ratio)),

@@ -414,6 +414,7 @@ class HouseSearchManager:
         self.route_stuck_bypass_attempts = 0
         self.house_bypass_unstuck_pause_until = 0.0
         self.entry_near_micro_adjust_attempts = 0
+        self.entry_near_micro_blocked_attempts = 0
         self.entry_direction_aligned_key = None
         self._jump_forward_guard = False
         self._jump_forward_wait_until_hidden = False
@@ -3004,6 +3005,20 @@ class HouseSearchManager:
                 f"下一次改用偏移 {next_offset}° 的方向绕障微调"
             )
         elif next_loc is not None:
+            moved_distance = get_distance(refreshed_loc, next_loc)
+            if (
+                blocked_direction_offset != 0
+                and self.LANDING_LOCATION_STABLE_MIN_CHANGE_DISTANCE
+                < moved_distance
+                <= self.LANDING_LOCATION_STABLE_MAX_CHANGE_DISTANCE
+            ):
+                w.frame_log(
+                    f"[{phase_label}] 替代方向微调已脱离阻挡："
+                    f"A/B={refreshed_loc}，C={next_loc}，"
+                    f"距离={moved_distance:.2f} 满足 "
+                    f"0 < d <= {self.LANDING_LOCATION_STABLE_MAX_CHANGE_DISTANCE:g}，"
+                    "判定位置稳定，恢复朝入门点微调"
+                )
             self.entry_near_micro_blocked_attempts = 0
         self.history_locations = []
         return "adjusting"

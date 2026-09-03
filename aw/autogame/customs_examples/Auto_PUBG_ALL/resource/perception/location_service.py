@@ -1,5 +1,7 @@
 import cv2
+import math
 import numpy as np
+import statistics
 from typing import Optional
 
 
@@ -12,19 +14,22 @@ class LocatePoints:
                  big_map_path: str = r"aw/autogame/customs_examples/Auto_PUBG_ALL/resource/map/hpjy.png",
                  is_circle: bool = False,
                  init_stable_frames: int = 5,
-                 stability_thresh: int = 50,
+                 stability_thresh: int = 40,
                  correction_thresh: int = 80,
                  max_corrections: int = 4,
-                 min_good_matches: int = 8,
-                 min_inliers: int = 6,
-                 min_inlier_ratio: float = 0.5,
-                 max_median_reprojection_error: float = 5.0,
-                 min_inlier_coverage_ratio: float = 0.01,
+                 min_good_matches: int = 5,
+                 min_inliers: int = 4,
+                 min_inlier_ratio: float = 0.70,
+                 max_median_reprojection_error: float = 3.0,
+                 min_inlier_coverage_ratio: float = 0.02,
                  unstable_output_min_samples: int = 3,
                  max_local_interference_ratio: float = 0.30,
                  local_residual_grid_size: int = 8,
                  min_clean_region_similarity: float = 0.55,
-                 enable_local_map_validation: bool = True):
+                 enable_local_map_validation: bool = False,
+                 prior_center_radius: float = 40.0,
+                 prior_feature_search_padding: int = 16,
+                 yellow_reference_distance: float = 8.0):
 
         self.big_map = cv2.imread(big_map_path)
         if self.big_map is None:
@@ -105,6 +110,13 @@ class LocatePoints:
             max(-1.0, float(min_clean_region_similarity)),
         )
         self.enable_local_map_validation = bool(enable_local_map_validation)
+        self.prior_center_radius = max(1.0, float(prior_center_radius))
+        self.prior_feature_search_padding = max(0, int(prior_feature_search_padding))
+        self.yellow_reference_distance = max(0.0, float(yellow_reference_distance))
+        self.stable_blue_history = []
+        self._tracking_sequence = 0
+        self._previous_tracking_color = None
+        self._previous_tracking_point = None
         self.last_match_quality = {}
         self.last_local_interference_mask = None
 
@@ -113,6 +125,10 @@ class LocatePoints:
         self.mode = "unstable"
         self.history_points = []
         self.consecutive_corrections = 0
+        self.stable_blue_history = []
+        self._tracking_sequence = 0
+        self._previous_tracking_color = None
+        self._previous_tracking_point = None
         zero_state = np.zeros((4, 1), dtype=np.float32)
         self.kf.statePre = zero_state.copy()
         self.kf.statePost = zero_state.copy()
@@ -218,6 +234,154 @@ class LocatePoints:
     def _preprocess_query(self, gray_curr):
         clahe = getattr(self, "clahe", None)
         return clahe.apply(gray_curr) if clahe is not None else gray_curr
+
+    @staticmethod
+    def _geometry_score(candidate: dict) -> float:
+        """对多个已经通过蓝点门槛的候选做稳定、可解释的排序。"""
+        return (
+            float(candidate["inlier_ratio"]) * 1000.0
+            + min(int(candidate["inliers"]), 20) * 10.0
+            + float(candidate["coverage_ratio"]) * 100.0
+            - float(candidate["median_reprojection_error"])
+        )
+
+    def _get_prior_region_blue_candidate(self, gray_curr, prior_point) -> Optional[dict]:
+        """在稳定轨迹先验附近重做几何匹配，返回达标的蓝点候选。
+
+        ``prior_center_radius`` 限制的是投影后的小地图中心。特征可来自小地图
+        边缘，因此检索地图块会额外扩展小地图半对角线，不能只截取 40px 小块。
+        """
+        gray_curr = self._preprocess_query(gray_curr)
+        query_mask = (
+            self._local_valid_mask(gray_curr.shape[:2])
+            if getattr(self, "is_circle", False) else None
+        )
+        query_keypoints, query_descriptors = self.sift.detectAndCompute(
+            gray_curr, query_mask,
+        )
+        if query_descriptors is None or len(query_keypoints) < 4:
+            return None
+
+        query_height, query_width = gray_curr.shape[:2]
+        search_radius = int(math.ceil(
+            math.hypot(query_width, query_height) / 2
+            + float(getattr(self, "prior_center_radius", 40.0))
+            + int(getattr(self, "prior_feature_search_padding", 16))
+        ))
+        map_height, map_width = self.big_map_gray.shape[:2]
+        prior_x, prior_y = prior_point
+        left = max(0, int(math.floor(prior_x - search_radius)))
+        top = max(0, int(math.floor(prior_y - search_radius)))
+        right = min(map_width, int(math.ceil(prior_x + search_radius)))
+        bottom = min(map_height, int(math.ceil(prior_y + search_radius)))
+        patch = self.big_map_gray[top:bottom, left:right]
+        patch_keypoints, patch_descriptors = self.sift.detectAndCompute(patch, None)
+        if patch_descriptors is None or len(patch_keypoints) < 4:
+            return None
+
+        matcher = cv2.FlannBasedMatcher(
+            dict(algorithm=1, trees=5), dict(checks=50),
+        )
+        try:
+            matches = matcher.knnMatch(query_descriptors, patch_descriptors, k=2)
+        except cv2.error:
+            return None
+        good = [
+            pair[0]
+            for pair in matches
+            if len(pair) >= 2 and pair[0].distance < 0.7 * pair[1].distance
+        ]
+        if len(good) < self.min_good_matches:
+            return None
+
+        source_points = np.float32(
+            [query_keypoints[match.queryIdx].pt for match in good]
+        ).reshape(-1, 1, 2)
+        destination_points = np.float32(
+            [patch_keypoints[match.trainIdx].pt for match in good]
+        ).reshape(-1, 1, 2)
+        try:
+            homography, inlier_mask = cv2.findHomography(
+                source_points, destination_points, cv2.RANSAC, 5.0,
+            )
+        except cv2.error:
+            return None
+        if homography is None or inlier_mask is None or not np.all(np.isfinite(homography)):
+            return None
+
+        center = np.float32([[query_width / 2, query_height / 2]]).reshape(-1, 1, 2)
+        try:
+            patch_center = cv2.perspectiveTransform(center, homography).reshape(-1, 2)[0]
+        except cv2.error:
+            return None
+        map_point = (float(patch_center[0] + left), float(patch_center[1] + top))
+        if not (0 <= map_point[0] < map_width and 0 <= map_point[1] < map_height):
+            return None
+
+        inlier_flags = np.asarray(inlier_mask).reshape(-1).astype(bool)
+        inliers = int(np.count_nonzero(inlier_flags))
+        inlier_ratio = inliers / float(len(good))
+        inlier_source = source_points[inlier_flags]
+        coverage_ratio = self._point_coverage_ratio(
+            inlier_source, query_width, query_height,
+        )
+        try:
+            projected = cv2.perspectiveTransform(inlier_source, homography)
+        except cv2.error:
+            return None
+        errors = np.linalg.norm(
+            projected.reshape(-1, 2) - destination_points[inlier_flags].reshape(-1, 2),
+            axis=1,
+        )
+        median_error = float(np.median(errors))
+        if not (
+            inliers >= self.min_inliers
+            and inlier_ratio >= self.min_inlier_ratio
+            and coverage_ratio >= self.min_inlier_coverage_ratio
+            and np.isfinite(median_error)
+            and median_error <= self.max_median_reprojection_error
+        ):
+            return None
+        return {
+            "point": (int(round(map_point[0])), int(round(map_point[1]))),
+            "good_matches": len(good),
+            "inliers": inliers,
+            "inlier_ratio": inlier_ratio,
+            "coverage_ratio": coverage_ratio,
+            "median_reprojection_error": median_error,
+            "distance_to_prior": float(get_distance(map_point, prior_point)),
+        }
+
+    def _predict_from_stable_blue_history(self):
+        history = getattr(self, "stable_blue_history", [])
+        _, last_point = history[-1]
+        if len(history) < 2:
+            return last_point
+        velocities = [
+            (
+                (right_point[0] - left_point[0]) / (right_sequence - left_sequence),
+                (right_point[1] - left_point[1]) / (right_sequence - left_sequence),
+            )
+            for (left_sequence, left_point), (right_sequence, right_point)
+            in zip(history, history[1:])
+            if right_sequence > left_sequence
+        ]
+        if not velocities:
+            return last_point
+        velocity_x = statistics.median(item[0] for item in velocities)
+        velocity_y = statistics.median(item[1] for item in velocities)
+        sequence = getattr(self, "_tracking_sequence", 0)
+        elapsed = sequence - history[-1][0]
+        return (
+            last_point[0] + velocity_x * elapsed,
+            last_point[1] + velocity_y * elapsed,
+        )
+
+    def _remember_stable_blue(self, point):
+        history = getattr(self, "stable_blue_history", [])
+        history.append((getattr(self, "_tracking_sequence", 0), point))
+        history_limit = max(2, int(getattr(self, "init_stable_frames", 5)))
+        self.stable_blue_history = history[-history_limit:]
 
     @staticmethod
     def _local_gradient(image: np.ndarray) -> np.ndarray:
@@ -588,21 +752,73 @@ class LocatePoints:
         return measured_point, "global"
 
     def get_location(self, img) -> tuple:
+        """连续画面的因果定位。
+
+        全局蓝候选并不自动覆盖稳定轨迹。稳定后会同时评估预测中心附近的区域
+        蓝候选；范围内合格候选优先，范围内没有合格蓝候选时才输出预测点并失稳。
+        黄候选永远不写入蓝点历史。
+        """
         if img is None or img.size == 0:
             return (None, None), self.mode
 
+        self._tracking_sequence = getattr(self, "_tracking_sequence", 0) + 1
         gray_curr = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         measured_point = self._get_global_measured_point(gray_curr)
+        global_quality = dict(getattr(self, "last_match_quality", {}))
+        raw_candidate = measured_point
+        if raw_candidate is None:
+            raw_candidate = global_quality.get("candidate_point")
+        if raw_candidate is None and global_quality.get("single_match_fallback"):
+            raw_candidate = global_quality["single_match_fallback"]["point"]
+
+        def finish(point, color, decision, *, prediction=None, prior_candidate=None):
+            quality = dict(global_quality)
+            quality.update(
+                accepted=color == "blue",
+                point=point,
+                tracking={
+                    "color": color,
+                    "decision": decision,
+                    "mode": self.mode,
+                    "prediction": prediction,
+                    "prior_candidate": prior_candidate,
+                },
+            )
+            self.last_match_quality = quality
+            self._previous_tracking_color = color
+            self._previous_tracking_point = point
+            output_point = (None, None) if point is None else point
+            return output_point, self.mode
 
         if self.mode == "unstable":
             if measured_point is None:
-                return (None, None), self.mode
+                if (
+                    raw_candidate is not None
+                    and getattr(self, "_previous_tracking_color", None) == "blue"
+                    and getattr(self, "_previous_tracking_point", None) is not None
+                    and get_distance(
+                        raw_candidate, self._previous_tracking_point,
+                    ) <= getattr(self, "yellow_reference_distance", 8.0)
+                ):
+                    self.history_points = []
+                    return finish(
+                        raw_candidate,
+                        "yellow",
+                        "yellow_accepted_by_previous_blue",
+                    )
+                self.history_points = []
+                self._previous_tracking_color = None
+                self._previous_tracking_point = None
+                return finish(None, None, "yellow_discarded_before_stable")
 
             if self.history_points:
                 movement = get_distance(measured_point, self.history_points[-1])
                 if movement > self.stability_thresh:
                     self.history_points = [measured_point]
-                    return (None, None), self.mode
+                    result = finish(None, None, "blue_jump_restarts_warmup")
+                    self._previous_tracking_color = "blue"
+                    self._previous_tracking_point = measured_point
+                    return result
 
             self.history_points.append(measured_point)
 
@@ -613,12 +829,22 @@ class LocatePoints:
                 if all(0 <= m <= self.stability_thresh for m in movements):
                     self.mode = "stable"
                     self.consecutive_corrections = 0
-                    curr_x, curr_y = measured_point
-                    self.kf.statePost = np.array([[curr_x], [curr_y], [0], [0]], np.float32)
-
-                self.history_points.pop(0)
+                    start_sequence = self._tracking_sequence - len(self.history_points) + 1
+                    self.stable_blue_history = [
+                        (start_sequence + index, point)
+                        for index, point in enumerate(self.history_points)
+                    ]
+                    return finish(
+                        measured_point,
+                        "blue",
+                        "geometry_accepted_entered_stable",
+                    )
+                self.history_points = [measured_point]
             if len(self.history_points) < self.unstable_output_min_samples:
-                return (None, None), self.mode
+                result = finish(None, None, "blue_warmup")
+                self._previous_tracking_color = "blue"
+                self._previous_tracking_point = measured_point
+                return result
             recent_points = np.asarray(
                 self.history_points[-self.unstable_output_min_samples:],
                 dtype=np.float32,
@@ -627,34 +853,73 @@ class LocatePoints:
                 int(round(value))
                 for value in np.median(recent_points, axis=0)
             )
-            return median_point, self.mode
+            result = finish(median_point, "blue", "geometry_accepted_warmup")
+            self._previous_tracking_point = measured_point
+            return result
 
-        elif self.mode == "stable":
-            prediction = self.kf.predict()
-            predicted_point = (int(prediction[0]), int(prediction[1]))
+        prediction = self._predict_from_stable_blue_history()
+        prior_candidate = self._get_prior_region_blue_candidate(gray_curr, prediction)
+        global_blue_candidate = None
+        if measured_point is not None:
+            global_blue_candidate = {
+                "point": measured_point,
+                "good_matches": global_quality.get("good_matches", 0),
+                "inliers": global_quality.get("inliers", 0),
+                "inlier_ratio": global_quality.get("inlier_ratio", 0.0),
+                "coverage_ratio": global_quality.get("coverage_ratio", 0.0),
+                "median_reprojection_error": global_quality.get(
+                    "median_reprojection_error", float("inf"),
+                ),
+                "distance_to_prior": get_distance(measured_point, prediction),
+            }
+        blue_candidates = [
+            candidate
+            for candidate in (global_blue_candidate, prior_candidate)
+            if candidate is not None
+            and candidate["distance_to_prior"] <= self.prior_center_radius
+        ]
+        if blue_candidates:
+            selected = max(blue_candidates, key=self._geometry_score)
+            selected_point = selected["point"]
+            self._remember_stable_blue(selected_point)
+            decision = (
+                "prior_region_geometry_accepted"
+                if selected is prior_candidate
+                else "global_geometry_accepted_within_prior"
+            )
+            return finish(
+                selected_point,
+                "blue",
+                decision,
+                prediction=prediction,
+                prior_candidate=prior_candidate,
+            )
 
-            needs_correction = measured_point is None or \
-                               get_distance(measured_point, predicted_point) > self.correction_thresh
+        raw_distance = (
+            get_distance(raw_candidate, prediction)
+            if raw_candidate is not None else None
+        )
+        if (
+            measured_point is None
+            and raw_candidate is not None
+            and raw_distance <= self.yellow_reference_distance
+        ):
+            return finish(
+                raw_candidate,
+                "yellow",
+                "yellow_accepted_by_stable_prediction",
+                prediction=prediction,
+                prior_candidate=prior_candidate,
+            )
 
-            if needs_correction:
-                final_point = predicted_point
-                self.consecutive_corrections += 1
-                self.kf.statePost = prediction
-            else:
-                meas = np.array([[np.float32(measured_point[0])],
-                                 [np.float32(measured_point[1])]], np.float32)
-                self.kf.correct(meas)
-                final_point = measured_point
-                self.consecutive_corrections = 0
-
-            if self.consecutive_corrections >= self.max_corrections:
-                self.mode = "unstable"
-                self.consecutive_corrections = 0
-                self.history_points = []
-            elif final_point is not None:
-                self.history_points.append(final_point)
-                if len(self.history_points) > 30:
-                    self.history_points.pop(0)
-
-            return final_point, self.mode
-        return (None, None), self.mode
+        self.mode = "unstable"
+        self.history_points = []
+        self.stable_blue_history = []
+        self.consecutive_corrections = 0
+        return finish(
+            tuple(int(round(value)) for value in prediction),
+            "purple",
+            "no_in_range_blue_replaced_by_prediction",
+            prediction=prediction,
+            prior_candidate=prior_candidate,
+        )

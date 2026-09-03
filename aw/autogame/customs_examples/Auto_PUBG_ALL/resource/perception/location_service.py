@@ -408,6 +408,24 @@ class LocatePoints:
                 median_reprojection_error=median_reprojection_error,
             )
 
+        center_pts = np.float32([[w / 2, h / 2]]).reshape(-1, 1, 2)
+        try:
+            dst_center = cv2.perspectiveTransform(center_pts, M).reshape(-1, 2)[0]
+        except cv2.error:
+            return self._reject_global_match("center_projection_failed")
+        if not np.all(np.isfinite(dst_center)):
+            return self._reject_global_match("invalid_projected_center")
+
+        center_x, center_y = float(dst_center[0]), float(dst_center[1])
+        map_h, map_w = self.big_map_gray.shape[:2]
+        if not (0 <= center_x < map_w and 0 <= center_y < map_h):
+            return self._reject_global_match(
+                "projected_center_out_of_map",
+                center=(center_x, center_y),
+                map_size=(map_w, map_h),
+            )
+        candidate_point = (int(round(center_x)), int(round(center_y)))
+
         local_validation = self._validate_local_map_agreement(gray_curr, M)
         interference_mask = local_validation.pop("interference_mask", None)
         self.last_local_interference_mask = interference_mask
@@ -420,6 +438,7 @@ class LocatePoints:
                 coverage_ratio=coverage_ratio,
                 median_reprojection_error=median_reprojection_error,
                 local_validation=local_validation,
+                candidate_point=candidate_point,
             )
 
         if interference_mask is not None and int(np.count_nonzero(interference_mask)):
@@ -438,27 +457,10 @@ class LocatePoints:
                     inliers=inlier_count,
                     inliers_outside_interference=outside_inliers,
                     local_validation=local_validation,
+                    candidate_point=candidate_point,
                 )
             local_validation["inliers_outside_interference"] = outside_inliers
-
-        center_pts = np.float32([[w / 2, h / 2]]).reshape(-1, 1, 2)
-        try:
-            dst_center = cv2.perspectiveTransform(center_pts, M).reshape(-1, 2)[0]
-        except cv2.error:
-            return self._reject_global_match("center_projection_failed")
-        if not np.all(np.isfinite(dst_center)):
-            return self._reject_global_match("invalid_projected_center")
-
-        center_x, center_y = float(dst_center[0]), float(dst_center[1])
-        map_h, map_w = self.big_map_gray.shape[:2]
-        if not (0 <= center_x < map_w and 0 <= center_y < map_h):
-            return self._reject_global_match(
-                "projected_center_out_of_map",
-                center=(center_x, center_y),
-                map_size=(map_w, map_h),
-            )
-
-        measured_point = (int(round(center_x)), int(round(center_y)))
+        measured_point = candidate_point
         self.last_match_quality = {
             "accepted": True,
             "reason": "accepted",
@@ -468,6 +470,7 @@ class LocatePoints:
             "coverage_ratio": coverage_ratio,
             "median_reprojection_error": median_reprojection_error,
             "local_validation": local_validation,
+            "candidate_point": candidate_point,
             "point": measured_point,
         }
         return measured_point

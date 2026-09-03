@@ -148,6 +148,7 @@ class HouseSearchManager:
     ENTRY_NEAR_MICRO_RADIUS = 200
     ENTRY_NEAR_MICRO_DURA = 200
     ENTRY_NEAR_MICRO_WAIT = 300
+    ENTRY_NEAR_MICRO_BLOCKED_DIRECTION_OFFSETS = (0, 90, -90, 180)
     ENTRY_DOOR_FINAL_ALIGN_MAX_STEPS = 4
     ENTRY_DOOR_FINAL_VIEW_TOLERANCE_PX = 55
     ENTRY_DOOR_VIEW_ADJUST_REFRESH_SETTLE_SECONDS = 0.2
@@ -305,6 +306,7 @@ class HouseSearchManager:
         self.route_stuck_bypass_attempts = 0
         self.house_bypass_unstuck_pause_until = 0.0
         self.entry_near_micro_adjust_attempts = 0
+        self.entry_near_micro_blocked_attempts = 0
         self.entry_direction_aligned_key = None
         self.entry_door_last_area_ratio = None
         self._entry_door_force_strict_align_once = False
@@ -768,6 +770,7 @@ class HouseSearchManager:
 
     def _reset_entry_near_micro_adjust(self):
         self.entry_near_micro_adjust_attempts = 0
+        self.entry_near_micro_blocked_attempts = 0
 
     def _pause_unstuck_for_house_bypass(self, phase_label='NAV'):
         already_paused = self._is_house_bypass_unstuck_paused()
@@ -1400,6 +1403,13 @@ class HouseSearchManager:
             int(round(-radius * math.cos(radians))),
             relative,
         )
+
+    def _entry_near_micro_blocked_direction_offset(self) -> int:
+        offsets = self.ENTRY_NEAR_MICRO_BLOCKED_DIRECTION_OFFSETS
+        blocked_attempts = max(
+            0, int(getattr(self, "entry_near_micro_blocked_attempts", 0) or 0)
+        )
+        return int(offsets[blocked_attempts % len(offsets)])
 
     @staticmethod
     def _side_label(side: str) -> str:
@@ -2946,7 +2956,16 @@ class HouseSearchManager:
         refreshed_loc = self._get_current_location(w) or current_loc
         current_dir = ideal_angle if ideal_angle is not None else w.get_info('direction')
         target_angle = calculate_angle(refreshed_loc, target_loc)
-        move_params = self._entry_near_micro_move_params(current_dir, target_angle)
+        blocked_direction_offset = self._entry_near_micro_blocked_direction_offset()
+        adjusted_target_angle = (
+            (float(target_angle) + blocked_direction_offset) % 360
+            if target_angle is not None
+            else None
+        )
+        move_params = self._entry_near_micro_move_params(
+            current_dir,
+            adjusted_target_angle,
+        )
         if move_params is None:
             w.frame_log(
                 f"[{phase_label}] 入门点微调缺少有效方向/坐标: "
@@ -2962,6 +2981,7 @@ class HouseSearchManager:
             f"[{phase_label}] 入门点微调 "
             f"第{self.entry_near_micro_adjust_attempts}次："
             f"距离={dist_val:.2f}，相对方位={relative:.1f}°，"
+            f"绕障偏移={blocked_direction_offset}°，"
             f"摇杆=({x_bias},{y_bias})，半径={self.ENTRY_NEAR_MICRO_RADIUS}，"
             f"dura={self.ENTRY_NEAR_MICRO_DURA}，wait={self.ENTRY_NEAR_MICRO_WAIT}"
         )
@@ -2973,6 +2993,18 @@ class HouseSearchManager:
             wait=self.ENTRY_NEAR_MICRO_WAIT,
         )
         self._refresh_frame_and_handle_jump(w, handle_jump=False)
+        next_loc = self._get_current_location(w)
+        if next_loc is not None and next_loc == refreshed_loc:
+            self.entry_near_micro_blocked_attempts = (
+                int(getattr(self, "entry_near_micro_blocked_attempts", 0) or 0) + 1
+            )
+            next_offset = self._entry_near_micro_blocked_direction_offset()
+            w.frame_log(
+                f"[{phase_label}] 入门点微调受阻：A={refreshed_loc}，B={next_loc} 坐标相同；"
+                f"下一次改用偏移 {next_offset}° 的方向绕障微调"
+            )
+        elif next_loc is not None:
+            self.entry_near_micro_blocked_attempts = 0
         self.history_locations = []
         return "adjusting"
 

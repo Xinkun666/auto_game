@@ -358,56 +358,9 @@ class LocatePoints:
                 good_matches=good_count,
             )
 
-        inlier_flags = np.asarray(inlier_mask).reshape(-1).astype(bool)
-        inlier_count = int(np.count_nonzero(inlier_flags))
-        inlier_ratio = inlier_count / float(good_count)
-        if inlier_count < self.min_inliers or inlier_ratio < self.min_inlier_ratio:
-            return self._reject_global_match(
-                "weak_ransac_consensus",
-                good_matches=good_count,
-                inliers=inlier_count,
-                inlier_ratio=inlier_ratio,
-            )
-
-        inlier_src = src_pts[inlier_flags]
-        inlier_dst = dst_pts[inlier_flags]
+        # 从此处开始，单应矩阵已经可把小地图中心投影回大地图。即使后续质量门槛
+        # 拒绝该帧，也保留 candidate_point 供离线审计显示；调用方仍只会收到 None。
         h, w = gray_curr.shape
-        coverage_ratio = self._point_coverage_ratio(inlier_src, w, h)
-        if coverage_ratio < self.min_inlier_coverage_ratio:
-            return self._reject_global_match(
-                "clustered_inliers",
-                good_matches=good_count,
-                inliers=inlier_count,
-                inlier_ratio=inlier_ratio,
-                coverage_ratio=coverage_ratio,
-            )
-
-        try:
-            projected_inliers = cv2.perspectiveTransform(inlier_src, M)
-        except cv2.error:
-            return self._reject_global_match(
-                "inlier_projection_failed",
-                good_matches=good_count,
-                inliers=inlier_count,
-            )
-        reprojection_errors = np.linalg.norm(
-            projected_inliers.reshape(-1, 2) - inlier_dst.reshape(-1, 2),
-            axis=1,
-        )
-        median_reprojection_error = float(np.median(reprojection_errors))
-        if (
-            not np.isfinite(median_reprojection_error)
-            or median_reprojection_error > self.max_median_reprojection_error
-        ):
-            return self._reject_global_match(
-                "high_reprojection_error",
-                good_matches=good_count,
-                inliers=inlier_count,
-                inlier_ratio=inlier_ratio,
-                coverage_ratio=coverage_ratio,
-                median_reprojection_error=median_reprojection_error,
-            )
-
         center_pts = np.float32([[w / 2, h / 2]]).reshape(-1, 1, 2)
         try:
             dst_center = cv2.perspectiveTransform(center_pts, M).reshape(-1, 2)[0]
@@ -425,6 +378,59 @@ class LocatePoints:
                 map_size=(map_w, map_h),
             )
         candidate_point = (int(round(center_x)), int(round(center_y)))
+
+        inlier_flags = np.asarray(inlier_mask).reshape(-1).astype(bool)
+        inlier_count = int(np.count_nonzero(inlier_flags))
+        inlier_ratio = inlier_count / float(good_count)
+        if inlier_count < self.min_inliers or inlier_ratio < self.min_inlier_ratio:
+            return self._reject_global_match(
+                "weak_ransac_consensus",
+                good_matches=good_count,
+                inliers=inlier_count,
+                inlier_ratio=inlier_ratio,
+                candidate_point=candidate_point,
+            )
+
+        inlier_src = src_pts[inlier_flags]
+        inlier_dst = dst_pts[inlier_flags]
+        coverage_ratio = self._point_coverage_ratio(inlier_src, w, h)
+        if coverage_ratio < self.min_inlier_coverage_ratio:
+            return self._reject_global_match(
+                "clustered_inliers",
+                good_matches=good_count,
+                inliers=inlier_count,
+                inlier_ratio=inlier_ratio,
+                coverage_ratio=coverage_ratio,
+                candidate_point=candidate_point,
+            )
+
+        try:
+            projected_inliers = cv2.perspectiveTransform(inlier_src, M)
+        except cv2.error:
+            return self._reject_global_match(
+                "inlier_projection_failed",
+                good_matches=good_count,
+                inliers=inlier_count,
+                candidate_point=candidate_point,
+            )
+        reprojection_errors = np.linalg.norm(
+            projected_inliers.reshape(-1, 2) - inlier_dst.reshape(-1, 2),
+            axis=1,
+        )
+        median_reprojection_error = float(np.median(reprojection_errors))
+        if (
+            not np.isfinite(median_reprojection_error)
+            or median_reprojection_error > self.max_median_reprojection_error
+        ):
+            return self._reject_global_match(
+                "high_reprojection_error",
+                good_matches=good_count,
+                inliers=inlier_count,
+                inlier_ratio=inlier_ratio,
+                coverage_ratio=coverage_ratio,
+                median_reprojection_error=median_reprojection_error,
+                candidate_point=candidate_point,
+            )
 
         local_validation = self._validate_local_map_agreement(gray_curr, M)
         interference_mask = local_validation.pop("interference_mask", None)

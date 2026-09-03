@@ -2755,6 +2755,7 @@ class HouseSearchManager:
         dist: float,
         phase_label='Nav',
         fail_if_missing: bool = True,
+        center_sam3_door: bool = True,
     ) -> str:
         door = self.find_largest_door(w)
         if door is None:
@@ -2769,17 +2770,23 @@ class HouseSearchManager:
                     return "failed"
                 return "missing"
 
-            sam3_state, adjusted_door = self._adjust_to_sam3_door_once(
-                w,
-                door,
-                phase_label,
-            )
-            if sam3_state == "failed":
-                self._mark_current_entry_failed("SAM3已返回门但无法计算门中心")
-                return "failed"
-            if sam3_state == "adjusting":
-                return "adjusting"
-            door = adjusted_door
+            if center_sam3_door:
+                sam3_state, adjusted_door = self._adjust_to_sam3_door_once(
+                    w,
+                    door,
+                    phase_label,
+                )
+                if sam3_state == "failed":
+                    self._mark_current_entry_failed("SAM3已返回门但无法计算门中心")
+                    return "failed"
+                if sam3_state == "adjusting":
+                    return "adjusting"
+                door = adjusted_door
+            else:
+                w.frame_log(
+                    f"[{phase_label}] 后拉复查阶段SAM3已定位门，仅记录检测结果；"
+                    "不做左右/视角微调。"
+                )
 
         w.frame_log(
             f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
@@ -2934,6 +2941,7 @@ class HouseSearchManager:
             refreshed_dist,
             phase_label,
             fail_if_missing=True,
+            center_sam3_door=False,
         )
         self._reset_entry_near_micro_adjust()
         return final_result

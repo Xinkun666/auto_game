@@ -137,6 +137,42 @@ class LocatePoints:
         height = max(0.0, float(np.max(flat[:, 1]) - np.min(flat[:, 1])))
         return (width * height) / float(image_width * image_height)
 
+    def _single_match_fallback(self, matches, keypoints, image_shape):
+        """给特征不足的离线帧提供仅供审计显示的单点候选。
+
+        单一特征无法估计单应矩阵，故调用方不得将此结果作为正式定位。这里选择
+        Lowe 比率最低的匹配，并假定它与小地图中心只有平移差，用于在地图上标红。
+        """
+        best = None
+        for pair in matches:
+            if len(pair) < 2:
+                continue
+            first, second = pair[0], pair[1]
+            denominator = max(float(second.distance), 1e-12)
+            ratio = float(first.distance) / denominator
+            ranking = (ratio, float(first.distance))
+            if best is None or ranking < best[0]:
+                best = (ranking, first)
+        if best is None:
+            return None
+
+        _, match = best
+        query_x, query_y = keypoints[match.queryIdx].pt
+        map_x, map_y = self.kp_big[match.trainIdx].pt
+        height, width = image_shape[:2]
+        candidate_x = float(map_x) + (width / 2.0 - float(query_x))
+        candidate_y = float(map_y) + (height / 2.0 - float(query_y))
+        map_height, map_width = self.big_map_gray.shape[:2]
+        if not (0 <= candidate_x < map_width and 0 <= candidate_y < map_height):
+            return None
+        ratio, distance = best[0]
+        return {
+            "point": (int(round(candidate_x)), int(round(candidate_y))),
+            "lowe_ratio": ratio,
+            "distance": distance,
+            "confidence": max(0.0, min(1.0, 1.0 - ratio)),
+        }
+
     def _preprocess_query(self, gray_curr):
         clahe = getattr(self, "clahe", None)
         return clahe.apply(gray_curr) if clahe is not None else gray_curr
@@ -340,9 +376,15 @@ class LocatePoints:
         ]
         good_count = len(good)
         if good_count < self.min_good_matches:
+            single_match_fallback = self._single_match_fallback(
+                matches,
+                kp_small,
+                gray_curr.shape,
+            )
             return self._reject_global_match(
                 "insufficient_good_matches",
                 good_matches=good_count,
+                single_match_fallback=single_match_fallback,
             )
 
         src_pts = np.float32([kp_small[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)

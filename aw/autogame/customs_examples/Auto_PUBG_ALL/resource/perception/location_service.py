@@ -170,6 +170,51 @@ class LocatePoints:
             "confidence": max(0.0, min(1.0, 1.0 - ratio)),
         }
 
+    def get_global_best_feature_candidate(self, img) -> Optional[dict]:
+        """为单张离线截图返回全局最佳的单特征地图候选。
+
+        该接口不要求足够的匹配点来估计单应矩阵，也不读取连续帧状态；它只按
+        最小 Lowe 比率选择一个地图内特征点。调用方必须自行按 ``confidence``
+        阈值决定该候选是否可用，不能把它当作正式导航定位。
+        """
+        if img is None or img.size == 0:
+            self._reject_global_match("empty_query_image")
+            return None
+
+        gray_curr = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gray_curr = self._preprocess_query(gray_curr)
+        mask = self._local_valid_mask(gray_curr.shape[:2]) if self.is_circle else None
+        keypoints, descriptors = self.sift.detectAndCompute(gray_curr, mask)
+        if descriptors is None or len(keypoints) == 0:
+            self._reject_global_match(
+                "insufficient_query_features",
+                query_keypoints=len(keypoints or []),
+            )
+            return None
+
+        try:
+            matches = self.flann.knnMatch(descriptors, self.des_big, k=2)
+        except cv2.error:
+            self._reject_global_match("flann_match_failed")
+            return None
+
+        candidate = self._single_match_fallback(matches, keypoints, gray_curr.shape)
+        if candidate is None:
+            self._reject_global_match(
+                "no_valid_feature_candidate",
+                query_keypoints=len(keypoints),
+            )
+            return None
+
+        self.last_match_quality = {
+            "accepted": True,
+            "reason": "best_feature_candidate",
+            "query_keypoints": len(keypoints),
+            "point": candidate["point"],
+            "best_feature_candidate": candidate,
+        }
+        return candidate
+
     def _preprocess_query(self, gray_curr):
         clahe = getattr(self, "clahe", None)
         return clahe.apply(gray_curr) if clahe is not None else gray_curr

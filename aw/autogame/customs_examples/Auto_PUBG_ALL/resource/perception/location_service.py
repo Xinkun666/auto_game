@@ -287,13 +287,20 @@ class LocatePoints:
 
         clean_similarity = float(np.median(clean_similarities)) if clean_similarities else -1.0
         max_ratio = float(getattr(self, "max_local_interference_ratio", 0.30))
+        # ``interference_ratio`` 是所有低一致性格子的并集，固定 UI、压缩噪声或
+        # 轻微色偏会让它分散在地图多处。用户定义的 30% 是单个局部污染块上限，
+        # 因此只限制最大连通块；其余区域仍须满足结构一致性和既有 SIFT 质量门槛。
         accepted = (
-            interference_ratio <= max_ratio
-            and largest_component_ratio <= max_ratio
+            largest_component_ratio <= max_ratio
             and bool(clean_similarities)
             and clean_similarity >= float(getattr(self, "min_clean_region_similarity", 0.55))
         )
-        reason = "accepted" if accepted else "local_interference_exceeds_limit"
+        if accepted:
+            reason = "accepted"
+        elif largest_component_ratio > max_ratio:
+            reason = "local_interference_exceeds_limit"
+        else:
+            reason = "local_clean_structure_too_weak"
         return {
             "evaluated": True,
             "accepted": accepted,

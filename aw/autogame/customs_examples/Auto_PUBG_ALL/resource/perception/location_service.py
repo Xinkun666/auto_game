@@ -150,6 +150,10 @@ class LocatePoints:
             first, second = pair[0], pair[1]
             denominator = max(float(second.distance), 1e-12)
             ratio = float(first.distance) / denominator
+            map_x, map_y = self.kp_big[first.trainIdx].pt
+            map_height, map_width = self.big_map_gray.shape[:2]
+            if not (0 <= map_x < map_width and 0 <= map_y < map_height):
+                continue
             ranking = (ratio, float(first.distance))
             if best is None or ranking < best[0]:
                 best = (ranking, first)
@@ -158,9 +162,6 @@ class LocatePoints:
 
         _, match = best
         map_x, map_y = self.kp_big[match.trainIdx].pt
-        map_height, map_width = self.big_map_gray.shape[:2]
-        if not (0 <= map_x < map_width and 0 <= map_y < map_height):
-            return None
         ratio, distance = best[0]
         return {
             "point": (int(round(map_x)), int(round(map_y))),

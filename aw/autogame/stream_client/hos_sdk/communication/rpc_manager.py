@@ -67,6 +67,14 @@ class RpcManager(object):
         if self._rpc_call:
             self._rpc_call.cancel()
 
+    def _is_local_stop_cancellation(self, error) -> bool:
+        if not self._stopped:
+            return False
+        try:
+            return error.code() == grpc.StatusCode.CANCELLED
+        except Exception:
+            return False
+
     def start_scrcpy(self, screen_cap_callback: ScreenCapCallback) -> bool:
         """
         start screen copy
@@ -97,6 +105,9 @@ class RpcManager(object):
             if self._timeout_timer:
                 self._timeout_timer.cancel()
                 self._timeout_timer = None
+            if self._is_local_stop_cancellation(e):
+                logger.info("scrcpy stream stopped locally")
+                return True
             if self._first_frame_timeout_triggered and self.on_first_frame_timeout:
                 logger.info("首帧超时，执行重试回调...")
                 self.on_first_frame_timeout()
@@ -130,6 +141,9 @@ class RpcManager(object):
                 timeout=self.STOP_RPC_TIMEOUT_SECONDS,
             )
         except grpc.RpcError as e:
+            if self._is_local_stop_cancellation(e):
+                logger.info("scrcpy stop completed after local cancellation")
+                return
             logger.error("stop scrcpy error: %s", e)
             if self.screenCapCallback is not None:
                 self.screenCapCallback.on_exception(e)

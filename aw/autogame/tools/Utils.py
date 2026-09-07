@@ -693,6 +693,8 @@ def prune_run_archive_artifacts(
         "hos_disconnect.json",
         "stream_disconnect_signal.json",
         "manual_stop_preserve.json",
+        "results.txt",
+        "time.txt",
     }
     legacy_logs_dir = archive_dir / "logs"
 

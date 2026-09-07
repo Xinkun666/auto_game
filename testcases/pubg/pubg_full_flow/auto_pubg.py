@@ -1,7 +1,6 @@
 # !/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2023. All rights reserved.
-import json
 import os
 import time
 from pathlib import Path
@@ -21,7 +20,6 @@ os.environ["TARGET_GAME_CASE"] = target_case
 
 from devicetest.core.test_case import TestCase
 from hypium import BY, UiDriver
-from hypium.action.os_hypium.device_logger import DeviceLogger
 from aw.autogame.tools.GameAutomator import GameAutomator
 from aw.autogame.customs_game_examples.Auto_PUBG_ALL.auto_pubg import preload_runtime
 from aw.autogame.tools.GameLaunchProfile import (
@@ -29,13 +27,7 @@ from aw.autogame.tools.GameLaunchProfile import (
     cleanup_packages_for_test_profile,
     should_use_sp_recording_for_profile,
 )
-from aw.autogame.tools.Utils import (
-    analyze_txt,
-    get_display_rotation,
-    normalize_rotation,
-    resolve_log_dir,
-    resolve_process_save_frames_dir,
-)
+from aw.autogame.tools.Utils import get_display_rotation, normalize_rotation
 
 PERF_TOOL_PACKAGE = DEFAULT_SP_PACKAGE
 
@@ -51,14 +43,6 @@ class auto_pubg(TestCase):
             print(f"[Device] 本轮 xDevice 设备 SN: {self.device_sn}")
         self.driver = UiDriver(self.device1)
         self.automator = None
-        self.task_name = os.environ.get("TARGET_GAME_CASE") or target_case
-        self.device_logger = DeviceLogger(self.driver)
-        self.device_log_started = False
-        self.device_log_available = False
-        self.log_path = os.environ.get("AUTOGAME_DEVICE_LOG_PATH") or str(
-            resolve_log_dir() / f"{self.task_name}.txt"
-        )
-        self.frame_path = str(resolve_process_save_frames_dir())
         self.game_display_name = GAME_DISPLAY_NAME
         self.game_package = GAME_PACKAGE_NAME
         self.perf_tool_package = PERF_TOOL_PACKAGE
@@ -77,32 +61,6 @@ class auto_pubg(TestCase):
                 "Copy this template, then update project_case/target_case and export label resources. "
                 f"Missing: {', '.join(missing)}"
             )
-
-    def _write_device_log_state(self, event_name, stop_ok=None, error=""):
-        archive_dir = os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()
-        if not archive_dir:
-            return
-
-        try:
-            log_exists = os.path.exists(self.log_path)
-            payload = {
-                "event": event_name,
-                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "log_path": self.log_path,
-                "log_exists": log_exists,
-                "log_size": os.path.getsize(self.log_path) if log_exists else 0,
-                "device_log_started": self.device_log_started,
-                "stop_ok": stop_ok,
-                "error": str(error or ""),
-            }
-            os.makedirs(archive_dir, exist_ok=True)
-            signal_path = os.path.join(archive_dir, "device_log_state.json")
-            tmp_path = signal_path + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, signal_path)
-        except Exception as exc:
-            print(f"写入设备日志状态失败: {exc}")
 
     def setup(self):
         self.log.info("预置条件：设置常亮")
@@ -191,58 +149,6 @@ class auto_pubg(TestCase):
             time.sleep(interval)
         raise RuntimeError(f"未找到{desc}，请检查当前页面是否已正确进入目标界面")
 
-    def start_device_log(self):
-        print('和平精英-启动日志采集!!!')
-        if os.path.exists(f'aw/autogame/temp/results/{self.task_name}/time.txt'):
-            os.remove(f'aw/autogame/temp/results/{self.task_name}/time.txt')
-            print(f'检测到旧的时间日志，已成功删除: aw/autogame/temp/results/{self.task_name}/time.txt')
-
-        if os.environ.get("AUTOGAME_DEVICE_LOG_OWNER") == "launcher":
-            self.device_log_available = True
-            print(f'[DeviceLog] Launcher 已负责 hilog 采集，用例跳过重复启动: {self.log_path}')
-            self._write_device_log_state("device_log_managed_by_launcher")
-            return
-
-        try:
-            os.makedirs(os.path.dirname(self.log_path) or ".", exist_ok=True)
-            if os.path.exists(self.log_path):
-                os.remove(self.log_path)
-                print(f"检测到旧日志，已成功删除: {self.log_path}")
-            print('开始抓取日志!')
-            self.device_logger.start_log(self.log_path)
-            self.device_log_started = True
-            self.device_log_available = True
-            self._write_device_log_state("device_log_started")
-        except Exception as exc:
-            self.device_log_started = False
-            self.device_log_available = False
-            print(f'[DeviceLog] 日志采集启动失败，继续执行用例: {exc}')
-            self._write_device_log_state("device_log_start_failed", stop_ok=False, error=exc)
-
-    def stop_device_log(self):
-        if not self.device_log_started:
-            return
-        stop_ok = False
-        stop_error = ""
-        try:
-            print('自动化结束，结束抓取日志!')
-            try:
-                self.device_logger.stop_log()
-                stop_ok = True
-                print(f'日志文件保存在: {self.log_path}')
-            except Exception as exc:
-                stop_error = exc
-                print(f'停止设备日志失败: {exc}')
-        finally:
-            self._write_device_log_state("device_log_stopped", stop_ok=stop_ok, error=stop_error)
-            self.device_log_started = False
-
-    def start_yuanshen(self):
-        print('和平精英-启动!!!')
-        # self.driver.start_app('com.tencent.tmgp.pubgmhd.hw')
-        self.start_device_log()
-        # time.sleep(30)
-
     def start_game_package(self):
         print(f"{self.game_display_name}-通过 HAP 包直接启动: {self.game_package}")
         self.driver.start_app(self.game_package)
@@ -294,14 +200,10 @@ class auto_pubg(TestCase):
         )
 
     def test_step(self):
-        automation_completed = False
         try:
             self._validate_runtime_entry()
             print("预加载南大房型匹配运行时...")
             preload_runtime()
-            # 1. 启动本地设备日志。即使后续 gRPC 断流被 launcher 杀进程，
-            #    已生成的日志文件也会被 launcher 归档到本次运行目录。
-            self.start_device_log()
             if self._use_sp_recording():
                 self.start_perf_tool()
             else:
@@ -311,23 +213,7 @@ class auto_pubg(TestCase):
             # 2. 运行自动化逻辑（现在执行完会返回了）
             print('开始游戏自动化!')
             self.automator.start()
-            automation_completed = True
         finally:
-            self.stop_device_log()
-
-            if automation_completed and os.path.exists(f'aw/autogame/temp/results/{self.task_name}/time.txt'):
-                result_path = f'aw/autogame/temp/results/{self.task_name}/results.txt'
-                try:
-                    if not self.device_log_available or not os.path.exists(self.log_path):
-                        raise FileNotFoundError(f'hilog 不可用: {self.log_path}')
-                    if os.path.exists(result_path):
-                        os.remove(result_path)
-                        print(f'检测到旧的结果日志，已成功删除: {result_path}')
-                    analyze_txt(self.log_path, self.frame_path, time_txt_path=f'aw/autogame/temp/results/{self.task_name}/time.txt', result_path=result_path)
-                    print(f'分析完成, 结果保存在 aw/autogame/temp/results/{self.task_name}/results.txt 中')
-                except Exception as exc:
-                    print(f'[DeviceLog] 日志分析失败，不影响用例结果: {exc}')
-
             cleanup_apps = cleanup_packages_for_test_profile(
                 self.test_profile,
                 game_package=self.game_package,

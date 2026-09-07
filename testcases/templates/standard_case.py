@@ -4,7 +4,6 @@
 # Copy this file and standard_case.json together when creating a new launcher
 # testcase. Rename both files to the same stem, then update the values in this
 # block before selecting the copied .py from launcher.
-import json
 import os
 import time
 from pathlib import Path
@@ -21,21 +20,13 @@ os.environ["TARGET_GAME_CASE"] = target_case
 
 from devicetest.core.test_case import TestCase
 from hypium import BY, UiDriver
-from hypium.action.os_hypium.device_logger import DeviceLogger
-
 from aw.autogame.tools.GameAutomator import GameAutomator
 from aw.autogame.tools.GameLaunchProfile import (
     DEFAULT_SP_PACKAGE,
     cleanup_packages_for_test_profile,
     should_use_sp_recording_for_profile,
 )
-from aw.autogame.tools.Utils import (
-    analyze_txt,
-    get_display_rotation,
-    normalize_rotation,
-    resolve_log_dir,
-    resolve_process_save_frames_dir,
-)
+from aw.autogame.tools.Utils import get_display_rotation, normalize_rotation
 
 PERF_TOOL_PACKAGE = DEFAULT_SP_PACKAGE
 
@@ -52,14 +43,6 @@ class StandardAutoGameCase(TestCase):
             print(f"[Device] 本轮 xDevice 设备 SN: {self.device_sn}")
         self.driver = UiDriver(self.device1)
         self.automator = None
-        self.task_name = os.environ.get("TARGET_GAME_CASE") or target_case
-        self.device_logger = DeviceLogger(self.driver)
-        self.device_log_started = False
-        self.device_log_available = False
-        self.log_path = os.environ.get("AUTOGAME_DEVICE_LOG_PATH") or str(
-            resolve_log_dir() / f"{self.task_name}.txt"
-        )
-        self.frame_path = str(resolve_process_save_frames_dir())
         self.game_display_name = GAME_DISPLAY_NAME
         self.game_package = GAME_PACKAGE_NAME
         self.perf_tool_package = PERF_TOOL_PACKAGE
@@ -83,79 +66,6 @@ class StandardAutoGameCase(TestCase):
                 "Copy this template, then update project_case/target_case and export label resources. "
                 f"Missing: {', '.join(missing)}"
             )
-
-    def _write_device_log_state(self, event_name, stop_ok=None, error=""):
-        archive_dir = os.environ.get("AUTOGAME_RUN_ARCHIVE_DIR", "").strip()
-        if not archive_dir:
-            return
-
-        try:
-            log_exists = os.path.exists(self.log_path)
-            payload = {
-                "event": event_name,
-                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "log_path": self.log_path,
-                "log_exists": log_exists,
-                "log_size": os.path.getsize(self.log_path) if log_exists else 0,
-                "device_log_started": self.device_log_started,
-                "stop_ok": stop_ok,
-                "error": str(error or ""),
-            }
-            os.makedirs(archive_dir, exist_ok=True)
-            signal_path = Path(archive_dir) / "device_log_state.json"
-            tmp_path = signal_path.with_suffix(signal_path.suffix + ".tmp")
-            tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(tmp_path, signal_path)
-        except Exception as exc:
-            print(f"写入设备日志状态失败: {exc}")
-
-    def start_device_log(self):
-        print(f"{self.game_display_name}-启动日志采集!!!")
-        time_log_path = f"aw/autogame/temp/results/{self.task_name}/time.txt"
-        if os.path.exists(time_log_path):
-            os.remove(time_log_path)
-            print(f"检测到旧的时间日志，已成功删除: {time_log_path}")
-
-        if os.environ.get("AUTOGAME_DEVICE_LOG_OWNER") == "launcher":
-            self.device_log_available = True
-            print(f"[DeviceLog] Launcher 已负责 hilog 采集，用例跳过重复启动: {self.log_path}")
-            self._write_device_log_state("device_log_managed_by_launcher")
-            return
-
-        try:
-            os.makedirs(os.path.dirname(self.log_path) or ".", exist_ok=True)
-            if os.path.exists(self.log_path):
-                os.remove(self.log_path)
-                print(f"检测到旧日志，已成功删除: {self.log_path}")
-            print("开始抓取日志!")
-            self.device_logger.start_log(self.log_path)
-            self.device_log_started = True
-            self.device_log_available = True
-            self._write_device_log_state("device_log_started")
-        except Exception as exc:
-            self.device_log_started = False
-            self.device_log_available = False
-            print(f"[DeviceLog] 日志采集启动失败，继续执行用例: {exc}")
-            self._write_device_log_state("device_log_start_failed", stop_ok=False, error=exc)
-
-    def stop_device_log(self):
-        if not self.device_log_started:
-            return
-
-        stop_ok = False
-        stop_error = ""
-        try:
-            print("自动化结束，结束抓取日志!")
-            try:
-                self.device_logger.stop_log()
-                stop_ok = True
-                print(f"日志文件保存在: {self.log_path}")
-            except Exception as exc:
-                stop_error = exc
-                print(f"停止设备日志失败: {exc}")
-        finally:
-            self._write_device_log_state("device_log_stopped", stop_ok=stop_ok, error=stop_error)
-            self.device_log_started = False
 
     def _wait_for_component(self, selector, timeout=10, interval=1.0, desc="目标控件"):
         deadline = time.time() + timeout
@@ -278,28 +188,9 @@ class StandardAutoGameCase(TestCase):
             device_sn=self.device_sn or None,
         )
 
-    def _write_analysis_if_available(self):
-        time_txt_path = f"aw/autogame/temp/results/{self.task_name}/time.txt"
-        if not os.path.exists(time_txt_path):
-            return
-
-        result_path = f"aw/autogame/temp/results/{self.task_name}/results.txt"
-        try:
-            if not self.device_log_available or not os.path.exists(self.log_path):
-                raise FileNotFoundError(f"hilog 不可用: {self.log_path}")
-            if os.path.exists(result_path):
-                os.remove(result_path)
-                print(f"检测到旧的结果日志，已成功删除: {result_path}")
-            analyze_txt(self.log_path, self.frame_path, time_txt_path=time_txt_path, result_path=result_path)
-            print(f"分析完成, 结果保存在 {result_path} 中")
-        except Exception as exc:
-            print(f"[DeviceLog] 日志分析失败，不影响用例结果: {exc}")
-
     def test_step(self):
-        automation_completed = False
         try:
             self._validate_runtime_entry()
-            self.start_device_log()
             if self._use_sp_recording():
                 self.start_perf_tool()
             else:
@@ -308,12 +199,7 @@ class StandardAutoGameCase(TestCase):
             self._ensure_automator()
             print("开始游戏自动化!")
             self.automator.start()
-            automation_completed = True
         finally:
-            self.stop_device_log()
-            if automation_completed:
-                self._write_analysis_if_available()
-
             cleanup_apps = cleanup_packages_for_test_profile(
                 self.test_profile,
                 game_package=self.game_package,

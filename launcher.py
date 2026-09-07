@@ -62,7 +62,7 @@ from aw.autogame.tools.HdcDebugLog import (
 )
 from aw.autogame.tools.HilogCapture import HilogRunCapture
 from aw.autogame.tools.MemoryCapture import MemoryRunCapture
-from aw.autogame.tools.Utils import LATEST_PREVIEW_POINTER_FILENAME, archive_run_artifacts, get_display_rotation, get_resolution, get_screen_mode, prune_run_archive_artifacts, resolve_run_archive_dir, select_scene_resolution
+from aw.autogame.tools.Utils import LATEST_PREVIEW_POINTER_FILENAME, analyze_txt, archive_run_artifacts, get_display_rotation, get_resolution, get_screen_mode, prune_run_archive_artifacts, resolve_run_archive_dir, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 from aw.autogame.common.SPController.SPArea import (
     SP_CONTROLLER_STATE_FILE,
@@ -2471,6 +2471,7 @@ def _xdevice_summary_exit_code(summary_path: Path) -> int:
 def run_testcase_entry(testcase_label: str) -> int:
     install_hidden_subprocess_patch()
     start_hidden_subprocess_window_suppressor()
+    _install_launcher_owned_device_logger_compat()
     LOGGER.info("run_testcase_entry: testcase_label=%s", testcase_label)
     from xdevice.__main__ import main_process
 
@@ -2488,6 +2489,28 @@ def run_testcase_entry(testcase_label: str) -> int:
         / Variables.task_name
     )
     return _xdevice_summary_exit_code(report_dir / "summary_report.xml")
+
+
+def _install_launcher_owned_device_logger_compat() -> None:
+    """Keep legacy testcases from creating a second hilog collector."""
+    if os.environ.get("AUTOGAME_DEVICE_LOG_OWNER") != "launcher":
+        return
+    try:
+        from hypium.action.os_hypium.device_logger import DeviceLogger
+    except ImportError:
+        return
+    if getattr(DeviceLogger, "_autogame_launcher_owned", False):
+        return
+
+    def ignored_start_log(self, *args, **kwargs):
+        LOGGER.info("legacy testcase DeviceLogger.start_log ignored; Launcher owns hilog")
+
+    def ignored_stop_log(self, *args, **kwargs):
+        LOGGER.info("legacy testcase DeviceLogger.stop_log ignored; Launcher owns hilog")
+
+    DeviceLogger.start_log = ignored_start_log
+    DeviceLogger.stop_log = ignored_stop_log
+    DeviceLogger._autogame_launcher_owned = True
 
 
 def run_direct_entry(project_case: str, target_case: str):
@@ -5748,6 +5771,8 @@ class LauncherWindow(QWidget):
         apply_pyinstaller_splash_suppression(env)
         # 默认彻底关闭业务进程内的内存打点，避免继承到外部残留配置。
         env.remove("AUTOGAME_MEMORY_LOG_PATH")
+        env.remove("AUTOGAME_DEVICE_LOG_PATH")
+        env.remove("AUTOGAME_DEVICE_LOG_OWNER")
         env.insert("TARGET_PROJECT_CASE", project_case)
         env.insert("TARGET_GAME_CASE", target_case)
         env.insert("AUTOGAME_VIS_MODE", "launcher")
@@ -5786,10 +5811,6 @@ class LauncherWindow(QWidget):
             env.insert("AUTOGAME_PREVIEW_DIR", str(run_preview_dir))
             env.insert("AUTOGAME_RUN_ARCHIVE_DIR", str(run_archive_dir))
             env.insert("AUTOGAME_BATCH_ARCHIVE_DIR", str(run_archive_dir.parent))
-            env.insert(
-                "AUTOGAME_DEVICE_LOG_PATH",
-                str(run_archive_dir / "hilog.txt"),
-            )
             if bool(self.current_plan and self.current_plan.get("memory_log_enabled")):
                 env.insert(
                     "AUTOGAME_MEMORY_LOG_PATH",
@@ -6824,6 +6845,7 @@ class LauncherWindow(QWidget):
         self._stop_current_memory_capture()
         self._stop_current_hilog_capture()
         self._stop_current_hdc_debug_capture()
+        self._reset_testcase_log_analysis_outputs()
         if archive_dir is not None:
             self.process_launch_tracer.stop()
             self.process_launch_tracer = WindowsProcessLaunchTracer(archive_dir)
@@ -7759,6 +7781,53 @@ class LauncherWindow(QWidget):
         except Exception:
             log_exception("stop current hilog capture failed")
 
+    def _reset_testcase_log_analysis_outputs(self):
+        if self.current_plan is None or self.current_plan.get("mode") != "testcase":
+            return
+        target_case = str(self.current_plan.get("target_case") or "").strip()
+        if not target_case:
+            return
+        result_dir = APP_DIR / "aw" / "autogame" / "temp" / "results" / target_case
+        for name in ("time.txt", "results.txt"):
+            try:
+                (result_dir / name).unlink(missing_ok=True)
+            except OSError as exc:
+                self._log_message(
+                    f"[Launcher] 无法清理上次的 {name}：{exc}\n",
+                    level=logging.WARNING,
+                )
+
+    def _finalize_testcase_log_analysis(self) -> dict[str, str]:
+        if self.current_plan is None or self.current_plan.get("mode") != "testcase":
+            return {}
+        target_case = str(self.current_plan.get("target_case") or "").strip()
+        log_path = self._resolve_current_device_log_path()
+        if not target_case or log_path is None or not log_path.is_file():
+            return {}
+
+        result_dir = APP_DIR / "aw" / "autogame" / "temp" / "results" / target_case
+        time_path = result_dir / "time.txt"
+        if not time_path.is_file():
+            return {}
+        result_path = result_dir / "results.txt"
+        try:
+            analyze_txt(
+                str(log_path),
+                str(self._current_preview_dir()),
+                time_txt_path=str(time_path),
+                result_path=str(result_path),
+            )
+            self._log_message(f"[Launcher] hilog 分析完成：{result_path}\n")
+        except Exception as exc:
+            self._log_message(
+                f"[Launcher] hilog 分析失败，不影响本次归档：{exc}\n",
+                level=logging.WARNING,
+            )
+        files = {"time": str(time_path)}
+        if result_path.is_file():
+            files["results"] = str(result_path)
+        return files
+
     def _archive_run_outputs(self, run_no: int, exit_code: int):
         if self.current_plan is None:
             return
@@ -7785,6 +7854,7 @@ class LauncherWindow(QWidget):
                     "[Launcher] 本次运行未找到 hilog 日志文件。\n",
                     level=logging.WARNING,
                 )
+        extra_log_files.update(self._finalize_testcase_log_analysis())
 
         try:
             generate_preview_video = bool(

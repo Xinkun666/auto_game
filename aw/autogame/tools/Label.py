@@ -4990,7 +4990,6 @@ class AutoStudioWindow(QMainWindow):
         if new_idx < 0 or new_idx >= len(stages):
             return
         stages[idx], stages[new_idx] = stages[new_idx], stages[idx]
-        self.last_expand_stage_id = stage_data.id
         self.update_tree_view()
 
     def move_stage_to_top(self, stage_data: StageData):
@@ -5004,7 +5003,6 @@ class AutoStudioWindow(QMainWindow):
         if idx <= 0:
             return
         stages.insert(0, stages.pop(idx))
-        self.last_expand_stage_id = stage_data.id
         self.update_tree_view()
     def delete_stage(self, stage_data: StageData):
         if not self.project:

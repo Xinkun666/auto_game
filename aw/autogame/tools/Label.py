@@ -3633,8 +3633,11 @@ class AutoStudioWindow(QMainWindow):
         if isinstance(data, StageData):
             self.current_stage = data
             self.set_current_work_stage(data)
-            self.current_scene = None
-            self.clear_scene_display()
+            self.current_scene = data.scenes[0] if data.scenes else None
+            if self.current_scene:
+                self.show_scene_image(self.current_scene)
+            else:
+                self.clear_scene_display()
         elif isinstance(data, dict) and data.get("kind") in {"scene_pool_root", "scene_pool_group"}:
             self.current_scene = None
             self.clear_scene_display()

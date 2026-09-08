@@ -112,7 +112,6 @@ STAGE_PRIORITY_JUMP_FORWARD_DURA = 100
 STAGE_PRIORITY_JUMP_FORWARD_WAIT = 300
 STAGE_PRIORITY_JUMP_SETTLE_SECONDS = 0.2
 RANK_FINISH_SPECTATE_WAIT_SECONDS = 2.0
-RANK_FINISH_CONTINUE_WAIT_SECONDS = 3.0
 RANK_FINISH_CONTINUE_1_WAIT_SECONDS = 2.0
 SP_RECORDING_ENABLED = False
 START_GAME_VERIFY_DELAY = 5.0
@@ -710,7 +709,7 @@ def confirm_lobby_after_popups(w: "FrameWorker") -> bool:
 
 
 def _advance_rank_finish_continue_lobby_flow(w: "FrameWorker") -> bool:
-    """Finish the post-spectator continue flow without falling back to Settings."""
+    """Finish the ranking-page continue flow without falling back to Settings."""
     global rank_finish_lobby_flow_state
 
     if rank_finish_lobby_flow_state == "waiting_continue_1":
@@ -772,34 +771,22 @@ def prepare_rank_finish_for_lobby(w: "FrameWorker") -> bool:
         return False
 
     spectate_opponent = w.get_info("观战对手")
-    if not spectate_opponent:
+    if spectate_opponent:
         w.frame_log(
-            "未识别到观战对手区域，保留在排名界面等待下一帧",
-            log_type=FrameLogType.LOGIC,
+            f"通过区域动态点击观战对手后走设置返回大厅: position={spectate_opponent}",
+            log_type=FrameLogType.UI_CONTROL,
         )
-        return False
-
-    w.frame_log(
-        f"通过区域动态点击观战对手: position={spectate_opponent}",
-        log_type=FrameLogType.UI_CONTROL,
-    )
-    w.click(spectate_opponent)
-    w.frame_log(
-        "已点击观战对手，等待3s观察继续区域",
-        log_type=FrameLogType.LOGIC,
-    )
-    time.sleep(RANK_FINISH_CONTINUE_WAIT_SECONDS)
-    if not w.refresh_frame():
-        return False
+        w.click(spectate_opponent)
+        rank_finish_pending = False
+        return True
 
     continue_region = w.get_info("继续")
     if not continue_region:
         w.frame_log(
-            "未识别到继续区域，回退到原有设置返回大厅流程",
+            "未识别到观战对手或继续区域，保留在排名界面等待下一帧",
             log_type=FrameLogType.LOGIC,
         )
-        rank_finish_pending = False
-        return True
+        return False
 
     w.frame_log(
         f"通过区域动态点击继续: position={continue_region}",

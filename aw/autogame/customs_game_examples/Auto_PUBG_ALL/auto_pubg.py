@@ -86,18 +86,16 @@ DROP_HOUSE_IMPORTANCE_BY_REGION = {
 # 保留旧名称，避免外部脚本读取该常量时立即失效。
 DROP_TARGETS_BY_CITY = DROP_HOUSE_TARGETS_BY_REGION
 
-# 旧L城车辆落点暂时有问题；只影响下面的寻车候选，不影响新房区。
-DISABLED_DROP_CITIES = {"L城"}
+DISABLED_DROP_CITIES = set()
 DROP_TARGET_R_CITY_CAR_SEARCH = (1104, 790)
 DROP_TARGET_L_CITY_CAR_SEARCH = (1731, 910)
 DROP_TARGET_M_CITY_CAR_SEARCH = (1477, 1171)
-DROP_TARGET_G_TOWN_CAR_SEARCH = (576, 1127)
 DROP_CAR_SEARCH_TARGETS_BY_CITY = {
     "R城": DROP_TARGET_R_CITY_CAR_SEARCH,
     "L城": DROP_TARGET_L_CITY_CAR_SEARCH,
     "M城": DROP_TARGET_M_CITY_CAR_SEARCH,
-    "G镇": DROP_TARGET_G_TOWN_CAR_SEARCH,
 }
+DROP_CAR_SEARCH_IMPORTANCE_BY_CITY = {"R城": 3, "L城": 2, "M城": 1}
 
 
 def _enabled_drop_target_candidates(candidates):
@@ -309,6 +307,8 @@ def prepare_round(w: "FrameWorker" = None):
     )
     if need_searching:
         configure_kwargs["target_importance"] = DROP_HOUSE_IMPORTANCE_BY_REGION
+    else:
+        configure_kwargs["target_importance"] = DROP_CAR_SEARCH_IMPORTANCE_BY_CITY
     parachute_manager.configure(**configure_kwargs)
 
     running_manager.reset(finding_car=need_drive)

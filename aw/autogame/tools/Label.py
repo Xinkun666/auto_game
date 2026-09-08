@@ -1267,6 +1267,16 @@ class AutoStudioWindow(QMainWindow):
         suffix = "Area" if ref.item_type == "area" else "Special"
         return f"{ref.scene_name}_{ref.item_name} ({suffix})"
 
+    def _preview_group_item_scene(self, stage: StageData, ref: GroupItemRef):
+        scene = self._first_stage_scene_resolution(stage, ref.scene_name)
+        if not scene:
+            return
+        self.current_stage = stage
+        self.set_current_work_stage(stage)
+        self.current_scene = scene
+        self.show_scene_image(scene)
+        self.status_label.setText(f"正在预览场景 {scene.name} 的 {ref.item_name}。")
+
     def _open_group_dialog(self, stage: StageData, existing_group: Optional[GroupData] = None, allow_rename=True):
         dialog = QDialog(self)
         dialog.setWindowTitle("修改分组" if existing_group else "添加分组")
@@ -1288,6 +1298,9 @@ class AutoStudioWindow(QMainWindow):
         for ref in self._iter_groupable_item_refs(stage):
             checkbox = QCheckBox(self._format_group_item_ref_label(ref))
             checkbox.setChecked(ref in selected_refs)
+            checkbox.clicked.connect(
+                lambda _checked, selected_ref=ref: self._preview_group_item_scene(stage, selected_ref)
+            )
             checks_layout.addWidget(checkbox)
             checkboxes.append((ref, checkbox))
         checks_layout.addStretch()

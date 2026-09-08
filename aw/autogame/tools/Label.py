@@ -354,7 +354,7 @@ class ImageCanvas(QGraphicsView):
                     self._search_scope_label(item),
                 )
                 scope.setData(0, item)
-            self.scene.addItem(scope)
+                self.scene.addItem(scope)
 
     def _draw_auto_pan_delta(self, viewport_pos):
         """Return the scroll delta when a drawing cursor reaches a viewport edge."""

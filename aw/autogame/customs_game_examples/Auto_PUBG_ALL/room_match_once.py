@@ -366,9 +366,6 @@ def on_stage(worker: "FrameWorker") -> None:
             worker.change_stage("搜房阶段")
         if worker.current_stage != "搜房阶段":
             raise RuntimeError("无法切换到只用于感知配置的搜房阶段")
-        if worker.current_group != "other":
-            if worker.change_group("other") is not True:
-                raise RuntimeError("无法切换到房型匹配的基础感知分组")
 
         frame = getattr(worker, "frame", None)
         if frame is None:

@@ -1,11 +1,7 @@
 """Auto_PUBG_ALL 的运行时初始分组配置。
 
-分组内容完全使用标注工具导出的 info.py；这里只声明进入搜房阶段时默认启用
-other，避免落入内置的“默认”全量组而常态执行 SAM3。
+分组内容完全使用标注工具导出的 info.py。搜房阶段默认使用其中配置的
+“默认”分组；SAM3 与 passable 均按需切换到各自分组。
 """
 
-STAGE_GROUP_OVERRIDES = {
-    "搜房阶段": {
-        "initial_group": "other",
-    },
-}
+STAGE_GROUP_OVERRIDES = {}

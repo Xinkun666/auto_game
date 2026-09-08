@@ -952,7 +952,7 @@ class StageLogicController:
     def get_initial_group(self, stage_name):
         """返回进入阶段时应启用的运行分组。
 
-        未配置 initial_group 的老工程继续使用内置的“默认”全量组；
+        未配置 initial_group 的工程继续使用“默认”分组；
         配置值无效时也安全回退，避免阶段切换后处于不存在的分组。
         """
         stage_data = self.stage_info.get(stage_name, {})
@@ -971,14 +971,13 @@ class StageLogicController:
         return DEFAULT_GROUP_NAME
 
     def _resolve_group_filter(self, stage_data, group_name):
-        if not group_name or group_name == DEFAULT_GROUP_NAME:
-            return None
+        group_name = str(group_name or DEFAULT_GROUP_NAME).strip() or DEFAULT_GROUP_NAME
         groups = stage_data.get('groups', {}) if isinstance(stage_data, dict) else {}
         if not isinstance(groups, dict):
             return None
         group_data = groups.get(group_name)
         if group_data is None:
-            return set()
+            return None if group_name == DEFAULT_GROUP_NAME else set()
         if isinstance(group_data, dict) and group_data.get('all'):
             return None
 
@@ -1022,7 +1021,7 @@ class StageLogicController:
         Args:
             frame_img: 当前视频帧
             current_stage_name (str): 由 Framework 传入的当前阶段名称 (如 '关闭弹窗')
-            group_name (str): 当前阶段内要识别的分组名，默认分组识别全部区域和特殊区域
+            group_name (str): 当前阶段内要识别的分组名
 
         Returns:
             dict: 检测结果

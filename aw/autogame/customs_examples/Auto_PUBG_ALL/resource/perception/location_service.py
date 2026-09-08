@@ -53,17 +53,6 @@ class LocatePoints:
         # 提取特征
         self.kp_big, self.des_big = self.sift.detectAndCompute(self.big_map_gray, None)
 
-        # 4. 【可视化】保存特征点提取结果，用于检查空白区是否改善
-        img_vis = cv2.drawKeypoints(
-            self.big_map,  # 在原图上画
-            self.kp_big,
-            None,
-            color=(0, 255, 0),
-            flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
-        )
-        cv2.imwrite(r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/map/map_features_debug.png', img_vis)
-        print(f"特征点提取完成，共 {len(self.kp_big)} 个点。可视化已保存至 map_features_debug.png")
-
         index_params = dict(algorithm=1, trees=5)
         search_params = dict(checks=50)
         self.flann = cv2.FlannBasedMatcher(index_params, search_params)

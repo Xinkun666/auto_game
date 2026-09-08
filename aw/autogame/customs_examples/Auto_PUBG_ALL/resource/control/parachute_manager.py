@@ -28,7 +28,6 @@ class ParachuteManager:
     ROUTE_MISS_CONFIRM_TOLERANCE: int = 35  # 航线错过目标时，后一帧需要明显远离才确认重开
     SUSTAINED_ROUTE_MISS_INCREASE_FRAMES: int = 3  # 错过最近点后，连续递增多少帧才确认重开
     ROUTE_MIN_STEP: float = 1.0  # 两个航线采样点之间至少要有可辨识位移
-    ROUTE_SAMPLE_MAX_STEP: float = 20.0  # 航线取点只接受小于 20 像素的连续位移
     ROUTE_SEGMENT_ANGLE_TOLERANCE: float = 15.0  # 相邻两段近似共线的最大夹角
     PLANNED_DIRECTION_TOLERANCE: int = 5  # 提前对准计划跳伞方向的允许误差
     PLANNED_DIRECTION_MAX_STEPS: int = 2  # 每帧最多执行的方向校准步数
@@ -249,13 +248,10 @@ class ParachuteManager:
 
         previous = self.route_samples[-1]
         step = get_distance(previous, location)
-        if not self._is_valid_distance(step) or step >= self.ROUTE_SAMPLE_MAX_STEP:
-            if self._is_valid_distance(step) and step >= self.ROUTE_SAMPLE_MAX_STEP:
-                self.route_samples = [location]
+        if not self._is_valid_distance(step):
             w.frame_log(
-                f"[Parachute] 航线点位移过大: prev={previous}, "
-                f"current={location}, step={step:.2f}, "
-                f"需要 step < {self.ROUTE_SAMPLE_MAX_STEP:.1f}；从当前点重新取样"
+                f"[Parachute] 航线点位移无效: prev={previous}, "
+                f"current={location}, step={step}；保留原线段继续取点"
             )
             return {}
 

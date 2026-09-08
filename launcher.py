@@ -62,7 +62,7 @@ from aw.autogame.tools.HdcDebugLog import (
 )
 from aw.autogame.tools.HilogCapture import HilogRunCapture
 from aw.autogame.tools.MemoryCapture import MemoryRunCapture
-from aw.autogame.tools.Utils import LATEST_PREVIEW_POINTER_FILENAME, analyze_txt, archive_run_artifacts, get_display_rotation, get_resolution, get_screen_mode, prune_run_archive_artifacts, resolve_run_archive_dir, select_scene_resolution
+from aw.autogame.tools.Utils import FRAME_ARCHIVE_DIR_PREFIX, LATEST_PREVIEW_POINTER_FILENAME, analyze_txt, archive_run_artifacts, get_display_rotation, get_resolution, get_screen_mode, prune_run_archive_artifacts, resolve_run_archive_dir, select_scene_resolution
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 from aw.autogame.common.SPController.SPArea import (
     SP_CONTROLLER_STATE_FILE,
@@ -1725,7 +1725,7 @@ def _count_files(path: Path) -> int:
 def _count_frame_json_files(path: Path) -> int:
     if not path.exists() or not path.is_dir():
         return 0
-    return sum(1 for child in path.glob("frame_*.json") if child.is_file())
+    return sum(1 for child in path.rglob("frame_*.json") if child.is_file())
 
 
 def _read_history_text(path: Path, max_chars: int = 200000) -> str:
@@ -1923,9 +1923,10 @@ def find_latest_preview_frame(preview_dir: Path) -> Optional[Path]:
         return None
 
     image_name = str(payload.get("image") or "").strip()
-    if not image_name or Path(image_name).name != image_name:
+    image_path = Path(image_name)
+    if not image_name or image_path.is_absolute() or ".." in image_path.parts:
         return None
-    latest_image = preview_dir / image_name
+    latest_image = preview_dir / image_path
     if (
         not latest_image.is_file()
         or latest_image.suffix.lower() not in PREVIEW_FRAME_SUFFIXES
@@ -1947,15 +1948,45 @@ def _read_json_payload(path: Path):
     return payload if isinstance(payload, dict) else {"raw": payload}
 
 
-def load_history_frame_records(record: dict) -> list[dict]:
+def _history_frame_dir(record: dict) -> Optional[Path]:
     if not isinstance(record, dict):
-        return []
+        return None
     archive_dir = Path(record.get("archive_dir") or "")
-    frame_dir = archive_dir / "process_temp_logs"
-    if not frame_dir.exists():
-        frame_dir = archive_dir / "process_save_frames"
-    if not frame_dir.exists():
+    for name in ("process_temp_logs", "process_save_frames"):
+        frame_dir = archive_dir / name
+        if frame_dir.is_dir():
+            return frame_dir
+    return None
+
+
+def _history_frame_archive_sort_key(path: Path):
+    suffix = path.name[len(FRAME_ARCHIVE_DIR_PREFIX):]
+    try:
+        return (0, int(suffix))
+    except ValueError:
+        return (1, path.name)
+
+
+def load_history_frame_archives(record: dict) -> list[dict]:
+    frame_dir = _history_frame_dir(record)
+    if frame_dir is None:
         return []
+    archive_dirs = sorted(
+        (
+            path for path in frame_dir.iterdir()
+            if path.is_dir() and path.name.startswith(FRAME_ARCHIVE_DIR_PREFIX)
+        ),
+        key=_history_frame_archive_sort_key,
+    )
+    if not archive_dirs:
+        return [{"label": "全部图片", "path": frame_dir}]
+    return [
+        {"label": f"归档 {index}", "path": path}
+        for index, path in enumerate(archive_dirs, start=1)
+    ]
+
+
+def _load_history_frame_records(frame_dir: Path) -> list[dict]:
 
     frames = []
     image_paths = [
@@ -1979,6 +2010,11 @@ def load_history_frame_records(record: dict) -> list[dict]:
             "payload": payload,
         })
     return frames
+
+
+def load_history_frame_records(record: dict) -> list[dict]:
+    archives = load_history_frame_archives(record)
+    return _load_history_frame_records(Path(archives[0]["path"])) if archives else []
 
 
 def _clean_history_text(value, default: str = "-") -> str:
@@ -3015,6 +3051,8 @@ class LauncherWindow(QWidget):
         self.history_records: list[dict] = []
         self.selected_history_record: Optional[dict] = None
         self.selected_history_batch_dir: Optional[Path] = None
+        self.history_frame_archives: list[dict] = []
+        self.history_frame_archive_index = -1
         self.history_frame_records: list[dict] = []
         self.history_frame_index = -1
         self.process_launch_tracer = WindowsProcessLaunchTracer()
@@ -4462,6 +4500,9 @@ class LauncherWindow(QWidget):
         frame_nav_layout.setSpacing(8)
         self.history_prev_frame_button = QPushButton("上一帧")
         self.history_next_frame_button = QPushButton("下一帧")
+        self.history_archive_button = QPushButton("选择归档")
+        self.history_archive_combo = QComboBox()
+        self.history_archive_combo.setVisible(False)
         self.history_prev_frame_shortcut = QShortcut(QKeySequence("A"), page)
         self.history_prev_frame_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.history_prev_frame_shortcut.activated.connect(self._show_previous_history_frame)
@@ -4472,6 +4513,8 @@ class LauncherWindow(QWidget):
         self.history_frame_counter_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         frame_nav_layout.addWidget(self.history_prev_frame_button)
         frame_nav_layout.addWidget(self.history_next_frame_button)
+        frame_nav_layout.addWidget(self.history_archive_button)
+        frame_nav_layout.addWidget(self.history_archive_combo)
         frame_nav_layout.addWidget(self.history_frame_counter_label, 1)
         frame_layout.addLayout(frame_nav_layout)
 
@@ -4535,6 +4578,8 @@ class LauncherWindow(QWidget):
         self.history_tree.itemSelectionChanged.connect(self._on_history_selection_changed)
         self.history_prev_frame_button.clicked.connect(self._show_previous_history_frame)
         self.history_next_frame_button.clicked.connect(self._show_next_history_frame)
+        self.history_archive_button.clicked.connect(self._show_history_archive_selector)
+        self.history_archive_combo.activated.connect(self._select_history_frame_archive)
         self.game_process_policy_button.toggled.connect(self._toggle_game_process_policy)
         self.generate_preview_video_button.toggled.connect(self._toggle_generate_preview_video)
         self.memory_log_button.toggled.connect(self._toggle_memory_log)
@@ -5544,14 +5589,21 @@ class LauncherWindow(QWidget):
         if not has_archive:
             self.history_summary_edit.clear()
             self.history_output_edit.clear()
+            self.history_frame_archives = []
+            self.history_frame_archive_index = -1
             self.history_frame_records = []
             self.history_frame_index = -1
+            self._sync_history_archive_controls()
             self._render_history_frame()
             return
 
         self.history_summary_edit.setPlainText(format_history_record_summary(record))
-        self.history_frame_records = load_history_frame_records(record)
-        self.history_frame_index = 0 if self.history_frame_records else -1
+        self.history_frame_archives = load_history_frame_archives(record)
+        self.history_frame_archive_index = -1
+        self.history_frame_records = []
+        self.history_frame_index = -1
+        self._load_history_frame_archive(0)
+        self._sync_history_archive_controls()
         self._render_history_frame()
         launcher_output = str(record.get("launcher_output") or "").strip()
         if launcher_output:
@@ -5559,11 +5611,55 @@ class LauncherWindow(QWidget):
         else:
             self.history_output_edit.setPlainText("未找到 logs/launcher_output.txt。")
 
+    def _sync_history_archive_controls(self):
+        has_archives = len(self.history_frame_archives) > 1
+        self.history_archive_button.setEnabled(has_archives)
+        self.history_archive_combo.blockSignals(True)
+        self.history_archive_combo.clear()
+        self.history_archive_combo.addItems(
+            [str(item.get("label") or "归档") for item in self.history_frame_archives]
+        )
+        self.history_archive_combo.setCurrentIndex(self.history_frame_archive_index)
+        self.history_archive_combo.blockSignals(False)
+        if not has_archives:
+            self.history_archive_combo.setVisible(False)
+
+    def _load_history_frame_archive(self, archive_index: int, last_frame: bool = False) -> bool:
+        if not 0 <= archive_index < len(self.history_frame_archives):
+            return False
+        archive = self.history_frame_archives[archive_index]
+        records = _load_history_frame_records(Path(archive["path"]))
+        if not records:
+            return False
+        self.history_frame_archive_index = archive_index
+        self.history_frame_records = records
+        self.history_frame_index = len(records) - 1 if last_frame else 0
+        self._sync_history_archive_controls()
+        return True
+
+    def _show_history_archive_selector(self):
+        if len(self.history_frame_archives) <= 1:
+            return
+        self.history_archive_combo.setVisible(True)
+        self.history_archive_combo.showPopup()
+
+    def _select_history_frame_archive(self, archive_index: int):
+        self.history_archive_combo.setVisible(False)
+        if self._load_history_frame_archive(archive_index):
+            self._render_history_frame()
+
     def _render_history_frame(self):
         frame_count = len(self.history_frame_records)
         has_frame = frame_count > 0 and 0 <= self.history_frame_index < frame_count
-        self.history_prev_frame_button.setEnabled(has_frame and self.history_frame_index > 0)
-        self.history_next_frame_button.setEnabled(has_frame and self.history_frame_index < frame_count - 1)
+        self.history_prev_frame_button.setEnabled(
+            has_frame and (self.history_frame_index > 0 or self.history_frame_archive_index > 0)
+        )
+        self.history_next_frame_button.setEnabled(
+            has_frame and (
+                self.history_frame_index < frame_count - 1
+                or self.history_frame_archive_index < len(self.history_frame_archives) - 1
+            )
+        )
 
         if not has_frame:
             self.history_frame_counter_label.setText("未找到逐帧日志")
@@ -5576,8 +5672,11 @@ class LauncherWindow(QWidget):
 
         frame_record = self.history_frame_records[self.history_frame_index]
         image_path = Path(frame_record.get("image_path"))
+        archive_label = ""
+        if 0 <= self.history_frame_archive_index < len(self.history_frame_archives):
+            archive_label = f"{self.history_frame_archives[self.history_frame_archive_index]['label']}  "
         self.history_frame_counter_label.setText(
-            f"{self.history_frame_index + 1}/{frame_count}  {image_path.name}"
+            f"{archive_label}{self.history_frame_index + 1}/{frame_count}  {image_path.name}"
         )
         self.history_frame_log_edit.setPlainText(format_history_frame_details(frame_record))
 
@@ -5599,15 +5698,28 @@ class LauncherWindow(QWidget):
         self.history_frame_image_label.setPixmap(scaled)
 
     def _show_previous_history_frame(self):
-        if self.history_frame_index <= 0:
-            return
-        self.history_frame_index -= 1
+        if self.history_frame_index > 0:
+            self.history_frame_index -= 1
+        else:
+            for archive_index in range(self.history_frame_archive_index - 1, -1, -1):
+                if self._load_history_frame_archive(archive_index, last_frame=True):
+                    break
+            else:
+                return
         self._render_history_frame()
 
     def _show_next_history_frame(self):
-        if self.history_frame_index >= len(self.history_frame_records) - 1:
-            return
-        self.history_frame_index += 1
+        if self.history_frame_index < len(self.history_frame_records) - 1:
+            self.history_frame_index += 1
+        else:
+            for archive_index in range(
+                self.history_frame_archive_index + 1,
+                len(self.history_frame_archives),
+            ):
+                if self._load_history_frame_archive(archive_index):
+                    break
+            else:
+                return
         self._render_history_frame()
 
     def _refresh_history_outputs(self):

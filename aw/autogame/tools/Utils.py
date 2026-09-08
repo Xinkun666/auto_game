@@ -46,6 +46,8 @@ def resolve_tmp_frames_dir() -> Path:
 PROCESS_TEMP_LOGS_DIR = resolve_process_temp_logs_dir()
 PROCESS_SAVE_FRAMES_DIR = resolve_process_save_frames_dir()
 LATEST_PREVIEW_POINTER_FILENAME = ".latest_preview.json"
+FRAME_ARCHIVE_SIZE = 1000
+FRAME_ARCHIVE_DIR_PREFIX = "frames_"
 
 
 def write_image_unicode(path, image, params=None) -> bool:
@@ -84,8 +86,8 @@ def publish_latest_preview_pointer(log_dir: Path, frame_name: str, frame_index: 
     payload = {
         "schema_version": 1,
         "frame_index": int(frame_index),
-        "image": Path(frame_name).name,
-        "json": Path(frame_name).with_suffix(".json").name,
+        "image": Path(frame_name).as_posix(),
+        "json": Path(frame_name).with_suffix(".json").as_posix(),
     }
     try:
         temporary_path.write_text(
@@ -99,6 +101,11 @@ def publish_latest_preview_pointer(log_dir: Path, frame_name: str, frame_index: 
         except OSError:
             pass
     return pointer_path
+
+
+def resolve_frame_archive_dir(log_dir: Path, frame_index: int) -> Path:
+    archive_index = int(frame_index) // FRAME_ARCHIVE_SIZE + 1
+    return Path(log_dir) / f"{FRAME_ARCHIVE_DIR_PREFIX}{archive_index:04d}"
 
 
 def _copy_process_temp_logs(dst_dir: Path, src_dir: Optional[Path] = None):
@@ -589,7 +596,7 @@ def _read_image_quietly(path: Path) -> Optional[np.ndarray]:
 
 
 def _create_preview_video(src_dir: Path, output_path: Path, fps: int = 10, pattern: str = "frame_*.jpg") -> Optional[str]:
-    frame_paths = sorted(src_dir.glob(pattern), key=_frame_sort_key)
+    frame_paths = sorted(src_dir.rglob(pattern), key=_frame_sort_key)
     if not frame_paths:
         return None
 
@@ -1593,9 +1600,11 @@ def visualizer_process(queue, visual=True):
                     )
 
             # 4. 存储原始图
-            base_filename = os.path.join(log_dir, f"frame_{index:05d}")
+            frame_dir = resolve_frame_archive_dir(log_dir, index)
             frame_name = f"frame_{index:05d}.jpg"
-            if not write_image_unicode(f"{base_filename}.jpg", frame_rotated):
+            relative_frame_name = str(Path(frame_dir.name) / frame_name)
+            base_filename = frame_dir / f"frame_{index:05d}"
+            if not write_image_unicode(base_filename.with_suffix(".jpg"), frame_rotated):
                 raise RuntimeError(f"preview image write failed: {base_filename}.jpg")
             runtime_logs = frame_meta.get("runtime_logs")
             runtime_logs = dict(runtime_logs) if isinstance(runtime_logs, dict) else {}
@@ -1609,13 +1618,13 @@ def visualizer_process(queue, visual=True):
                 index,
                 runtime_logs=runtime_logs,
                 group_name=frame_meta.get("group_name"),
-                frame_name=frame_name,
+                frame_name=relative_frame_name,
                 frame_size={"width": orig_w, "height": orig_h},
                 screen_size=frame_meta.get("screen_size"),
             )
-            with open(f"{base_filename}.json", "w", encoding="utf-8") as f:
+            with open(base_filename.with_suffix(".json"), "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=4)
-            publish_latest_preview_pointer(log_dir, frame_name, index)
+            publish_latest_preview_pointer(log_dir, relative_frame_name, index)
 
             # 5. 缩放显示 (此时文字会因为前面的反向补偿，在显示窗口中看起来大小适中)
             if show_window:

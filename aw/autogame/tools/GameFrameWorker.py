@@ -3145,19 +3145,23 @@ class FrameWorker(threading.Thread):
 
         return resolve_run_archive_dir(run_index, extra_metadata=extra_metadata, create=True)
 
-    def _capture_launcher_unknown_screenshot(self):
+    def _capture_launcher_unknown_screenshot(
+        self,
+        folder_name="异常画面",
+        file_prefix="无操作超时",
+    ):
         archive_dir = self._resolve_launcher_run_archive_dir()
         if archive_dir is None:
             archive_dir = TEMP_DIR
 
         # 无操作超时属于需要人工回看的异常，截图必须随本次运行归档，
         # 不能散落在临时目录或使用含义不清的旧目录名。
-        screenshot_dir = os.path.join(str(archive_dir), "异常画面")
+        screenshot_dir = os.path.join(str(archive_dir), folder_name)
         os.makedirs(screenshot_dir, exist_ok=True)
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         remote_path = f"/data/local/tmp/inactivity_timeout_{timestamp}.jpeg"
-        local_path = os.path.join(screenshot_dir, f"无操作超时_{timestamp}.jpeg")
+        local_path = os.path.join(screenshot_dir, f"{file_prefix}_{timestamp}.jpeg")
         need_remote_rm = False
 
         try:

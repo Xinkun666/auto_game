@@ -752,6 +752,28 @@ def _advance_rank_finish_continue_lobby_flow(w: "FrameWorker") -> bool:
     return True
 
 
+def _fail_unrecognized_rank_exit(w: "FrameWorker") -> bool:
+    screenshot_path = None
+    capture_screenshot = getattr(w, "_capture_launcher_unknown_screenshot", None)
+    if callable(capture_screenshot):
+        screenshot_path = capture_screenshot("未识别帧", "未识别帧")
+
+    message = "当前无法处理退出机制，已结束用例。"
+    if screenshot_path:
+        message = f"{message} 未识别帧已保存至：{screenshot_path}"
+    w.frame_log(message, log_type=FrameLogType.SYSTEM)
+
+    mark_failed = getattr(w, "mark_failed", None)
+    if callable(mark_failed):
+        mark_failed(
+            "rank_exit_unrecognized",
+            message,
+            screenshot_path=screenshot_path,
+        )
+    w.stop()
+    return False
+
+
 def prepare_rank_finish_for_lobby(w: "FrameWorker") -> bool:
     global rank_finish_pending, rank_finish_lobby_flow_state
 
@@ -782,11 +804,7 @@ def prepare_rank_finish_for_lobby(w: "FrameWorker") -> bool:
 
     continue_region = w.get_info("继续")
     if not continue_region:
-        w.frame_log(
-            "未识别到观战对手或继续区域，保留在排名界面等待下一帧",
-            log_type=FrameLogType.LOGIC,
-        )
-        return False
+        return _fail_unrecognized_rank_exit(w)
 
     w.frame_log(
         f"通过区域动态点击继续: position={continue_region}",

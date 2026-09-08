@@ -7328,7 +7328,7 @@ class LauncherWindow(QWidget):
         actual_minutes = max(0.0, float(actual_runtime_seconds)) / 60.0
         self._log_message(
             f"[Launcher] {label}：SP 实际运行 {actual_minutes:.2f} 分钟，"
-            f"按 max(60秒, 实际运行分钟×2) 需要等待 {wait_seconds} 秒；"
+            f"按 max(30秒, 实际运行分钟×1.5) 需要等待 {wait_seconds} 秒；"
             "等待完成前不会清理游戏/SP 进程。\n"
         )
         self._set_status(f"{label}：SP 后台保存中，剩余 {wait_seconds} 秒。")

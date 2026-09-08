@@ -54,7 +54,7 @@ def calculate_sp_save_settle_seconds(actual_runtime_seconds: Any) -> int:
         runtime_seconds = 0.0
     return max(
         SP_SAVE_MIN_SETTLE_SECONDS,
-        int(math.ceil(runtime_seconds / 30.0)),
+        int(math.ceil(runtime_seconds / 40.0)),
     )
 
 

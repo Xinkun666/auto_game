@@ -3367,7 +3367,7 @@ class FrameWorker(threading.Thread):
         actual_minutes = actual_runtime_seconds / 60.0
         self.frame_log(
             f"{label}：SP 实际运行 {actual_minutes:.2f} 分钟，"
-            f"按 max(60秒, 实际运行分钟×2) 需要等待 {wait_seconds} 秒，"
+            f"按 max(30秒, 实际运行分钟×1.5) 需要等待 {wait_seconds} 秒，"
             "等待完成后才允许清理游戏/SP 进程。"
         )
         self._flush_current_frame_log()

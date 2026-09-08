@@ -756,8 +756,6 @@ class AutoStudioWindow(QMainWindow):
         if default_group is None:
             default_group = GroupData(name=DEFAULT_GROUP_NAME, includes_all=True)
         default_group.name = DEFAULT_GROUP_NAME
-        default_group.includes_all = True
-        default_group.items = []
         stage.groups = [default_group] + custom_groups
         if not self._get_stage_group(stage, stage.active_group_name):
             stage.active_group_name = DEFAULT_GROUP_NAME
@@ -828,7 +826,7 @@ class AutoStudioWindow(QMainWindow):
         self._ensure_stage_default_group(stage)
         group_data = {}
         for group in stage.groups:
-            if group.name == DEFAULT_GROUP_NAME or group.includes_all:
+            if group.includes_all:
                 group_data[group.name] = {"all": True}
                 continue
             group_data[group.name] = {
@@ -857,15 +855,18 @@ class AutoStudioWindow(QMainWindow):
         valid_refs = set(AutoStudioWindow._iter_groupable_item_refs(stage))
         has_valid_ref_catalog = bool(valid_refs)
         groups = [GroupData(name=DEFAULT_GROUP_NAME, includes_all=True)]
-        seen_names = {DEFAULT_GROUP_NAME}
+        seen_names = set()
 
         for raw_name, raw_group in groups_data.items():
             name = str(raw_name).strip()
             if not name or name in seen_names:
                 continue
-            if name == DEFAULT_GROUP_NAME:
-                continue
-            if isinstance(raw_group, dict) and raw_group.get("all"):
+            is_all = isinstance(raw_group, dict) and raw_group.get("all")
+            if is_all:
+                if name == DEFAULT_GROUP_NAME:
+                    groups[0].includes_all = True
+                    groups[0].items = []
+                    seen_names.add(name)
                 continue
             raw_items = raw_group.get("items", []) if isinstance(raw_group, dict) else []
             items = []
@@ -883,6 +884,11 @@ class AutoStudioWindow(QMainWindow):
                     continue
                 if ref not in items:
                     items.append(ref)
+            if name == DEFAULT_GROUP_NAME:
+                groups[0].includes_all = False
+                groups[0].items = items
+                seen_names.add(name)
+                continue
             groups.append(GroupData(name=name, items=items))
             seen_names.add(name)
         return groups
@@ -1235,11 +1241,10 @@ class AutoStudioWindow(QMainWindow):
             self.group_combo.addItem(DEFAULT_GROUP_NAME)
         self._updating_group_combo = False
         active_name = self.group_combo.currentText() or DEFAULT_GROUP_NAME
-        is_default = active_name == DEFAULT_GROUP_NAME
         self.group_combo.setEnabled(enabled)
         self.btn_add_group.setEnabled(enabled)
-        self.btn_edit_group.setEnabled(enabled and not is_default)
-        self.btn_delete_group.setEnabled(enabled and not is_default)
+        self.btn_edit_group.setEnabled(enabled)
+        self.btn_delete_group.setEnabled(enabled and active_name != DEFAULT_GROUP_NAME)
 
     def on_group_combo_changed(self, group_name):
         if getattr(self, "_updating_group_combo", False):
@@ -1262,7 +1267,7 @@ class AutoStudioWindow(QMainWindow):
         suffix = "Area" if ref.item_type == "area" else "Special"
         return f"{ref.scene_name}_{ref.item_name} ({suffix})"
 
-    def _open_group_dialog(self, stage: StageData, existing_group: Optional[GroupData] = None):
+    def _open_group_dialog(self, stage: StageData, existing_group: Optional[GroupData] = None, allow_rename=True):
         dialog = QDialog(self)
         dialog.setWindowTitle("修改分组" if existing_group else "添加分组")
         layout = QVBoxLayout(dialog)
@@ -1270,6 +1275,7 @@ class AutoStudioWindow(QMainWindow):
         name_row = QHBoxLayout()
         name_row.addWidget(QLabel("组名:"))
         name_edit = QLineEdit(existing_group.name if existing_group else "")
+        name_edit.setReadOnly(not allow_rename)
         name_row.addWidget(name_edit)
         layout.addLayout(name_row)
 
@@ -1277,7 +1283,7 @@ class AutoStudioWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll_widget = QWidget()
         checks_layout = QVBoxLayout(scroll_widget)
-        selected_refs = set(existing_group.items if existing_group else [])
+        selected_refs = set(self._iter_groupable_item_refs(stage)) if existing_group and existing_group.includes_all else set(existing_group.items if existing_group else [])
         checkboxes = []
         for ref in self._iter_groupable_item_refs(stage):
             checkbox = QCheckBox(self._format_group_item_ref_label(ref))
@@ -1334,17 +1340,15 @@ class AutoStudioWindow(QMainWindow):
         if not stage or not group:
             QMessageBox.warning(self, "提示", "请先选择一个分组。")
             return
-        if group.includes_all or group.name == DEFAULT_GROUP_NAME:
-            QMessageBox.information(self, "提示", "默认分组包含全部区域和特殊区域，不能修改。")
-            return
-        result = self._open_group_dialog(stage, group)
+        is_default = group.name == DEFAULT_GROUP_NAME
+        result = self._open_group_dialog(stage, group, allow_rename=not is_default)
         if result is None:
             return
         group_name, items = result
         if not group_name:
             QMessageBox.warning(self, "提示", "组名不能为空。")
             return
-        if group_name == DEFAULT_GROUP_NAME:
+        if group_name == DEFAULT_GROUP_NAME and not is_default:
             QMessageBox.warning(self, "提示", "不能将自定义分组改名为默认。")
             return
         existing = self._get_stage_group(stage, group_name)
@@ -1354,6 +1358,8 @@ class AutoStudioWindow(QMainWindow):
         old_name = group.name
         group.name = group_name
         group.items = items
+        if is_default:
+            group.includes_all = False
         stage.active_group_name = group_name
         self.update_group_controls()
         self.update_tree_view()

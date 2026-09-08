@@ -228,6 +228,15 @@ class ImageCanvas(QGraphicsView):
         if pixmap.isNull():
             return False
         return 0 <= pt.x() <= pixmap.width() and 0 <= pt.y() <= pixmap.height()
+
+    def _clamp_point_to_image(self, pt: QPointF) -> QPointF:
+        pixmap = self.current_pixmap.pixmap() if self.current_pixmap else None
+        if not pixmap or pixmap.isNull():
+            return pt
+        return QPointF(
+            min(max(pt.x(), 0.0), pixmap.width()),
+            min(max(pt.y(), 0.0), pixmap.height()),
+        )
     def set_image(self, pixmap):
         self._stop_draw_auto_pan()
         self.scene.clear()
@@ -410,7 +419,7 @@ class ImageCanvas(QGraphicsView):
         if not self._apply_draw_auto_pan():
             self._stop_draw_auto_pan()
             return
-        current_pt = self.mapToScene(self._draw_cursor_pos)
+        current_pt = self._clamp_point_to_image(self.mapToScene(self._draw_cursor_pos))
         self.update_crosshair(current_pt)
         if self.temp_rect_item:
             self.temp_rect_item.setRect(QRectF(self.start_point, current_pt).normalized())
@@ -457,6 +466,9 @@ class ImageCanvas(QGraphicsView):
                         break
         if self.mode != "IDLE" and self.current_pixmap:
             pt = self.mapToScene(event.pos())
+            if not self.is_point_on_image(pt):
+                event.ignore()
+                return
             self.start_point = pt
             self.temp_rect_item = QGraphicsRectItem()
             self.temp_rect_item.setPen(QPen(Qt.GlobalColor.yellow, 2, Qt.PenStyle.DashLine))
@@ -495,7 +507,7 @@ class ImageCanvas(QGraphicsView):
             event.accept()
             return
         if self.mode != "IDLE" and self.start_point:
-            rect = QRectF(self.start_point, current_pt).normalized()
+            rect = QRectF(self.start_point, self._clamp_point_to_image(current_pt)).normalized()
             self.temp_rect_item.setRect(rect)
         else:
             super().mouseMoveEvent(event)
@@ -521,7 +533,7 @@ class ImageCanvas(QGraphicsView):
             return
         if self.mode != "IDLE" and self.start_point:
             self._stop_draw_auto_pan()
-            end_point = self.mapToScene(event.pos())
+            end_point = self._clamp_point_to_image(self.mapToScene(event.pos()))
             rect = QRectF(self.start_point, end_point).normalized()
             self.scene.removeItem(self.temp_rect_item)
             self.start_point = None

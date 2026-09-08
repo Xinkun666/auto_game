@@ -3828,6 +3828,10 @@ class AutoStudioWindow(QMainWindow):
             paste_action.triggered.connect(lambda: self.paste_scene_to_stage(data))
             menu.addAction(paste_action)
             if self.project and len(self.project.stages) > 1:
+                move_top_action = QAction("⬆ 移到顶部", self)
+                move_top_action.setEnabled(self.project.stages.index(data) > 0)
+                move_top_action.triggered.connect(lambda: self.move_stage_to_top(data))
+                menu.addAction(move_top_action)
                 move_up_action = QAction("⬆ 上移阶段", self)
                 move_up_action.setEnabled(self.project.stages.index(data) > 0)
                 move_up_action.triggered.connect(lambda: self.move_stage(data, -1))
@@ -4986,6 +4990,20 @@ class AutoStudioWindow(QMainWindow):
         if new_idx < 0 or new_idx >= len(stages):
             return
         stages[idx], stages[new_idx] = stages[new_idx], stages[idx]
+        self.last_expand_stage_id = stage_data.id
+        self.update_tree_view()
+
+    def move_stage_to_top(self, stage_data: StageData):
+        if not self.project:
+            return
+        stages = self.project.stages
+        try:
+            idx = stages.index(stage_data)
+        except ValueError:
+            return
+        if idx <= 0:
+            return
+        stages.insert(0, stages.pop(idx))
         self.last_expand_stage_id = stage_data.id
         self.update_tree_view()
     def delete_stage(self, stage_data: StageData):

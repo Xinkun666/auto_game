@@ -168,9 +168,3 @@ def passable(img):
     """PIDNet-S 可通行性分割；输入为 HOS RGB 画面。"""
     from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.passability import passable as segment_passability
     return segment_passability(img)
-
-
-@special_timing
-def passble(img):
-    """标注工具中的 special 区域名；保留该拼写以匹配项目配置。"""
-    return passable(img)

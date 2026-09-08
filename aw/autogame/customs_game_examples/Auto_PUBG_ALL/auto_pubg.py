@@ -255,7 +255,7 @@ def initialize_runtime():
     searching_house_manager.r_city_recovery_route_callback = recover_bad_landing_to_r_city
     searching_house_manager.r_city_pre_search_route_callback = route_to_r_city_search_start
     searching_house_manager.r_city_entry_route_callback = route_to_r_city_entry_point
-    searching_house_manager.finish_callback = finish_searching_and_enter_running
+    searching_house_manager.finish_callback = finish_searching_and_end_round
 
     _runtime_initialized = True
 
@@ -554,9 +554,8 @@ def _should_find_car_after_searching() -> bool:
     )
 
 
-def finish_searching_and_enter_running(w: "FrameWorker", reason: str):
-    global searching_view_synced, searching_phase_finishing, searching_to_running_notified
-    global searching_exit_retry_count
+def finish_searching_and_end_round(w: "FrameWorker", reason: str):
+    global searching_phase_finishing
 
     _require_runtime()
     if searching_phase_finishing:
@@ -564,53 +563,12 @@ def finish_searching_and_enter_running(w: "FrameWorker", reason: str):
 
     searching_phase_finishing = True
     w.frame_log(
-        f"搜房结束: {reason} | "
-        f"searching_remaining={phase_timer.get_remaining(PHASE_SEARCHING):.2f}s, "
-        f"running_remaining={phase_timer.get_remaining(PHASE_RUNNING):.2f}s, "
-        f"driving_remaining={phase_timer.get_remaining(PHASE_DRIVING):.2f}s",
+        f"搜房结束: {reason}，结束当前局；下一局跳伞到取车点",
         log_type=FrameLogType.LOGIC,
     )
-
-    searching_house_manager.stop_auto_forward(w)
-    w.refresh_frame()
-    house_scene = searching_house_manager._get_house_scene(w)
-    if house_scene == searching_house_manager.HOUSE_INDOOR:
-        searching_exit_retry_count += 1
-        w.frame_log(
-            f"搜房结束时仍在屋内，先执行搜房出房策略，再切跑图 "
-            f"(retry={searching_exit_retry_count})",
-            log_type=FrameLogType.LOGIC,
-        )
-        exit_ok = searching_house_manager._exit_house(w)
-        if w.current_stage != "搜房阶段":
-            searching_phase_finishing = False
-            return True
-        w.refresh_frame()
-        if not exit_ok and searching_house_manager._get_house_scene(w) == searching_house_manager.HOUSE_INDOOR:
-            w.frame_log(
-                "搜房结束出房未确认，保留搜房阶段并继续出房",
-                log_type=FrameLogType.LOGIC,
-            )
-            searching_phase_finishing = False
-            return True
-    else:
-        searching_exit_retry_count = 0
-
-    finding_car = _should_find_car_after_searching()
-    search_region = getattr(searching_house_manager, "house_region", None)
-    running_manager.notify_searching_exit(
-        finding_car=finding_car,
-        search_region=search_region,
-    )
-    running_manager.set_drive_required(finding_car)
-    if phase_timer.start_game_time is not None:
-        running_manager.set_game_time(phase_timer.start_game_time)
-    searching_house_manager.reset()
-    searching_view_synced = True
-    searching_to_running_notified = True
-    searching_exit_retry_count = 0
+    _stop_active_motion(w, "搜房阶段已完成")
     searching_phase_finishing = False
-    w.change_stage("跑图阶段")
+    w.change_stage("结束阶段")
     return True
 
 
@@ -946,10 +904,16 @@ def on_stage(w: "FrameWorker"):
     if previous_stage == "搜房阶段" and w.current_stage == "跑图阶段":
         if searching_to_running_notified:
             w.frame_log(
-                "搜房模块已完成跑图交接，清理交接标记",
+                "搜房中临时跑图交接，保持禁用寻车",
                 log_type=FrameLogType.LOGIC,
             )
             searching_to_running_notified = False
+        elif not phase_timer.is_completed(PHASE_SEARCHING):
+            w.frame_log(
+                "搜房未结束，跑图只前往下一个搜房点，禁用寻车",
+                log_type=FrameLogType.LOGIC,
+            )
+            running_manager.notify_searching_exit(finding_car=False)
         else:
             w.frame_log(
                 "搜房阶段切到跑图阶段，初始化寻车状态",
@@ -1133,7 +1097,7 @@ def on_stage(w: "FrameWorker"):
         if should_abort_searching(w):
             # 南大取景/匹配也会调用 should_abort_searching。计时到期时，
             # 内层只返回中止信号，等触控和感知分组清理完成后，
-            # 再由这个最外层阶段入口统一执行出房与跑图交接。
+            # 再由这个最外层阶段入口统一结束当前局。
             # 已经开始的南大回放使用独立的中止回调，会先完整回放。
             if (
                 w.current_stage == "搜房阶段"
@@ -1142,10 +1106,10 @@ def on_stage(w: "FrameWorker"):
                 w.frame_log(
                     f"搜房阶段 "
                     f"{phase_timer.get_duration_minutes_label(PHASE_SEARCHING)} "
-                    "分钟已用完，安全结束当前搜房动作后切换到跑图阶段",
+                    "分钟已用完，安全结束当前搜房动作后结束本局",
                     log_type=FrameLogType.TIME,
                 )
-                finish_searching_and_enter_running(w, "搜房阶段计时已用完")
+                finish_searching_and_end_round(w, "搜房阶段计时已用完")
             return
 
         if handle_priority_stage_jump_forward(w, "搜房阶段"):

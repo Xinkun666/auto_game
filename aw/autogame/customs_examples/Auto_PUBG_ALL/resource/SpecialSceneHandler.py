@@ -1,25 +1,58 @@
 # -*- coding: utf-8 -*-
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.direction_ctc_service import Get_Direction as Get_Direction_CTC
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.location_service import LocatePoints
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.yolo_detector import YOLO26Detector
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.angle_tracker import AngleTracker
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.speed_classifier import SpeedClassifier
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.scene_predictor import GameSceneClassifier
-from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.sam3_tiny import segment_sam3
-
 from aw.autogame.tools.Utils import *
 
 import time
 from functools import wraps
 
-dire_tool_ctc = Get_Direction_CTC(model_weight=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/direction_ctc.pt')
-loc_tool = LocatePoints()
-yolo_detector = YOLO26Detector(model_path=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/best.pt')
-tracker = AngleTracker(window_size=30)
-speed_cls = SpeedClassifier(weight_path=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/speed_classifier.pt')
-scene_cls = GameSceneClassifier(checkpoint_path=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/scene_best_model.pth')
+dire_tool_ctc = loc_tool = yolo_detector = tracker = speed_cls = scene_cls = None
 
-h, w = get_wh()
+
+def _direction_tool():
+    global dire_tool_ctc
+    if dire_tool_ctc is None:
+        from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.direction_ctc_service import Get_Direction
+        dire_tool_ctc = Get_Direction(model_weight=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/direction_ctc.pt')
+    return dire_tool_ctc
+
+
+def _location_tool():
+    global loc_tool
+    if loc_tool is None:
+        from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.location_service import LocatePoints
+        loc_tool = LocatePoints()
+    return loc_tool
+
+
+def _yolo_detector():
+    global yolo_detector
+    if yolo_detector is None:
+        from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.yolo_detector import YOLO26Detector
+        yolo_detector = YOLO26Detector(model_path=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/best.pt')
+    return yolo_detector
+
+
+def _tracker():
+    global tracker
+    if tracker is None:
+        from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.angle_tracker import AngleTracker
+        tracker = AngleTracker(window_size=30)
+    return tracker
+
+
+def _speed_classifier():
+    global speed_cls
+    if speed_cls is None:
+        from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.speed_classifier import SpeedClassifier
+        speed_cls = SpeedClassifier(weight_path=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/speed_classifier.pt')
+    return speed_cls
+
+
+def _scene_classifier():
+    global scene_cls
+    if scene_cls is None:
+        from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.scene_predictor import GameSceneClassifier
+        scene_cls = GameSceneClassifier(checkpoint_path=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/scene_best_model.pth')
+    return scene_cls
 
 
 def special_timing(func):
@@ -39,16 +72,16 @@ def special_timing(func):
 
 
 def direction(img):
-    return dire_tool_ctc.get_direction(img)
+    return _direction_tool().get_direction(img)
 
 
 def location(img):
-    return loc_tool.get_location(img)
+    return _location_tool().get_location(img)
 
 
 def reset_location_tracking():
     """人物落地后丢弃跳伞阶段的 SIFT/卡尔曼状态。"""
-    return loc_tool.reset_tracking()
+    return _location_tool().reset_tracking()
 
 
 def forward_scene(img):
@@ -83,7 +116,7 @@ def forward_scene(img):
         19: 'sandband_wall',
     }
     # 1. 执行检测
-    res = yolo_detector.infer(img)
+    res = _yolo_detector().infer(img)
     if not res:
         return []
 
@@ -94,6 +127,7 @@ def forward_scene(img):
         print("警告: 未能找到 forward_scene 的配置，返回原始结果")
         return res
 
+    h, w = img.shape[:2]
     x_offset = w * roi_rect[0]
     y_offset = h * roi_rect[1]
 
@@ -112,18 +146,31 @@ def forward_scene(img):
 
 
 def white_angle(img):
-    return tracker.get_angle(img)
+    return _tracker().get_angle(img)
 
 
 def speed(img):
-    return speed_cls.infer(img)
+    return _speed_classifier().infer(img)
 
 
 def house_scene(img):
-    return scene_cls.predict(img)
+    return _scene_classifier().predict(img)
 
 
 @special_timing
 def sam3(img, seg_name=None, version=0):
     """按 version 选择本地 EfficientSAM3 实现。"""
+    from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.sam3_tiny import segment_sam3
     return segment_sam3(img, seg_name=seg_name, version=version)
+
+
+def passable(img):
+    """PIDNet-S 可通行性分割；输入为 HOS RGB 画面。"""
+    from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.passability import passable as segment_passability
+    return segment_passability(img)
+
+
+@special_timing
+def passble(img):
+    """标注工具中的 special 区域名；保留该拼写以匹配项目配置。"""
+    return passable(img)

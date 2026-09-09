@@ -691,6 +691,7 @@ def prune_run_archive_artifacts(
     """Keep runtime frames and the compact per-run diagnostic evidence."""
     archive_dir = Path(archive_dir)
     allowed_root_files = {
+        "archive_info.json",
         "launcher_output.txt",
         "launcher_output_partial.txt",
         "launcher_debug.log",

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Dict, NamedTuple, Optional
 from xml.etree import ElementTree
 
-from PyQt6.QtCore import QByteArray, QObject, QProcess, QProcessEnvironment, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QByteArray, QEvent, QObject, QProcess, QProcessEnvironment, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextCursor, QTextOption
 from PyQt6.QtWidgets import (
     QApplication,
@@ -1815,6 +1815,20 @@ def _read_archive_metadata(info_path: Optional[Path]) -> dict:
         return {}
 
 
+def save_run_resolution_metadata(archive_dir: Path, width, height) -> bool:
+    width = _positive_int(width)
+    height = _positive_int(height)
+    if not width or not height:
+        return False
+    info_path = Path(archive_dir) / "archive_info.json"
+    metadata = _read_archive_metadata(info_path)
+    metadata.update({"screen_width": width, "screen_height": height})
+    temp_path = info_path.with_suffix(".json.tmp")
+    temp_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(info_path)
+    return True
+
+
 def discover_history_outputs(temp_dir: Path = TEMP_DIR) -> list[dict]:
     temp_dir = Path(temp_dir)
     if not temp_dir.exists():
@@ -1826,6 +1840,7 @@ def discover_history_outputs(temp_dir: Path = TEMP_DIR) -> list[dict]:
         if not info_path.exists():
             info_path = None
         metadata = _read_archive_metadata(info_path)
+        screen_width, screen_height = _size_from_mapping(metadata)
         legacy_logs_dir = archive_dir / "logs"
 
         def history_log_path(name: str) -> Path:
@@ -1857,6 +1872,8 @@ def discover_history_outputs(temp_dir: Path = TEMP_DIR) -> list[dict]:
             "battery_stop_requested": metadata.get("battery_stop_requested", ""),
             "stream_disconnected": metadata.get("stream_disconnected", ""),
             "stream_disconnect_startup": metadata.get("stream_disconnect_startup", ""),
+            "screen_width": screen_width,
+            "screen_height": screen_height,
             "archive_metadata": metadata,
             "launcher_output": launcher_output,
             "hilog_path": hilog_path,
@@ -1895,9 +1912,13 @@ def format_history_record_summary(record: dict) -> str:
     hilog_text = "有" if record.get("hilog_exists") else "无"
     battery_text = "有" if record.get("battery_log_exists") else "无"
     frame_log_count = int(record.get("frame_log_count") or 0)
+    screen_width = _positive_int(record.get("screen_width"))
+    screen_height = _positive_int(record.get("screen_height"))
+    resolution_text = f"{screen_width} × {screen_height}" if screen_width and screen_height else "未记录"
     lines = [
         f"Launcher 运行日志: {launcher_text}",
         f"hilog 日志: {hilog_text}",
+        f"分辨率: {resolution_text}",
         f"运行帧 JSON: {frame_log_count}",
         f"battery.log: {battery_text}",
         f"预览视频: {preview_text}",
@@ -1938,6 +1959,31 @@ def find_latest_preview_frame(preview_dir: Path) -> Optional[Path]:
 
 def _history_frame_sort_key(path: Path):
     return (_preview_frame_sequence(path), path.name)
+
+
+def map_history_image_coordinates(
+    mouse_x,
+    mouse_y,
+    label_width,
+    label_height,
+    image_width,
+    image_height,
+    screen_width=None,
+    screen_height=None,
+):
+    if min(label_width, label_height, image_width, image_height) <= 0:
+        return None
+    left = (label_width - image_width) / 2
+    top = (label_height - image_height) / 2
+    if not (left <= mouse_x < left + image_width and top <= mouse_y < top + image_height):
+        return None
+    normalized_x = (mouse_x - left) / image_width
+    normalized_y = (mouse_y - top) / image_height
+    width = _positive_int(screen_width)
+    height = _positive_int(screen_height)
+    absolute_x = min(width - 1, int(normalized_x * width)) if width else None
+    absolute_y = min(height - 1, int(normalized_y * height)) if height else None
+    return normalized_x, normalized_y, absolute_x, absolute_y
 
 
 def _read_json_payload(path: Path):
@@ -3046,6 +3092,7 @@ class LauncherWindow(QWidget):
         self.history_frame_archive_index = -1
         self.history_frame_records: list[dict] = []
         self.history_frame_index = -1
+        self.history_frame_screen_size = (None, None)
         self.process_launch_tracer = WindowsProcessLaunchTracer()
 
         self.setWindowTitle("Auto Game 启动器")
@@ -4481,6 +4528,13 @@ class LauncherWindow(QWidget):
         self.history_frame_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.history_frame_image_label.setMinimumSize(420, 220)
         self.history_frame_image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.history_frame_image_label.setMouseTracking(True)
+        self.history_frame_image_label.installEventFilter(self)
+        self.history_frame_coordinate_label = QLabel(self.history_frame_image_label)
+        self.history_frame_coordinate_label.setStyleSheet(
+            "background: rgba(0, 0, 0, 180); color: white; padding: 4px 7px; border-radius: 4px;"
+        )
+        self.history_frame_coordinate_label.hide()
         summary_layout.addWidget(self.history_frame_image_label)
 
         frame_group = QGroupBox("日志信息")
@@ -5670,6 +5724,8 @@ class LauncherWindow(QWidget):
             self.history_frame_basic_edit.clear()
             self.history_frame_info_edit.clear()
             self.history_frame_control_edit.clear()
+            self.history_frame_screen_size = (None, None)
+            self.history_frame_coordinate_label.hide()
             return
 
         frame_record = self.history_frame_records[self.history_frame_index]
@@ -5685,6 +5741,14 @@ class LauncherWindow(QWidget):
         self.history_frame_info_edit.setPlainText(columns["info"])
         self.history_frame_log_edit.setPlainText(columns["frame_log"])
         self.history_frame_control_edit.setPlainText(columns["control"])
+        payload = frame_record.get("payload") if isinstance(frame_record, dict) else {}
+        screen_width, screen_height = _size_from_mapping(
+            payload.get("screen") if isinstance(payload, dict) else None
+        )
+        if not screen_width or not screen_height:
+            screen_width, screen_height = _size_from_mapping(self.selected_history_record)
+        self.history_frame_screen_size = (screen_width, screen_height)
+        self.history_frame_coordinate_label.hide()
 
         pixmap = QPixmap(str(image_path))
         if pixmap.isNull():
@@ -5702,6 +5766,44 @@ class LauncherWindow(QWidget):
         )
         self.history_frame_image_label.setText("")
         self.history_frame_image_label.setPixmap(scaled)
+
+    def eventFilter(self, watched, event):
+        if watched is getattr(self, "history_frame_image_label", None):
+            if event.type() == QEvent.Type.Leave:
+                self.history_frame_coordinate_label.hide()
+            elif event.type() == QEvent.Type.MouseMove:
+                pixmap = self.history_frame_image_label.pixmap()
+                mapped = map_history_image_coordinates(
+                    event.position().x(),
+                    event.position().y(),
+                    self.history_frame_image_label.width(),
+                    self.history_frame_image_label.height(),
+                    pixmap.width() if pixmap and not pixmap.isNull() else 0,
+                    pixmap.height() if pixmap and not pixmap.isNull() else 0,
+                    *self.history_frame_screen_size,
+                )
+                if mapped is None:
+                    self.history_frame_coordinate_label.hide()
+                else:
+                    normalized_x, normalized_y, absolute_x, absolute_y = mapped
+                    absolute_text = (
+                        f"绝对坐标: ({absolute_x}, {absolute_y})"
+                        if absolute_x is not None and absolute_y is not None
+                        else "绝对坐标: 未记录分辨率"
+                    )
+                    self.history_frame_coordinate_label.setText(
+                        f"归一化坐标: ({normalized_x:.4f}, {normalized_y:.4f})    {absolute_text}"
+                    )
+                    self.history_frame_coordinate_label.adjustSize()
+                    image_left = (self.history_frame_image_label.width() - pixmap.width()) / 2
+                    image_bottom = (self.history_frame_image_label.height() + pixmap.height()) / 2
+                    self.history_frame_coordinate_label.move(
+                        max(8, int(image_left) + 8),
+                        max(8, int(image_bottom) - self.history_frame_coordinate_label.height() - 8),
+                    )
+                    self.history_frame_coordinate_label.show()
+                    self.history_frame_coordinate_label.raise_()
+        return super().eventFilter(watched, event)
 
     def _show_previous_history_frame(self):
         if self.history_frame_index > 0:
@@ -6949,6 +7051,14 @@ class LauncherWindow(QWidget):
         self.process_output_buffer = ""
         archive_dir = self._resolve_current_run_archive_dir()
         if archive_dir is not None:
+            try:
+                save_run_resolution_metadata(
+                    archive_dir,
+                    self.current_plan.get("screen_width"),
+                    self.current_plan.get("screen_height"),
+                )
+            except OSError as exc:
+                self._log_message(f"[Launcher] 分辨率信息保存失败：{exc}\n", level=logging.WARNING)
             set_launcher_log_file(archive_dir / "launcher_debug.log")
             self._start_output_log_spool(archive_dir)
             self.current_run_output_start = 0

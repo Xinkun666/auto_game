@@ -4530,12 +4530,13 @@ class LauncherWindow(QWidget):
         self.history_frame_image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.history_frame_image_label.setMouseTracking(True)
         self.history_frame_image_label.installEventFilter(self)
-        self.history_frame_coordinate_label = QLabel(self.history_frame_image_label)
-        self.history_frame_coordinate_label.setStyleSheet(
-            "background: rgba(0, 0, 0, 180); color: white; padding: 4px 7px; border-radius: 4px;"
+        self.history_frame_coordinate_label = QLabel()
+        self.history_frame_coordinate_label.setMinimumHeight(24)
+        self.history_frame_coordinate_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
-        self.history_frame_coordinate_label.hide()
-        summary_layout.addWidget(self.history_frame_image_label)
+        summary_layout.addWidget(self.history_frame_image_label, 1)
+        summary_layout.addWidget(self.history_frame_coordinate_label)
 
         frame_group = QGroupBox("日志信息")
         frame_layout = QVBoxLayout(frame_group)
@@ -5726,7 +5727,7 @@ class LauncherWindow(QWidget):
             self.history_frame_basic_edit.clear()
             self.history_frame_info_edit.clear()
             self.history_frame_screen_size = (None, None)
-            self.history_frame_coordinate_label.hide()
+            self.history_frame_coordinate_label.clear()
             return
 
         frame_record = self.history_frame_records[self.history_frame_index]
@@ -5748,7 +5749,7 @@ class LauncherWindow(QWidget):
         if not screen_width or not screen_height:
             screen_width, screen_height = _size_from_mapping(self.selected_history_record)
         self.history_frame_screen_size = (screen_width, screen_height)
-        self.history_frame_coordinate_label.hide()
+        self.history_frame_coordinate_label.clear()
 
         pixmap = QPixmap(str(image_path))
         if pixmap.isNull():
@@ -5770,7 +5771,7 @@ class LauncherWindow(QWidget):
     def eventFilter(self, watched, event):
         if watched is getattr(self, "history_frame_image_label", None):
             if event.type() == QEvent.Type.Leave:
-                self.history_frame_coordinate_label.hide()
+                self.history_frame_coordinate_label.clear()
             elif event.type() == QEvent.Type.MouseMove:
                 pixmap = self.history_frame_image_label.pixmap()
                 mapped = map_history_image_coordinates(
@@ -5783,7 +5784,7 @@ class LauncherWindow(QWidget):
                     *self.history_frame_screen_size,
                 )
                 if mapped is None:
-                    self.history_frame_coordinate_label.hide()
+                    self.history_frame_coordinate_label.clear()
                 else:
                     normalized_x, normalized_y, absolute_x, absolute_y = mapped
                     absolute_text = (
@@ -5794,15 +5795,6 @@ class LauncherWindow(QWidget):
                     self.history_frame_coordinate_label.setText(
                         f"归一化坐标: ({normalized_x:.4f}, {normalized_y:.4f})    {absolute_text}"
                     )
-                    self.history_frame_coordinate_label.adjustSize()
-                    image_left = (self.history_frame_image_label.width() - pixmap.width()) / 2
-                    image_bottom = (self.history_frame_image_label.height() + pixmap.height()) / 2
-                    self.history_frame_coordinate_label.move(
-                        max(8, int(image_left) + 8),
-                        max(8, int(image_bottom) - self.history_frame_coordinate_label.height() - 8),
-                    )
-                    self.history_frame_coordinate_label.show()
-                    self.history_frame_coordinate_label.raise_()
         return super().eventFilter(watched, event)
 
     def _show_previous_history_frame(self):

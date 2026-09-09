@@ -2118,15 +2118,6 @@ def _extract_seen_text(semantic_perception: dict, seen: dict, info_payload: dict
     return "-"
 
 
-def _format_history_info(info_payload: dict) -> list[str]:
-    if not isinstance(info_payload, dict) or not info_payload:
-        return ["- info: -"]
-    lines = ["- info:"]
-    for key, value in list(info_payload.items())[:80]:
-        lines.append(f"  {key}: {value}")
-    return lines
-
-
 def _format_history_logic(
     *,
     seen_text: str,
@@ -2360,7 +2351,7 @@ def _format_semantic_actions(actions: list[dict]) -> list[str]:
     return lines or ["- 暂无控制动作"]
 
 
-def format_history_frame_details(frame_record: dict) -> str:
+def format_history_frame_columns(frame_record: dict) -> dict[str, str]:
     payload = frame_record.get("payload") if isinstance(frame_record, dict) else {}
     payload = payload if isinstance(payload, dict) else {}
     frame_info = payload.get("frame") if isinstance(payload.get("frame"), dict) else {}
@@ -2384,9 +2375,11 @@ def format_history_frame_details(frame_record: dict) -> str:
         info_payload,
     )
 
-    lines = [
+    basic_lines = [
         f"帧: {frame_info.get('image') or Path(str(frame_record.get('image_path') or '')).name}",
         f"序号: {frame_info.get('index', frame_record.get('index', '-'))}",
+        f"阶段: {stage_name}",
+        f"分组: {stage_group}",
     ]
 
     semantic_stage = semantic_log.get("current_stage") if isinstance(semantic_log.get("current_stage"), dict) else {}
@@ -2424,33 +2417,31 @@ def format_history_frame_details(frame_record: dict) -> str:
             frame_logs,
         )
 
-    lines.extend([
-        "",
-        "日志信息",
-        *_format_history_logic(
-            seen_text=seen_summary,
-            stage_name=stage_name,
-            frame_log=logic_frame_log,
-            frame_logs=logic_frame_logs,
-            semantic_judgment=semantic_judgment,
-            semantic_branch=semantic_branch,
-            decision_payload=decision_payload,
-            code_branch=code_branch,
-            next_action=next_action,
-        ),
-        "",
-        "控制信息",
-        *_format_history_control(control_frame_logs, semantic_actions),
-        "",
-        "当前阶段",
-        f"- stage: {semantic_stage.get('stage') or stage_name}",
-        f"- group: {semantic_stage.get('group') or stage_group}",
-        "",
-        "识别信息",
-        *_format_history_info(info_payload),
-    ])
+    info_lines = [
+        f"{key}: {value}"
+        for key, value in list(info_payload.items())[:80]
+    ] or ["-"]
+    logic_lines = _format_history_logic(
+        seen_text=seen_summary,
+        stage_name=stage_name,
+        frame_log=logic_frame_log,
+        frame_logs=logic_frame_logs,
+        semantic_judgment=semantic_judgment,
+        semantic_branch=semantic_branch,
+        decision_payload=decision_payload,
+        code_branch=code_branch,
+        next_action=next_action,
+    )
+    control_lines = _format_history_control(control_frame_logs, semantic_actions)
 
-    return "\n".join(lines)
+    basic_lines[2] = f"阶段: {semantic_stage.get('stage') or stage_name}"
+    basic_lines[3] = f"分组: {semantic_stage.get('group') or stage_group}"
+    return {
+        "basic": "\n".join(basic_lines),
+        "info": "\n".join(info_lines),
+        "frame_log": "\n".join(logic_lines),
+        "control": "\n".join(control_lines),
+    }
 
 
 def discover_project_cases() -> list[str]:
@@ -4482,16 +4473,17 @@ class LauncherWindow(QWidget):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(10)
 
-        summary_group = QGroupBox("摘要")
+        summary_group = QGroupBox("逐帧场景图片")
         summary_layout = QVBoxLayout(summary_group)
         summary_layout.setContentsMargins(12, 10, 12, 12)
-        self.history_summary_edit = QPlainTextEdit()
-        self.history_summary_edit.setReadOnly(True)
-        self.history_summary_edit.setMinimumHeight(190)
-        self.history_summary_edit.setPlaceholderText("选择一条历史输出后显示摘要...")
-        summary_layout.addWidget(self.history_summary_edit)
+        self.history_frame_image_label = QLabel("选择历史输出后显示帧画面")
+        self.history_frame_image_label.setObjectName("previewSurface")
+        self.history_frame_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.history_frame_image_label.setMinimumSize(420, 220)
+        self.history_frame_image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        summary_layout.addWidget(self.history_frame_image_label)
 
-        frame_group = QGroupBox("逐帧场景日志")
+        frame_group = QGroupBox("日志信息")
         frame_layout = QVBoxLayout(frame_group)
         frame_layout.setContentsMargins(12, 10, 12, 12)
         frame_layout.setSpacing(8)
@@ -4521,18 +4513,25 @@ class LauncherWindow(QWidget):
         frame_splitter = QSplitter(Qt.Orientation.Horizontal)
         frame_splitter.setChildrenCollapsible(False)
         frame_splitter.setHandleWidth(8)
-        self.history_frame_image_label = QLabel("选择历史输出后显示帧画面")
-        self.history_frame_image_label.setObjectName("previewSurface")
-        self.history_frame_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.history_frame_image_label.setMinimumSize(420, 260)
-        self.history_frame_image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.history_frame_log_edit = QPlainTextEdit()
-        self.history_frame_log_edit.setReadOnly(True)
-        self.history_frame_log_edit.setPlaceholderText("选择历史输出后显示这一帧的阶段、info、日志信息和控制信息...")
-        frame_splitter.addWidget(self.history_frame_image_label)
-        frame_splitter.addWidget(self.history_frame_log_edit)
-        frame_splitter.setStretchFactor(0, 3)
-        frame_splitter.setStretchFactor(1, 2)
+        columns = (
+            ("运行摘要", "history_summary_edit", "选择历史输出后显示运行摘要...", 2),
+            ("基础信息", "history_frame_basic_edit", "帧、序号、阶段和分组", 2),
+            ("info 信息", "history_frame_info_edit", "本帧 info 信息", 3),
+            ("帧日志信息", "history_frame_log_edit", "本帧日志信息", 4),
+            ("控制信息", "history_frame_control_edit", "本帧控制信息", 3),
+        )
+        for index, (title, attr_name, placeholder, stretch) in enumerate(columns):
+            column_group = QGroupBox(title)
+            column_layout = QVBoxLayout(column_group)
+            column_layout.setContentsMargins(6, 6, 6, 6)
+            edit = QPlainTextEdit()
+            edit.setReadOnly(True)
+            edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+            edit.setPlaceholderText(placeholder)
+            setattr(self, attr_name, edit)
+            column_layout.addWidget(edit)
+            frame_splitter.addWidget(column_group)
+            frame_splitter.setStretchFactor(index, stretch)
         frame_layout.addWidget(frame_splitter, 1)
 
         output_group = QGroupBox("launcher 输出")
@@ -4543,7 +4542,7 @@ class LauncherWindow(QWidget):
         self.history_output_edit.setPlaceholderText("选择一条历史输出后显示 logs/launcher_output.txt...")
         output_layout.addWidget(self.history_output_edit)
 
-        right_layout.addWidget(summary_group, 0)
+        right_layout.addWidget(summary_group, 2)
         right_layout.addWidget(frame_group, 2)
         right_layout.addWidget(output_group, 1)
 
@@ -5668,6 +5667,9 @@ class LauncherWindow(QWidget):
             self.history_frame_log_edit.setPlainText(
                 "未找到逐帧 JSON。请检查本轮 process_temp_logs 是否已正常生成。"
             )
+            self.history_frame_basic_edit.clear()
+            self.history_frame_info_edit.clear()
+            self.history_frame_control_edit.clear()
             return
 
         frame_record = self.history_frame_records[self.history_frame_index]
@@ -5678,7 +5680,11 @@ class LauncherWindow(QWidget):
         self.history_frame_counter_label.setText(
             f"{archive_label}{self.history_frame_index + 1}/{frame_count}  {image_path.name}"
         )
-        self.history_frame_log_edit.setPlainText(format_history_frame_details(frame_record))
+        columns = format_history_frame_columns(frame_record)
+        self.history_frame_basic_edit.setPlainText(columns["basic"])
+        self.history_frame_info_edit.setPlainText(columns["info"])
+        self.history_frame_log_edit.setPlainText(columns["frame_log"])
+        self.history_frame_control_edit.setPlainText(columns["control"])
 
         pixmap = QPixmap(str(image_path))
         if pixmap.isNull():

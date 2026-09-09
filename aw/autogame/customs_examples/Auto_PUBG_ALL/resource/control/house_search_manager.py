@@ -1684,6 +1684,10 @@ class HouseSearchManager:
         frame_size = self._get_visual_frame_size(w)
         change_group = getattr(w, "change_group", None)
         if frame_size is None or not callable(change_group):
+            w.frame_log(
+                f"[{phase_label}][EntryDoorFlow][建筑分割] 缺少画面尺寸或分组切换能力，"
+                "本次无法判定建筑在左边还是右边"
+            )
             return None
 
         original_group = str(getattr(w, "current_group", None) or "默认")
@@ -1693,7 +1697,15 @@ class HouseSearchManager:
             self.ENTRY_BUILDING_SAM3_PROMPT,
         )
         try:
+            w.frame_log(
+                f"[{phase_label}][EntryDoorFlow][建筑分割] "
+                f"切换到 {self.ENTRY_DOOR_SAM3_GROUP} 分组，"
+                f"提示词={self.ENTRY_BUILDING_SAM3_PROMPT}，仅用于判断左右占比"
+            )
             if change_group(self.ENTRY_DOOR_SAM3_GROUP) is not True:
+                w.frame_log(
+                    f"[{phase_label}][EntryDoorFlow][建筑分割] 切换SAM3分组失败"
+                )
                 return None
             switched = True
             side = self._sam3_building_side_from_info(
@@ -1701,7 +1713,8 @@ class HouseSearchManager:
                 frame_size,
             )
             w.frame_log(
-                f"[{phase_label}] SAM3建筑分割左右占比结果: {side or '无法判定'}"
+                f"[{phase_label}][EntryDoorFlow][建筑分割] "
+                f"左右占比判定={side or '无法判定'}"
             )
             return side
         except Exception as exc:
@@ -2822,6 +2835,10 @@ class HouseSearchManager:
 
     def _align_visible_entry_door_before_nanda(self, w, door, phase_label='Nav') -> str:
         """Keep the near-entry sequence as: find door -> align door -> match/replay."""
+        w.frame_log(
+            f"[{phase_label}][EntryDoorFlow][6-门校准] 开始将门移到画面中心："
+            f"door={door}，中心容差={self.ENTRY_DOOR_FINAL_VIEW_TOLERANCE_PX}px"
+        )
         door_state = self._align_to_door_detection(
             w,
             door,
@@ -2831,7 +2848,8 @@ class HouseSearchManager:
         )
         if door_state == "aligned":
             w.frame_log(
-                f"[{phase_label}] 门已视觉对齐，进入房型匹配；匹配成功后立即执行回放"
+                f"[{phase_label}][EntryDoorFlow][6-门校准] 校准成功，"
+                "门已到中心容差内；现在启动房型匹配，匹配成功后立即回放"
             )
             return "aligned"
 
@@ -2853,6 +2871,10 @@ class HouseSearchManager:
         phase_label='Nav',
         fail_if_missing: bool = True,
     ) -> str:
+        w.frame_log(
+            f"[{phase_label}][EntryDoorFlow][2-定位门] 开始检测："
+            f"entry={target_loc}，dist={dist:.2f}，方向保持锁定，先YOLO后SAM3"
+        )
         door = self.find_largest_door(w)
         if door is None:
             w.frame_log(
@@ -2861,13 +2883,23 @@ class HouseSearchManager:
             )
             door = self._find_entry_door_with_sam3(w, phase_label)
             if door is None:
+                w.frame_log(
+                    f"[{phase_label}][EntryDoorFlow][2-定位门] 本轮结果=missing："
+                    "YOLO和SAM3都没有定位到门"
+                )
                 if fail_if_missing:
                     self._mark_current_entry_failed("YOLO与SAM3均未定位到门")
                     return "failed"
                 return "missing"
 
             w.frame_log(
-                f"[{phase_label}] SAM3已定位门，直接交给门校准模块"
+                f"[{phase_label}][EntryDoorFlow][2-定位门] 本轮结果=SAM3命中，"
+                f"door={door}，直接交给门校准模块"
+            )
+        else:
+            w.frame_log(
+                f"[{phase_label}][EntryDoorFlow][2-定位门] 本轮结果=YOLO命中，"
+                f"door={door}，直接交给门校准模块"
             )
 
         w.frame_log(
@@ -2881,7 +2913,15 @@ class HouseSearchManager:
             phase_label,
         )
         if door_align_result != "aligned":
+            w.frame_log(
+                f"[{phase_label}][EntryDoorFlow][6-门校准] 本轮结果={door_align_result}，"
+                "暂不启动匹配/回放"
+            )
             return door_align_result
+        w.frame_log(
+            f"[{phase_label}][EntryDoorFlow][7-匹配回放] 门校准已通过，"
+            "将当前画面交给南大房型匹配链路"
+        )
         nanda_result = self._try_nanda_search_before_entry(
             w,
             door,
@@ -2890,6 +2930,10 @@ class HouseSearchManager:
             phase_label,
         )
         if nanda_result != "fallback":
+            w.frame_log(
+                f"[{phase_label}][EntryDoorFlow][7-匹配回放] "
+                f"南大链路返回={nanda_result}"
+            )
             return nanda_result
 
         w.frame_log(f"[{phase_label}] 南大方案未接管，跳过微调到0，继续现有对门前推")
@@ -2966,14 +3010,23 @@ class HouseSearchManager:
     def _handle_near_entry_point(self, w: 'FrameWorker', current_loc, target_loc, dist: float, phase_label='Nav') -> str:
         self.stop_auto_forward(w)
         w.frame_log(
-            f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist:.2f} "
-            f"<= {self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:g}，已经到达入门点附近，"
-            f"停止自动前进，准备对齐入门方向并微调位置"
+            f"[{phase_label}][EntryDoorFlow][1-进入近门流程] "
+            f"current={current_loc}，entry={target_loc}，dist={dist:.2f} "
+            f"<= {self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:g}；已停止自动前进，"
+            "下一步=对齐入门方向"
         )
 
         if not self._align_entry_direction_at_near_point(w, phase_label):
-            w.frame_log(f"[{phase_label}] 进门点方向尚未对准，等待下一轮继续对准")
+            w.frame_log(
+                f"[{phase_label}][EntryDoorFlow][1-方向校准] 本轮未对准，"
+                "不定位门、不移动人物，下一轮继续校准"
+            )
             return "aligning"
+
+        w.frame_log(
+            f"[{phase_label}][EntryDoorFlow][1-方向校准] 已对准并锁定，"
+            "定位阶段不再调整人物方向；下一步=YOLO+SAM3定位门"
+        )
 
         visible_door_result = self._try_entry_door_yolo_then_sam3(
             w,
@@ -2988,8 +3041,9 @@ class HouseSearchManager:
 
         if dist != self.ENTRY_NEAR_MICRO_DONE_DISTANCE:
             w.frame_log(
-                f"[{phase_label}] YOLO与SAM3暂未定位到门，"
-                "保持入门方向不变，只用摇杆向入门点微调；下一轮重新定位门"
+                f"[{phase_label}][EntryDoorFlow][3-摇杆微调] 门未定位且dist={dist:.2f}>0；"
+                "保持人物方向不变，只操作摇杆向入门点微调，"
+                "刷新画面后从YOLO开始重新定位门"
             )
             return self._micro_adjust_near_entry_point(
                 w,
@@ -3000,9 +3054,10 @@ class HouseSearchManager:
             )
 
         w.frame_log(
-            f"[{phase_label}] 已到入门点坐标0但YOLO与SAM3仍未定位到门，"
-            f"短后拉后做最后一次门定位：dura={self.ENTRY_DOOR_MISSING_BACKOFF_DURA}，"
-            f"wait={self.ENTRY_DOOR_MISSING_BACKOFF_WAIT}"
+            f"[{phase_label}][EntryDoorFlow][4-零距离后拉] dist=0且YOLO/SAM3仍无门；"
+            f"仅操作摇杆后拉，x=0，y={self.ENTRY_DOOR_MISSING_BACKOFF_Y_BIAS}，"
+            f"dura={self.ENTRY_DOOR_MISSING_BACKOFF_DURA}，"
+            f"wait={self.ENTRY_DOOR_MISSING_BACKOFF_WAIT}，人物方向不变"
         )
         w.tap_single(
             '摇杆',
@@ -3017,6 +3072,11 @@ class HouseSearchManager:
             if refreshed_loc is not None
             else 0.0
         )
+        w.frame_log(
+            f"[{phase_label}][EntryDoorFlow][4-零距离后拉] 后拉完成并刷新画面："
+            f"location={refreshed_loc}，dist={refreshed_dist:.2f}；"
+            "下一步=再执行一次YOLO+SAM3定位门"
+        )
         final_result = self._try_entry_door_yolo_then_sam3(
             w,
             target_loc,
@@ -3025,6 +3085,11 @@ class HouseSearchManager:
             fail_if_missing=False,
         )
         if final_result == "missing":
+            w.frame_log(
+                f"[{phase_label}][EntryDoorFlow][5-建筑侧向纠偏] 后拉复查仍无门，"
+                f"启动最多{self.ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS}次"
+                "SAM3 building左右判定→摇杆横移→YOLO+SAM3复查"
+            )
             final_result = self._recover_missing_entry_door_by_building(
                 w,
                 target_loc,
@@ -3042,10 +3107,15 @@ class HouseSearchManager:
         phase_label='Nav',
     ) -> str:
         for attempt in range(1, self.ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS + 1):
+            w.frame_log(
+                f"[{phase_label}][EntryDoorFlow][5-建筑侧向纠偏] "
+                f"第{attempt}/{self.ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS}轮："
+                "先用SAM3分割正前building"
+            )
             side = self._find_entry_building_side_with_sam3(w, phase_label)
             if side is None:
                 w.frame_log(
-                    f"[{phase_label}] 建筑侧向纠偏 {attempt}/"
+                    f"[{phase_label}][EntryDoorFlow][5-建筑侧向纠偏] {attempt}/"
                     f"{self.ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS}: "
                     "SAM3未给出可靠左右方向，刷新后重试"
                 )
@@ -3058,10 +3128,12 @@ class HouseSearchManager:
                 else -self.ENTRY_NEAR_LATERAL_CORRECT_X_BIAS
             )
             w.frame_log(
-                f"[{phase_label}] 建筑侧向纠偏 {attempt}/"
+                f"[{phase_label}][EntryDoorFlow][5-建筑侧向纠偏] {attempt}/"
                 f"{self.ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS}: "
                 f"建筑大部分在{'右' if side == 'right' else '左'}边，"
-                f"仅滑动摇杆 x={x_bias}"
+                f"仅滑动摇杆 x={x_bias}，y=0，"
+                f"dura={self.ENTRY_NEAR_LATERAL_CORRECT_DURA}，"
+                f"wait={self.ENTRY_NEAR_LATERAL_CORRECT_WAIT}，人物方向不变"
             )
             w.tap_single(
                 '摇杆',
@@ -3071,6 +3143,10 @@ class HouseSearchManager:
                 wait=self.ENTRY_NEAR_LATERAL_CORRECT_WAIT,
             )
             self._refresh_frame_and_handle_jump(w, handle_jump=False)
+            w.frame_log(
+                f"[{phase_label}][EntryDoorFlow][5-建筑侧向纠偏] "
+                f"第{attempt}轮横移完成并刷新画面，现在重新执行YOLO+SAM3定位门"
+            )
             result = self._try_entry_door_yolo_then_sam3(
                 w,
                 target_loc,
@@ -3079,8 +3155,17 @@ class HouseSearchManager:
                 fail_if_missing=False,
             )
             if result != "missing":
+                w.frame_log(
+                    f"[{phase_label}][EntryDoorFlow][5-建筑侧向纠偏] "
+                    f"第{attempt}轮复查结束，result={result}，停止建筑纠偏循环"
+                )
                 return result
 
+        w.frame_log(
+            f"[{phase_label}][EntryDoorFlow][5-建筑侧向纠偏] "
+            f"已用完{self.ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS}次尝试，仍未定位门，"
+            "判定当前入门点失败"
+        )
         self._mark_current_entry_failed(
             f"后拉及{self.ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS}次建筑侧向纠偏后"
             "YOLO与SAM3仍未定位到门"
@@ -3145,6 +3230,18 @@ class HouseSearchManager:
         )
         self._refresh_frame_and_handle_jump(w, handle_jump=False)
         next_loc = self._get_current_location(w)
+        next_dist = (
+            get_distance(next_loc, target_loc)
+            if next_loc is not None
+            else None
+        )
+        w.frame_log(
+            f"[{phase_label}][EntryDoorFlow][3-摇杆微调] "
+            f"第{self.entry_near_micro_adjust_attempts}次微调完成并刷新画面："
+            f"before={refreshed_loc}，after={next_loc}，"
+            f"new_dist={f'{next_dist:.2f}' if next_dist is not None else '未知'}；"
+            "下一帧从YOLO开始重新定位门"
+        )
         if next_loc is not None and next_loc == refreshed_loc:
             self.entry_near_micro_blocked_attempts = (
                 int(getattr(self, "entry_near_micro_blocked_attempts", 0) or 0) + 1

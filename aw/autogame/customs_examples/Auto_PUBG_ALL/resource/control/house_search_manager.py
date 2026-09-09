@@ -309,6 +309,7 @@ class HouseSearchManager:
         self.entry_near_micro_adjust_attempts = 0
         self.entry_near_micro_blocked_attempts = 0
         self.entry_direction_aligned_key = None
+        self.entry_first_person_key = None
         self.entry_door_last_area_ratio = None
         self._entry_door_force_strict_align_once = False
         self._jump_forward_guard = False
@@ -355,8 +356,17 @@ class HouseSearchManager:
 
     def _mark_current_entry_failed(self, reason: str):
         entry_loc = self._entry_location_tuple(self.active_entry) if self.active_entry else None
-        if getattr(self, "_frame_worker", None) is not None:
-            self._frame_worker.frame_log(
+        worker = getattr(self, "_frame_worker", None)
+        if getattr(self, "entry_first_person_key", None) is not None and worker is not None:
+            worker.frame_log(
+                "[EntryDoorFlow][View] 当前入门点在匹配前失败，"
+                "恢复第三人称后再导航到其他入门点"
+            )
+            worker.click('人称')
+            worker.refresh_frame()
+        self.entry_first_person_key = None
+        if worker is not None:
+            worker.frame_log(
                 f'[EntryPoint] {reason}，临时舍弃当前房屋唯一入门点 '
                 f'house={self.current_house_id}, entry={entry_loc}；本轮跳过该房'
             )
@@ -417,6 +427,7 @@ class HouseSearchManager:
         self.entry_near_micro_adjust_attempts = 0
         self.entry_near_micro_blocked_attempts = 0
         self.entry_direction_aligned_key = None
+        self.entry_first_person_key = None
         self._jump_forward_guard = False
         self._jump_forward_wait_until_hidden = False
         self._nanda_preflight_passed = False
@@ -2620,6 +2631,9 @@ class HouseSearchManager:
                 reason,
             ),
             door_aligned=True,
+            first_person_match_view=(
+                self.entry_first_person_key == self._active_entry_view_key()
+            ),
         )
 
     def _refresh_nanda_search_context(
@@ -2704,6 +2718,9 @@ class HouseSearchManager:
                 f"策略管线异常: {exc}",
                 phase="pipeline",
             )
+        finally:
+            if context.first_person_match_view:
+                self.entry_first_person_key = None
         if not hasattr(result, 'status'):
             return self._fallback_nanda_failure(
                 w,
@@ -2997,6 +3014,27 @@ class HouseSearchManager:
         self.history_locations = []
         return True
 
+    def _active_entry_view_key(self):
+        return self.current_house_id, self._entry_location_tuple(self.active_entry)
+
+    def _ensure_first_person_at_near_entry(self, w: 'FrameWorker', phase_label='Nav'):
+        entry_key = self._active_entry_view_key()
+        if self.entry_first_person_key == entry_key:
+            w.frame_log(
+                f"[{phase_label}][EntryDoorFlow][1-第一人称] "
+                "当前入门点已切换第一人称，保持不变"
+            )
+            return
+
+        w.frame_log(
+            f"[{phase_label}][EntryDoorFlow][1-第一人称] "
+            f"首次进入 <= {self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:g} 米，"
+            "点击人称切换第一人称；保持到房型匹配结束"
+        )
+        w.click('人称')
+        self.entry_first_person_key = entry_key
+        self._refresh_frame_and_handle_jump(w, handle_jump=False)
+
     def _handle_near_entry_point(self, w: 'FrameWorker', current_loc, target_loc, dist: float, phase_label='Nav') -> str:
         self.stop_auto_forward(w)
         w.frame_log(
@@ -3005,6 +3043,7 @@ class HouseSearchManager:
             f"<= {self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:g}；已停止自动前进，"
             "下一步=对齐入门方向"
         )
+        self._ensure_first_person_at_near_entry(w, phase_label)
 
         if not self._align_entry_direction_at_near_point(w, phase_label):
             w.frame_log(

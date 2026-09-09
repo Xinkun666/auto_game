@@ -180,6 +180,8 @@ class HouseSearchManager:
     ENTRY_DOOR_SAM3_GROUP = "sam3"
     ENTRY_DOOR_SAM3_INFO_NAME = "sam3"
     ENTRY_DOOR_SAM3_PROMPT = "door frame"
+    ENTRY_BUILDING_SAM3_PROMPT = "building"
+    ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS = 3
     ENTRY_NEAR_WALL_SIDE_ESCAPE_X_BIAS = 120
     ENTRY_NEAR_WALL_SIDE_ESCAPE_DURA = 160
     ENTRY_NEAR_WALL_SIDE_ESCAPE_WAIT = 320
@@ -1535,8 +1537,8 @@ class HouseSearchManager:
                 return [x1, y1, x2, y2]
         return None
 
-    def _configure_entry_door_sam3_prompt(self, w):
-        """Temporarily reuse the configured SAM3 area for door-frame detection."""
+    def _configure_entry_door_sam3_prompt(self, w, prompt=None):
+        """Temporarily reuse the configured SAM3 area with another prompt."""
         resolver = getattr(w, "stage_resolver", None)
         stage_info = getattr(resolver, "stage_info", None)
         stage_name = str(getattr(w, "current_stage", None) or "").strip()
@@ -1563,7 +1565,7 @@ class HouseSearchManager:
                 continue
             had_seg_name = "seg_name" in target_area
             original_seg_name = target_area.get("seg_name")
-            target_area["seg_name"] = self.ENTRY_DOOR_SAM3_PROMPT
+            target_area["seg_name"] = prompt or self.ENTRY_DOOR_SAM3_PROMPT
             return target_area, had_seg_name, original_seg_name
         return None
 
@@ -1617,6 +1619,101 @@ class HouseSearchManager:
                         w.frame_log(f"[{phase_label}] SAM3门分割后恢复感知分组失败: {original_group}")
                 except Exception as exc:
                     w.frame_log(f"[{phase_label}] SAM3门分割后恢复感知分组异常: {exc}")
+
+    @classmethod
+    def _sam3_building_side_from_info(cls, sam3_info, frame_size):
+        if not isinstance(sam3_info, dict) or sam3_info.get("found") is not True:
+            return None
+        prompt = sam3_info.get("prompt")
+        if isinstance(prompt, str) and prompt.strip().casefold() != cls.ENTRY_BUILDING_SAM3_PROMPT:
+            return None
+
+        frame_width, frame_height = frame_size
+        middle = int(frame_width) // 2
+        left_area = right_area = 0.0
+        for visual in sam3_info.get("__visualizations__") or ():
+            if not isinstance(visual, dict) or visual.get("type") != "sam3_mask":
+                continue
+            offset_x = offset_y = 0.0
+            crop = visual.get("source_crop_xyxy")
+            if (
+                str(visual.get("coord") or "local") != "frame"
+                and isinstance(crop, (list, tuple))
+                and len(crop) >= 2
+            ):
+                offset_x, offset_y = float(crop[0]), float(crop[1])
+
+            polygons = []
+            for contour in visual.get("contours") or ():
+                try:
+                    points = np.asarray(
+                        [[float(point[0]) + offset_x, float(point[1]) + offset_y] for point in contour],
+                        dtype=np.int32,
+                    )
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if len(points) >= 3:
+                    polygons.append(points)
+            if polygons:
+                mask = np.zeros((int(frame_height), int(frame_width)), dtype=np.uint8)
+                cv2.fillPoly(mask, polygons, 1)
+                left_area += float(np.count_nonzero(mask[:, :middle]))
+                right_area += float(np.count_nonzero(mask[:, middle:]))
+                continue
+
+            bbox = visual.get("bbox_xyxy")
+            if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+                continue
+            try:
+                x1, y1, x2, y2 = (float(value) for value in bbox[:4])
+                x1 += offset_x
+                x2 += offset_x
+                y1 += offset_y
+                y2 += offset_y
+            except (TypeError, ValueError):
+                continue
+            height = max(0.0, y2 - y1)
+            left_area += max(0.0, min(x2, middle) - max(x1, 0.0)) * height
+            right_area += max(0.0, min(x2, float(frame_width)) - max(x1, middle)) * height
+
+        if left_area == right_area:
+            return None
+        return "right" if right_area > left_area else "left"
+
+    def _find_entry_building_side_with_sam3(self, w: 'FrameWorker', phase_label='Nav'):
+        frame_size = self._get_visual_frame_size(w)
+        change_group = getattr(w, "change_group", None)
+        if frame_size is None or not callable(change_group):
+            return None
+
+        original_group = str(getattr(w, "current_group", None) or "默认")
+        switched = False
+        prompt_restore = self._configure_entry_door_sam3_prompt(
+            w,
+            self.ENTRY_BUILDING_SAM3_PROMPT,
+        )
+        try:
+            if change_group(self.ENTRY_DOOR_SAM3_GROUP) is not True:
+                return None
+            switched = True
+            side = self._sam3_building_side_from_info(
+                w.get_info(self.ENTRY_DOOR_SAM3_INFO_NAME),
+                frame_size,
+            )
+            w.frame_log(
+                f"[{phase_label}] SAM3建筑分割左右占比结果: {side or '无法判定'}"
+            )
+            return side
+        except Exception as exc:
+            w.frame_log(f"[{phase_label}] SAM3建筑分割异常: {exc}")
+            return None
+        finally:
+            self._restore_entry_door_sam3_prompt(prompt_restore)
+            if switched:
+                try:
+                    change_group(original_group)
+                except Exception as exc:
+                    w.frame_log(f"[{phase_label}] SAM3建筑分割后恢复感知分组异常: {exc}")
 
     def _adjust_to_sam3_door_once(self, w: 'FrameWorker', door, phase_label='Nav'):
         offset_real, door_area_ratio, _ = self._get_visible_door_center_offset(w, door)
@@ -2755,7 +2852,6 @@ class HouseSearchManager:
         dist: float,
         phase_label='Nav',
         fail_if_missing: bool = True,
-        center_sam3_door: bool = True,
     ) -> str:
         door = self.find_largest_door(w)
         if door is None:
@@ -2770,23 +2866,9 @@ class HouseSearchManager:
                     return "failed"
                 return "missing"
 
-            if center_sam3_door:
-                sam3_state, adjusted_door = self._adjust_to_sam3_door_once(
-                    w,
-                    door,
-                    phase_label,
-                )
-                if sam3_state == "failed":
-                    self._mark_current_entry_failed("SAM3已返回门但无法计算门中心")
-                    return "failed"
-                if sam3_state == "adjusting":
-                    return "adjusting"
-                door = adjusted_door
-            else:
-                w.frame_log(
-                    f"[{phase_label}] 后拉复查阶段SAM3已定位门，仅记录检测结果；"
-                    "不做左右/视角微调。"
-                )
+            w.frame_log(
+                f"[{phase_label}] SAM3已定位门，直接交给门校准模块"
+            )
 
         w.frame_log(
             f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
@@ -2940,11 +3022,70 @@ class HouseSearchManager:
             target_loc,
             refreshed_dist,
             phase_label,
-            fail_if_missing=True,
-            center_sam3_door=False,
+            fail_if_missing=False,
         )
+        if final_result == "missing":
+            final_result = self._recover_missing_entry_door_by_building(
+                w,
+                target_loc,
+                refreshed_dist,
+                phase_label,
+            )
         self._reset_entry_near_micro_adjust()
         return final_result
+
+    def _recover_missing_entry_door_by_building(
+        self,
+        w: 'FrameWorker',
+        target_loc,
+        dist: float,
+        phase_label='Nav',
+    ) -> str:
+        for attempt in range(1, self.ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS + 1):
+            side = self._find_entry_building_side_with_sam3(w, phase_label)
+            if side is None:
+                w.frame_log(
+                    f"[{phase_label}] 建筑侧向纠偏 {attempt}/"
+                    f"{self.ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS}: "
+                    "SAM3未给出可靠左右方向，刷新后重试"
+                )
+                self._refresh_frame_and_handle_jump(w, handle_jump=False)
+                continue
+
+            x_bias = (
+                self.ENTRY_NEAR_LATERAL_CORRECT_X_BIAS
+                if side == "right"
+                else -self.ENTRY_NEAR_LATERAL_CORRECT_X_BIAS
+            )
+            w.frame_log(
+                f"[{phase_label}] 建筑侧向纠偏 {attempt}/"
+                f"{self.ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS}: "
+                f"建筑大部分在{'右' if side == 'right' else '左'}边，"
+                f"仅滑动摇杆 x={x_bias}"
+            )
+            w.tap_single(
+                '摇杆',
+                x_bias=x_bias,
+                y_bias=0,
+                dura=self.ENTRY_NEAR_LATERAL_CORRECT_DURA,
+                wait=self.ENTRY_NEAR_LATERAL_CORRECT_WAIT,
+            )
+            self._refresh_frame_and_handle_jump(w, handle_jump=False)
+            result = self._try_entry_door_yolo_then_sam3(
+                w,
+                target_loc,
+                dist,
+                phase_label,
+                fail_if_missing=False,
+            )
+            if result != "missing":
+                return result
+
+        self._mark_current_entry_failed(
+            f"后拉及{self.ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS}次建筑侧向纠偏后"
+            "YOLO与SAM3仍未定位到门"
+        )
+        return "failed"
 
     def _micro_adjust_near_entry_point(self, w: 'FrameWorker', current_loc, target_loc, dist: float, phase_label='Nav') -> str:
         try:
@@ -3147,20 +3288,9 @@ class HouseSearchManager:
         # --- 分段摇杆逼近 ---
         elif self.status == "PRECISE_NAV":
             w.frame_log('[Action] 精准推进入门点')
-            nav_scene_result = self._handle_nav_near_entry_scene_if_needed(w, "Nav精推段", "导航中")
-            if nav_scene_result == "indoor":
-                self._complete_current_house_search(w, "导航中贴门墙后进入房屋")
-                return
-            if nav_scene_result is not None:
-                return
-
-            if self._jump_forward_if_visible_near_house(w, "Nav精推段靠近房子"):
-                return
-
             if dist <= self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
                 near_result = self._handle_near_entry_point(w, current_loc, target_loc, dist, "Nav")
                 if near_result == "adjusting":
-                    self.handle_jump_logic(w)
                     return
 
                 w.frame_log(f"[Nav] 当前距离入门点 {target_loc} 为 {dist:.2f}，近门处理结果={near_result}")
@@ -3178,6 +3308,16 @@ class HouseSearchManager:
                     return
                 self._reset_entry_near_micro_adjust()
                 self.status = "SCANNING"
+                return
+
+            nav_scene_result = self._handle_nav_near_entry_scene_if_needed(w, "Nav精推段", "导航中")
+            if nav_scene_result == "indoor":
+                self._complete_current_house_search(w, "导航中贴门墙后进入房屋")
+                return
+            if nav_scene_result is not None:
+                return
+
+            if self._jump_forward_if_visible_near_house(w, "Nav精推段靠近房子"):
                 return
 
             self._reset_entry_near_micro_adjust()
@@ -5456,21 +5596,6 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         if self.status == "PRECISE_NAV":
             w.frame_log('[Action] 精准推进入门点')
-            nav_scene_result = self._handle_nav_near_entry_scene_if_needed(
-                w,
-                "Nav精推段",
-                "R城导航中",
-                current_loc=current_loc,
-                target_loc=target_loc,
-            )
-            if nav_scene_result == "indoor":
-                w.frame_log('[Action] 完成当前房搜房')
-                self._complete_current_house_search(w, "R城导航中贴门墙后进入房屋")
-                return
-            if nav_scene_result is not None:
-                w.frame_log('[Action] 处理贴墙贴门干扰')
-                return
-
             if dist <= self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
                 w.frame_log('[Action] 执行入门点近距建模流程')
                 near_result = self._handle_near_entry_point(
@@ -5484,6 +5609,21 @@ class HouseSceneSearchManager(HouseSearchManager):
                 if near_result in {"failed", "aborted"}:
                     self.status = "IDLE"
                     return
+                return
+
+            nav_scene_result = self._handle_nav_near_entry_scene_if_needed(
+                w,
+                "Nav精推段",
+                "R城导航中",
+                current_loc=current_loc,
+                target_loc=target_loc,
+            )
+            if nav_scene_result == "indoor":
+                w.frame_log('[Action] 完成当前房搜房')
+                self._complete_current_house_search(w, "R城导航中贴门墙后进入房屋")
+                return
+            if nav_scene_result is not None:
+                w.frame_log('[Action] 处理贴墙贴门干扰')
                 return
 
             self.stop_auto_forward(w)

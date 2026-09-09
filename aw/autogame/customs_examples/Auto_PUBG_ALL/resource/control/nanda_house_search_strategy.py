@@ -427,7 +427,15 @@ class NandaHouseSearchStrategy:
                     )
                 return pose_result
 
+        switched_to_first_person = False
         try:
+            context.worker.frame_log(
+                "[NandaSearch][View] 门已对准，即将开始房型匹配；"
+                "点击人称切换到第一人称"
+            )
+            context.worker.click("人称")
+            switched_to_first_person = True
+            context.worker.refresh_frame()
             match_aligned_entry = getattr(self.matcher, "match_aligned_entry", None)
             if context.door_aligned and callable(match_aligned_entry):
                 match = match_aligned_entry(context)
@@ -466,6 +474,14 @@ class NandaHouseSearchStrategy:
                 f"房型匹配异常: {exc}",
                 metadata={"phase": "match", "exception": type(exc).__name__},
             )
+        finally:
+            if switched_to_first_person:
+                context.worker.frame_log(
+                    "[NandaSearch][View] 房型匹配已结束，回放开始前"
+                    "点击人称恢复第三人称"
+                )
+                context.worker.click("人称")
+                context.worker.refresh_frame()
 
         if match is None:
             if context.should_abort():

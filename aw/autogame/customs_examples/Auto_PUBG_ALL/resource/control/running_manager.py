@@ -440,9 +440,8 @@ class RunningManager:
     GARAGE_TO_ROADSIDE_FORWARD_WAIT = 5000
     # 历史保留字段，表示默认入库朝向
     CAR_FACE_DIRECTION = 265
-    # 跑图/开车统一通过“人称”按钮切换视角。
+    # 落地、跑图和开车统一保持第三人称。
     VIEW_SWITCH_BUTTON = "人称"
-    VIEW_MODE_FIRST = "first"
     VIEW_MODE_THIRD = "third"
     # 入库失败后依次尝试的朝向序列
     PRECISE_FACE_DIRECTIONS = [265, 270, 275, 280, 285, 290]
@@ -969,9 +968,6 @@ class RunningManager:
             self.reset(finding_car=False)
             self.last_vehicle_entry_source = entry_source
             w.change_stage("开车阶段")
-            return
-
-        if self._ensure_first_person_view(w, location, direction):
             return
 
         if self._is_in_water(w):
@@ -3147,11 +3143,6 @@ class RunningManager:
         self.roadside_car_peak_area_ratio = None
         self.roadside_car_last_forward_motion = None
         self._discard_current_road_target()
-        self._switch_view_mode(
-            w,
-            self.VIEW_MODE_FIRST,
-            "道路巡游发现车辆，切换第一人称以便视觉对车",
-        )
 
     def _process_roadside_car_pursuit(
         self,
@@ -3609,12 +3600,7 @@ class RunningManager:
     def _ensure_precise_view(self, w: "FrameWorker"):
         if self.precise_view_ready:
             return
-        w.frame_log("[Running] 到达上车点，切换第一人称以便视觉对车")
-        self._switch_view_mode(
-            w,
-            self.VIEW_MODE_FIRST,
-            "到达上车点，切换第一人称以便视觉对车",
-        )
+        w.frame_log("[Running] 到达上车点，保持第三人称进行视觉对车")
         self.precise_view_ready = True
 
     def _restore_vehicle_view(self, w: "FrameWorker"):
@@ -3627,7 +3613,7 @@ class RunningManager:
         self.precise_view_ready = False
 
     def set_view_mode(self, mode: str):
-        if mode in (self.VIEW_MODE_FIRST, self.VIEW_MODE_THIRD):
+        if mode == self.VIEW_MODE_THIRD:
             self.current_view_mode = mode
 
     def _switch_view_mode(
@@ -3645,16 +3631,6 @@ class RunningManager:
         time.sleep(0.2)
         w.refresh_frame()
         return True
-
-    def _ensure_first_person_view(
-        self,
-        w: "FrameWorker",
-        location: Tuple[int, int],
-        direction: Optional[float],
-    ) -> bool:
-        if self.current_view_mode == self.VIEW_MODE_FIRST:
-            return False
-        return self._switch_view_mode(w, self.VIEW_MODE_FIRST, "当前处于跑图阶段，切换第一人称")
 
     def _ensure_third_person_view(
         self,

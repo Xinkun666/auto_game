@@ -477,7 +477,7 @@ def recover_bad_landing_to_r_city(w: "FrameWorker", target, reason: str):
         reason=reason,
         arrival_distance=searching_house_manager.r_city_near_distance,
     )
-    running_manager.set_view_mode(RunningManager.VIEW_MODE_FIRST)
+    running_manager.set_view_mode(RunningManager.VIEW_MODE_THIRD)
     searching_view_synced = True
     searching_to_running_notified = True
     w.change_stage("跑图阶段")
@@ -506,7 +506,7 @@ def route_to_r_city_search_start(
         reason=reason,
         arrival_distance=arrival_distance,
     )
-    running_manager.set_view_mode(RunningManager.VIEW_MODE_FIRST)
+    running_manager.set_view_mode(RunningManager.VIEW_MODE_THIRD)
     searching_view_synced = True
     searching_to_running_notified = True
     w.change_stage("跑图阶段")
@@ -538,7 +538,7 @@ def route_to_r_city_entry_point(
         approach_target=approach_location,
         target_resolver=searching_house_manager.get_live_r_city_entry_for_route,
     )
-    running_manager.set_view_mode(RunningManager.VIEW_MODE_FIRST)
+    running_manager.set_view_mode(RunningManager.VIEW_MODE_THIRD)
     searching_view_synced = True
     searching_to_running_notified = True
     w.change_stage("跑图阶段")
@@ -1127,10 +1127,10 @@ def on_stage(w: "FrameWorker"):
     if w.current_stage == "跑图阶段":
         if searching_view_synced:
             w.frame_log(
-                "恢复第一人称视角",
+                "跑图阶段继续保持第三人称视角",
                 log_type=FrameLogType.LOGIC,
             )
-            running_manager.set_view_mode(RunningManager.VIEW_MODE_FIRST)
+            running_manager.set_view_mode(RunningManager.VIEW_MODE_THIRD)
             searching_view_synced = False
 
         handle_sp_start(w)

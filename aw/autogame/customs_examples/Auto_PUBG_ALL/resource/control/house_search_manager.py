@@ -600,10 +600,9 @@ class HouseSearchManager:
         self.landing_location_confirmed = True
         w.frame_log(
             f"[Searching] 落地坐标已由 {required_points} 个连续坐标点确认稳定，"
-            f"取最后坐标 {second_loc} 选择搜房片区"
+            f"取最后坐标 {second_loc} 选择搜房片区；"
+            "保持默认第三人称，不切换视角"
         )
-        w.frame_log('[Action] 点击人称并进入搜房判断')
-        w.click('人称')
         self.first_view = True
         return second_loc
 

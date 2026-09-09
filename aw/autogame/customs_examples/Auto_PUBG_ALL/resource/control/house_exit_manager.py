@@ -12,13 +12,12 @@ if TYPE_CHECKING:
 
 
 class HouseExitManager:
-    HOUSE_INDOOR = 0
-    HOUSE_OUTDOOR = 1
-    HOUSE_ROOFTOP = 2
-    HOUSE_NEAR_DOOR = 3
-    HOUSE_NEAR_WALL = 4
-    HOUSE_EXIT_SCENES = {HOUSE_OUTDOOR, HOUSE_ROOFTOP}
-    HOUSE_ACTIVE_EXIT_SCENES = {HOUSE_INDOOR, HOUSE_NEAR_DOOR, HOUSE_NEAR_WALL}
+    HOUSE_INDOOR = "indoor"
+    HOUSE_OUTDOOR = "outdoor"
+    HOUSE_NEAR_WALL = "nearwall"
+    HOUSE_NEAR_HOUSE = "nearhouse"
+    HOUSE_EXIT_SCENES = {HOUSE_OUTDOOR}
+    HOUSE_ACTIVE_EXIT_SCENES = {HOUSE_INDOOR, HOUSE_NEAR_WALL, HOUSE_NEAR_HOUSE}
 
     DOOR_CLASS_IDS = {0, 4}
     WINDOW_CLASS_IDS = {2}
@@ -143,16 +142,11 @@ class HouseExitManager:
 
         return None
 
-    def _get_house_scene(self, w: "FrameWorker") -> Optional[int]:
+    def _get_house_scene(self, w: "FrameWorker") -> Optional[str]:
         value = w.get_info("house_scene")
         if isinstance(value, (list, tuple)) and len(value) == 1:
             value = value[0]
-        if isinstance(value, bool):
-            return None
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
+        return value if isinstance(value, str) else None
 
     def _get_forward_scene(self, w: "FrameWorker") -> List[List[float]]:
         scene = w.get_info("forward_scene")
@@ -450,7 +444,7 @@ class HouseExitManager:
                     return True
                 if self._get_house_scene(w) in self.HOUSE_EXIT_SCENES:
                     return True
-                if self._get_house_scene(w) in {self.HOUSE_NEAR_DOOR, self.HOUSE_NEAR_WALL}:
+                if self._get_house_scene(w) in {self.HOUSE_NEAR_WALL, self.HOUSE_NEAR_HOUSE}:
                     w.frame_log("[HouseExit] 前推后仍处于贴门/贴墙状态，转入左右斜向顶出")
                     return self._door_diagonal_sweep(w)
                 continue
@@ -572,7 +566,7 @@ class HouseExitManager:
                 return True
             if self._get_house_scene(w) in self.HOUSE_EXIT_SCENES:
                 return self._verify_exit_success(w)
-            if self._get_house_scene(w) in {self.HOUSE_NEAR_DOOR, self.HOUSE_NEAR_WALL}:
+            if self._get_house_scene(w) in {self.HOUSE_NEAR_WALL, self.HOUSE_NEAR_HOUSE}:
                 w.frame_log("[HouseExit] 靠窗前推后贴墙，转入左右横移重新定位窗户")
                 recovered, window = self._recover_window_with_lateral_sweep(w)
                 if recovered:
@@ -727,7 +721,7 @@ class HouseExitManager:
     def _handle_no_exit_after_scan(self, w: "FrameWorker") -> bool:
         scene = self._get_house_scene(w)
         w.frame_log(f"[HouseExit] 一轮视角扫描结束仍未发现门窗，scene={scene}")
-        if scene in {self.HOUSE_NEAR_DOOR, self.HOUSE_NEAR_WALL}:
+        if scene in {self.HOUSE_NEAR_WALL, self.HOUSE_NEAR_HOUSE}:
             if self._recover_from_wall_and_turn_back(w):
                 return True
         return self._escape_dead_end_randomly(w)

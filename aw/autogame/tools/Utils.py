@@ -260,18 +260,16 @@ def _semantic_text(value, default=""):
 def _infer_house_scene_state(value):
     text = str(value or "").strip().strip("[]()")
     mapping = {
-        "0": "在屋内",
-        "1": "在屋外",
-        "2": "在楼顶/房顶",
-        "3": "靠近门",
-        "4": "靠近墙/贴墙/疑似撞墙",
+        "indoor": "在屋内",
+        "outdoor": "在屋外",
+        "nearwall": "靠近墙/贴墙/疑似撞墙",
+        "nearhouse": "靠近房屋",
         "HOUSE_INDOOR": "在屋内",
         "HOUSE_OUTDOOR": "在屋外",
-        "HOUSE_ROOFTOP": "在楼顶/房顶",
-        "HOUSE_NEAR_DOOR": "靠近门",
         "HOUSE_NEAR_WALL": "靠近墙/贴墙/疑似撞墙",
-        "NEAR_DOOR": "靠近门",
+        "HOUSE_NEAR_HOUSE": "靠近房屋",
         "NEAR_WALL": "靠近墙/贴墙/疑似撞墙",
+        "NEAR_HOUSE": "靠近房屋",
     }
     return mapping.get(text)
 

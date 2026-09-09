@@ -1533,16 +1533,11 @@ class DrivingManager:
             circle_angle = self.latest_circle_angle
         return "None" if circle_angle is None else f"{circle_angle:.1f}"
 
-    def _get_house_scene(self, w: "FrameWorker") -> Optional[int]:
+    def _get_house_scene(self, w: "FrameWorker") -> Optional[str]:
         value = w.get_info("house_scene")
         if isinstance(value, (list, tuple)) and len(value) == 1:
             value = value[0]
-        if isinstance(value, bool):
-            return None
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
+        return value if isinstance(value, str) else None
 
     def _try_house_exit_when_indoor(self, w: "FrameWorker", reason: str) -> bool:
         if self._get_house_scene(w) != HouseExitManager.HOUSE_INDOOR:

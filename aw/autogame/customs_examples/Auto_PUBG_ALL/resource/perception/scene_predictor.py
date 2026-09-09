@@ -6,11 +6,11 @@ from PIL import Image
 
 
 class _EfficientNetClassifier(nn.Module):
-    def __init__(self, num_classes=5):
+    def __init__(self, num_classes=4, weights=None):
         super().__init__()
         # 场景分类器随后会完整加载本地 scene_best_model.pth，禁止 torchvision
         # 在启动自动化时联网下载 ImageNet 预训练权重。
-        self.backbone = models.efficientnet_b0(weights=None)
+        self.backbone = models.efficientnet_b0(weights=weights)
         feature_dim = self.backbone.classifier[1].in_features
         self.backbone.classifier = nn.Identity()
 
@@ -30,15 +30,17 @@ class _EfficientNetClassifier(nn.Module):
 
 
 class GameSceneClassifier:
-    CLASS_LABELS = {0: 'indoor', 1: 'outdoor', 2: 'rooftop', 3: 'near_door', 4: 'near_wall'}
+    CLASS_LABELS = {0: 'indoor', 1: 'outdoor', 2: 'nearwall', 3: 'nearhouse'}
 
     def __init__(self, checkpoint_path, device=None):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
-        self.class_to_idx = {'indoor': 0, 'outdoor': 1, 'rooftop': 2, 'near_door': 3, 'near_wall': 4}
+        self.class_to_idx = {name: idx for idx, name in self.CLASS_LABELS.items()}
         self.idx_to_class = {v: k for k, v in self.class_to_idx.items()}
 
-        self.model = _EfficientNetClassifier(num_classes=5)
+        self.model = _EfficientNetClassifier(num_classes=len(self.CLASS_LABELS))
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        if checkpoint.get('class_to_idx') not in (None, self.class_to_idx):
+            raise ValueError(f"模型类别不匹配：{checkpoint['class_to_idx']} != {self.class_to_idx}")
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.model.to(self.device)
         self.model.eval()
@@ -63,16 +65,14 @@ class GameSceneClassifier:
 
         with torch.no_grad():
             outputs = self.model(image_tensor)
-            probs = torch.softmax(outputs, dim=1)
-            confidence, predicted = torch.max(probs, 1)
+            predicted = outputs.argmax(dim=1)
 
-        predicted_idx = predicted.item()
-
-        return predicted_idx
+        return self.idx_to_class[predicted.item()]
 
 
 if __name__ == '__main__':
-    classifier = GameSceneClassifier('checkpoints/best_model.pth')
+    import sys
 
-    result = classifier.predict('path/to/image.jpg')
-    print(f"Class: {result} ({GameSceneClassifier.CLASS_LABELS[result]})")
+    result = GameSceneClassifier(sys.argv[1]).predict(sys.argv[2])
+    assert result in GameSceneClassifier.CLASS_LABELS.values()
+    print(result)

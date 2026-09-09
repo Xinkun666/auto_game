@@ -2488,16 +2488,11 @@ class RunningManager:
 
         return None
 
-    def _get_house_scene(self, w: "FrameWorker") -> Optional[int]:
+    def _get_house_scene(self, w: "FrameWorker") -> Optional[str]:
         value = w.get_info("house_scene")
         if isinstance(value, (list, tuple)) and len(value) == 1:
             value = value[0]
-        if isinstance(value, bool):
-            return None
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
+        return value if isinstance(value, str) else None
 
     def _is_close_entry_forced_route(self, location: Tuple[int, int]) -> bool:
         if (

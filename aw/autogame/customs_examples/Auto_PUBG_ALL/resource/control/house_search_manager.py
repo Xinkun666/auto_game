@@ -68,11 +68,10 @@ class HouseSearchManager:
     JUMP_FORWARD_Y_BIAS = -180
     JUMP_FORWARD_DURA = 160
     JUMP_FORWARD_WAIT = 320
-    HOUSE_INDOOR = 0
-    HOUSE_OUTDOOR = 1
-    HOUSE_ROOFTOP = 2
-    HOUSE_NEAR_DOOR = 3
-    HOUSE_NEAR_WALL = 4
+    HOUSE_INDOOR = "indoor"
+    HOUSE_OUTDOOR = "outdoor"
+    HOUSE_NEAR_WALL = "nearwall"
+    HOUSE_NEAR_HOUSE = "nearhouse"
     HOUSE_CLASS_IDS = {8}
     WINDOW_CLASS_IDS = {2}
 
@@ -93,7 +92,7 @@ class HouseSearchManager:
     HOUSE_PROACTIVE_BYPASS_FORWARD_Y_BIAS = -260
     HOUSE_PROACTIVE_BYPASS_FORWARD_DURA = 320
     HOUSE_PROACTIVE_BYPASS_FORWARD_WAIT = 700
-    HOUSE_PROACTIVE_BYPASS_NEAR_ENTRY_SCENES = {3, 4}
+    HOUSE_PROACTIVE_BYPASS_NEAR_ENTRY_SCENES = {HOUSE_NEAR_WALL, HOUSE_NEAR_HOUSE}
     HOUSE_SEARCH_BYPASS_MIN_ENTRY_DISTANCE = 10.0
     HOUSE_OBSTACLE_TURN_STEP_DEGREES = 30
     HOUSE_OBSTACLE_MAX_TURN_DEGREES = 90
@@ -429,14 +428,12 @@ class HouseSearchManager:
 
 
     def _house_scene_label(self, scene) -> str:
-        labels = {
-            self.HOUSE_INDOOR: "indoor",
-            self.HOUSE_OUTDOOR: "outdoor",
-            self.HOUSE_ROOFTOP: "rooftop",
-            self.HOUSE_NEAR_DOOR: "near_door",
-            self.HOUSE_NEAR_WALL: "near_wall",
-        }
-        return labels.get(scene, f"unknown({scene})")
+        return scene if scene in {
+            self.HOUSE_INDOOR,
+            self.HOUSE_OUTDOOR,
+            self.HOUSE_NEAR_WALL,
+            self.HOUSE_NEAR_HOUSE,
+        } else f"unknown({scene})"
 
 
 
@@ -694,12 +691,7 @@ class HouseSearchManager:
         value = w.get_info('house_scene')
         if isinstance(value, (list, tuple)) and len(value) == 1:
             value = value[0]
-        if isinstance(value, bool):
-            return None
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
+        return value if isinstance(value, str) else None
 
     def _refresh_frame_and_handle_jump(
         self,
@@ -856,7 +848,7 @@ class HouseSearchManager:
         result = self._exit_house(w)
         if result is None:
             self._refresh_frame_and_handle_jump(w)
-            result = self._get_house_scene(w) != 0
+            result = self._get_house_scene(w) != self.HOUSE_INDOOR
 
         self.indoor_stuck_frames = 0
         self.current_house_id = None
@@ -872,7 +864,7 @@ class HouseSearchManager:
         return False
 
     def _handle_indoor_during_entry_route(self, w: 'FrameWorker', current_loc, reason: str) -> bool:
-        if self._get_house_scene(w) != 0:
+        if self._get_house_scene(w) != self.HOUSE_INDOOR:
             return False
 
         current_stage = getattr(w, "current_stage", None)
@@ -929,7 +921,7 @@ class HouseSearchManager:
         self._clear_house_search_timer()
         self._refresh_frame_and_handle_jump(w)
 
-        if self._get_house_scene(w) != 0:
+        if self._get_house_scene(w) != self.HOUSE_INDOOR:
             w.frame_log("[搜房] 超时时已不在屋内，视为出房完成")
             return True
 
@@ -944,7 +936,7 @@ class HouseSearchManager:
 
         w.frame_log("[搜房] HouseExitManager 未出房，回退到原出房策略")
         self._exit_house(w)
-        return not self._should_abort(w) and self._get_house_scene(w) != 0
+        return not self._should_abort(w) and self._get_house_scene(w) != self.HOUSE_INDOOR
 
     def _get_frame_size(self):
         inf_w, inf_h = get_wh()
@@ -1310,7 +1302,7 @@ class HouseSearchManager:
                 wait=self.VISIBLE_DOOR_FORWARD_WAIT,
             )
             self._refresh_frame_and_handle_jump(w)
-            if self._get_house_scene(w) == 0:
+            if self._get_house_scene(w) == self.HOUSE_INDOOR:
                 indoor_loc = self._safe_get_frame_location(w) or current_loc
                 return self._handle_indoor_during_entry_route(
                     w,
@@ -1929,7 +1921,7 @@ class HouseSearchManager:
 
         self._mark_entry_door_strict_align_after_backoff()
         scene_after_backoff = self._get_house_scene(w)
-        if scene_after_backoff in {self.HOUSE_OUTDOOR, self.HOUSE_ROOFTOP, self.HOUSE_NEAR_DOOR}:
+        if scene_after_backoff in {self.HOUSE_OUTDOOR, self.HOUSE_NEAR_HOUSE}:
             w.frame_log(
                 f"[{phase_label}] near_wall 后拉后已到屋外/门口 house_scene={scene_after_backoff}，"
                 f"向左轻推抵消刚才右移后继续进门"
@@ -1960,7 +1952,7 @@ class HouseSearchManager:
         target_loc=None,
     ):
         scene = self._get_house_scene(w)
-        if scene not in {self.HOUSE_NEAR_WALL, self.HOUSE_NEAR_DOOR}:
+        if scene not in {self.HOUSE_NEAR_WALL, self.HOUSE_NEAR_HOUSE}:
             return None
 
         if scene == self.HOUSE_NEAR_WALL:
@@ -1974,7 +1966,7 @@ class HouseSearchManager:
             if recovery_result is not None:
                 return recovery_result
 
-        scene_label = "near_wall" if scene == self.HOUSE_NEAR_WALL else "near_door"
+        scene_label = "nearwall" if scene == self.HOUSE_NEAR_WALL else "nearhouse"
         w.frame_log(
                     f"[{phase_label}] {reason}：{scene_label}，后拉脱离门墙后继续当前入口"
                 )
@@ -2621,7 +2613,7 @@ class HouseSearchManager:
             should_abort=lambda: self._should_abort(w),
             should_abort_replay=lambda: self._should_abort_nanda_replay(w),
             is_outside=lambda: self._get_house_scene(w)
-            in {self.HOUSE_OUTDOOR, self.HOUSE_ROOFTOP},
+            in {self.HOUSE_OUTDOOR},
             refresh_context=lambda reason='': self._refresh_nanda_search_context(
                 w,
                 target_loc,
@@ -2775,7 +2767,6 @@ class HouseSearchManager:
 
             if scene not in {
                 self.HOUSE_OUTDOOR,
-                self.HOUSE_ROOFTOP,
                 self.HOUSE_NEAR_WALL,
             }:
                 return self._fallback_nanda_failure(
@@ -3276,14 +3267,14 @@ class HouseSearchManager:
 
         # --- 屋内卡死兜底检测 ---
         house_scene = self._get_house_scene(w)
-        if house_scene == 0 and self._is_entry_approach_status():
+        if house_scene == self.HOUSE_INDOOR and self._is_entry_approach_status():
             if self._handle_indoor_during_entry_route(w, current_loc, "前往进门点途中检测到 indoor"):
                 return
 
-        if house_scene == 0 and not self._is_entry_approach_status():
+        if house_scene == self.HOUSE_INDOOR and not self._is_entry_approach_status():
             self.indoor_stuck_frames += 1
             if self.indoor_stuck_frames > 30:
-                w.frame_log('[Searching] 检测到长时间困在屋内 (house_scene=0)，启动兜底出房策略')
+                w.frame_log('[Searching] 检测到长时间困在屋内 (house_scene=indoor)，启动兜底出房策略')
                 self.house_exit_manager.reset()
                 for _ in range(20):
                     if self._should_abort(w):
@@ -3704,8 +3695,8 @@ class HouseSearchManager:
         return self._last_valid_location()
 
     def _push_until_entered_house(self, w: 'FrameWorker') -> bool:
-        if self._get_house_scene(w) == 0:
-            w.frame_log("[Entry] 已检测到 house_scene=0，确认已进屋")
+        if self._get_house_scene(w) == self.HOUSE_INDOOR:
+            w.frame_log("[Entry] 已检测到 house_scene=indoor，确认已进屋")
             return True
 
         ideal_angle = self.active_entry['direction'] if self.active_entry else None
@@ -3722,7 +3713,7 @@ class HouseSearchManager:
             else:
                 x_bias = self.ENTRY_CONFIRM_SIDE_X_BIAS if attempt % 2 == 1 else -self.ENTRY_CONFIRM_SIDE_X_BIAS
                 side = "右前方" if x_bias > 0 else "左前方"
-                w.frame_log(f"[Entry] house_scene 仍非 0，向{side}推进确认入屋 {attempt + 1}/{self.ENTRY_CONFIRM_MAX_ATTEMPTS}")
+                w.frame_log(f"[Entry] house_scene 仍非 indoor，向{side}推进确认入屋 {attempt + 1}/{self.ENTRY_CONFIRM_MAX_ATTEMPTS}")
 
             w.tap_single(
                 '摇杆',
@@ -3735,8 +3726,8 @@ class HouseSearchManager:
             time.sleep(0.2)
 
             house_scene = self._get_house_scene(w)
-            if house_scene == 0:
-                w.frame_log("[Entry] 推进后 house_scene=0，确认已进屋")
+            if house_scene == self.HOUSE_INDOOR:
+                w.frame_log("[Entry] 推进后 house_scene=indoor，确认已进屋")
                 return True
 
         return False
@@ -3907,7 +3898,7 @@ class HouseSearchManager:
         )
         w.tap_single('摇杆', y_bias=backoff_y_bias, dura=backoff_dura, wait=backoff_wait)
         self._refresh_frame_and_handle_jump(w)
-        if self._get_house_scene(w) == 0:
+        if self._get_house_scene(w) == self.HOUSE_INDOOR:
             loc_after_back = self._get_current_location(w) or current_loc
             return self._handle_indoor_during_entry_route(
                 w,
@@ -4059,9 +4050,9 @@ class HouseSearchManager:
         def _safe_get_loc():
             return self._get_current_location(w)
 
-        if self._get_house_scene(w) == 0:
+        if self._get_house_scene(w) == self.HOUSE_INDOOR:
             house_scene_after_backoff = self._backoff_and_recheck_house_scene(w)
-            if house_scene_after_backoff != 0:
+            if house_scene_after_backoff != self.HOUSE_INDOOR:
                 w.frame_log("[Unstuck] 后退复核后已不判定为室内，按室外卡住绕障")
                 return self._recover_route_stuck_by_side_forward(
                     w,
@@ -4515,7 +4506,7 @@ class HouseSearchManager:
             w.frame_log(f"[出口] 发现入口房间关闭门，推开离开！")
             if self._enter_closed_door(w, rel_ang, rush_time=1.2):
                 self._refresh_frame_and_handle_jump(w)
-                if self._get_house_scene(w) != 0:
+                if self._get_house_scene(w) != self.HOUSE_INDOOR:
                     trusted_exit_route = True
                     return
 
@@ -4540,7 +4531,7 @@ class HouseSearchManager:
                 w.frame_log(f"[出口] 发现子房间关闭门，推开离开！")
                 if self._enter_closed_door(w, c_rel_ang, rush_time=1.2):
                     self._refresh_frame_and_handle_jump(w)
-                    if self._get_house_scene(w) != 0:
+                    if self._get_house_scene(w) != self.HOUSE_INDOOR:
                         trusted_exit_route = True
                         return
 
@@ -4569,7 +4560,7 @@ class HouseSearchManager:
 
         # 策略4：所有策略均失败，启动HouseExitManager兜底
         self._refresh_frame_and_handle_jump(w)
-        if self._get_house_scene(w) == 0:
+        if self._get_house_scene(w) == self.HOUSE_INDOOR:
             w.frame_log("[出口] 策略3后仍在屋内，启动HouseExitManager兜底出房")
             self.house_exit_manager.reset()
             for _ in range(30):
@@ -4583,7 +4574,7 @@ class HouseSearchManager:
                 w.tap_single('摇杆', y_bias=-500, dura=300)
                 self._refresh_frame_and_handle_jump(w)
                 time.sleep(0.3)
-            if self._get_house_scene(w) != 0:
+            if self._get_house_scene(w) != self.HOUSE_INDOOR:
                 self.house_exit_manager.reset()
                 self.house_exit_manager.process(w)
         elif not trusted_exit_route:
@@ -5110,19 +5101,18 @@ class HouseSearchManager:
 
 
 class HouseSceneSearchManager(HouseSearchManager):
-    """基于 house_scene 五分类的 R 城南大排他搜房逻辑。
+    """基于 house_scene 四分类的 R 城南大排他搜房逻辑。
 
     选点、导航和出房兜底仍复用基类能力；入户搜房只允许南大管线接管。
     未接管时室外跳过入门点，已在室内时直接出房，不回退旋转搜房。
     """
 
-    HOUSE_INDOOR = 0
-    HOUSE_OUTDOOR = 1
-    HOUSE_ROOFTOP = 2
-    HOUSE_NEAR_DOOR = 3
-    HOUSE_NEAR_WALL = 4
-    HOUSE_NEAR_ENTRY_SCENES = {HOUSE_NEAR_DOOR, HOUSE_NEAR_WALL}
-    HOUSE_EXIT_SCENES = {HOUSE_OUTDOOR, HOUSE_ROOFTOP}
+    HOUSE_INDOOR = "indoor"
+    HOUSE_OUTDOOR = "outdoor"
+    HOUSE_NEAR_WALL = "nearwall"
+    HOUSE_NEAR_HOUSE = "nearhouse"
+    HOUSE_NEAR_ENTRY_SCENES = {HOUSE_NEAR_WALL, HOUSE_NEAR_HOUSE}
+    HOUSE_EXIT_SCENES = {HOUSE_OUTDOOR}
 
     R_CITY_FALLBACK_CENTER = (1036, 745)
     R_CITY_FALLBACK_LANDING_TARGET = (990, 757)
@@ -5416,7 +5406,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                 target_loc=target_loc,
             )
 
-        scene_label = "near_wall" if scene == self.HOUSE_NEAR_WALL else "near_door"
+        scene_label = "nearwall" if scene == self.HOUSE_NEAR_WALL else "nearhouse"
         w.frame_log(
             f"[RCitySearch] 当前入门点检测到{scene_label}，后拉后先确认门框，"
             "不再直接回到同一入口精推"
@@ -7359,7 +7349,7 @@ class HouseSceneSearchManager(HouseSearchManager):
                     scene = self._get_house_scene(w)
                 if scene is not None and scene not in {
                     self.HOUSE_INDOOR,
-                    self.HOUSE_NEAR_DOOR,
+                    self.HOUSE_NEAR_HOUSE,
                     self.HOUSE_NEAR_WALL,
                 }:
                     w.frame_log(f"[SceneRotate] 当前 house_scene={scene}，停止室内旋转搜房")

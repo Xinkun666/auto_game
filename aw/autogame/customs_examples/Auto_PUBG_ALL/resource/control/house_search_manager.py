@@ -5546,15 +5546,19 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         if getattr(self, "house_region_selection_pending", False):
             if not self._select_house_region_after_landing(w, current_loc):
-                self._finish_r_city_searching(
-                    w,
-                    "落地后没有找到包含可用房点的搜房片区",
+                w.frame_log(
+                    "[Searching] 当前未找到包含可用房点的片区，"
+                    "保持搜房阶段；满10分钟后由计时器统一结束本局"
                 )
                 return
 
         nearest_entry_loc = self._maintain_nearest_r_city_entry_reference(current_loc)
         if nearest_entry_loc is None:
-            self._finish_r_city_searching(w, "R城没有可用入门点，无法维持最近入门点参考")
+            self._advance_house_region_or_finish(
+                w,
+                current_loc,
+                f"片区 {self.house_region or '未选择'} 已无可用入门点",
+            )
             return
 
         if self.status == self.STATUS_ROUTE_TO_R_CITY:
@@ -5566,7 +5570,11 @@ class HouseSceneSearchManager(HouseSearchManager):
             self._select_next_r_city_house(current_loc, current_direction)
 
             if not self.current_house_id:
-                self._finish_r_city_searching(w, "R城房点已全部处理或均不可进入")
+                self._advance_house_region_or_finish(
+                    w,
+                    current_loc,
+                    f"片区 {self.house_region or '未选择'} 房点已全部处理或均不可进入",
+                )
                 return
 
             target_loc, target_dist = self._active_entry_point_distance(current_loc)
@@ -5849,24 +5857,59 @@ class HouseSceneSearchManager(HouseSearchManager):
             self.house_region = region_name
             self.r_city_center = region_center
             self.r_city_targets = self._build_r_city_targets()
-            if not self.r_city_targets:
+            available_targets = [
+                target
+                for target in self.r_city_targets
+                if self._is_r_city_target_available(target)
+            ]
+            if not available_targets:
                 w.frame_log(
-                    f"[Searching] 跳过片区: region={region_name}, reason=没有可用房点"
+                    f"[Searching] 跳过片区: region={region_name}, "
+                    "reason=没有未处理的可用房点"
                 )
                 self.house_region = None
                 continue
 
             self.house_region_selection_pending = False
             w.frame_log(
-                f"[Searching] 落地后按片区点距离锁定搜房片区: "
+                f"[Searching] 按当前位置与片区点距离锁定搜房片区: "
                 f"region={region_name}, center={region_center}, "
                 f"直线距离={get_distance(loc, region_center):.2f}, "
-                f"targets={len(self.r_city_targets)}；"
+                f"available_targets={len(available_targets)}；"
                 "下一步从该片区选择最近入门点并复用原通行判断"
             )
             return True
 
         self.house_region = None
+        self.r_city_targets = []
+        return False
+
+    def _advance_house_region_or_finish(self, w: "FrameWorker", current_loc, reason: str) -> bool:
+        if self._can_finish_searching(w):
+            self._finish_r_city_searching(w, f"{reason}，搜房已满10分钟")
+            return False
+
+        previous_region = self.house_region
+        self.current_house_id = None
+        self.current_r_city_target = None
+        self.active_entry = None
+        self.status = "IDLE"
+        self.history_locations = []
+        self.r_city_nearest_entry_location = None
+        self.r_city_nearest_entry_id = None
+        if self._select_house_region_after_landing(w, current_loc):
+            w.frame_log(
+                f"[Searching] {reason}，搜房未满10分钟；"
+                f"从片区 {previous_region} 切换到附近片区 {self.house_region} 继续搜房"
+            )
+            return True
+
+        w.frame_log(
+            f"[Searching] {reason}，搜房未满10分钟，"
+            "但所有片区当前都无可用房点；保持搜房阶段并继续复查"
+        )
+        self.house_region = None
+        self.house_region_selection_pending = True
         self.r_city_targets = []
         return False
 
@@ -6408,8 +6451,11 @@ class HouseSceneSearchManager(HouseSearchManager):
             if not self.r_city_route_target and nearest:
                 self.r_city_route_target = nearest
             if not self.r_city_route_target:
-                w.frame_log('[Action] 结束搜房')
-                self._finish_r_city_searching(w, "无法选择R城接入点")
+                self._advance_house_region_or_finish(
+                    w,
+                    current_loc,
+                    "当前片区无法选择可用接入点",
+                )
                 return
             if not self.r_city_route_path:
                 self.r_city_route_path = self._plan_path_safe(
@@ -6493,8 +6539,11 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         self._select_next_r_city_house(loc, current_direction)
         if not self.current_house_id:
-            w.frame_log('[Action] 结束搜房')
-            self._finish_r_city_searching(w, "R城路线交接后无可用入门点")
+            self._advance_house_region_or_finish(
+                w,
+                loc,
+                "路线交接后当前片区无可用入门点",
+            )
             return True
 
         target_loc = self.active_entry["location"]

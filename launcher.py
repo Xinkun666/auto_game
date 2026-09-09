@@ -2479,14 +2479,14 @@ def format_history_frame_columns(frame_record: dict) -> dict[str, str]:
         next_action=next_action,
     )
     control_lines = _format_history_control(control_frame_logs, semantic_actions)
+    frame_log_lines = [*logic_lines, "", *control_lines] if control_lines else logic_lines
 
     basic_lines[2] = f"阶段: {semantic_stage.get('stage') or stage_name}"
     basic_lines[3] = f"分组: {semantic_stage.get('group') or stage_group}"
     return {
         "basic": "\n".join(basic_lines),
         "info": "\n".join(info_lines),
-        "frame_log": "\n".join(logic_lines),
-        "control": "\n".join(control_lines),
+        "frame_log": "\n".join(frame_log_lines),
     }
 
 
@@ -4571,8 +4571,7 @@ class LauncherWindow(QWidget):
             ("运行摘要", "history_summary_edit", "选择历史输出后显示运行摘要...", 2),
             ("基础信息", "history_frame_basic_edit", "帧、序号、阶段和分组", 2),
             ("info 信息", "history_frame_info_edit", "本帧 info 信息", 3),
-            ("帧日志信息", "history_frame_log_edit", "本帧日志信息", 4),
-            ("控制信息", "history_frame_control_edit", "本帧控制信息", 3),
+            ("帧日志信息", "history_frame_log_edit", "本帧日志和控制信息", 3),
         )
         for index, (title, attr_name, placeholder, stretch) in enumerate(columns):
             column_group = QGroupBox(title)
@@ -4588,6 +4587,7 @@ class LauncherWindow(QWidget):
             column_layout.addWidget(edit)
             frame_splitter.addWidget(column_group)
             frame_splitter.setStretchFactor(index, stretch)
+        frame_splitter.setSizes([200, 200, 300, 300])
         frame_layout.addWidget(frame_splitter, 1)
 
         output_group = QGroupBox("launcher 输出")
@@ -5725,7 +5725,6 @@ class LauncherWindow(QWidget):
             )
             self.history_frame_basic_edit.clear()
             self.history_frame_info_edit.clear()
-            self.history_frame_control_edit.clear()
             self.history_frame_screen_size = (None, None)
             self.history_frame_coordinate_label.hide()
             return
@@ -5742,7 +5741,6 @@ class LauncherWindow(QWidget):
         self.history_frame_basic_edit.setPlainText(columns["basic"])
         self.history_frame_info_edit.setPlainText(columns["info"])
         self.history_frame_log_edit.setPlainText(columns["frame_log"])
-        self.history_frame_control_edit.setPlainText(columns["control"])
         payload = frame_record.get("payload") if isinstance(frame_record, dict) else {}
         screen_width, screen_height = _size_from_mapping(
             payload.get("screen") if isinstance(payload, dict) else None

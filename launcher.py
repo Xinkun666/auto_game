@@ -1,6 +1,7 @@
 import argparse
 import ast
 import base64
+import codecs
 import importlib
 import json
 import logging
@@ -688,6 +689,8 @@ def build_launcher_plan_env_values(plan: Optional[dict]) -> dict[str, str]:
         min(100, int(plan.get("marathon_end_battery_percent") or 0)),
     )
     env_values = {
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
         "AUTOGAME_TEST_PROFILE": test_profile,
         "AUTOGAME_SCREEN_MODE": screen_mode,
         "AUTOGAME_SINGLE_CASE_LOOPS": str(max(1, case_loop_count)),
@@ -3036,6 +3039,7 @@ class LauncherWindow(QWidget):
         self.current_run_output_start = 0
         self.output_log_spool_path: Optional[Path] = None
         self.process_output_buffer = ""
+        self.process_output_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self.current_run_stream_started = False
         self.current_run_stream_disconnected = False
         self.current_run_stream_disconnect_startup = False
@@ -7041,6 +7045,7 @@ class LauncherWindow(QWidget):
         self.current_run_start_timestamp = time.strftime("%Y%m%d%H%M%S")
         self.current_run_archive_dir = None
         self.process_output_buffer = ""
+        self.process_output_decoder.reset()
         archive_dir = self._resolve_current_run_archive_dir()
         if archive_dir is not None:
             try:
@@ -8523,7 +8528,9 @@ class LauncherWindow(QWidget):
     def _read_process_output(self):
         if self.process is None:
             return
-        raw_text = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        raw_text = self.process_output_decoder.decode(
+            bytes(self.process.readAllStandardOutput())
+        )
         text = self._take_complete_process_output(raw_text)
         if not text:
             return
@@ -8548,7 +8555,10 @@ class LauncherWindow(QWidget):
         return combined[:newline_index + 1]
 
     def _flush_process_output_buffer(self):
-        text = self._take_complete_process_output("", flush=True)
+        text = self._take_complete_process_output(
+            self.process_output_decoder.decode(b"", final=True),
+            flush=True,
+        )
         if not text:
             return
         self._append_output(text)

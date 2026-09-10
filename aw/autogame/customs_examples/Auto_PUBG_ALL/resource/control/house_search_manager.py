@@ -142,7 +142,7 @@ class HouseSearchManager:
     ROUTE_STUCK_HOUSE_BYPASS_FORWARD_DURA = 650
     ROUTE_STUCK_HOUSE_BYPASS_FORWARD_WAIT = 1000
     HOUSE_SEARCH_TIMEOUT_SECONDS = 60
-    ENTRY_NEAR_MICRO_ADJUST_DISTANCE = 2.5
+    ENTRY_NEAR_MICRO_ADJUST_DISTANCE = 1.0
     ENTRY_NEAR_MICRO_DONE_DISTANCE = 0.0
     ENTRY_NEAR_MICRO_RADIUS = 200
     ENTRY_NEAR_MICRO_DURA = 200
@@ -1130,13 +1130,16 @@ class HouseSearchManager:
             score += (overlap_w * overlap_h) / lane_area
         return score
 
-    def _choose_house_bypass_side(self, w: 'FrameWorker'):
+    def _choose_house_bypass_side(self, w: 'FrameWorker', log_prefix="[Unstuck]"):
         scene = self._get_forward_scene(w)
         frame_w, frame_h = self._get_frame_size()
         left_score = self._house_side_block_score(scene, frame_w * 0.16, frame_w * 0.46, frame_h)
         right_score = self._house_side_block_score(scene, frame_w * 0.54, frame_w * 0.84, frame_h)
         side = "right" if right_score <= left_score else "left"
-        w.frame_log(f"[Unstuck] 房体绕行空隙判断：left={left_score:.2f}, right={right_score:.2f}，选择{side}")
+        w.frame_log(
+            f"{log_prefix} 房体绕行空隙判断：left={left_score:.2f}, "
+            f"right={right_score:.2f}，选择{side}"
+        )
         return side
 
     def _bypass_front_house_block(self, w: 'FrameWorker', current_loc, safe_get_loc):
@@ -3891,16 +3894,22 @@ class HouseSearchManager:
         after_dist = get_distance(after_loc, target_loc) if after_loc is not None else None
         update_adaptive_forward_motion(mode, before_dist, before_dist, after_dist, y_bias, dura, wait)
 
-    def _choose_route_stuck_bypass_side_by_target_angle(self, w: 'FrameWorker', current_loc, target_loc):
+    def _choose_route_stuck_bypass_side_by_target_angle(
+        self,
+        w: 'FrameWorker',
+        current_loc,
+        target_loc,
+        log_prefix="[Unstuck]",
+    ):
         current_dir = w.get_info('direction')
         refreshed_loc = self._get_current_location(w) or current_loc
         target = check_location(target_loc)
         target_angle = calculate_angle(refreshed_loc, target) if refreshed_loc is not None and target is not None else None
 
         if current_dir is None or target_angle is None:
-            fallback_side = self._choose_house_bypass_side(w)
+            fallback_side = self._choose_house_bypass_side(w, log_prefix=log_prefix)
             w.frame_log(
-                f"[Unstuck] 缺少当前方向或目标坐标，无法按目的地角度选边，"
+                f"{log_prefix} 缺少当前方向或目标坐标，无法按目的地角度选边，"
                 f"回退使用房体空隙选择 side={fallback_side}"
             )
             return fallback_side, None, target_angle, current_dir
@@ -3909,18 +3918,18 @@ class HouseSearchManager:
             current_dir_float = float(current_dir)
             target_angle_float = float(target_angle)
         except (TypeError, ValueError):
-            fallback_side = self._choose_house_bypass_side(w)
+            fallback_side = self._choose_house_bypass_side(w, log_prefix=log_prefix)
             w.frame_log(
-                f"[Unstuck] 当前方向/目标角度无效，回退使用房体空隙选择 side={fallback_side}: "
+                f"{log_prefix} 当前方向/目标角度无效，回退使用房体空隙选择 side={fallback_side}: "
                 f"current_dir={current_dir}, target_angle={target_angle}"
             )
             return fallback_side, None, target_angle, current_dir
 
         relative = (target_angle_float - current_dir_float + 540) % 360 - 180
         if abs(relative) <= 5:
-            side = self._choose_house_bypass_side(w)
+            side = self._choose_house_bypass_side(w, log_prefix=log_prefix)
             w.frame_log(
-                f"[Unstuck] 目的地基本在正前方 relative={relative:.1f}°，"
+                f"{log_prefix} 目的地基本在正前方 relative={relative:.1f}°，"
                 f"按房体空隙选择 side={side}"
             )
             return side, relative, target_angle_float, current_dir_float
@@ -3928,7 +3937,7 @@ class HouseSearchManager:
         side = "right" if relative > 0 else "left"
         side_label = "右" if side == "right" else "左"
         w.frame_log(
-            f"[Unstuck] 结合目的地和当前方向选择绕房方向："
+            f"{log_prefix} 结合目的地和当前方向选择绕房方向："
             f"current_dir={current_dir_float:.1f}, target_angle={target_angle_float:.1f}, "
             f"relative={relative:.1f}°，目的地在{side_label}侧，选择 side={side}"
         )
@@ -5318,6 +5327,8 @@ class HouseSceneSearchManager(HouseSearchManager):
     ENTRY_SIDE_ADJUST_BASE_DURA = 100
     ENTRY_SIDE_ADJUST_MAX_DURA = 420
     ENTRY_SIDE_ADJUST_WAIT_PAD = 240
+    ENTRY_NEAR_HOUSE_CLEAR_FORWARD_DURA = 300
+    ENTRY_NEAR_HOUSE_CLEAR_FORWARD_WAIT = 500
     ENTRY_FORWARD_MAX_STEPS = 4
     ENTRY_FORWARD_STEP_Y_SCALE = 0.62
     ENTRY_FORWARD_STEP_MIN_DURA = 100
@@ -5862,6 +5873,14 @@ class HouseSceneSearchManager(HouseSearchManager):
         if self.status == "PRECISE_NAV":
             w.frame_log('[Action] 精准推进入门点')
             if dist <= self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
+                if getattr(self, "entry_near_house_bypass_side", None) is not None:
+                    w.frame_log(
+                        f"[RCityEntry][EntryApproach][NearHouse] dist={dist:.2f} "
+                        f"<= {self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:g}，"
+                        "已进入近门流程；清空绕房方位"
+                    )
+                    self.entry_near_house_bypass_key = None
+                    self.entry_near_house_bypass_side = None
                 w.frame_log('[Action] 执行入门点近距建模流程')
                 near_result = self._handle_near_entry_point(
                     w, current_loc, target_loc, dist, "RCityEntry"
@@ -5874,6 +5893,15 @@ class HouseSceneSearchManager(HouseSearchManager):
                 if near_result in {"failed", "aborted"}:
                     self.status = "IDLE"
                     return
+                return
+
+            if self._handle_entry_near_house_bypass(
+                w,
+                current_loc,
+                target_loc,
+                dist,
+                phase_label="Nav精推段",
+            ):
                 return
 
             nav_scene_result = self._handle_nav_near_entry_scene_if_needed(
@@ -6192,6 +6220,8 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_entry_large_backoff_count = 0
         self.r_city_side_probe_target = None
         self.r_city_side_probe_count = 0
+        self.entry_near_house_bypass_key = None
+        self.entry_near_house_bypass_side = None
         self.forbidden_escape_target = None
         self.forbidden_escape_region_anchor = None
         self.water_escape_side = None
@@ -7104,6 +7134,8 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.r_city_entry_large_backoff_count = 0
         self.r_city_side_probe_target = None
         self.r_city_side_probe_count = 0
+        self.entry_near_house_bypass_key = None
+        self.entry_near_house_bypass_side = None
 
     def _mark_current_r_city_target_failed(self, reason: str):
         if self.current_r_city_target:
@@ -7261,6 +7293,125 @@ class HouseSceneSearchManager(HouseSearchManager):
             )
         w.frame_log("[RCitySearch] 推进中卡住且仍在室外，执行室外绕障")
         return self.execute_unstuck_logic(w, current_loc)
+
+    def _handle_entry_near_house_bypass(
+        self,
+        w: "FrameWorker",
+        current_loc,
+        target_loc,
+        dist: float,
+        phase_label: str = "Nav精推段",
+    ) -> bool:
+        log_prefix = f"[{phase_label}][EntryApproach][NearHouse]"
+        entry_key = self._active_entry_view_key()
+        stored_key = getattr(self, "entry_near_house_bypass_key", None)
+        if stored_key != entry_key:
+            if getattr(self, "entry_near_house_bypass_side", None) is not None:
+                w.frame_log(
+                    f"{log_prefix} 入门点已变化：old={stored_key}，new={entry_key}；"
+                    "清空旧绕房方位"
+                )
+            self.entry_near_house_bypass_key = entry_key
+            self.entry_near_house_bypass_side = None
+
+        scene = self._get_house_scene(w)
+        side = getattr(self, "entry_near_house_bypass_side", None)
+        if scene == self.HOUSE_NEAR_HOUSE:
+            self.stop_auto_forward(w)
+            refreshed_loc = self._get_current_location(w) or current_loc
+            if side is None:
+                side, relative, target_angle, current_direction = (
+                    self._choose_route_stuck_bypass_side_by_target_angle(
+                        w,
+                        refreshed_loc,
+                        target_loc,
+                        log_prefix=log_prefix,
+                    )
+                )
+                self.entry_near_house_bypass_side = side
+                w.frame_log(
+                    f"{log_prefix} 计算并记录绕房方位：current={refreshed_loc}，"
+                    f"entry={target_loc}，direction={current_direction}，"
+                    f"target_angle={target_angle}，relative={relative}，side={side}"
+                )
+            else:
+                w.frame_log(
+                    f"{log_prefix} 仍为 nearhouse，复用之前计算的绕房方位："
+                    f"entry={target_loc}，dist={dist:.2f}，side={side}"
+                )
+
+            x_bias = (
+                self.ENTRY_SIDE_ADJUST_X_BIAS
+                if side == "right"
+                else -self.ENTRY_SIDE_ADJUST_X_BIAS
+            )
+            dura = self._entry_micro_dura(
+                dist,
+                self.ENTRY_SIDE_ADJUST_BASE_DURA,
+                self.ENTRY_SIDE_ADJUST_MAX_DURA,
+            )
+            wait = dura + self.ENTRY_SIDE_ADJUST_WAIT_PAD
+            w.frame_log(
+                f"{log_prefix} 按绕房方位执行{self._side_label(side)}移："
+                f"scene={scene}，x={x_bias}，y=0，dura={dura}，wait={wait}；"
+                "人物朝向不变"
+            )
+            w.tap_single(
+                "摇杆",
+                x_bias=x_bias,
+                y_bias=0,
+                dura=dura,
+                wait=wait,
+            )
+            self._refresh_frame_and_handle_jump(w, handle_jump=False)
+            after_loc = self._get_current_location(w)
+            after_dist = (
+                get_distance(after_loc, target_loc)
+                if after_loc is not None
+                else None
+            )
+            after_scene = self._get_house_scene(w)
+            w.frame_log(
+                f"{log_prefix} 左右移动完成并刷新：before={refreshed_loc}，"
+                f"after={after_loc}，dist={after_dist}，scene={after_scene}；"
+                "下一帧重新判断 d<=1 和 nearhouse"
+            )
+            self.history_locations = []
+            return True
+
+        if side is None:
+            return False
+
+        self.stop_auto_forward(w)
+        w.frame_log(
+            f"{log_prefix} 已脱离 nearhouse 且之前存在绕房方位 side={side}；"
+            f"先短前推 y={self.R_CITY_PRECISE_NAV_Y_BIAS}，"
+            f"dura={self.ENTRY_NEAR_HOUSE_CLEAR_FORWARD_DURA}，"
+            f"wait={self.ENTRY_NEAR_HOUSE_CLEAR_FORWARD_WAIT}"
+        )
+        w.tap_single(
+            "摇杆",
+            y_bias=self.R_CITY_PRECISE_NAV_Y_BIAS,
+            dura=self.ENTRY_NEAR_HOUSE_CLEAR_FORWARD_DURA,
+            wait=self.ENTRY_NEAR_HOUSE_CLEAR_FORWARD_WAIT,
+        )
+        self._refresh_frame_and_handle_jump(w, handle_jump=False)
+        after_loc = self._get_current_location(w)
+        after_dist = (
+            get_distance(after_loc, target_loc)
+            if after_loc is not None
+            else None
+        )
+        after_scene = self._get_house_scene(w)
+        self.entry_near_house_bypass_side = None
+        self.entry_near_house_bypass_key = None
+        self.history_locations = []
+        w.frame_log(
+            f"{log_prefix} 短前推完成：location={after_loc}，dist={after_dist}，"
+            f"scene={after_scene}；已清空绕房方位，"
+            "下一帧重新对准入门点并继续前进"
+        )
+        return True
 
     def _move_precisely_to_entry_point(
         self,

@@ -185,7 +185,7 @@ class HouseSearchManager:
     ENTRY_DOOR_SAM3_PROMPT = "door frame"
     ENTRY_BUILDING_SAM3_PROMPT = "building"
     ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS = 3
-    ENTRY_BUILDING_SIDE_RECOVERY_WAIT_STEP = 100
+    ENTRY_BUILDING_SIDE_RECOVERY_WAIT_STEP = 400
     ENTRY_NEAR_WALL_SIDE_ESCAPE_X_BIAS = 120
     ENTRY_NEAR_WALL_SIDE_ESCAPE_DURA = 160
     ENTRY_NEAR_WALL_SIDE_ESCAPE_WAIT = 320
@@ -363,14 +363,13 @@ class HouseSearchManager:
     def _mark_current_entry_failed(self, reason: str):
         entry_loc = self._entry_location_tuple(self.active_entry) if self.active_entry else None
         worker = getattr(self, "_frame_worker", None)
-        if getattr(self, "entry_first_person_key", None) is not None and worker is not None:
-            worker.frame_log(
-                "[EntryDoorFlow][View] 当前入门点在匹配前失败，"
-                "恢复第三人称后再导航到其他入门点"
+        if worker is not None:
+            self._restore_third_person_after_entry(
+                worker,
+                f"当前入门点失败：{reason}",
             )
-            worker.click('人称')
-            worker.refresh_frame()
-        self.entry_first_person_key = None
+        else:
+            self.entry_first_person_key = None
         self._entry_door_recovery = {}
         if worker is not None:
             worker.frame_log(
@@ -459,6 +458,7 @@ class HouseSearchManager:
     def process(self, w: 'FrameWorker'):
         self._frame_worker = w
         if self._should_abort(w):
+            self._restore_third_person_after_entry(w, "搜房流程中止")
             return
         if not self._validate_nanda_only_ready(w):
             return
@@ -668,6 +668,7 @@ class HouseSearchManager:
 
     def _continue_searching_until_timer(self, w: 'FrameWorker', reason: str):
         self.stop_auto_forward(w)
+        self._restore_third_person_after_entry(w, f"当前入门点结束：{reason}")
         if self._can_finish_searching(w):
             w.frame_log(f"[Searching] {reason}，搜房计时已满，切换到跑图阶段")
             self.searching_number = 0
@@ -862,6 +863,7 @@ class HouseSearchManager:
         if w.current_stage != '搜房阶段':
             return False
 
+        self._restore_third_person_after_entry(w, f"当前房屋搜索完成：{reason}")
         if self.current_house_id is not None:
             self.completed_houses.add(self.current_house_id)
         self.searching_number += 1
@@ -887,6 +889,8 @@ class HouseSearchManager:
             self._refresh_frame_and_handle_jump(w)
             result = self._get_house_scene(w) != self.HOUSE_INDOOR
 
+        if result:
+            self._restore_third_person_after_entry(w, f"当前入门点已出房：{reason}")
         self.indoor_stuck_frames = 0
         self.current_house_id = None
         self.active_entry = None
@@ -2628,6 +2632,11 @@ class HouseSearchManager:
             first_person_match_view=(
                 self.entry_first_person_key == self._active_entry_view_key()
             ),
+            on_third_person_restored=lambda: setattr(
+                self,
+                "entry_first_person_key",
+                None,
+            ),
         )
 
     def _refresh_nanda_search_context(
@@ -2707,19 +2716,29 @@ class HouseSearchManager:
         try:
             result = strategy.run(context)
         except Exception as exc:
+            self._restore_third_person_after_entry(
+                w,
+                f"南大搜房管线异常：{exc}",
+            )
             return self._fallback_nanda_failure(
                 w,
                 f"策略管线异常: {exc}",
                 phase="pipeline",
             )
-        finally:
-            if context.first_person_match_view:
-                self.entry_first_person_key = None
         if not hasattr(result, 'status'):
+            self._restore_third_person_after_entry(
+                w,
+                "南大搜房管线返回无效结果",
+            )
             return self._fallback_nanda_failure(
                 w,
                 f"策略返回值无效: {type(result).__name__}",
                 phase="pipeline",
+            )
+        if result.status != NandaSearchStatus.RETRY:
+            self._restore_third_person_after_entry(
+                w,
+                f"南大搜房管线结束：status={result.status.value}",
             )
         if result.status == NandaSearchStatus.RETRY:
             w.frame_log(f"[NandaSearch] 门前位姿尚未稳定：{result.message or '等待下一帧'}")
@@ -3015,6 +3034,20 @@ class HouseSearchManager:
     def _active_entry_view_key(self):
         return self.current_house_id, self._entry_location_tuple(self.active_entry)
 
+    def _restore_third_person_after_entry(self, w: 'FrameWorker', reason: str) -> bool:
+        entry_key = getattr(self, "entry_first_person_key", None)
+        if entry_key is None or w is None:
+            return False
+
+        w.frame_log(
+            f"[EntryDoorFlow][View] {reason}；当前入门点={entry_key}，"
+            "点击人称恢复第三人称，下一个入门点距离<=1时再切换第一人称"
+        )
+        w.click('人称')
+        self.entry_first_person_key = None
+        self._refresh_frame_and_handle_jump(w, handle_jump=False)
+        return True
+
     def _ensure_first_person_at_near_entry(self, w: 'FrameWorker', phase_label='Nav'):
         entry_key = self._active_entry_view_key()
         if self.entry_first_person_key == entry_key:
@@ -3023,6 +3056,12 @@ class HouseSearchManager:
                 "当前入门点已切换第一人称，保持不变"
             )
             return
+
+        if self.entry_first_person_key is not None:
+            self._restore_third_person_after_entry(
+                w,
+                "入门点已变更，先结束上一个入门点的第一人称状态",
+            )
 
         w.frame_log(
             f"[{phase_label}][EntryDoorFlow][1-第一人称] "
@@ -7137,6 +7176,12 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.entry_near_house_bypass_side = None
 
     def _mark_current_r_city_target_failed(self, reason: str):
+        worker = getattr(self, "_frame_worker", None)
+        if worker is not None:
+            self._restore_third_person_after_entry(
+                worker,
+                f"当前R城入门点失败：{reason}",
+            )
         if self.current_r_city_target:
             target_id = self.current_r_city_target["id"]
             self.r_city_failed_counts[target_id] = self.r_city_failed_counts.get(target_id, 0) + 1
@@ -7188,6 +7233,7 @@ class HouseSceneSearchManager(HouseSearchManager):
 
     def _finish_r_city_searching(self, w: "FrameWorker", reason: str):
         self.stop_auto_forward(w)
+        self._restore_third_person_after_entry(w, f"R城搜房结束：{reason}")
         w.frame_log(f"[RCitySearch] {reason}，切换到跑图阶段")
         self.current_house_id = None
         self.current_r_city_target = None
@@ -7234,6 +7280,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         if w.current_stage != "搜房阶段":
             return False
 
+        self._restore_third_person_after_entry(w, f"当前R城房屋搜索完成：{reason}")
         completed_house_id = self.current_house_id
         if completed_house_id is not None:
             self.completed_houses.add(str(completed_house_id))
@@ -7271,6 +7318,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.stop_auto_forward(w)
         w.frame_log("[SceneSearch] 意外进房，跳过旋转搜房，直接执行出房")
         if self._exit_house(w):
+            self._restore_third_person_after_entry(w, "当前入门点意外进房后已出房")
             self.indoor_stuck_frames = 0
             self.current_house_id = None
             self.current_r_city_target = None

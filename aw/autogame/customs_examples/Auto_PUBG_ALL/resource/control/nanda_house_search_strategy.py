@@ -80,6 +80,7 @@ class NandaSearchContext:
     # 原始匹配/回放链路，不能再由位姿准备器做第二次移动或转视角。
     door_aligned: bool = False
     first_person_match_view: bool = False
+    on_third_person_restored: Optional[Callable[[], None]] = None
 
 
 @dataclass(frozen=True)
@@ -474,6 +475,9 @@ class NandaHouseSearchStrategy:
                     "点击人称恢复第三人称"
                 )
                 context.worker.click("人称")
+                on_restored = getattr(context, "on_third_person_restored", None)
+                if callable(on_restored):
+                    on_restored()
                 context.worker.refresh_frame()
 
         if match is None:

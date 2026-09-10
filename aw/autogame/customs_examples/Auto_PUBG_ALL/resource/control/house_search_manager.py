@@ -185,6 +185,7 @@ class HouseSearchManager:
     ENTRY_DOOR_SAM3_PROMPT = "door frame"
     ENTRY_BUILDING_SAM3_PROMPT = "building"
     ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS = 3
+    ENTRY_BUILDING_SIDE_RECOVERY_WAIT_STEP = 100
     ENTRY_NEAR_WALL_SIDE_ESCAPE_X_BIAS = 120
     ENTRY_NEAR_WALL_SIDE_ESCAPE_DURA = 160
     ENTRY_NEAR_WALL_SIDE_ESCAPE_WAIT = 320
@@ -315,6 +316,7 @@ class HouseSearchManager:
         self.entry_direction_aligned_key = None
         self.entry_first_person_key = None
         self.entry_door_last_area_ratio = None
+        self._entry_door_recovery = {}
         self._entry_door_force_strict_align_once = False
         self._jump_forward_guard = False
         self._jump_forward_wait_until_hidden = False
@@ -369,6 +371,7 @@ class HouseSearchManager:
             worker.click('人称')
             worker.refresh_frame()
         self.entry_first_person_key = None
+        self._entry_door_recovery = {}
         if worker is not None:
             worker.frame_log(
                 f'[EntryPoint] {reason}，临时舍弃当前房屋唯一入门点 '
@@ -432,6 +435,7 @@ class HouseSearchManager:
         self.entry_near_micro_blocked_attempts = 0
         self.entry_direction_aligned_key = None
         self.entry_first_person_key = None
+        self._entry_door_recovery = {}
         self._jump_forward_guard = False
         self._jump_forward_wait_until_hidden = False
         self._nanda_preflight_passed = False
@@ -781,6 +785,25 @@ class HouseSearchManager:
     def _reset_entry_near_micro_adjust(self):
         self.entry_near_micro_adjust_attempts = 0
         self.entry_near_micro_blocked_attempts = 0
+
+    def _entry_door_recovery_state(self):
+        active_entry = getattr(self, "active_entry", None)
+        key = (
+            getattr(self, "current_house_id", None),
+            self._entry_location_tuple(active_entry) if active_entry else None,
+        )
+        state = getattr(self, "_entry_door_recovery", None)
+        if not isinstance(state, dict) or state.get("key") != key:
+            state = {
+                "key": key,
+                "door_seen": False,
+                "backoff_done": False,
+                "building_attempts": 0,
+                "last_side": None,
+                "last_wait": self.ENTRY_NEAR_LATERAL_CORRECT_WAIT,
+            }
+            self._entry_door_recovery = state
+        return state
 
     def _pause_unstuck_for_house_bypass(self, phase_label='NAV'):
         already_paused = self._is_house_bypass_unstuck_paused()
@@ -2879,6 +2902,8 @@ class HouseSearchManager:
                 f"door={door}，直接交给门校准模块"
             )
 
+        self._entry_door_recovery_state()["door_seen"] = True
+
         w.frame_log(
             f"[{phase_label}] 当前距离入门点 {target_loc} 为 {dist:.2f}，"
             f"方向已对齐且已定位门，先完成门对齐再进入房型匹配: door={door}"
@@ -3027,6 +3052,7 @@ class HouseSearchManager:
             "定位阶段不再调整人物方向；下一步=YOLO+SAM3定位门"
         )
 
+        recovery_state = self._entry_door_recovery_state()
         visible_door_result = self._try_entry_door_yolo_then_sam3(
             w,
             target_loc,
@@ -3039,7 +3065,26 @@ class HouseSearchManager:
             self._reset_entry_near_micro_adjust()
             return visible_door_result
 
-        if not lost_after_adjust and dist != self.ENTRY_NEAR_MICRO_DONE_DISTANCE:
+        if recovery_state["backoff_done"]:
+            w.frame_log(
+                f"[{phase_label}][EntryDoorFlow][5-建筑侧向纠偏] "
+                "当前入门点之前已经后拉，门仍未定位；不重复后拉，"
+                "继续SAM3 building左右纠偏"
+            )
+            result = self._recover_missing_entry_door_by_building(
+                w,
+                target_loc,
+                dist,
+                phase_label,
+            )
+            self._reset_entry_near_micro_adjust()
+            return result
+
+        if (
+            not recovery_state["door_seen"]
+            and not lost_after_adjust
+            and dist != self.ENTRY_NEAR_MICRO_DONE_DISTANCE
+        ):
             w.frame_log(
                 f"[{phase_label}][EntryDoorFlow][3-摇杆微调] 门未定位且dist={dist:.2f}>0；"
                 "保持人物方向不变，只操作摇杆向入门点微调，"
@@ -3066,6 +3111,7 @@ class HouseSearchManager:
             dura=self.ENTRY_DOOR_MISSING_BACKOFF_DURA,
             wait=self.ENTRY_DOOR_MISSING_BACKOFF_WAIT,
         )
+        recovery_state["backoff_done"] = True
         self._refresh_frame_and_handle_jump(w, handle_jump=False)
         refreshed_loc = self._get_current_location(w)
         refreshed_dist = (
@@ -3085,9 +3131,7 @@ class HouseSearchManager:
             phase_label,
             fail_if_missing=False,
         )
-        if final_result == "lost_after_adjust":
-            final_result = "adjusting"
-        if final_result == "missing":
+        if final_result in {"missing", "lost_after_adjust"}:
             w.frame_log(
                 f"[{phase_label}][EntryDoorFlow][5-建筑侧向纠偏] 后拉复查仍无门，"
                 f"启动最多{self.ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS}次"
@@ -3109,7 +3153,9 @@ class HouseSearchManager:
         dist: float,
         phase_label='Nav',
     ) -> str:
-        for attempt in range(1, self.ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS + 1):
+        recovery_state = self._entry_door_recovery_state()
+        while recovery_state["building_attempts"] < self.ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS:
+            attempt = recovery_state["building_attempts"] + 1
             w.frame_log(
                 f"[{phase_label}][EntryDoorFlow][5-建筑侧向纠偏] "
                 f"第{attempt}/{self.ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS}轮："
@@ -3117,13 +3163,23 @@ class HouseSearchManager:
             )
             side = self._find_entry_building_side_with_sam3(w, phase_label)
             if side is None:
-                w.frame_log(
-                    f"[{phase_label}][EntryDoorFlow][5-建筑侧向纠偏] {attempt}/"
-                    f"{self.ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS}: "
-                    "SAM3未给出可靠左右方向，刷新后重试"
-                )
-                self._refresh_frame_and_handle_jump(w, handle_jump=False)
-                continue
+                if recovery_state["building_attempts"] == 0:
+                    side = "left"
+                    move_wait = self.ENTRY_NEAR_LATERAL_CORRECT_WAIT
+                    reason = "SAM3未分割到房屋，首次调整默认左调"
+                else:
+                    side = "right" if recovery_state["last_side"] == "left" else "left"
+                    move_wait = (
+                        recovery_state["last_wait"]
+                        + self.ENTRY_BUILDING_SIDE_RECOVERY_WAIT_STEP
+                    )
+                    reason = (
+                        "SAM3未分割到房屋，改为与上一次相反方向，"
+                        f"wait+{self.ENTRY_BUILDING_SIDE_RECOVERY_WAIT_STEP}"
+                    )
+            else:
+                move_wait = self.ENTRY_NEAR_LATERAL_CORRECT_WAIT
+                reason = f"建筑大部分在{'右' if side == 'right' else '左'}边"
 
             x_bias = (
                 self.ENTRY_NEAR_LATERAL_CORRECT_X_BIAS
@@ -3133,18 +3189,21 @@ class HouseSearchManager:
             w.frame_log(
                 f"[{phase_label}][EntryDoorFlow][5-建筑侧向纠偏] {attempt}/"
                 f"{self.ENTRY_BUILDING_SIDE_RECOVERY_MAX_ATTEMPTS}: "
-                f"建筑大部分在{'右' if side == 'right' else '左'}边，"
+                f"{reason}，"
                 f"仅滑动摇杆 x={x_bias}，y=0，"
                 f"dura={self.ENTRY_NEAR_LATERAL_CORRECT_DURA}，"
-                f"wait={self.ENTRY_NEAR_LATERAL_CORRECT_WAIT}，人物方向不变"
+                f"wait={move_wait}，人物方向不变"
             )
             w.tap_single(
                 '摇杆',
                 x_bias=x_bias,
                 y_bias=0,
                 dura=self.ENTRY_NEAR_LATERAL_CORRECT_DURA,
-                wait=self.ENTRY_NEAR_LATERAL_CORRECT_WAIT,
+                wait=move_wait,
             )
+            recovery_state["building_attempts"] = attempt
+            recovery_state["last_side"] = side
+            recovery_state["last_wait"] = move_wait
             self._refresh_frame_and_handle_jump(w, handle_jump=False)
             w.frame_log(
                 f"[{phase_label}][EntryDoorFlow][5-建筑侧向纠偏] "
@@ -3157,7 +3216,7 @@ class HouseSearchManager:
                 phase_label,
                 fail_if_missing=False,
             )
-            if result != "missing":
+            if result not in {"missing", "lost_after_adjust"}:
                 w.frame_log(
                     f"[{phase_label}][EntryDoorFlow][5-建筑侧向纠偏] "
                     f"第{attempt}轮复查结束，result={result}，停止建筑纠偏循环"
@@ -4317,7 +4376,12 @@ class HouseSearchManager:
         if not doors: return None
         return max(doors, key=lambda x: (x[2] - x[0]) * (x[3] - x[1]))
 
-    def _refresh_door_after_view_adjust(self, w, phase_label="DoorAlign"):
+    def _refresh_door_after_view_adjust(
+        self,
+        w,
+        phase_label="DoorAlign",
+        use_sam3: bool = False,
+    ):
         w.frame_log(
             f"[{phase_label}] 视角/位置调整后等待最新帧再继续判断: "
             f"settle={self.ENTRY_DOOR_VIEW_ADJUST_REFRESH_SETTLE_SECONDS:.1f}s"
@@ -4325,7 +4389,11 @@ class HouseSearchManager:
         if self.ENTRY_DOOR_VIEW_ADJUST_REFRESH_SETTLE_SECONDS > 0:
             time.sleep(self.ENTRY_DOOR_VIEW_ADJUST_REFRESH_SETTLE_SECONDS)
         self._refresh_frame_and_handle_jump(w, f"{phase_label} 等待最新帧")
-        return self.find_largest_door(w)
+        door = self.find_largest_door(w)
+        if door is None and use_sam3:
+            w.frame_log(f"[{phase_label}] 调整后YOLO未定位门，继续使用SAM3复查")
+            door = self._find_entry_door_with_sam3(w, phase_label)
+        return door
 
     def _align_to_door_detection(
         self,
@@ -4434,7 +4502,11 @@ class HouseSearchManager:
 
                 if adjusted_position:
                     self.history_locations = []
-                refreshed = self._refresh_door_after_view_adjust(w, phase_label)
+                refreshed = self._refresh_door_after_view_adjust(
+                    w,
+                    phase_label,
+                    use_sam3=True,
+                )
                 if refreshed is None:
                     return finish("lost")
                 door = refreshed

@@ -5324,9 +5324,8 @@ class HouseSceneSearchManager(HouseSearchManager):
     ENTRY_SIDE_ADJUST_MIN_DEGREES = 55
     ENTRY_SIDE_ADJUST_MAX_DEGREES = 125
     ENTRY_SIDE_ADJUST_X_BIAS = 230
-    ENTRY_SIDE_ADJUST_BASE_DURA = 100
-    ENTRY_SIDE_ADJUST_MAX_DURA = 420
-    ENTRY_SIDE_ADJUST_WAIT_PAD = 240
+    ENTRY_SIDE_ADJUST_DURA = 300
+    ENTRY_SIDE_ADJUST_WAIT = 500
     ENTRY_NEAR_HOUSE_CLEAR_FORWARD_DURA = 300
     ENTRY_NEAR_HOUSE_CLEAR_FORWARD_WAIT = 500
     ENTRY_FORWARD_MAX_STEPS = 4
@@ -7345,23 +7344,19 @@ class HouseSceneSearchManager(HouseSearchManager):
                 if side == "right"
                 else -self.ENTRY_SIDE_ADJUST_X_BIAS
             )
-            dura = self._entry_micro_dura(
-                dist,
-                self.ENTRY_SIDE_ADJUST_BASE_DURA,
-                self.ENTRY_SIDE_ADJUST_MAX_DURA,
-            )
-            wait = dura + self.ENTRY_SIDE_ADJUST_WAIT_PAD
             w.frame_log(
                 f"{log_prefix} 按绕房方位执行{self._side_label(side)}移："
-                f"scene={scene}，x={x_bias}，y=0，dura={dura}，wait={wait}；"
+                f"scene={scene}，x={x_bias}，y=0，"
+                f"dura={self.ENTRY_SIDE_ADJUST_DURA}，"
+                f"wait={self.ENTRY_SIDE_ADJUST_WAIT}；"
                 "人物朝向不变"
             )
             w.tap_single(
                 "摇杆",
                 x_bias=x_bias,
                 y_bias=0,
-                dura=dura,
-                wait=wait,
+                dura=self.ENTRY_SIDE_ADJUST_DURA,
+                wait=self.ENTRY_SIDE_ADJUST_WAIT,
             )
             self._refresh_frame_and_handle_jump(w, handle_jump=False)
             after_loc = self._get_current_location(w)

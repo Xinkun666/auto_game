@@ -150,6 +150,12 @@ class HouseSearchManager:
     ENTRY_NEAR_MICRO_BLOCKED_DIRECTION_OFFSETS = (0, 90, -90, 180)
     ENTRY_DOOR_FINAL_ALIGN_MAX_STEPS = 4
     ENTRY_DOOR_FINAL_VIEW_TOLERANCE_PX = 55
+    ENTRY_DOOR_CENTER_ALIGNED_RATIO = 0.01
+    ENTRY_DOOR_CENTER_JOYSTICK_RATIO = 0.04
+    ENTRY_DOOR_DISTANCE_MIN_AREA_RATIO = 0.01
+    ENTRY_DOOR_DISTANCE_MAX_AREA_RATIO = 0.035
+    ENTRY_DOOR_DISTANCE_ADJUST_DURA = 100
+    ENTRY_DOOR_DISTANCE_ADJUST_WAIT = 100
     ENTRY_DOOR_VIEW_ADJUST_REFRESH_SETTLE_SECONDS = 0.2
     ENTRY_DOOR_ALIGN_CENTER_THRESHOLD = 80
     ENTRY_DOOR_ALIGN_CLOSE_CENTER_THRESHOLD = 140
@@ -165,8 +171,6 @@ class HouseSearchManager:
     ENTRY_DOOR_ALIGN_VERY_NEAR_AREA_RATIO = 0.090
     ENTRY_DOOR_DIRECT_CENTER_MIN_RATIO = 0.40
     ENTRY_DOOR_DIRECT_CENTER_MAX_RATIO = 0.60
-    ENTRY_DOOR_EDGE_LATERAL_LEFT_RATIO = 0.25
-    ENTRY_DOOR_EDGE_LATERAL_RIGHT_RATIO = 0.75
     ENTRY_DOOR_DIRECT_FORWARD_Y_BIAS = -200
     ENTRY_DOOR_DIRECT_FORWARD_DURA = 200
     ENTRY_DOOR_DIRECT_FORWARD_WAIT = 3000
@@ -175,7 +179,7 @@ class HouseSearchManager:
     ENTRY_DOOR_DIRECT_BACKOFF_WAIT = 3000
     ENTRY_DOOR_MISSING_BACKOFF_Y_BIAS = 320
     ENTRY_DOOR_MISSING_BACKOFF_DURA = 300
-    ENTRY_DOOR_MISSING_BACKOFF_WAIT = 1000
+    ENTRY_DOOR_MISSING_BACKOFF_WAIT = 1300
     ENTRY_DOOR_SAM3_GROUP = "sam3"
     ENTRY_DOOR_SAM3_INFO_NAME = "sam3"
     ENTRY_DOOR_SAM3_PROMPT = "door frame"
@@ -1822,41 +1826,6 @@ class HouseSearchManager:
             return False
         return self.ENTRY_DOOR_DIRECT_CENTER_MIN_RATIO <= ratio <= self.ENTRY_DOOR_DIRECT_CENTER_MAX_RATIO
 
-    def _shift_edge_visible_entry_door_by_lateral_move(self, w: 'FrameWorker', door, phase_label='Nav') -> bool:
-        frame_size = self._get_visual_frame_size(w)
-        if frame_size is None:
-            return False
-
-        frame_w, _ = frame_size
-        ratio = self._door_center_ratio(door, frame_w)
-        if ratio is None:
-            return False
-
-        if ratio <= self.ENTRY_DOOR_EDGE_LATERAL_LEFT_RATIO:
-            side = "left"
-            x_bias = -self._scaled_door_lateral_bias()
-        elif ratio >= self.ENTRY_DOOR_EDGE_LATERAL_RIGHT_RATIO:
-            side = "right"
-            x_bias = self._scaled_door_lateral_bias()
-        else:
-            return False
-
-        w.frame_log(
-            f"[{phase_label}] 入门点附近最大门中心在画面{self._side_label(side)}侧边缘 "
-            f"(ratio={ratio:.2f})，不转视角，改用摇杆横移对齐门，"
-            f"水平调整倍率={self.ENTRY_DOOR_HORIZONTAL_ADJUST_SCALE:g}"
-        )
-        w.tap_single(
-            '摇杆',
-            x_bias=x_bias,
-            y_bias=0,
-            dura=self.VISIBLE_DOOR_CENTER_SIDE_DURA,
-            wait=self.VISIBLE_DOOR_CENTER_SIDE_WAIT,
-        )
-        self._refresh_frame_and_handle_jump(w)
-        self.history_locations = []
-        return True
-
     def _align_visible_entry_door_for_direct_push(self, w: 'FrameWorker', door, phase_label='Nav'):
         """Use the same visual-center loop as car alignment before pushing through a door."""
         wall_result = self._handle_entry_near_wall_if_needed(w, phase_label, "门框视觉对齐前")
@@ -1868,6 +1837,7 @@ class HouseSearchManager:
             door,
             tolerance_px=self.ENTRY_DOOR_FINAL_VIEW_TOLERANCE_PX,
             phase_label=phase_label,
+            center_ratio_stages=True,
         ):
             w.frame_log(f"[{phase_label}] 视觉中心闭环对门失败，继续原进门流程")
             return None
@@ -2285,13 +2255,11 @@ class HouseSearchManager:
                 f"[{phase_label}] 第 {attempt + 1}/{self.ENTRY_DOOR_ALIGNED_PUSH_MAX_ATTEMPTS} 次对准门: "
                 f"door={door}"
             )
-            if self._shift_edge_visible_entry_door_by_lateral_move(w, door, phase_label):
-                return "adjusting"
-
             if not self._align_to_door_detection(
                 w,
                 door,
                 tolerance_px=self.ENTRY_DOOR_FINAL_VIEW_TOLERANCE_PX,
+                center_ratio_stages=True,
             ):
                 w.frame_log(f"[{phase_label}] 对准门失败，重新获取门目标后继续")
                 self._refresh_frame_and_handle_jump(w)
@@ -2844,7 +2812,7 @@ class HouseSearchManager:
         """Keep the near-entry sequence as: find door -> align door -> match/replay."""
         w.frame_log(
             f"[{phase_label}][EntryDoorFlow][6-门校准] 开始将门移到画面中心："
-            f"door={door}，中心容差={self.ENTRY_DOOR_FINAL_VIEW_TOLERANCE_PX}px"
+            f"door={door}，>4%用摇杆，1%~4%用视角，≤1%后按门面积1%~3.5%前后微调"
         )
         door_state = self._align_to_door_detection(
             w,
@@ -2852,6 +2820,7 @@ class HouseSearchManager:
             tolerance_px=self.ENTRY_DOOR_FINAL_VIEW_TOLERANCE_PX,
             phase_label=f"{phase_label} 门对齐",
             return_state=True,
+            center_ratio_stages=True,
         )
         if door_state == "aligned":
             w.frame_log(
@@ -4362,6 +4331,7 @@ class HouseSearchManager:
         return_state: bool = False,
         return_last_offset: bool = False,
         max_steps=None,
+        center_ratio_stages: bool = False,
     ):
         last_offset_real = None
 
@@ -4380,7 +4350,68 @@ class HouseSearchManager:
 
             last_offset_real = offset_real
 
-            if strict_after_backoff:
+            if center_ratio_stages:
+                center_x = self._door_center_x(door)
+                center_offset_ratio = abs(center_x - frame_w / 2.0) / frame_w
+                if center_offset_ratio <= self.ENTRY_DOOR_CENTER_ALIGNED_RATIO:
+                    if door_area_ratio is None:
+                        w.frame_log(f"[{phase_label}] 门水平已对准但无法计算面积，重新定位门")
+                        return finish("lost")
+                    if door_area_ratio < self.ENTRY_DOOR_DISTANCE_MIN_AREA_RATIO:
+                        y_bias = self.ENTRY_DOOR_DIRECT_FORWARD_Y_BIAS
+                        distance_action = "前进"
+                    elif door_area_ratio > self.ENTRY_DOOR_DISTANCE_MAX_AREA_RATIO:
+                        y_bias = self.ENTRY_DOOR_DIRECT_BACKOFF_Y_BIAS
+                        distance_action = "后退"
+                    else:
+                        w.frame_log(
+                            f"[{phase_label}] 门已对准：距中心={center_offset_ratio:.2%}，"
+                            f"门面积={door_area_ratio:.2%}"
+                        )
+                        return finish("aligned")
+                    w.frame_log(
+                        f"[{phase_label}] 门水平已对准但面积={door_area_ratio:.2%}，"
+                        f"合适范围={self.ENTRY_DOOR_DISTANCE_MIN_AREA_RATIO:.0%}~"
+                        f"{self.ENTRY_DOOR_DISTANCE_MAX_AREA_RATIO:.1%}，"
+                        f"摇杆小步{distance_action} y={y_bias}"
+                    )
+                    w.tap_single(
+                        '摇杆',
+                        y_bias=y_bias,
+                        dura=self.ENTRY_DOOR_DISTANCE_ADJUST_DURA,
+                        wait=self.ENTRY_DOOR_DISTANCE_ADJUST_WAIT,
+                    )
+                    self.history_locations = []
+                    refreshed = self._refresh_door_after_view_adjust(w, phase_label)
+                    if refreshed is None:
+                        return finish("lost")
+                    door = refreshed
+                    continue
+                if center_offset_ratio > self.ENTRY_DOOR_CENTER_JOYSTICK_RATIO:
+                    x_bias = self._scaled_door_lateral_bias() if offset_real > 0 else -self._scaled_door_lateral_bias()
+                    w.frame_log(
+                        f"[{phase_label}] 对门 {step + 1}/{align_max_steps}："
+                        f"距中心={center_offset_ratio:.2%}>"
+                        f"{self.ENTRY_DOOR_CENTER_JOYSTICK_RATIO:.0%}，"
+                        f"摇杆水平调整 x={x_bias}，人物方向不变"
+                    )
+                    w.tap_single(
+                        '摇杆',
+                        x_bias=x_bias,
+                        y_bias=0,
+                        dura=self.VISIBLE_DOOR_CENTER_SIDE_DURA,
+                        wait=self.VISIBLE_DOOR_CENTER_SIDE_WAIT,
+                    )
+                    self.history_locations = []
+                    refreshed = self._refresh_door_after_view_adjust(w, phase_label)
+                    if refreshed is None:
+                        return finish("lost")
+                    door = refreshed
+                    continue
+
+            if center_ratio_stages:
+                center_threshold = max(1, round((self.screen_w or frame_w) * self.ENTRY_DOOR_CENTER_ALIGNED_RATIO))
+            elif strict_after_backoff:
                 center_threshold = self._get_strict_door_align_center_threshold(tolerance_px)
             else:
                 center_threshold = self._get_door_align_center_threshold(tolerance_px)

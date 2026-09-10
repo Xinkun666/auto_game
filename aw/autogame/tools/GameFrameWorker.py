@@ -3623,7 +3623,7 @@ class FrameWorker(threading.Thread):
         self.current_group = self._get_initial_group_for_stage(stage_name)
         self.frame_log(
             f"[Stage] {old_stage or '未设置'} → {stage_name}，分组={self.current_group}",
-            log_type=FrameLogType.SYSTEM,
+            log_type=FrameLogType.LOGIC,
         )
 
         print("\n" + ">" * 40)

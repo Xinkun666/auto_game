@@ -330,6 +330,8 @@ def classify_output_line(line: str) -> str:
             return category
         return LOG_CATEGORY_LOGIC
 
+    if any(marker in text for marker in ("[GROUP CHANGE]", "[STAGE SYNC]", "STATUS CHANGE:")):
+        return LOG_CATEGORY_LOGIC
     if any(marker in text for marker in TIME_LOG_MARKERS):
         return LOG_CATEGORY_TIME
     if any(marker in text for marker in LOGIC_LOG_MARKERS):

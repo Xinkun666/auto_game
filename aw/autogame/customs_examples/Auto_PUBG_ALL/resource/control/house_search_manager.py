@@ -179,7 +179,7 @@ class HouseSearchManager:
     ENTRY_DOOR_DIRECT_BACKOFF_WAIT = 3000
     ENTRY_DOOR_MISSING_BACKOFF_Y_BIAS = 320
     ENTRY_DOOR_MISSING_BACKOFF_DURA = 300
-    ENTRY_DOOR_MISSING_BACKOFF_WAIT = 1300
+    ENTRY_DOOR_MISSING_BACKOFF_WAIT = 2000
     ENTRY_DOOR_SAM3_GROUP = "sam3"
     ENTRY_DOOR_SAM3_INFO_NAME = "sam3"
     ENTRY_DOOR_SAM3_PROMPT = "door frame"
@@ -2831,8 +2831,9 @@ class HouseSearchManager:
 
         if door_state == "lost":
             w.frame_log(
-                f"[{phase_label}] 门对齐过程中目标丢失，下一轮重新从YOLO优先定位门"
+                f"[{phase_label}] 门对齐动作后目标丢失，跳过微调到0并直接后拉"
             )
+            return "lost_after_adjust"
         else:
             w.frame_log(
                 f"[{phase_label}] 门尚未对齐，本轮不进入房型匹配/回放"
@@ -3033,11 +3034,12 @@ class HouseSearchManager:
             phase_label,
             fail_if_missing=False,
         )
-        if visible_door_result != "missing":
+        lost_after_adjust = visible_door_result == "lost_after_adjust"
+        if visible_door_result not in {"missing", "lost_after_adjust"}:
             self._reset_entry_near_micro_adjust()
             return visible_door_result
 
-        if dist != self.ENTRY_NEAR_MICRO_DONE_DISTANCE:
+        if not lost_after_adjust and dist != self.ENTRY_NEAR_MICRO_DONE_DISTANCE:
             w.frame_log(
                 f"[{phase_label}][EntryDoorFlow][3-摇杆微调] 门未定位且dist={dist:.2f}>0；"
                 "保持人物方向不变，只操作摇杆向入门点微调，"
@@ -3052,7 +3054,8 @@ class HouseSearchManager:
             )
 
         w.frame_log(
-            f"[{phase_label}][EntryDoorFlow][4-零距离后拉] dist=0且YOLO/SAM3仍无门；"
+            f"[{phase_label}][EntryDoorFlow][4-直接后拉] "
+            f"{'门校准动作后目标丢失，跳过微调到0' if lost_after_adjust else 'dist=0且YOLO/SAM3仍无门'}；"
             f"仅操作摇杆后拉，x=0，y={self.ENTRY_DOOR_MISSING_BACKOFF_Y_BIAS}，"
             f"dura={self.ENTRY_DOOR_MISSING_BACKOFF_DURA}，"
             f"wait={self.ENTRY_DOOR_MISSING_BACKOFF_WAIT}，人物方向不变"
@@ -3071,7 +3074,7 @@ class HouseSearchManager:
             else 0.0
         )
         w.frame_log(
-            f"[{phase_label}][EntryDoorFlow][4-零距离后拉] 后拉完成并刷新画面："
+            f"[{phase_label}][EntryDoorFlow][4-直接后拉] 后拉完成并刷新画面："
             f"location={refreshed_loc}，dist={refreshed_dist:.2f}；"
             "下一步=再执行一次YOLO+SAM3定位门"
         )
@@ -3082,6 +3085,8 @@ class HouseSearchManager:
             phase_label,
             fail_if_missing=False,
         )
+        if final_result == "lost_after_adjust":
+            final_result = "adjusting"
         if final_result == "missing":
             w.frame_log(
                 f"[{phase_label}][EntryDoorFlow][5-建筑侧向纠偏] 后拉复查仍无门，"

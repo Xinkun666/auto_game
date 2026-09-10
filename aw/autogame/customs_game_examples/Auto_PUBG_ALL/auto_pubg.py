@@ -111,7 +111,7 @@ STAGE_PRIORITY_JUMP_FORWARD_Y_BIAS = -400
 STAGE_PRIORITY_JUMP_FORWARD_DURA = 100
 STAGE_PRIORITY_JUMP_FORWARD_WAIT = 300
 STAGE_PRIORITY_JUMP_SETTLE_SECONDS = 0.2
-RANK_FINISH_SPECTATE_WAIT_SECONDS = 2.0
+RANK_FINISH_SPECTATE_WAIT_SECONDS = 4.0
 RANK_FINISH_CONTINUE_1_WAIT_SECONDS = 2.0
 SP_RECORDING_ENABLED = False
 START_GAME_VERIFY_DELAY = 5.0
@@ -785,7 +785,8 @@ def prepare_rank_finish_for_lobby(w: "FrameWorker") -> bool:
 
     rank_finish_pending = True
     w.frame_log(
-        "检测到排名界面，等待2s后通过区域获取观战对手位置",
+        f"检测到排名界面，等待{RANK_FINISH_SPECTATE_WAIT_SECONDS:g}s后"
+        "通过区域获取观战对手位置",
         log_type=FrameLogType.LOGIC,
     )
     time.sleep(RANK_FINISH_SPECTATE_WAIT_SECONDS)

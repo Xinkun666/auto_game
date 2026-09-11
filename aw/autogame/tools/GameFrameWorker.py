@@ -2298,7 +2298,7 @@ class FrameWorker(threading.Thread):
         if not case_name:
             raise ValueError("TARGET_GAME_CASE 未设置")
 
-        logic_path = f"aw.autogame.customs_game_examples.{project_case}.{case_name}"
+        logic_path = f"aw.autogame.customs_examples.{project_case}.scripts.{case_name}"
         try:
             logic_module = importlib.import_module(logic_path)
             self.on_stage_logic = getattr(logic_module, "on_stage")

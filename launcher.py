@@ -130,7 +130,6 @@ HOSCRCPY_FRAME_RATE_OPTIONS = (15, 30, 60, 120)
 DEFAULT_HOSCRCPY_FRAME_RATE = HOSCRCPY_FRAME_RATE_OPTIONS[0]
 TESTCASES_DIR = APP_DIR / "testcases"
 CUSTOMS_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_examples"
-CUSTOMS_GAME_EXAMPLES_DIR = ROOT_DIR / "aw" / "autogame" / "customs_game_examples"
 GAME_RECORDING_PROJECT_DIR = CUSTOMS_EXAMPLES_DIR / "Game_Recording"
 TEMP_DIR = resolve_runtime_temp_dir(APP_DIR)
 PACKAGE_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+){2,}")
@@ -2508,7 +2507,7 @@ def discover_project_cases() -> list[str]:
 
 
 def discover_target_cases(project_case: str) -> list[str]:
-    project_dir = CUSTOMS_GAME_EXAMPLES_DIR / project_case
+    project_dir = CUSTOMS_EXAMPLES_DIR / project_case / "scripts"
     LOGGER.debug("discover_target_cases: project_case=%s dir=%s exists=%s", project_case, project_dir, project_dir.exists())
     if not project_dir.exists():
         return []
@@ -2610,7 +2609,7 @@ def run_direct_entry(project_case: str, target_case: str):
 
 def run_game_recording_entry() -> int:
     """由 Launcher 子进程启动独立的录制回放 Qt 窗口。"""
-    from aw.autogame.customs_game_examples.Game_Recording.main import main as game_recording_main
+    from aw.autogame.customs_examples.Game_Recording.scripts.main import main as game_recording_main
 
     # ``--run-game-recording`` 是 Launcher 自己的 helper 参数，不能泄漏给
     # Game Recording 的 argparse；后者只应接收其自身的可选启动参数。
@@ -6691,7 +6690,7 @@ class LauncherWindow(QWidget):
             cleanup_apps.update(extract_package_names(self.selected_testcase_file))
 
         target_logic_file = (
-            CUSTOMS_GAME_EXAMPLES_DIR / project_case / f"{target_case}.py"
+            CUSTOMS_EXAMPLES_DIR / project_case / "scripts" / f"{target_case}.py"
         )
         cleanup_apps.update(extract_package_names(target_logic_file))
 

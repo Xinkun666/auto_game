@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 project_case = "Auto_PUBG_ALL"  # label-tool exported resource directory
-target_case = "auto_pubg"  # runtime script under customs_game_examples/<project_case>
+target_case = "auto_pubg"  # runtime script under customs_examples/<project_case>/scripts
 testcase_description = (
     "和平精英全流程自动化：单次循环包含10分钟搜房、10分钟开车和10分钟跑图；"
     "默认循环1次，总运行时长约30分钟。"
@@ -21,7 +21,7 @@ os.environ["TARGET_GAME_CASE"] = target_case
 from devicetest.core.test_case import TestCase
 from hypium import BY, UiDriver
 from aw.autogame.tools.GameAutomator import GameAutomator
-from aw.autogame.customs_game_examples.Auto_PUBG_ALL.auto_pubg import preload_runtime
+from aw.autogame.customs_examples.Auto_PUBG_ALL.scripts.auto_pubg import preload_runtime
 from aw.autogame.tools.GameLaunchProfile import (
     DEFAULT_SP_PACKAGE,
     cleanup_packages_for_test_profile,
@@ -52,7 +52,7 @@ class auto_pubg(TestCase):
         return should_use_sp_recording_for_profile(self.test_profile)
 
     def _validate_runtime_entry(self):
-        runtime_file = Path("aw") / "autogame" / "customs_game_examples" / project_case / f"{target_case}.py"
+        runtime_file = Path("aw") / "autogame" / "customs_examples" / project_case / "scripts" / f"{target_case}.py"
         info_file = Path("aw") / "autogame" / "customs_examples" / project_case / "info.py"
         missing = [str(path) for path in (runtime_file, info_file) if not path.exists()]
         if missing:

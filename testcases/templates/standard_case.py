@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 project_case = "Auto_PUBG_ALL"  # label-tool exported resource directory
-target_case = "template_target_case"  # runtime script under customs_game_examples/<project_case>
+target_case = "template_target_case"  # runtime script under customs_examples/<project_case>/scripts
 testcase_description = "请填写该用例的测试目标、主要阶段、预计时长和关键结束条件。"
 GAME_DISPLAY_NAME = "CHANGE_ME_GAME_NAME"  # name shown inside SP app selector
 GAME_PACKAGE_NAME = "com.example.game"  # package launched for function tests
@@ -57,7 +57,7 @@ class StandardAutoGameCase(TestCase):
         return should_use_sp_recording_for_profile(self.test_profile)
 
     def _validate_runtime_entry(self):
-        runtime_file = Path("aw") / "autogame" / "customs_game_examples" / project_case / f"{target_case}.py"
+        runtime_file = Path("aw") / "autogame" / "customs_examples" / project_case / "scripts" / f"{target_case}.py"
         info_file = Path("aw") / "autogame" / "customs_examples" / project_case / "info.py"
         missing = [str(path) for path in (runtime_file, info_file) if not path.exists()]
         if missing:

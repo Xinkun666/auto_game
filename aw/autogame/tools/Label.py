@@ -5337,18 +5337,15 @@ class AutoStudioWindow(QMainWindow):
 
         # 新结构优先：PROJECT_ROOT/aw/autogame/tools/main.py -> 优先使用 PROJECT_ROOT/aw/autogame
         if os.path.basename(script_dir).lower() == "tools" and os.path.basename(parent_dir).lower() == "autogame":
-            if os.path.isdir(os.path.join(parent_dir, "customs_examples")) or os.path.isdir(
-                    os.path.join(parent_dir, "customs_game_examples")):
+            if os.path.isdir(os.path.join(parent_dir, "customs_examples")):
                 return parent_dir
-            if os.path.isdir(os.path.join(grand_parent_dir, "customs_examples")) or os.path.isdir(
-                    os.path.join(grand_parent_dir, "customs_game_examples")):
+            if os.path.isdir(os.path.join(grand_parent_dir, "customs_examples")):
                 return grand_parent_dir
             return parent_dir
 
         # 先向上查找已存在的导出根目录（兼容旧结构与新结构）。
         for candidate in [script_dir, parent_dir, grand_parent_dir]:
-            if os.path.isdir(os.path.join(candidate, "customs_examples")) or os.path.isdir(
-                    os.path.join(candidate, "customs_game_examples")):
+            if os.path.isdir(os.path.join(candidate, "customs_examples")):
                 return candidate
 
         # 旧结构兜底：PROJECT_ROOT/tools/main.py -> PROJECT_ROOT
@@ -5691,8 +5688,6 @@ class AutoStudioWindow(QMainWindow):
         export_temp_dir = None
         staging_project_dir = None
         renamed_backup_dir = None
-        created_game_case_dir = None
-        game_case_dir_existed = False
         project_dir_swapped = False
         progress_dialog = None
         progress_state = None
@@ -5739,19 +5734,33 @@ class AutoStudioWindow(QMainWindow):
                     if os.path.exists(project_dir):
                         QMessageBox.critical(self, "导出失败", "修改后的工程名仍然冲突。")
                         return
+            imported_project_dir = getattr(self, "imported_project_dir", "") or ""
+            imported_scripts_dir = (
+                os.path.join(imported_project_dir, "scripts")
+                if imported_project_dir
+                else ""
+            )
+            existing_scripts_dir = os.path.join(project_dir, "scripts")
+            scripts_source = (
+                existing_scripts_dir
+                if os.path.isdir(existing_scripts_dir)
+                else imported_scripts_dir
+                if os.path.isdir(imported_scripts_dir)
+                else None
+            )
             progress_total = self._estimate_export_generation_steps()
             progress_total += self._estimate_tree_copy_steps(export_resource_source) if export_resource_source else 1
+            progress_total += self._estimate_tree_copy_steps(scripts_source) if scripts_source else 1
             progress_total += 4
             progress_dialog = self._create_export_progress_dialog(progress_total)
             progress_state = {"current": 0, "total": progress_total}
             self._advance_export_progress(progress_dialog, progress_state, "正在创建导出暂存目录...", 0)
             export_temp_dir = tempfile.mkdtemp(prefix="label_export_")
             staging_project_dir = os.path.join(export_temp_dir, project_name)
-            customs_game_examples_dir = os.path.join(project_root_dir, "customs_game_examples")
-            os.makedirs(customs_game_examples_dir, exist_ok=True)
             scenes_dir = os.path.join(staging_project_dir, "scenes")
             templates_dir = os.path.join(staging_project_dir, "templates")
             resource_dir = os.path.join(staging_project_dir, "resource")
+            scripts_dir = os.path.join(staging_project_dir, "scripts")
             os.makedirs(scenes_dir, exist_ok=True)
             os.makedirs(templates_dir, exist_ok=True)
             self._advance_export_progress(progress_dialog, progress_state, "已创建导出暂存目录", 1)
@@ -5766,6 +5775,17 @@ class AutoStudioWindow(QMainWindow):
             else:
                 os.makedirs(resource_dir, exist_ok=True)
                 self._advance_export_progress(progress_dialog, progress_state, "已创建空资源目录", 1)
+            if scripts_source:
+                self._copy_tree_with_progress(
+                    scripts_source,
+                    scripts_dir,
+                    progress_callback=lambda text, step=1: self._advance_export_progress(
+                        progress_dialog, progress_state, text, step
+                    ),
+                )
+            else:
+                os.makedirs(scripts_dir, exist_ok=True)
+                self._advance_export_progress(progress_dialog, progress_state, "已创建空用例目录", 1)
             file_path = os.path.join(staging_project_dir, "info.py")
             # 生成代码逻辑
             stage_dict = {}
@@ -5993,9 +6013,6 @@ class AutoStudioWindow(QMainWindow):
             else:
                 self.ensure_special_scene_handler(staging_project_dir, special_area_names, preserved_handler_content)
             self._advance_export_progress(progress_dialog, progress_state, "正在更新 SpecialSceneHandler.py", 1)
-            created_game_case_dir = os.path.join(customs_game_examples_dir, project_name)
-            game_case_dir_existed = os.path.exists(created_game_case_dir)
-            os.makedirs(created_game_case_dir, exist_ok=True)
             sync_stats = None
             if existing_dir_strategy == "replace" and os.path.exists(project_dir):
                 sync_steps = self._estimate_sync_steps(staging_project_dir, project_dir)
@@ -6048,11 +6065,6 @@ class AutoStudioWindow(QMainWindow):
                 shutil.rmtree(project_dir, ignore_errors=True)
             if renamed_backup_dir and os.path.exists(renamed_backup_dir) and not os.path.exists(project_dir):
                 os.rename(renamed_backup_dir, project_dir)
-            if created_game_case_dir and not game_case_dir_existed and os.path.isdir(created_game_case_dir):
-                try:
-                    os.rmdir(created_game_case_dir)
-                except OSError:
-                    pass
             self.project.name = original_project_name
             QMessageBox.critical(self, "导出失败", f"导出失败，已恢复导出前状态。\n\n{exc}")
         finally:

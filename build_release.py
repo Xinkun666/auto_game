@@ -93,7 +93,6 @@ def required_runtime_assets() -> list[ReleaseAsset]:
         _asset("aw/autogame/config"),
         _asset("aw/autogame/stream_client"),
         _asset("aw/autogame/customs_examples"),
-        _asset("aw/autogame/customs_game_examples"),
     ]
 
 
@@ -277,7 +276,6 @@ def verify_release_output() -> None:
         ("root ProcessUtils.py", DIST_DIR / "aw" / "autogame" / "tools" / "ProcessUtils.py"),
         ("root config.json", DIST_DIR / "aw" / "autogame" / "config" / "config.json"),
         ("root customs_examples", DIST_DIR / "aw" / "autogame" / "customs_examples"),
-        ("root customs_game_examples", DIST_DIR / "aw" / "autogame" / "customs_game_examples"),
         ("internal ProcessUtils.py", internal_root / "aw" / "autogame" / "tools" / "ProcessUtils.py"),
         ("house entry summary", DIST_DIR / "aw" / "autogame" / "customs_examples" / "Auto_PUBG_ALL" / "resource" / "house_entry" / "house_entries_summary.json"),
         ("map mask", DIST_DIR / "aw" / "autogame" / "customs_examples" / "Auto_PUBG_ALL" / "resource" / "map" / "hpjy_mask.tif"),

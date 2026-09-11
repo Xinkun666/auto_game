@@ -17,7 +17,7 @@
 在仓库根目录执行：
 
 ```bash
-python aw/autogame/customs_game_examples/Game_Recording/main.py
+python aw/autogame/customs_examples/Game_Recording/scripts/main.py
 ```
 
 默认使用 `auto` 动态兼容模式：先尝试设备已有 SO，启动不成功就继续尝试本地 `res/video` 中的其他候选；某个 SO 能启动但运行中断流，也会记录并切换下一个。只有所有候选都失败后，程序才最终停止。
@@ -51,27 +51,27 @@ python aw/autogame/customs_game_examples/Game_Recording/main.py
 如需对比设备原有版本：
 
 ```bash
-python aw/autogame/customs_game_examples/Game_Recording/main.py --video-so reuse
+python aw/autogame/customs_examples/Game_Recording/scripts/main.py --video-so reuse
 ```
 
 也可以指定本地已存在的完整文件名：
 
 ```bash
-python aw/autogame/customs_game_examples/Game_Recording/main.py \
+python aw/autogame/customs_examples/Game_Recording/scripts/main.py \
   --video-so libscrcpy_server_unix_6.3.1-20260113.z.so
 ```
 
 默认使用 HOS 触控。如需改用 `sendevent`：
 
 ```bash
-python aw/autogame/customs_game_examples/Game_Recording/main.py \
+python aw/autogame/customs_examples/Game_Recording/scripts/main.py \
   --touch-backend sendevent
 ```
 
 程序会依次尝试设备端 `getevent -lp`、`getevent -p` 和 `/data/test/getevent -p`，自动识别触摸设备及 ABS 坐标范围。如果该手机无法自动探测，可以手动指定：
 
 ```bash
-python aw/autogame/customs_game_examples/Game_Recording/main.py \
+python aw/autogame/customs_examples/Game_Recording/scripts/main.py \
   --touch-backend sendevent \
   --sendevent-device event2 \
   --sendevent-max-x 10799 \
@@ -102,7 +102,7 @@ python aw/autogame/customs_game_examples/Game_Recording/main.py \
 在仓库根目录执行：
 
 ```bash
-python aw/autogame/customs_game_examples/Game_Recording/start_replay.py
+python aw/autogame/customs_examples/Game_Recording/scripts/start_replay.py
 ```
 
 启动后先弹出历史记录选择窗口，记录按录制时间从新到旧排列。选中后可查看初始画面、时长、动作数、视频帧数和结束原因；双击记录或点击“开始回放”后，程序才会连接手机。手机画面首帧到达后自动按原时间执行动作。
@@ -112,7 +112,7 @@ python aw/autogame/customs_game_examples/Game_Recording/start_replay.py
 `start_replay.py` 与录制脚本一样支持 `--video-so`、`--touch-backend sendevent` 及手动 sendevent 设备参数。如果记录位于其他目录，可使用：
 
 ```bash
-python aw/autogame/customs_game_examples/Game_Recording/start_replay.py \
+python aw/autogame/customs_examples/Game_Recording/scripts/start_replay.py \
   --records /path/to/records
 ```
 

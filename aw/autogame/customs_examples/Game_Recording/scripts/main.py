@@ -7,14 +7,14 @@ import sys
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[5]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
 def main(argv=None) -> int:
     from aw.autogame.customs_examples.Game_Recording.resource.main_app import run
-    from aw.autogame.customs_game_examples.Game_Recording.start_record import (
+    from aw.autogame.customs_examples.Game_Recording.scripts.start_record import (
         main as start_record_main,
     )
 

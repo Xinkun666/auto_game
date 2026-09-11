@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from aw.autogame.tools.GameFrameWorker import FrameWorker
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
+PROJECT_ROOT = Path(__file__).resolve().parents[5]
 DEFAULT_RESULT_ROOT = (
     PROJECT_ROOT / "aw" / "autogame" / "temp" / "results" / "room_match_once"
 )

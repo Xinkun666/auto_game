@@ -70,6 +70,15 @@ ITEM_TYPE_LABELS = {
 SEARCH_SCOPE_INERTIA_FACTOR = 0.8
 
 
+def _build_on_stage_template(stage_names: List[str]) -> str:
+    lines = ["def on_stage(w):"]
+    for stage_name in stage_names:
+        lines.extend((f"    if w.current_stage == {stage_name!r}:", "        return"))
+    if not stage_names:
+        lines.append("    return")
+    return "\n".join(lines) + "\n"
+
+
 @dataclass
 class RectData:
     x: float
@@ -5785,7 +5794,14 @@ class AutoStudioWindow(QMainWindow):
                 )
             else:
                 os.makedirs(scripts_dir, exist_ok=True)
-                self._advance_export_progress(progress_dialog, progress_state, "已创建空用例目录", 1)
+                template_path = os.path.join(scripts_dir, "standard_on_stage.py")
+                with open(template_path, "w", encoding="utf-8") as template_file:
+                    template_file.write(
+                        _build_on_stage_template(
+                            [stage.name for stage in self.project.stages]
+                        )
+                    )
+                self._advance_export_progress(progress_dialog, progress_state, "已创建用例模板", 1)
             file_path = os.path.join(staging_project_dir, "info.py")
             # 生成代码逻辑
             stage_dict = {}

@@ -3,8 +3,11 @@ from aw.autogame.tools.Utils import *
 
 import time
 from functools import wraps
+from pathlib import Path
 
 dire_tool_ctc = loc_tool = yolo_detector = tracker = speed_cls = scene_cls = None
+house_yolo_detector = None
+WEIGHTS_DIR = Path(__file__).resolve().parent / 'weights'
 
 
 def _direction_tool():
@@ -27,8 +30,26 @@ def _yolo_detector():
     global yolo_detector
     if yolo_detector is None:
         from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.yolo_detector import YOLO26Detector
-        yolo_detector = YOLO26Detector(model_path=r'aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/best.pt')
+        yolo_detector = YOLO26Detector(model_path=str(WEIGHTS_DIR / 'best.pt'))
     return yolo_detector
+
+
+def house_forward_scene(img):
+    """搜房专用五类模型；输出转换成控制器通用的旧类别编号。"""
+    global house_yolo_detector
+    if house_yolo_detector is None:
+        from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.yolo_detector import YOLO26Detector
+        detector = YOLO26Detector(model_path=str(WEIGHTS_DIR / 'best_yolo26_1189.pt'))
+        expected = {0: 'house', 1: 'door', 2: 'open_door', 3: 'window', 4: 'car'}
+        if detector.names != expected:
+            raise ValueError(f'搜房权重类别不匹配: {detector.names}; 预期 {expected}')
+        house_yolo_detector = detector
+    # house / door / open_door / window / car -> 业务统一编号。
+    class_ids = {0: 8, 1: 0, 2: 4, 3: 2, 4: 7}
+    return [
+        [int(x1), int(y1), int(x2), int(y2), conf, class_ids[int(cls)]]
+        for x1, y1, x2, y2, conf, cls in house_yolo_detector.infer(img)
+    ]
 
 
 def _tracker():

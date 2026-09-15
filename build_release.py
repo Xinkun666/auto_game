@@ -57,6 +57,7 @@ REQUIRED_HIDDEN_IMPORTS = (
 MODEL_WEIGHT_FILES = (
     "aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/direction_ctc.pt",
     "aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/best.pt",
+    "aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/best_yolo26_1189.pt",
     "aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/speed_classifier.pt",
     "aw/autogame/customs_examples/Auto_PUBG_ALL/resource/weights/scene_best_model.pth",
 )

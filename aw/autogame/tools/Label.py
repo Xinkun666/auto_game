@@ -1426,6 +1426,8 @@ class AutoStudioWindow(QMainWindow):
         width, height = self._get_scene_image_size(scene)
         if width > 0 and height > 0:
             return f"{width} * {height}"
+        if scene.items:
+            return f"缺少图片和有效分辨率（仍有 {len(scene.items)} 个标注）"
         return "未抓图/未导入图片"
 
     @staticmethod
@@ -4928,7 +4930,7 @@ class AutoStudioWindow(QMainWindow):
                 name_prefix = "特殊区域"
             existing_names = self.get_stage_item_names(self.current_stage, mode)
             existing_names = self._item_existing_names_for_scene(self.current_scene, mode, existing_names)
-            name = self.prompt_unique_name("命名", f"{name_prefix}名称:", existing_names=existing_names)
+            name = self.prompt_unique_name("命名", f"{name_prefix}名称:", existing_names=existing_names, item_type=mode)
             if not name:
                 self.status_label.setText("已取消添加。")
                 self.canvas.redraw_overlays(self.current_scene)
@@ -5120,6 +5122,7 @@ class AutoStudioWindow(QMainWindow):
         message = f"已删除场景 {scene_data.name} 的当前分辨率，并同步所有阶段。"
         if not peers:
             message += "场景已保留，当前未抓图/未导入图片。"
+        message += "请导出项目保存删除结果。"
         self.status_label.setText(message)
 
     def delete_scene(self, scene_data: SceneData):
@@ -5266,7 +5269,7 @@ class AutoStudioWindow(QMainWindow):
         text = f"{x1:.6f},{y1:.6f},{x2:.6f},{y2:.6f}"
         QGuiApplication.clipboard().setText(text)
         self.status_label.setText(f"已复制 {item_data.name} 归一化坐标: {text}")
-    def prompt_unique_name(self, title, label, existing_names, text=""):
+    def prompt_unique_name(self, title, label, existing_names, text="", item_type=None):
         while True:
             name, ok = QInputDialog.getText(self, title, label, text=text)
             if not ok:
@@ -5275,7 +5278,20 @@ class AutoStudioWindow(QMainWindow):
             if not name:
                 return None
             if name in existing_names:
-                QMessageBox.critical(self, "名称重复", "名称重复，请重新输入。")
+                message = "名称重复，请重新输入。"
+                if item_type:
+                    global_group = self._global_scene_group(self.project)
+                    scenes = list(global_group.scenes) if global_group else []
+                    if self.current_stage and not self._is_scene_in_global_group(self.project, self.current_scene):
+                        scenes.extend(self.current_stage.scenes)
+                    locations = sorted({
+                        f"场景「{scene.name}」 / {self._scene_size_label(scene)}"
+                        for scene in scenes
+                        if any(item.name == name and item.item_type == item_type for item in scene.items)
+                    })
+                    if locations:
+                        message += "\n该名称仍存在于：\n" + "\n".join(locations)
+                QMessageBox.critical(self, "名称重复", message)
                 text = name
                 continue
             return name

@@ -1132,6 +1132,7 @@ class AutoStudioWindow(QMainWindow):
                     positioning=positioning,
                     relative_to=relative_to,
                 ))
+            AutoStudioWindow._fill_missing_scene_image(scene)
             scenes_by_id[scene.id] = scene
 
         project = ProjectData(name=str(raw_project.get("name") or ""))
@@ -4002,7 +4003,6 @@ class AutoStudioWindow(QMainWindow):
             menu.addSeparator()
         elif isinstance(data, SceneData):
             delete_resolution_action = QAction("删除分辨率（保留场景，同步所有阶段）", self)
-            delete_resolution_action.setEnabled(any(self._get_scene_image_size(data)))
             delete_resolution_action.triggered.connect(lambda: self.delete_scene_resolution(data))
             menu.addAction(delete_resolution_action)
             menu.addSeparator()
@@ -6246,6 +6246,12 @@ class AutoStudioWindow(QMainWindow):
             QMessageBox.critical(self, "导入失败", f"无法导入项目：\n{exc}")
 
     @staticmethod
+    def _fill_missing_scene_image(scene: SceneData):
+        if (scene.pixmap is None or scene.pixmap.isNull()) and scene.items and scene.image_width > 0 and scene.image_height > 0:
+            scene.pixmap = QPixmap(scene.image_width, scene.image_height)
+            scene.pixmap.fill(Qt.GlobalColor.white)
+
+    @staticmethod
     def _import_scene_version(import_dir, stage_name, scene_name, scene_data, stage_control_names):
         scene = SceneData(id=str(random.randint(1000, 9999)), name=scene_name)
         image_rel = scene_data.get("image", "")
@@ -6314,6 +6320,7 @@ class AutoStudioWindow(QMainWindow):
                 rect=rect
             )
             scene.items.append(item)
+        AutoStudioWindow._fill_missing_scene_image(scene)
         return scene
 # ==========================================
 # 5. 启动入口

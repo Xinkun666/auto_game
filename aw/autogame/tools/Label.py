@@ -743,18 +743,17 @@ class AutoStudioWindow(QMainWindow):
 
     def eventFilter(self, watched, event):
         """让项目树的鼠标右键直接由其 viewport 打开菜单。"""
-        tree = None
-        for candidate in (getattr(self, "tree", None), getattr(self, "scene_pool_tree", None)):
-            if candidate is not None and watched is candidate.viewport():
-                tree = candidate
-                break
         if (
-            tree is not None
-            and event.type() == QEvent.Type.MouseButtonRelease
+            event.type() == QEvent.Type.MouseButtonRelease
             and event.button() == Qt.MouseButton.RightButton
         ):
-            self.open_context_menu(event.position().toPoint(), tree)
-            return True
+            # Other tree widgets may already be destroyed during window teardown.
+            tree = watched.parent()
+            if tree is not None and any(tree is candidate for candidate in (
+                getattr(self, "tree", None), getattr(self, "scene_pool_tree", None)
+            )):
+                self.open_context_menu(event.position().toPoint(), tree)
+                return True
         return super().eventFilter(watched, event)
     def trigger_add_shortcut(self, mode):
         if not self.current_scene:

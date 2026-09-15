@@ -8,6 +8,24 @@ from pathlib import Path
 dire_tool_ctc = loc_tool = yolo_detector = tracker = speed_cls = scene_cls = None
 house_yolo_detector = None
 WEIGHTS_DIR = Path(__file__).resolve().parent / 'weights'
+DETECTION_CLASSES = {0: 'house', 1: 'door', 2: 'open_door', 3: 'window', 4: 'car', 5: 'wrecked_car'}
+DETECTION_BUSINESS_IDS = {0: 8, 1: 0, 2: 4, 3: 2, 4: 7, 5: 17}
+
+
+def _load_detection_model(filename):
+    from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.yolo_detector import YOLO26Detector
+    detector = YOLO26Detector(model_path=str(WEIGHTS_DIR / filename))
+    if detector.names != DETECTION_CLASSES:
+        raise ValueError(f'{filename} 权重类别不匹配: {detector.names}; 预期 {DETECTION_CLASSES}')
+    return detector
+
+
+def _business_detections(detector, img):
+    """六类训练编号转成控制器编号，车辆与废车分别为 7、17。"""
+    return [
+        [int(x1), int(y1), int(x2), int(y2), conf, DETECTION_BUSINESS_IDS[int(cls)]]
+        for x1, y1, x2, y2, conf, cls in detector.infer(img)
+    ]
 
 
 def _direction_tool():
@@ -29,27 +47,16 @@ def _location_tool():
 def _yolo_detector():
     global yolo_detector
     if yolo_detector is None:
-        from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.yolo_detector import YOLO26Detector
-        yolo_detector = YOLO26Detector(model_path=str(WEIGHTS_DIR / 'driving.pt'))
+        yolo_detector = _load_detection_model('driving.pt')
     return yolo_detector
 
 
 def house_forward_scene(img):
-    """搜房专用五类模型；输出转换成控制器通用的旧类别编号。"""
+    """搜房入口，输出控制器通用类别编号。"""
     global house_yolo_detector
     if house_yolo_detector is None:
-        from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.yolo_detector import YOLO26Detector
-        detector = YOLO26Detector(model_path=str(WEIGHTS_DIR / 'house_search.pt'))
-        expected = {0: 'house', 1: 'door', 2: 'open_door', 3: 'window', 4: 'car'}
-        if detector.names != expected:
-            raise ValueError(f'搜房权重类别不匹配: {detector.names}; 预期 {expected}')
-        house_yolo_detector = detector
-    # house / door / open_door / window / car -> 业务统一编号。
-    class_ids = {0: 8, 1: 0, 2: 4, 3: 2, 4: 7}
-    return [
-        [int(x1), int(y1), int(x2), int(y2), conf, class_ids[int(cls)]]
-        for x1, y1, x2, y2, conf, cls in house_yolo_detector.infer(img)
-    ]
+        house_yolo_detector = _load_detection_model('house_search.pt')
+    return _business_detections(house_yolo_detector, img)
 
 
 def _tracker():
@@ -106,64 +113,8 @@ def reset_location_tracking():
 
 
 def forward_scene(img):
-    """
-    这是之前 forward_scene 的原始逻辑，已单独迁移到这个函数中保留。
-    当前你先不用它，但逻辑没有删除，后续需要时可以继续调用这个函数。
-
-    功能：
-    对 ROI 局部图像进行推理，并将结果坐标转换回原始全图绝对坐标（取整）
-    """
-
-    YOLO26_CLASSES = {
-        0: 'door',
-        1: 'object',
-        2: 'window',
-        3: 'pick_menu',
-        4: 'open_door',
-        5: 'stair',
-        6: 'down_stair',
-        7: 'car',
-        8: 'house',
-        9: 'stone_wall',
-        10: 'stump',
-        11: 'rock',
-        12: 'grass_tuft',
-        13: 'fence',
-        14: 'water',
-        15: 'ditch',
-        16: 'unique_construction',
-        17: 'wrecked_car',
-        18: 'box',
-        19: 'sandband_wall',
-    }
-    # 1. 执行检测
-    res = _yolo_detector().infer(img)
-    if not res:
-        return []
-
-    # 2. 获取相对比例配置
-    roi_rect = [0, 0, 1, 1]
-
-    if roi_rect is None:
-        print("警告: 未能找到 forward_scene 的配置，返回原始结果")
-        return res
-
-    h, w = img.shape[:2]
-    x_offset = w * roi_rect[0]
-    y_offset = h * roi_rect[1]
-
-    # 3. 遍历结果并转换坐标系
-    global_res = []
-    for x1, y1, x2, y2, conf, cls_id in res:
-        # 局部像素 + 全局偏移 = 全图像素坐标
-        gx1 = int(x1 + x_offset)
-        gy1 = int(y1 + y_offset)
-        gx2 = int(x2 + x_offset)
-        gy2 = int(y2 + y_offset)
-
-        global_res.append([gx1, gy1, gx2, gy2, conf, cls_id])
-
-    return global_res
+    """开车、跑图入口；输入画面的像素坐标取整，类别转为业务编号。"""
+    return _business_detections(_yolo_detector(), img)
 
 
 def white_angle(img):

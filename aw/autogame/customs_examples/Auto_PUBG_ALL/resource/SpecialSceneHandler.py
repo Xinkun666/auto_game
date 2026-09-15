@@ -30,7 +30,7 @@ def _yolo_detector():
     global yolo_detector
     if yolo_detector is None:
         from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.yolo_detector import YOLO26Detector
-        yolo_detector = YOLO26Detector(model_path=str(WEIGHTS_DIR / 'best.pt'))
+        yolo_detector = YOLO26Detector(model_path=str(WEIGHTS_DIR / 'driving.pt'))
     return yolo_detector
 
 
@@ -39,7 +39,7 @@ def house_forward_scene(img):
     global house_yolo_detector
     if house_yolo_detector is None:
         from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.perception.yolo_detector import YOLO26Detector
-        detector = YOLO26Detector(model_path=str(WEIGHTS_DIR / 'best_yolo26_1189.pt'))
+        detector = YOLO26Detector(model_path=str(WEIGHTS_DIR / 'house_search.pt'))
         expected = {0: 'house', 1: 'door', 2: 'open_door', 3: 'window', 4: 'car'}
         if detector.names != expected:
             raise ValueError(f'搜房权重类别不匹配: {detector.names}; 预期 {expected}')

@@ -2,11 +2,12 @@
 
 | 场景 | 文件 | 处理入口 |
 | --- | --- | --- |
-| 搜房阶段 | `best_yolo26_1189.pt` | `house_forward_scene` |
-| 开车、跑图阶段 | Windows 上原有的 `best.pt` | `forward_scene` |
+| 搜房阶段 | `house_search.pt`（原 `best_yolo26_1189.pt`） | `house_forward_scene` |
+| 开车、跑图阶段 | `driving.pt`（Windows 原 `best.pt`） | `forward_scene` |
 
 两份权重都放在本目录，分别按需加载并缓存。Windows 部署时复制
-`best_yolo26_1189.pt` 到本目录，保留已有的 `best.pt`；同时更新代码并重启用例。
+`house_search.pt` 到本目录，并将原有 `best.pt` 重命名为 `driving.pt`；同时更新代码并重启用例。
+开车权重仅改文件名，内容不变；不要用搜房权重替换它。
 权重文件由外部部署，Git 不包含 `.pt`。发布包会检查这两份权重。
 
 新权重 SHA-256：`0d56c6deba076bf1415296d16b312afeeb6eae267ba78a73e06a1e4c5db59138`。

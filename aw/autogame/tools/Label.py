@@ -4001,6 +4001,11 @@ class AutoStudioWindow(QMainWindow):
             menu.addAction(remove_reference_action)
             menu.addSeparator()
         elif isinstance(data, SceneData):
+            delete_resolution_action = QAction("删除分辨率（保留场景，同步所有阶段）", self)
+            delete_resolution_action.setEnabled(any(self._get_scene_image_size(data)))
+            delete_resolution_action.triggered.connect(lambda: self.delete_scene_resolution(data))
+            menu.addAction(delete_resolution_action)
+            menu.addSeparator()
             if tree is getattr(self, "scene_pool_tree", None):
                 action_scene_group = self._find_scene_pool_group_for_scene(data)
                 capture_action = QAction("📷 抓图", self)
@@ -5080,6 +5085,42 @@ class AutoStudioWindow(QMainWindow):
         self._autosave_imported_project_state()
         self.status_label.setText(f"已从当前阶段移除场景 {scene_name}。场景池内数据已保留。")
         self.update_tree_view()
+
+    def delete_scene_resolution(self, scene_data: SceneData):
+        scene_group = self._find_scene_pool_group_for_scene(scene_data)
+        if not self.project or not scene_group:
+            return
+        peers = [scene for scene in scene_group.scenes
+                 if scene.name == scene_data.name and scene is not scene_data]
+        if peers:
+            for container in [*self.project.scene_groups, *self.project.stages]:
+                if any(scene is scene_data for scene in container.scenes):
+                    container.scenes = [scene for scene in container.scenes if scene is not scene_data]
+                    if not any(scene is peers[0] for scene in container.scenes):
+                        container.scenes.append(peers[0])
+            selected_scene = peers[0]
+        else:
+            scene_data.image_path = ""
+            scene_data.pixmap = None
+            scene_data.image_width = 0
+            scene_data.image_height = 0
+            scene_data.items.clear()
+            selected_scene = scene_data
+        for stage in self.project.stages:
+            valid_refs = {self._group_item_ref(scene, item)
+                          for scene in stage.scenes for item in scene.items}
+            self._remove_group_item_refs(
+                stage, lambda ref: ref.scene_name == scene_data.name and ref not in valid_refs
+            )
+        self._autosave_imported_project_state()
+        self.update_tree_view()
+        self.select_item_in_tree(selected_scene)
+        self.current_scene = selected_scene
+        self.show_scene_image(selected_scene)
+        message = f"已删除场景 {scene_data.name} 的当前分辨率，并同步所有阶段。"
+        if not peers:
+            message += "场景已保留，当前未抓图/未导入图片。"
+        self.status_label.setText(message)
 
     def delete_scene(self, scene_data: SceneData):
         stage = self._find_stage_for_scene(scene_data) or self.current_stage

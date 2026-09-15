@@ -111,6 +111,9 @@ class HouseSearchManager:
     VISIBLE_DOOR_CENTER_SIDE_BIAS = 240
     VISIBLE_DOOR_CENTER_SIDE_DURA = 260
     VISIBLE_DOOR_CENTER_SIDE_WAIT = 420
+    ENTRY_DOOR_CENTER_JOYSTICK_MIN_WAIT = 50
+    ENTRY_DOOR_CENTER_JOYSTICK_MAX_WAIT = 1000
+    ENTRY_DOOR_CENTER_JOYSTICK_MAX_RATIO = 0.40
     VISIBLE_DOOR_FORWARD_Y_BIAS = -320
     VISIBLE_DOOR_FORWARD_DURA = 420
     VISIBLE_DOOR_FORWARD_WAIT = 800
@@ -1463,6 +1466,15 @@ class HouseSearchManager:
                 * self.ENTRY_DOOR_HORIZONTAL_ADJUST_SCALE
             )
         )
+
+    def _scaled_door_lateral_wait(self, center_offset_ratio: float) -> int:
+        ratio = min(self.ENTRY_DOOR_CENTER_JOYSTICK_MAX_RATIO, max(
+            self.ENTRY_DOOR_CENTER_JOYSTICK_RATIO, center_offset_ratio
+        ))
+        span = self.ENTRY_DOOR_CENTER_JOYSTICK_MAX_RATIO - self.ENTRY_DOOR_CENTER_JOYSTICK_RATIO
+        return round(self.ENTRY_DOOR_CENTER_JOYSTICK_MIN_WAIT + (ratio - self.ENTRY_DOOR_CENTER_JOYSTICK_RATIO) / span * (
+            self.ENTRY_DOOR_CENTER_JOYSTICK_MAX_WAIT - self.ENTRY_DOOR_CENTER_JOYSTICK_MIN_WAIT
+        ))
 
     @staticmethod
     def _door_center_x(door):
@@ -4508,18 +4520,19 @@ class HouseSearchManager:
                     w.frame_log(f"[{phase_label}] 本入门点已视角微调一次，不再左右调门，只调整前后")
                 elif center_offset_ratio > self.ENTRY_DOOR_CENTER_JOYSTICK_RATIO:
                     x_bias = self._scaled_door_lateral_bias() if offset_real > 0 else -self._scaled_door_lateral_bias()
+                    lateral_wait = self._scaled_door_lateral_wait(center_offset_ratio)
                     w.frame_log(
                         f"[{phase_label}] 对门 {step + 1}/{align_max_steps} 先左右："
                         f"距中心={center_offset_ratio:.2%}>"
                         f"{self.ENTRY_DOOR_CENTER_JOYSTICK_RATIO:.0%}，"
-                        f"摇杆水平调整 x={x_bias}，人物方向不变"
+                        f"摇杆水平调整 x={x_bias}，wait={lateral_wait}ms，人物方向不变"
                     )
                     w.tap_single(
                         '摇杆',
                         x_bias=x_bias,
                         y_bias=0,
                         dura=self.VISIBLE_DOOR_CENTER_SIDE_DURA,
-                        wait=self.VISIBLE_DOOR_CENTER_SIDE_WAIT,
+                        wait=lateral_wait,
                     )
                     adjusted_position = True
                 elif center_offset_ratio > self.ENTRY_DOOR_CENTER_ALIGNED_RATIO:

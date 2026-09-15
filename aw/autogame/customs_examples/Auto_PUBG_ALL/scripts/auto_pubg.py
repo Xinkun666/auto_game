@@ -340,14 +340,15 @@ def handle_sp_start(w: "FrameWorker"):
     if phase_timer.start_game_time is not None:
         running_manager.set_game_time(phase_timer.start_game_time)
         driving_manager.set_game_time(phase_timer.start_game_time)
-    if w.sp_controller.start("sp"):
-        time.sleep(0.5)
-        if is_marathon_test(w):
-            w.frame_log(
-                f"马拉松 SP 目标 {w.sp_controller.target_duration_seconds / 60:g} 分钟，"
-                f"当前有效时间 {w.sp_controller.effective_time / 60:.1f} 分钟",
-                log_type=FrameLogType.TIME,
-            )
+    if not w.sp_controller.start("sp"):
+        return False
+    time.sleep(0.5)
+    if is_marathon_test(w):
+        w.frame_log(
+            f"马拉松 SP 目标 {w.sp_controller.target_duration_seconds / 60:g} 分钟，"
+            f"当前有效时间 {w.sp_controller.effective_time / 60:.1f} 分钟",
+            log_type=FrameLogType.TIME,
+        )
 
 
 def handle_sp_stop(w: "FrameWorker"):
@@ -1099,7 +1100,8 @@ def on_stage(w: "FrameWorker"):
         return
 
     if w.current_stage == "搜房阶段":
-        handle_sp_start(w)
+        if handle_sp_start(w) is False:
+            return
         if should_abort_searching(w):
             # 南大取景/匹配也会调用 should_abort_searching。计时到期时，
             # 内层只返回中止信号，等触控和感知分组清理完成后，
@@ -1134,7 +1136,8 @@ def on_stage(w: "FrameWorker"):
             running_manager.set_view_mode(RunningManager.VIEW_MODE_THIRD)
             searching_view_synced = False
 
-        handle_sp_start(w)
+        if handle_sp_start(w) is False:
+            return
 
         if phase_timer.all_done():
             w.frame_log(

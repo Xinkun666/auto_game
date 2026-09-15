@@ -70,6 +70,7 @@ from aw.autogame.common.SPController.SPArea import (
     SP_SAVE_PROTECTION_LOG_MARKER,
     build_sp_save_shell_command,
     calculate_sp_save_settle_seconds,
+    normalize_sp_position,
 )
 
 class AppPaths(NamedTuple):
@@ -7618,18 +7619,27 @@ class LauncherWindow(QWidget):
 
     def _save_sp_for_preserve(self, reason_label: str) -> dict:
         self.run_timeout_timer.stop()
+        self._refresh_current_run_sp_state()
+        label = str(reason_label or "SP保全").strip() or "SP保全"
+        controller_state = self.current_run_sp_state.get("controller", {})
+        position = normalize_sp_position(controller_state.get("sp_norm_position"))
         try:
             resolution = get_resolution()
-        except Exception:
-            resolution = None
-
-        if resolution:
             screen_w, screen_h = int(resolution[0]), int(resolution[1])
-        else:
-            screen_w, screen_h = 2832, 1316
+        except Exception:
+            screen_w, screen_h = 0, 0
+        if position is None or screen_w <= 0 or screen_h <= 0:
+            self._log_message(
+                f"[Launcher] {label}：缺少首次定位的 SP 坐标缓存或有效设备分辨率，无法长按保存。\n",
+                level=logging.WARNING,
+            )
+            return {
+                "ok": False,
+                "actual_runtime_seconds": self._current_sp_actual_runtime_seconds(),
+                "settle_seconds": 0,
+            }
 
-        command, x, y, duration_ms = build_sp_save_shell_command(screen_w, screen_h)
-        label = str(reason_label or "SP保全").strip() or "SP保全"
+        command, x, y, duration_ms = build_sp_save_shell_command(screen_w, screen_h, position)
 
         self._log_message(
             f"[Launcher] {label}：尝试长按 SP 保存，pos=({x},{y}), duration={duration_ms}ms。\n"

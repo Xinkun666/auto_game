@@ -15,7 +15,6 @@ if TYPE_CHECKING:
 SP_SAVE_LONG_PRESS_MS = 3000
 SP_SAVE_MIN_SETTLE_SECONDS = 30
 SP_SAVE_PROTECTION_LOG_MARKER = "SP 保存保护开始"
-SP_DEFAULT_NORM_POSITION = (0.048, 0.295)
 MARATHON_DURATION_ENV = "AUTOGAME_MARATHON_DURATION_MINUTES"
 MARATHON_END_BATTERY_ENV = "AUTOGAME_MARATHON_END_BATTERY_PERCENT"
 SP_CONTROLLER_STATE_FILE = "sp_controller_state.json"
@@ -58,10 +57,22 @@ def calculate_sp_save_settle_seconds(actual_runtime_seconds: Any) -> int:
     )
 
 
+def normalize_sp_position(value):
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    try:
+        if any(isinstance(v, bool) for v in value):
+            return None
+        x, y = map(float, value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return (x, y) if 0 <= x <= 1 and 0 <= y <= 1 else None
+
+
 def build_sp_save_shell_command(
     screen_width: int,
     screen_height: int,
-    norm_position=SP_DEFAULT_NORM_POSITION,
+    norm_position,
     duration_ms: int = SP_SAVE_LONG_PRESS_MS,
 ):
     x = int(round(int(screen_width) * float(norm_position[0])))
@@ -210,6 +221,7 @@ class SPControllerBase:
             "sp_recording": self.is_recording,
             "sp_paused": started and not stopped and self._is_paused,
             "sp_saved": self.is_saved,
+            "sp_norm_position": normalize_sp_position(self._area),
             "state_written_at_epoch": state_written_at_epoch,
             "sp_started_at_epoch": self._start_wall_time,
             "marathon_enabled": self.marathon_enabled,
@@ -347,12 +359,24 @@ class SPControllerBase:
             self._log_missing()
             return False
         if sp_area_name is not None:
-            # sp_area_name 只能是sp区域名。
-            sp_area = self.w.get_info(sp_area_name)
-            if sp_area:
-                self._area = sp_area
-            else:
-                self._area = sp_area_name
+            try:
+                sp_area = self.w.get_info(sp_area_name)
+                self._area = normalize_sp_position(sp_area)
+                failure_detail = repr(sp_area)
+            except Exception as exc:
+                self._area = None
+                failure_detail = f"{type(exc).__name__}: {exc}"
+            if self._area is None:
+                message = (
+                    f"首次 get_info({sp_area_name!r}) 获取 SP 坐标失败：{failure_detail}。"
+                    "已立即停止用例，未执行 SP 点击。"
+                )
+                self.w.frame_log(message, log_type=FrameLogType.SYSTEM)
+                self._write_state("sp_initial_location_failed")
+                self.w.mark_failed("sp_initial_location_failed", message)
+                self.w.stop()
+                return False
+            self._write_state("sp_located")
         result = self.w.click(self._area)
         if not self._control_executed(result):
             self._area = None

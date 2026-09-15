@@ -749,7 +749,7 @@ def find_template_center_multiscale(target_img, template_input, threshold=0.7):
         else:
             return None
 
-        if img is None:
+        if img is None or img.size == 0:
             return None
 
         return _to_gray(img)
@@ -758,6 +758,9 @@ def find_template_center_multiscale(target_img, template_input, threshold=0.7):
     prepared_template = _prepare_gray_image(template_input)
 
     if prepared_target is None or prepared_template is None:
+        return None
+    # TM_CCOEFF_NORMED gives constant templates a spurious perfect score.
+    if np.ptp(prepared_template) == 0:
         return None
 
     tH, tW = prepared_template.shape[:2]
@@ -773,6 +776,8 @@ def find_template_center_multiscale(target_img, template_input, threshold=0.7):
             continue
 
         resized_tpl = cv2.resize(prepared_template, (new_w, new_h))
+        if np.ptp(resized_tpl) == 0:
+            continue
         res = cv2.matchTemplate(prepared_target, resized_tpl, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(res)
 

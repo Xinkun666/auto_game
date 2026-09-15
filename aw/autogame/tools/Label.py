@@ -6357,10 +6357,7 @@ class AutoStudioWindow(QMainWindow):
             )
             scene.items.append(item)
         for name, point_data in scene_data.get("points", {}).items():
-            previous_scene_name = stage_control_names.get(name)
-            if previous_scene_name is not None and previous_scene_name != scene_name:
-                raise ValueError(f"阶段内控点名称重复: {stage_name} -> {name}")
-            stage_control_names[name] = scene_name
+            # 场景管理允许跨场景同名控点；导入也保留原名和归属，供重复标注检查处理。
             rect = denormalize_rect(point_data.get("rect"))
             item = ItemData(
                 id=str(random.randint(10000, 99999)),

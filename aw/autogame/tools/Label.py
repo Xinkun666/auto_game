@@ -1,4 +1,5 @@
 import sys
+import signal
 import json
 import random
 import os
@@ -6394,6 +6395,7 @@ class AutoStudioWindow(QMainWindow):
 # ==========================================
 if __name__ == '__main__':
     app = QApplication(sys.argv)
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
     window = AutoStudioWindow()
     window.show()
     sys.exit(app.exec())

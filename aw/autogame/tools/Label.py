@@ -250,6 +250,7 @@ class ImageCanvas(QGraphicsView):
         self._stop_draw_auto_pan()
         self.scene.clear()
         self.current_pixmap = self.scene.addPixmap(pixmap)
+        self.setMouseTracking(True)
         self.setSceneRect(QRectF(pixmap.rect()))
         self.init_crosshair_items()
         self.hide_crosshair()

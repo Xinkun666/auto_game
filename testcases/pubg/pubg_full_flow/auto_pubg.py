@@ -65,7 +65,11 @@ class auto_pubg(TestCase):
     def setup(self):
         self.log.info("预置条件：设置常亮")
         self.driver.hdc("shell power-shell timeout -o 86400000")
-        self.driver.Screen.set_brightness(brightness=130)
+        screen = getattr(self.driver, "Screen", None)
+        if screen is None:
+            self.log.warning("当前 Hypium 不支持 Screen，跳过亮度设置，保留设备当前亮度")
+        else:
+            screen.set_brightness(brightness=130)
 
     def start_perf_tool(self):
         """封装性能工具启动逻辑"""

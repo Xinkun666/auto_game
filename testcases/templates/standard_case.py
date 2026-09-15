@@ -51,7 +51,11 @@ class StandardAutoGameCase(TestCase):
     def setup(self):
         self.log.info("预置条件：设置常亮")
         self.driver.hdc("shell power-shell timeout -o 86400000")
-        self.driver.Screen.set_brightness(brightness=130)
+        screen = getattr(self.driver, "Screen", None)
+        if screen is None:
+            self.log.warning("当前 Hypium 不支持 Screen，跳过亮度设置，保留设备当前亮度")
+        else:
+            screen.set_brightness(brightness=130)
 
     def _use_sp_recording(self) -> bool:
         return should_use_sp_recording_for_profile(self.test_profile)

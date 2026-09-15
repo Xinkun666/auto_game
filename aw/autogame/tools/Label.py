@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QPinchGesture, QHeaderView, QProgressDialog, QComboBox, QDialog,
                              QLineEdit, QCheckBox, QScrollArea, QDialogButtonBox, QTabWidget)
 from PyQt6.QtCore import Qt, QRectF, QPointF, QEvent, QTimer
-from PyQt6.QtGui import QAction, QPixmap, QColor, QPen, QBrush, QImage, QPainter, QGuiApplication, QFontMetricsF
+from PyQt6.QtGui import QAction, QPixmap, QColor, QPen, QBrush, QImage, QPainter, QGuiApplication, QFontMetricsF, QCursor
 from aw.autogame.tools.AreaResolver import resolve_area_rect_for_frame
 from aw.autogame.tools.ProcessUtils import hidden_subprocess_kwargs
 # ==========================================
@@ -230,6 +230,9 @@ class ImageCanvas(QGraphicsView):
         self._draw_auto_pan_timer = QTimer(self)
         self._draw_auto_pan_timer.setInterval(16)
         self._draw_auto_pan_timer.timeout.connect(self._continue_draw_auto_pan)
+        self._crosshair_timer = QTimer(self)
+        self._crosshair_timer.setInterval(16)
+        self._crosshair_timer.timeout.connect(self._sync_crosshair_with_cursor)
     def is_point_on_image(self, pt: QPointF):
         if not self.current_pixmap:
             return False
@@ -251,13 +254,26 @@ class ImageCanvas(QGraphicsView):
         self.scene.clear()
         self.current_pixmap = self.scene.addPixmap(pixmap)
         self.setMouseTracking(True)
-        self.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.setSceneRect(QRectF(pixmap.rect()))
         self.init_crosshair_items()
         self.hide_crosshair()
         self.user_zoomed = False
         self.fit_image_to_view()
         self.main_window.update_coord_display(None, None)
+        self._crosshair_timer.start()
+
+    def _sync_crosshair_with_cursor(self):
+        # Keep guide lines independent of native mouse/hover event delivery.
+        if not self.isVisible() or not self.current_pixmap:
+            return
+        cursor_pos = QCursor.pos()
+        viewport = self.viewport()
+        if QApplication.widgetAt(cursor_pos) is viewport:
+            self.update_crosshair(self.mapToScene(viewport.mapFromGlobal(cursor_pos)))
+        else:
+            self.hide_crosshair()
+            self.main_window.update_coord_display(None, None)
+
     def init_crosshair_items(self):
         pen = QPen(QColor(0, 255, 0, 200), 1, Qt.PenStyle.DashLine)
         self.crosshair_h = QGraphicsLineItem()
@@ -522,14 +538,6 @@ class ImageCanvas(QGraphicsView):
             self.temp_rect_item.setRect(rect)
         else:
             super().mouseMoveEvent(event)
-    def viewportEvent(self, event):
-        if event.type() in (QEvent.Type.HoverEnter, QEvent.Type.HoverMove):
-            self.update_crosshair(self.mapToScene(event.position().toPoint()))
-        elif event.type() == QEvent.Type.HoverLeave:
-            self.hide_crosshair()
-            self.main_window.update_coord_display(None, None)
-        return super().viewportEvent(event)
-
     def leaveEvent(self, event):
         self.hide_crosshair()
         self.main_window.update_coord_display(None, None)

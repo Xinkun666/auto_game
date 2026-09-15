@@ -798,6 +798,7 @@ class HouseSearchManager:
             state = {
                 "key": key,
                 "door_seen": False,
+                "view_micro_adjusted": False,
                 "backoff_done": False,
                 "building_attempts": 0,
                 "last_side": None,
@@ -1712,7 +1713,7 @@ class HouseSearchManager:
             left_area += max(0.0, min(x2, middle) - max(x1, 0.0)) * height
             right_area += max(0.0, min(x2, float(frame_width)) - max(x1, middle)) * height
 
-        if left_area == right_area:
+        if left_area == right_area == 0:
             return None
         return "right" if right_area > left_area else "left"
 
@@ -2857,7 +2858,8 @@ class HouseSearchManager:
         """Keep the near-entry sequence as: find door -> align door -> match/replay."""
         w.frame_log(
             f"[{phase_label}][EntryDoorFlow][6-门校准] 开始将门移到画面中心："
-            f"door={door}，>4%用摇杆，1%~4%用视角，≤1%后按门面积1%~3.5%前后微调"
+            f"door={door}，>4%用摇杆，1%~4%用一次视角微调；"
+            "视角微调后锁定水平，只按门面积1%~3.5%前后调整"
         )
         door_state = self._align_to_door_detection(
             w,
@@ -2870,7 +2872,8 @@ class HouseSearchManager:
         if door_state == "aligned":
             w.frame_log(
                 f"[{phase_label}][EntryDoorFlow][6-门校准] 校准成功，"
-                "门已到中心容差内；现在启动房型匹配，匹配成功后立即回放"
+                "水平已完成（中心在容差内或已做视角微调）且门大小合适；"
+                "现在启动房型匹配，匹配成功后立即回放"
             )
             return "aligned"
 
@@ -3035,6 +3038,8 @@ class HouseSearchManager:
         return self.current_house_id, self._entry_location_tuple(self.active_entry)
 
     def _restore_third_person_after_entry(self, w: 'FrameWorker', reason: str) -> bool:
+        self._entry_door_recovery = {}
+        self.entry_direction_aligned_key = None
         entry_key = getattr(self, "entry_first_person_key", None)
         if entry_key is None or w is None:
             return False
@@ -3077,7 +3082,8 @@ class HouseSearchManager:
         w.frame_log(
             f"[{phase_label}][EntryDoorFlow][1-进入近门流程] "
             f"current={current_loc}，entry={target_loc}，dist={dist:.2f} "
-            f"<= {self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:g}；已停止自动前进，"
+            f"（首次进入阈值<={self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:g}，后续保持本流程）；"
+            "已停止自动前进，"
             "下一步=对齐入门方向"
         )
         self._ensure_first_person_at_near_entry(w, phase_label)
@@ -3283,7 +3289,11 @@ class HouseSearchManager:
             w.frame_log(f"[{phase_label}] 入门点微调距离无效: dist={dist}，跳过微调")
             return "failed"
 
-        if dist_val > self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
+        if (
+            dist_val > self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE
+            and getattr(self, "entry_first_person_key", None)
+            != self._entry_door_recovery_state()["key"]
+        ):
             self._reset_entry_near_micro_adjust()
             return "outside"
         if dist_val == self.ENTRY_NEAR_MICRO_DONE_DISTANCE:
@@ -4436,7 +4446,9 @@ class HouseSearchManager:
         )
         if self.ENTRY_DOOR_VIEW_ADJUST_REFRESH_SETTLE_SECONDS > 0:
             time.sleep(self.ENTRY_DOOR_VIEW_ADJUST_REFRESH_SETTLE_SECONDS)
-        self._refresh_frame_and_handle_jump(w, f"{phase_label} 等待最新帧")
+        self._refresh_frame_and_handle_jump(
+            w, f"{phase_label} 等待最新帧", handle_jump=not use_sam3
+        )
         door = self.find_largest_door(w)
         if door is None and use_sam3:
             w.frame_log(f"[{phase_label}] 调整后YOLO未定位门，继续使用SAM3复查")
@@ -4455,6 +4467,7 @@ class HouseSearchManager:
         center_ratio_stages: bool = False,
     ):
         last_offset_real = None
+        recovery_state = self._entry_door_recovery_state() if center_ratio_stages else None
 
         def finish(state: str):
             result = state if return_state else state == "aligned"
@@ -4478,8 +4491,22 @@ class HouseSearchManager:
                     w.frame_log(f"[{phase_label}] 无法计算门面积，重新定位门")
                     return finish("lost")
 
+                horizontal_done = recovery_state.get("view_micro_adjusted", False)
+                if (
+                    (horizontal_done or center_offset_ratio <= self.ENTRY_DOOR_CENTER_ALIGNED_RATIO)
+                    and self.ENTRY_DOOR_DISTANCE_MIN_AREA_RATIO
+                    <= door_area_ratio <= self.ENTRY_DOOR_DISTANCE_MAX_AREA_RATIO
+                ):
+                    w.frame_log(
+                        f"[{phase_label}] 门校准完成：已视角微调={horizontal_done}，"
+                        f"距中心={center_offset_ratio:.2%}，门面积={door_area_ratio:.2%}"
+                    )
+                    return finish("aligned")
+
                 adjusted_position = False
-                if center_offset_ratio > self.ENTRY_DOOR_CENTER_JOYSTICK_RATIO:
+                if horizontal_done:
+                    w.frame_log(f"[{phase_label}] 本入门点已视角微调一次，不再左右调门，只调整前后")
+                elif center_offset_ratio > self.ENTRY_DOOR_CENTER_JOYSTICK_RATIO:
                     x_bias = self._scaled_door_lateral_bias() if offset_real > 0 else -self._scaled_door_lateral_bias()
                     w.frame_log(
                         f"[{phase_label}] 对门 {step + 1}/{align_max_steps} 先左右："
@@ -4515,6 +4542,8 @@ class HouseSearchManager:
                         dura=self.ENTRY_DOOR_ALIGN_DURA,
                         wait=self.ENTRY_DOOR_ALIGN_WAIT,
                     )
+                    recovery_state["view_micro_adjusted"] = True
+                    w.frame_log(f"[{phase_label}] 已完成一次视角微调，记录本入门点水平调整完成")
 
                 if door_area_ratio < self.ENTRY_DOOR_DISTANCE_MIN_AREA_RATIO:
                     y_bias = self.ENTRY_DOOR_DIRECT_FORWARD_Y_BIAS
@@ -4540,13 +4569,6 @@ class HouseSearchManager:
                         wait=self.ENTRY_DOOR_DISTANCE_ADJUST_WAIT,
                     )
                     adjusted_position = True
-
-                if center_offset_ratio <= self.ENTRY_DOOR_CENTER_ALIGNED_RATIO and y_bias is None:
-                    w.frame_log(
-                        f"[{phase_label}] 门已对准：距中心={center_offset_ratio:.2%}，"
-                        f"门面积={door_area_ratio:.2%}"
-                    )
-                    return finish("aligned")
 
                 if adjusted_position:
                     self.history_locations = []
@@ -5606,90 +5628,6 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.status = "IDLE"
         return "skipped"
 
-    def _handle_nav_near_entry_scene_if_needed(
-        self,
-        w: "FrameWorker",
-        phase_label: str,
-        reason: str,
-        current_loc=None,
-        target_loc=None,
-    ):
-        """Confirm a visible door once after near-door/wall backoff, or skip it."""
-        scene = self._get_house_scene(w)
-        if scene not in self.HOUSE_NEAR_ENTRY_SCENES:
-            return super()._handle_nav_near_entry_scene_if_needed(
-                w,
-                phase_label,
-                reason,
-                current_loc=current_loc,
-                target_loc=target_loc,
-            )
-
-        scene_label = "nearwall" if scene == self.HOUSE_NEAR_WALL else "nearhouse"
-        w.frame_log(
-            f"[RCitySearch] 当前入门点检测到{scene_label}，后拉后先确认门框，"
-            "不再直接回到同一入口精推"
-        )
-        self.stop_auto_forward(w)
-        w.tap_single(
-            "摇杆",
-            y_bias=self.ENTRY_DOOR_DIRECT_BACKOFF_Y_BIAS,
-            dura=self.ENTRY_DOOR_DIRECT_BACKOFF_DURA,
-            wait=self.ENTRY_DOOR_DIRECT_BACKOFF_WAIT,
-        )
-        # 这里只做视觉确认。不能走全局跳跃处理，否则“无门不前推”的
-        # 分支可能因为跳跃按钮而意外产生一次前推。
-        w.refresh_frame()
-        if self._is_indoor(w):
-            return "indoor"
-
-        door = self.find_largest_door(w)
-        if door is None:
-            w.frame_log('[Action] 左转30度找门')
-            self.turn_by_angle(w, -self.R_CITY_NEAR_ENTRY_LOOK_DEGREES)
-            w.refresh_frame()
-            if self._is_indoor(w):
-                return "indoor"
-            door = self.find_largest_door(w)
-
-        if door is None:
-            w.frame_log('[Action] 右转30度回正找门')
-            self.turn_by_angle(w, self.R_CITY_NEAR_ENTRY_LOOK_DEGREES)
-            w.refresh_frame()
-            if self._is_indoor(w):
-                return "indoor"
-            door = self.find_largest_door(w)
-
-        if door is not None:
-            resolved_target_loc = self._location_tuple(target_loc)
-            if resolved_target_loc is None and self.active_entry:
-                resolved_target_loc = self._location_tuple(
-                    self.active_entry.get("location")
-                )
-            resolved_current_loc = self._location_tuple(current_loc)
-            if resolved_current_loc is None:
-                resolved_current_loc = self._get_current_location(w)
-            resolved_dist = (
-                get_distance(resolved_current_loc, resolved_target_loc)
-                if resolved_current_loc is not None and resolved_target_loc is not None
-                else None
-            )
-            w.frame_log('[Action] 已确认门框，只允许南大搜房接管')
-            return self._try_nanda_search_before_entry(
-                w,
-                door,
-                resolved_target_loc,
-                resolved_dist,
-                phase_label,
-            )
-        else:
-            failure_reason = "贴门墙后正前方、左转30度和回正后均未看到门"
-
-        w.frame_log(f"[RCitySearch] {failure_reason}，舍弃当前入门点并重新选点")
-        self._mark_current_r_city_target_failed(failure_reason)
-        self.status = "IDLE"
-        return "failed"
-
     def searching_logic(self, w: "FrameWorker", current_loc, current_direction):
         if self._should_abort(w):
             return
@@ -5793,9 +5731,12 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         target_loc = self.active_entry["location"]
         dist = get_distance(current_loc, target_loc)
+        entry_flow_active = (
+            getattr(self, "entry_first_person_key", None) == self._active_entry_view_key()
+        )
         force_precise_entry_nav = (
-            target_loc is not None
-            and dist <= self.ENTRY_AUTO_FORWARD_DISTANCE
+            entry_flow_active
+            or (target_loc is not None and dist <= self.ENTRY_AUTO_FORWARD_DISTANCE)
         )
 
         if force_precise_entry_nav:
@@ -5881,12 +5822,9 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         if self.status == "FAST_NAV":
             w.frame_log('[Action] 朝入门点摇杆推进')
-            nav_scene_result = self._handle_nav_near_entry_scene_if_needed(w, "Nav快推段", "R城导航中")
-            if nav_scene_result == "indoor":
-                w.frame_log('[Action] 完成当前房搜房')
-                self._complete_current_house_search(w, "R城导航中贴门墙后进入房屋")
-                return
-            if nav_scene_result is not None:
+            if self._handle_entry_near_house_bypass(
+                w, current_loc, target_loc, dist, phase_label="Nav快推段"
+            ):
                 return
 
             if self.update_and_check_stuck(current_loc):
@@ -5910,12 +5848,11 @@ class HouseSceneSearchManager(HouseSearchManager):
 
         if self.status == "PRECISE_NAV":
             w.frame_log('[Action] 精准推进入门点')
-            if dist <= self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:
+            if dist <= self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE or entry_flow_active:
                 if getattr(self, "entry_near_house_bypass_side", None) is not None:
                     w.frame_log(
-                        f"[RCityEntry][EntryApproach][NearHouse] dist={dist:.2f} "
-                        f"<= {self.ENTRY_NEAR_MICRO_ADJUST_DISTANCE:g}，"
-                        "已进入近门流程；清空绕房方位"
+                        f"[RCityEntry][EntryApproach][NearHouse] dist={dist:.2f}，"
+                        "当前入门点已进入近门流程；清空绕房方位"
                     )
                     self.entry_near_house_bypass_key = None
                     self.entry_near_house_bypass_side = None
@@ -5940,21 +5877,6 @@ class HouseSceneSearchManager(HouseSearchManager):
                 dist,
                 phase_label="Nav精推段",
             ):
-                return
-
-            nav_scene_result = self._handle_nav_near_entry_scene_if_needed(
-                w,
-                "Nav精推段",
-                "R城导航中",
-                current_loc=current_loc,
-                target_loc=target_loc,
-            )
-            if nav_scene_result == "indoor":
-                w.frame_log('[Action] 完成当前房搜房')
-                self._complete_current_house_search(w, "R城导航中贴门墙后进入房屋")
-                return
-            if nav_scene_result is not None:
-                w.frame_log('[Action] 处理贴墙贴门干扰')
                 return
 
             self.stop_auto_forward(w)
@@ -7156,6 +7078,8 @@ class HouseSceneSearchManager(HouseSearchManager):
         return entry_loc, get_distance(loc, entry_loc)
 
     def _lock_r_city_target(self, target):
+        self._entry_door_recovery = {}
+        self.entry_direction_aligned_key = None
         self.current_r_city_target = target
         self.current_house_id = self._r_city_target_house_id(target)
         self.active_entry = {
@@ -7176,6 +7100,8 @@ class HouseSceneSearchManager(HouseSearchManager):
         self.entry_near_house_bypass_side = None
 
     def _mark_current_r_city_target_failed(self, reason: str):
+        self._entry_door_recovery = {}
+        self.entry_direction_aligned_key = None
         worker = getattr(self, "_frame_worker", None)
         if worker is not None:
             self._restore_third_person_after_entry(

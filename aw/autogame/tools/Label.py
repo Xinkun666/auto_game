@@ -251,6 +251,7 @@ class ImageCanvas(QGraphicsView):
         self.scene.clear()
         self.current_pixmap = self.scene.addPixmap(pixmap)
         self.setMouseTracking(True)
+        self.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.setSceneRect(QRectF(pixmap.rect()))
         self.init_crosshair_items()
         self.hide_crosshair()
@@ -521,6 +522,14 @@ class ImageCanvas(QGraphicsView):
             self.temp_rect_item.setRect(rect)
         else:
             super().mouseMoveEvent(event)
+    def viewportEvent(self, event):
+        if event.type() in (QEvent.Type.HoverEnter, QEvent.Type.HoverMove):
+            self.update_crosshair(self.mapToScene(event.position().toPoint()))
+        elif event.type() == QEvent.Type.HoverLeave:
+            self.hide_crosshair()
+            self.main_window.update_coord_display(None, None)
+        return super().viewportEvent(event)
+
     def leaveEvent(self, event):
         self.hide_crosshair()
         self.main_window.update_coord_display(None, None)

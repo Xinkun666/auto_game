@@ -1162,6 +1162,7 @@ class AutoStudioWindow(QMainWindow):
 
         AutoStudioWindow._ensure_project_scene_pool(project)
         AutoStudioWindow._sync_stage_scene_resolutions_from_pool(project)
+        AutoStudioWindow._restore_missing_scene_images(project)
         return project
 
     @staticmethod
@@ -6190,13 +6191,14 @@ class AutoStudioWindow(QMainWindow):
         scene_catalog = {}
         scene_dirs_by_object_id = {}
 
-        def add_imported_scene(stage_name, scene_name, scene_version_data, stage_control_names):
+        def add_imported_scene(stage_name, scene_name, scene_version_data, stage_control_names, resolution_key=""):
             imported_scene = AutoStudioWindow._import_scene_version(
                 import_dir,
                 stage_name,
                 scene_name,
                 scene_version_data,
                 stage_control_names,
+                resolution_key=resolution_key,
             )
             scene_dir = AutoStudioWindow._export_scene_dir_from_image_rel(
                 scene_version_data.get("image", "") if isinstance(scene_version_data, dict) else ""
@@ -6223,8 +6225,8 @@ class AutoStudioWindow(QMainWindow):
                 scene_versions = scene_data.get("resolutions", {}) if isinstance(scene_data, dict) else {}
                 if not scene_versions:
                     scene_versions = {"": scene_data}
-                for _, scene_version_data in scene_versions.items():
-                    scene = add_imported_scene(stage_name, scene_name, scene_version_data, stage_control_names)
+                for resolution_key, scene_version_data in scene_versions.items():
+                    scene = add_imported_scene(stage_name, scene_name, scene_version_data, stage_control_names, resolution_key)
                     stage.scenes.append(scene)
             stage.groups = (
                 AutoStudioWindow._deserialize_stage_groups(stage_data.get("groups", {}), stage)
@@ -6243,12 +6245,13 @@ class AutoStudioWindow(QMainWindow):
                     scene_versions = scene_data.get("resolutions", {})
                     if not isinstance(scene_versions, dict) or not scene_versions:
                         scene_versions = {"": scene_data}
-                    for _, scene_version_data in scene_versions.items():
-                        add_imported_scene("", scene_name, scene_version_data, {})
+                    for resolution_key, scene_version_data in scene_versions.items():
+                        add_imported_scene("", scene_name, scene_version_data, {}, resolution_key)
         AutoStudioWindow._ensure_project_scene_pool(new_project)
         if has_scene_pool_info:
             AutoStudioWindow._apply_scene_pool_info(new_project, scene_pool_info, scene_dirs_by_object_id)
         AutoStudioWindow._sync_stage_scene_resolutions_from_pool(new_project)
+        AutoStudioWindow._restore_missing_scene_images(new_project)
         return new_project
 
     def import_project(self):
@@ -6262,28 +6265,59 @@ class AutoStudioWindow(QMainWindow):
             QMessageBox.critical(self, "导入失败", f"无法导入项目：\n{exc}")
 
     @staticmethod
+    def _restore_missing_scene_images(project: ProjectData):
+        for group in project.scene_groups:
+            for scene in list(group.scenes):
+                if not scene.items or (scene.image_width > 0 and scene.image_height > 0):
+                    continue
+                scene.image_width, scene.image_height = 2832, 1316
+                existing = next((peer for peer in group.scenes
+                                 if peer is not scene and peer.name == scene.name
+                                 and (peer.image_width, peer.image_height) == (2832, 1316)), None)
+                if existing:
+                    keys = {(item.item_type, item.name) for item in existing.items}
+                    for item in scene.items:
+                        if (item.item_type, item.name) not in keys:
+                            existing.items.append(item)
+                            keys.add((item.item_type, item.name))
+                    for container in [*project.scene_groups, *project.stages]:
+                        if any(candidate is scene for candidate in container.scenes):
+                            container.scenes = [candidate for candidate in container.scenes if candidate is not scene]
+                            if not any(candidate is existing for candidate in container.scenes):
+                                container.scenes.append(existing)
+                    scene = existing
+                AutoStudioWindow._fill_missing_scene_image(scene)
+
+    @staticmethod
     def _fill_missing_scene_image(scene: SceneData):
         if (scene.pixmap is None or scene.pixmap.isNull()) and scene.items and scene.image_width > 0 and scene.image_height > 0:
             scene.pixmap = QPixmap(scene.image_width, scene.image_height)
             scene.pixmap.fill(Qt.GlobalColor.white)
 
     @staticmethod
-    def _import_scene_version(import_dir, stage_name, scene_name, scene_data, stage_control_names):
+    def _import_scene_version(import_dir, stage_name, scene_name, scene_data, stage_control_names, resolution_key=""):
         scene = SceneData(id=str(random.randint(1000, 9999)), name=scene_name)
         image_rel = scene_data.get("image", "")
+        width, height = int(scene_data.get("width") or 0), int(scene_data.get("height") or 0)
+        if width <= 0 or height <= 0:
+            for candidate in [str(resolution_key), *str(image_rel).replace("\\", "/").split("/")]:
+                match = re.fullmatch(r"([1-9]\d*)[x_]([1-9]\d*)", candidate)
+                if match:
+                    width, height = map(int, match.groups())
+                    break
         image_path = AutoStudioWindow._resolve_import_asset_path(
             import_dir,
             image_rel,
             scene_name=scene_name,
-            width=scene_data.get("width", 0),
-            height=scene_data.get("height", 0),
+            width=width,
+            height=height,
         )
         scene.image_path = image_path
         pix = AutoStudioWindow._load_pixmap_from_path(image_path)
         if pix:
             scene.pixmap = pix
-        width = scene_data.get("width", 0) or (scene.pixmap.width() if scene.pixmap else 0)
-        height = scene_data.get("height", 0) or (scene.pixmap.height() if scene.pixmap else 0)
+        width = width if width > 0 else (scene.pixmap.width() if scene.pixmap else 0)
+        height = height if height > 0 else (scene.pixmap.height() if scene.pixmap else 0)
         scene.image_width = int(width)
         scene.image_height = int(height)
 

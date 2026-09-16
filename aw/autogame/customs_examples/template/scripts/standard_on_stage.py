@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING
 
 
 if TYPE_CHECKING:
-    from ..script_types import GameWorker
+    from ..info import GameWorker
 
 
 def on_stage(w: "GameWorker"):

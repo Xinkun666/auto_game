@@ -3578,6 +3578,9 @@ class FrameWorker(threading.Thread):
                 return stage
         return None
 
+    def equal_stage(self, stage_name):
+        return self.current_stage == stage_name
+
     def _get_initial_group_for_stage(self, stage_name):
         if not stage_name:
             return DEFAULT_GROUP_NAME

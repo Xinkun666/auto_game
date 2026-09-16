@@ -77,7 +77,7 @@ def _build_on_stage_template(stage_names: List[str], typed: bool = True) -> str:
             "from typing import TYPE_CHECKING",
             "",
             "if TYPE_CHECKING:",
-            "    from ._autocomplete import GameWorker",
+            "    from ..script_types import GameWorker",
             "",
             "",
             "def on_stage(w: \"GameWorker\"):"
@@ -132,6 +132,7 @@ def _build_script_autocomplete_types(stages: List["StageData"]) -> str:
         "class GameWorker(Protocol):",
         "    current_stage: Optional[StageName]",
         "",
+        "    def equal_stage(self, stage_name: StageName) -> bool: ...",
         "    def get_info(self, area_name: InfoName) -> Optional[Any]: ...",
         "    def click(self, btn: ClickTarget, x_bias: float = 0, y_bias: float = 0, **kwargs: Any) -> Any: ...",
         "    def tap_single(self, btn: ClickTarget, **kwargs: Any) -> Any: ...",
@@ -5954,9 +5955,9 @@ class AutoStudioWindow(QMainWindow):
                         )
                     )
                 self._advance_export_progress(progress_dialog, progress_state, "已创建用例模板", 1)
-            autocomplete_path = os.path.join(scripts_dir, "_autocomplete.py")
-            with open(autocomplete_path, "w", encoding="utf-8") as autocomplete_file:
-                autocomplete_file.write(_build_script_autocomplete_types(self.project.stages))
+            script_types_path = os.path.join(staging_project_dir, "script_types.py")
+            with open(script_types_path, "w", encoding="utf-8") as script_types_file:
+                script_types_file.write(_build_script_autocomplete_types(self.project.stages))
             self._advance_export_progress(progress_dialog, progress_state, "已更新用例代码提示", 1)
             file_path = os.path.join(staging_project_dir, "info.py")
             # 生成代码逻辑

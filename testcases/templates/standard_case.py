@@ -149,6 +149,7 @@ class StandardAutoGameCase(TestCase):
     def start_game_package(self):
         print(f"{self.game_display_name}-通过 HAP 包直接启动: {self.game_package}")
         self.driver.start_app(self.game_package)
+        print(f"等待 {STARTUP_WAIT_SECONDS} 秒后开始拉起游戏自动化")
         time.sleep(STARTUP_WAIT_SECONDS)
 
     def _wait_for_game_rotation(self, timeout=20, stable_rounds=3, interval=1.0):

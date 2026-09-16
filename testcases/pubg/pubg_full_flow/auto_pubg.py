@@ -104,7 +104,8 @@ class auto_pubg(TestCase):
         self.driver.touch((0.27, 0.17))  # 点击搜索出的游戏
         time.sleep(10)
         self.driver.touch((0.49, 0.94))  # 点击开始测试
-        time.sleep(1)
+        print(f"等待 {STARTUP_WAIT_SECONDS} 秒后开始拉起游戏自动化")
+        time.sleep(STARTUP_WAIT_SECONDS)
 
     def _restart_perf_tool(self):
         print("重启性能工具应用")

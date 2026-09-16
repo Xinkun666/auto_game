@@ -5945,6 +5945,19 @@ class AutoStudioWindow(QMainWindow):
                         template_file.write(_build_on_stage_template(
                             [stage.name for stage in self.project.stages]
                         ))
+                else:
+                    try:
+                        with open(template_path, "r", encoding="utf-8") as template_file:
+                            template_content = template_file.read()
+                        updated_template_content = template_content.replace(
+                            "from ._autocomplete import GameWorker",
+                            "from ..script_types import GameWorker",
+                        )
+                        if updated_template_content != template_content:
+                            with open(template_path, "w", encoding="utf-8") as template_file:
+                                template_file.write(updated_template_content)
+                    except OSError:
+                        pass
             else:
                 os.makedirs(scripts_dir, exist_ok=True)
                 template_path = os.path.join(scripts_dir, "standard_on_stage.py")

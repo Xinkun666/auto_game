@@ -74,6 +74,9 @@ class PhaseTimeManager:
             phase_name: PhaseState(name=phase_name, duration=float(duration) * 60.0)
             for phase_name, duration in durations_in_minutes.items()
         }
+        self.original_durations = {
+            name: state.duration for name, state in self.phase_states.items()
+        }
         self.stage_phase_map = dict(stage_phase_map)
 
         self.last_stage: Optional[str] = None
@@ -147,7 +150,8 @@ class PhaseTimeManager:
         self._frame_log(f"单次用例循环次数: {self.case_loop_count}")
 
     def _reset_phase_progress(self):
-        for state in self.phase_states.values():
+        for name, state in self.phase_states.items():
+            state.duration = self.original_durations[name]
             state.elapsed = 0.0
             state.started = False
             state.completed = False
@@ -276,7 +280,25 @@ class PhaseTimeManager:
 
     def get_remaining(self, phase_name: str) -> float:
         state = self.phase_states[phase_name]
+        if state.completed:
+            return 0.0
         return max(0.0, state.duration - self._effective_elapsed(phase_name))
+
+    def finish_phase_early(self, phase_name: str, carry_to: str, max_remaining: float) -> float:
+        if self.active_phase == phase_name:
+            self._pause_active_phase()
+        if self.is_completed(phase_name) or self.is_completed(carry_to):
+            return 0.0
+        remaining = self.get_remaining(phase_name)
+        if not 0 < remaining <= max_remaining:
+            return 0.0
+        self.phase_states[phase_name].completed = True
+        self.phase_states[carry_to].duration += remaining
+        self._frame_log(
+            f"{self._phase_label(phase_name)}因重开提前结束，余下 {remaining:.1f} 秒"
+            f"补到{self._phase_label(carry_to)}"
+        )
+        return remaining
 
     def get_total_elapsed(self) -> float:
         elapsed = self.total_elapsed

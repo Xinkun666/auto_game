@@ -115,6 +115,7 @@ RANK_FINISH_SPECTATE_WAIT_SECONDS = 4.0
 RANK_FINISH_CONTINUE_1_WAIT_SECONDS = 2.0
 SP_RECORDING_ENABLED = False
 START_GAME_VERIFY_DELAY = 5.0
+RESTART_TIME_GRACE_SECONDS = 30.0
 EXIT_LOBBY_MISSING_FRAME_LIMIT = 10
 EXIT_RETRY_TIMEOUT_SECONDS = 30.0
 CLOSE_POPUP_SETTLE_DELAY = 1.0
@@ -642,6 +643,28 @@ def finish_case_loop_or_finalize(w: "FrameWorker"):
     handle_sp_stop(w)
     phase_timer.advance_case_loop(allow_extend=marathon_test)
     w.change_stage("结束阶段")
+
+
+def apply_restart_time_grace(w: "FrameWorker") -> bool:
+    round_remaining = phase_timer.get_total_remaining()
+    if round_remaining <= RESTART_TIME_GRACE_SECONDS:
+        w.frame_log(
+            f"本局需重开，但当前循环总计仅剩 {round_remaining:.1f} 秒，"
+            "按容差完成本轮，并按现有循环规则继续或结束用例",
+            log_type=FrameLogType.TIME,
+        )
+        finish_case_loop_or_finalize(w)
+        return True
+
+    if not phase_timer.is_completed(PHASE_SEARCHING):
+        for carry_to in (PHASE_RUNNING, PHASE_DRIVING):
+            if phase_timer.is_completed(carry_to):
+                continue
+            if phase_timer.finish_phase_early(
+                PHASE_SEARCHING, carry_to, RESTART_TIME_GRACE_SECONDS
+            ):
+                break
+    return False
 
 
 def finalize_after_lobby(w: "FrameWorker"):
@@ -1240,6 +1263,8 @@ def on_stage(w: "FrameWorker"):
     if w.current_stage == "结束阶段":
         if exit_retry_deadline is not None and time.monotonic() >= exit_retry_deadline:
             _fail_exit_retry(w, "结束阶段未能在30秒内返回开始游戏阶段")
+            return
+        if not final_shutdown_pending and apply_restart_time_grace(w):
             return
         if final_shutdown_pending:
             w.frame_log(

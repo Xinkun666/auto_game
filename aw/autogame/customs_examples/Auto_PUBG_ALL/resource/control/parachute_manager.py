@@ -2,6 +2,7 @@ import os
 import cv2
 import time
 import math
+import random
 import subprocess
 
 from aw.autogame.customs_examples.Auto_PUBG_ALL.resource.navigation.navigation_geometry import *
@@ -51,6 +52,7 @@ class ParachuteManager:
         self.jump_button_clicked = False
         self.target_candidates: Dict[str, Tuple[int, int]] = {}
         self.target_importance: Dict[str, float] = {}
+        self.recent_search_regions: List[str] = []
         self.dynamic_target_selection = False
         self.route_samples: List[Tuple[int, int]] = []
         self.route_start_location: Optional[Tuple[int, int]] = None
@@ -84,6 +86,7 @@ class ParachuteManager:
         self.jump_button_clicked = False
         self.target_candidates = {}
         self.target_importance = {}
+        # 最近片区跨轮次保留，供下一局抽选时降低重复权重。
         self.dynamic_target_selection = False
         self.route_samples = []
         self.route_start_location = None
@@ -351,7 +354,32 @@ class ParachuteManager:
         if not plans:
             return self._restart_match_for_unreachable_targets(w)
 
-        if self.target_importance:
+        if self.landing_stage == "搜房阶段":
+            weights = []
+            for plan in plans:
+                score = plan["importance_score"]
+                importance = (
+                    score if score is not None and math.isfinite(score) and score > 0
+                    else 1.0
+                )
+                route_weight = 1.0 - 0.8 * plan["cross_distance"] / self.TRIGGER_DIST
+                recent_weight = (
+                    0.25 if plan["name"] in self.recent_search_regions else 1.0
+                )
+                weights.append(importance * route_weight * recent_weight)
+            selected = random.choices(plans, weights=weights, k=1)[0]
+            self.recent_search_regions = (
+                self.recent_search_regions + [selected["name"]]
+            )[-2:]
+            selection_reason = "按重要性、航线距离和最近片区权重抽选"
+            weight_log = {
+                plan["name"]: round(weight, 2)
+                for plan, weight in zip(plans, weights)
+            }
+            w.frame_log(
+                f"[Parachute] 搜房片区候选权重: {weight_log}"
+            )
+        elif self.target_importance:
             selected = max(
                 plans,
                 key=lambda item: (

@@ -115,6 +115,8 @@ RANK_FINISH_SPECTATE_WAIT_SECONDS = 4.0
 RANK_FINISH_CONTINUE_1_WAIT_SECONDS = 2.0
 SP_RECORDING_ENABLED = False
 START_GAME_VERIFY_DELAY = 5.0
+EXIT_LOBBY_MISSING_FRAME_LIMIT = 10
+EXIT_RETRY_TIMEOUT_SECONDS = 30.0
 CLOSE_POPUP_SETTLE_DELAY = 1.0
 LOBBY_CONFIRM_INTERVAL = 0.7
 LOBBY_CONFIRM_REQUIRED = 2
@@ -135,6 +137,9 @@ start_game_click_time = None
 final_shutdown_pending = False
 rank_finish_pending = False
 rank_finish_lobby_flow_state = None
+exit_lobby_missing_frames = None
+exit_retry_count = 0
+exit_retry_deadline = None
 searching_view_synced = False
 searching_phase_finishing = False
 searching_to_running_notified = False
@@ -277,6 +282,7 @@ def pause_sp_after_death(w: "FrameWorker"):
 def prepare_round(w: "FrameWorker" = None):
     global searching_view_synced, rank_finish_pending, rank_finish_lobby_flow_state
     global searching_phase_finishing, searching_to_running_notified, searching_exit_retry_count
+    global exit_lobby_missing_frames, exit_retry_count, exit_retry_deadline
 
     _require_runtime()
     phase_timer.start_new_round()
@@ -287,6 +293,9 @@ def prepare_round(w: "FrameWorker" = None):
     searching_exit_retry_count = 0
     rank_finish_pending = False
     rank_finish_lobby_flow_state = None
+    exit_lobby_missing_frames = None
+    exit_retry_count = 0
+    exit_retry_deadline = None
 
     need_drive = phase_timer.need_drive()
     need_searching = not phase_timer.is_completed(PHASE_SEARCHING)
@@ -709,6 +718,55 @@ def confirm_lobby_after_popups(w: "FrameWorker") -> bool:
     return lobby_house_confirm_count >= LOBBY_CONFIRM_REQUIRED
 
 
+def _fail_exit_retry(w: "FrameWorker", reason: str) -> bool:
+    message = f"退出游戏重试失败：{reason}，结束用例。"
+    w.frame_log(message, log_type=FrameLogType.SYSTEM)
+    w.mark_failed("exit_to_lobby_failed", message)
+    w.stop()
+    return False
+
+
+def _return_to_start_from_end(w: "FrameWorker") -> bool:
+    global exit_lobby_missing_frames, exit_retry_deadline
+
+    if exit_retry_deadline is not None and time.monotonic() >= exit_retry_deadline:
+        return _fail_exit_retry(w, "结束阶段未能在30秒内返回开始游戏阶段")
+    exit_lobby_missing_frames = 0
+    exit_retry_deadline = None
+    w.change_stage("开始游戏阶段")
+    return True
+
+
+def _confirm_lobby_after_exit(w: "FrameWorker") -> bool:
+    global exit_lobby_missing_frames, exit_retry_count, exit_retry_deadline
+
+    if exit_lobby_missing_frames is None:
+        return True
+    if not w.refresh_frame():
+        return False
+    if w.get_info("房子"):
+        w.frame_log("退出游戏后已确认大厅房子区域", log_type=FrameLogType.LOGIC)
+        exit_lobby_missing_frames = None
+        exit_retry_count = 0
+        return True
+
+    exit_lobby_missing_frames += 1
+    if exit_lobby_missing_frames < EXIT_LOBBY_MISSING_FRAME_LIMIT:
+        return False
+    if exit_retry_count:
+        return _fail_exit_retry(w, "再次进入开始游戏阶段后连续10帧未见房子区域")
+
+    w.frame_log(
+        "开始游戏阶段连续10帧未见房子区域，返回结束阶段重试退出游戏",
+        log_type=FrameLogType.LOGIC,
+    )
+    exit_lobby_missing_frames = None
+    exit_retry_count = 1
+    exit_retry_deadline = time.monotonic() + EXIT_RETRY_TIMEOUT_SECONDS
+    w.change_stage("结束阶段")
+    return False
+
+
 def _advance_rank_finish_continue_lobby_flow(w: "FrameWorker") -> bool:
     """Finish the ranking-page continue flow without falling back to Settings."""
     global rank_finish_lobby_flow_state
@@ -747,7 +805,7 @@ def _advance_rank_finish_continue_lobby_flow(w: "FrameWorker") -> bool:
         )
         w.click(return_lobby)
         rank_finish_lobby_flow_state = None
-        w.change_stage("开始游戏阶段")
+        _return_to_start_from_end(w)
         return False
 
     return True
@@ -1040,6 +1098,8 @@ def on_stage(w: "FrameWorker"):
         return
 
     if w.current_stage == "开始游戏阶段":
+        if not _confirm_lobby_after_exit(w):
+            return
         if w.get_info("加速礼包"):
             w.frame_log(
                 "关闭加速礼包弹窗",
@@ -1178,6 +1238,9 @@ def on_stage(w: "FrameWorker"):
         return
 
     if w.current_stage == "结束阶段":
+        if exit_retry_deadline is not None and time.monotonic() >= exit_retry_deadline:
+            _fail_exit_retry(w, "结束阶段未能在30秒内返回开始游戏阶段")
+            return
         if final_shutdown_pending:
             w.frame_log(
                 "返回大厅并完成本轮",
@@ -1209,4 +1272,4 @@ def on_stage(w: "FrameWorker"):
         time.sleep(1)
         w.click("确定退出比赛")
         time.sleep(3)
-        w.change_stage("开始游戏阶段")
+        _return_to_start_from_end(w)

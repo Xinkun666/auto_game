@@ -7263,7 +7263,7 @@ class HouseSceneSearchManager(HouseSearchManager):
         return self.execute_unstuck_logic(w, current_loc)
 
     def _entry_house_bypass_geometry(self, w):
-        """按房屋框的水平覆盖区间，比较中心阻挡物两侧的可见空隙。"""
+        """从画面中心出发，选择更快抵达前方房屋边界的一侧。"""
         frame_size = self._get_visual_frame_size(w)
         if frame_size is None:
             return None
@@ -7288,12 +7288,12 @@ class HouseSceneSearchManager(HouseSearchManager):
             else:
                 merged.append((left, right))
         center = width / 2.0
-        for index, (left, right) in enumerate(merged):
+        for left, right in merged:
             if left <= center <= right:
-                left_gap = left - (merged[index - 1][1] if index else 0.0)
-                right_gap = (merged[index + 1][0] if index + 1 < len(merged) else width) - right
-                side = "right" if right_gap >= left_gap else "left"
-                distance = right - center if side == "right" else center - left
+                left_distance = center - left
+                right_distance = right - center
+                side = "right" if right_distance <= left_distance else "left"
+                distance = right_distance if side == "right" else left_distance
                 # ponytail: 横向框覆盖近似可行空隙；真实绕行偏差需再引入通行分割。
                 ratio = min(1.0, max(0.0, distance / center))
                 wait = round(self.ENTRY_HOUSE_BYPASS_MIN_WAIT + ratio * (
@@ -7301,8 +7301,8 @@ class HouseSceneSearchManager(HouseSearchManager):
                 ))
                 w.frame_log(
                     f"[EntryApproach][NearHouse] 中心阻挡框=({left:.0f},{right:.0f})，"
-                    f"左空隙={left_gap:.0f}，右空隙={right_gap:.0f}，"
-                    f"side={side}，到边缘距离={distance:.0f}，wait={wait}"
+                    f"中心到左边界={left_distance:.0f}，到右边界={right_distance:.0f}，"
+                    f"先到边界的方向={side}，wait={wait}"
                 )
                 return side, wait, True
         # 中心无房屋阻挡；首次没有任何框时仍按图向右探一步。
